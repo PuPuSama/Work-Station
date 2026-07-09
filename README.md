@@ -28,6 +28,7 @@ http://127.0.0.1:8000
 3. Treat each topic row as one article task.
 4. Create weekly task folders under `D:\article\7.6-7.10-谷瑞勋`.
 5. Generate title candidates, select one title, save products, generate outline, generate article, paste ZeroGPT report, optimize article, export Word.
+6. Product data can be filled manually or auto-recommended from WordPress REST API, sitemap, homepage links, and product-page images.
 
 ## LLM Setup
 

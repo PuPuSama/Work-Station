@@ -25,6 +25,7 @@ from models import (
 from services.docx_export import export_task_docx
 from services.generator import generate_article, generate_outline, generate_titles, humanize_article
 from services.llm import LLMClient
+from services.product_crawler import recommend_products
 from services.topics import scan_topic_library
 from storage import TaskStore, write_json_artifact, write_text_artifact
 
@@ -131,6 +132,14 @@ def select_title(task_id: str, request: SelectTitleRequest) -> TaskRecord:
 def update_products(task_id: str, request: ProductsUpdateRequest) -> TaskRecord:
     task = get_task_or_404(task_id)
     task.products = request.products
+    write_json_artifact(task, "products.json", [product.model_dump() for product in task.products])
+    return store().put(task)
+
+
+@app.post("/api/tasks/{task_id}/products/auto", response_model=TaskRecord)
+def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    task.products = recommend_products(config(), task, max(1, min(limit, 6)))
     write_json_artifact(task, "products.json", [product.model_dump() for product in task.products])
     return store().put(task)
 

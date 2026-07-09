@@ -231,7 +231,12 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               {projectName && (
-                <Button variant="outline" size="icon-sm" render={<Link href="/" />}>
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  nativeButton={false}
+                  render={<Link href="/" />}
+                >
                   <ArrowLeft />
                 </Button>
               )}
@@ -487,6 +492,21 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                         >
                           <Plus />
                           添加产品
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          onClick={() =>
+                            selectedId &&
+                            runAction("产品已自动抓取", () =>
+                              apiPost<TaskRecord>(
+                                `/api/tasks/${selectedId}/products/auto?limit=3`,
+                              ),
+                            )
+                          }
+                          disabled={isBusy || !selectedId}
+                        >
+                          {isBusy ? <Loader2 className="animate-spin" /> : <WandSparkles />}
+                          自动抓取产品
                         </Button>
                         <Button
                           onClick={() =>
