@@ -409,7 +409,7 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                 </div>
               ) : (
                 <Tabs defaultValue="titles" className="h-full min-w-0">
-                  <TabsList className="flex w-full flex-wrap justify-start">
+                  <TabsList className="grid h-auto w-full grid-cols-3 gap-1 sm:grid-cols-6">
                     <TabsTrigger value="titles">标题</TabsTrigger>
                     <TabsTrigger value="products">产品</TabsTrigger>
                     <TabsTrigger value="outline">大纲</TabsTrigger>

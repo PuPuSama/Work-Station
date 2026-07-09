@@ -5,6 +5,7 @@ data/*.tmp
 data/*.json
 data/*.log
 data/*.err.log
+data/*.txt
 *.pyc
 __pycache__/
 .env
