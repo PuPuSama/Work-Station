@@ -1,0 +1,31 @@
+paths:
+  topic_library: "D:\\article\\话题库"
+  knowledge_base: "D:\\article\\Knowledge"
+  output_root: "D:\\article"
+  data_file: "D:\\article\\article-agent\\data\\tasks.json"
+
+week_folder:
+  owner: "谷瑞勋"
+  name_format: "{start_month}.{start_day}-{end_month}.{end_day}-{owner}"
+
+article:
+  language: "English"
+  title_candidates: 10
+  default_word_count: 1500
+
+docx_format:
+  font: "Times New Roman"
+  styles:
+    title_1:
+      size_pt: 22
+    title_2:
+      size_pt: 18
+    title_3:
+      size_pt: 13.5
+    body:
+      size_pt: 12
+
+llm:
+  provider: "responses"
+  base_url: "https://api.openai.com/v1"
+  model: ""
