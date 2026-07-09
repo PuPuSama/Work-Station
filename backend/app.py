@@ -139,7 +139,10 @@ def update_products(task_id: str, request: ProductsUpdateRequest) -> TaskRecord:
 @app.post("/api/tasks/{task_id}/products/auto", response_model=TaskRecord)
 def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
     task = get_task_or_404(task_id)
-    task.products = recommend_products(config(), task, max(1, min(limit, 6)))
+    try:
+        task.products = recommend_products(config(), task, max(1, min(limit, 6)))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Auto product crawl failed: {exc}") from exc
     write_json_artifact(task, "products.json", [product.model_dump() for product in task.products])
     return store().put(task)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from html import unescape
@@ -19,6 +20,11 @@ from storage import write_json_artifact
 
 
 USER_AGENT = "ArticleWorkflowAgent/0.1 (+local)"
+MAX_CRAWL_SECONDS = 28
+DEFAULT_FETCH_TIMEOUT = 5
+IMAGE_FETCH_TIMEOUT = 10
+MAX_ENRICH_CANDIDATES = 14
+MAX_RAW_CANDIDATES = 50
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 STOPWORDS = {
     "about",
@@ -146,19 +152,33 @@ class SimpleHTMLParser(HTMLParser):
 
 def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> list[Product]:
     base_url = site_base_url(task.customer)
+    deadline = time.monotonic() + MAX_CRAWL_SECONDS
     terms = search_terms(task)
     candidates: list[CrawlCandidate] = []
     seen_urls: set[str] = set()
 
-    for candidate in collect_candidates(base_url, terms):
+    for candidate in collect_candidates(base_url, terms, deadline):
         if not candidate.url or candidate.url in seen_urls:
             continue
         seen_urls.add(candidate.url)
-        enrich_candidate(candidate, terms)
-        score_candidate(candidate, terms, base_url)
+        rough_score_candidate(candidate, terms, base_url)
         if candidate.score > 0:
             candidates.append(candidate)
+        if len(candidates) >= MAX_RAW_CANDIDATES or expired(deadline):
+            break
 
+    candidates.sort(key=lambda item: item.score, reverse=True)
+    enriched_candidates: list[CrawlCandidate] = []
+    for candidate in candidates[:MAX_ENRICH_CANDIDATES]:
+        if expired(deadline):
+            break
+        enrich_candidate(candidate, terms, deadline)
+        score_candidate(candidate, terms, base_url)
+        if candidate.score > 0:
+            enriched_candidates.append(candidate)
+
+    if enriched_candidates:
+        candidates = enriched_candidates
     candidates.sort(key=lambda item: item.score, reverse=True)
     products: list[Product] = []
     for candidate in candidates[: max(limit * 3, limit)]:
@@ -195,7 +215,7 @@ def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> l
     return products
 
 
-def collect_candidates(base_url: str, terms: list[str]) -> list[CrawlCandidate]:
+def collect_candidates(base_url: str, terms: list[str], deadline: float) -> list[CrawlCandidate]:
     candidates: list[CrawlCandidate] = []
     api_index = fetch_json(urljoin(base_url, "/wp-json/"))
     routes = api_index.get("routes", {}) if isinstance(api_index, dict) else {}
@@ -206,13 +226,27 @@ def collect_candidates(base_url: str, terms: list[str]) -> list[CrawlCandidate]:
         if re.search(r"/wp/v2/(product|products|portfolio|service|services)\b", route):
             endpoint_paths.append(route)
 
-    for term in terms[:8]:
+    for term in terms[:5]:
+        if expired(deadline):
+            return candidates
         for endpoint in unique(endpoint_paths):
+            if expired(deadline):
+                return candidates
             candidates.extend(candidates_from_rest_endpoint(base_url, endpoint, term))
+            if len(candidates) >= MAX_RAW_CANDIDATES:
+                return candidates
+        if expired(deadline):
+            return candidates
         candidates.extend(candidates_from_media_search(base_url, term))
+        if len(candidates) >= MAX_RAW_CANDIDATES:
+            return candidates
+        if len(candidates) >= 10:
+            return candidates
 
-    candidates.extend(candidates_from_sitemaps(base_url, terms))
-    candidates.extend(candidates_from_homepage(base_url, terms))
+    if len(candidates) < 5 and not expired(deadline):
+        candidates.extend(candidates_from_sitemaps(base_url, terms, deadline))
+    if len(candidates) < 5 and not expired(deadline):
+        candidates.extend(candidates_from_homepage(base_url, terms))
     return candidates
 
 
@@ -282,7 +316,7 @@ def candidates_from_media_search(base_url: str, term: str) -> list[CrawlCandidat
     return candidates
 
 
-def candidates_from_sitemaps(base_url: str, terms: list[str]) -> list[CrawlCandidate]:
+def candidates_from_sitemaps(base_url: str, terms: list[str], deadline: float) -> list[CrawlCandidate]:
     sitemap_urls = [
         urljoin(base_url, "/sitemap.xml"),
         urljoin(base_url, "/wp-sitemap.xml"),
@@ -293,7 +327,9 @@ def candidates_from_sitemaps(base_url: str, terms: list[str]) -> list[CrawlCandi
     ]
     candidates: list[CrawlCandidate] = []
     for sitemap_url in sitemap_urls:
-        text = fetch_text(sitemap_url, timeout=12)
+        if expired(deadline):
+            break
+        text = fetch_text(sitemap_url)
         if not text:
             continue
         for url in sitemap_locations(text):
@@ -334,7 +370,9 @@ def candidates_from_homepage(base_url: str, terms: list[str]) -> list[CrawlCandi
     return candidates
 
 
-def enrich_candidate(candidate: CrawlCandidate, terms: list[str]) -> None:
+def enrich_candidate(candidate: CrawlCandidate, terms: list[str], deadline: float) -> None:
+    if expired(deadline):
+        return
     html = fetch_text(candidate.url)
     if not html:
         return
@@ -354,6 +392,30 @@ def enrich_candidate(candidate: CrawlCandidate, terms: list[str]) -> None:
         image_url = best_html_image(candidate.url, parser, terms)
     if image_url:
         candidate.image_url = parse.urljoin(candidate.url, image_url)
+
+
+def rough_score_candidate(candidate: CrawlCandidate, terms: list[str], base_url: str) -> None:
+    haystack = " ".join([candidate.name, candidate.url, candidate.description]).lower()
+    score = 0
+    for term in terms:
+        term_lower = term.lower()
+        if term_lower and term_lower in haystack:
+            score += 8
+        for token in tokenize(term):
+            if token in haystack:
+                score += 2
+    path = parse.urlparse(candidate.url).path.lower()
+    if any(hint in path for hint in PRODUCT_PATH_HINTS):
+        score += 18
+    if candidate.image_url:
+        score += 10
+    if same_site(base_url, candidate.url):
+        score += 6
+    if candidate.source.startswith("rest"):
+        score += 4
+    if looks_like_blog(candidate.url):
+        score -= 8
+    candidate.score = score
 
 
 def score_candidate(candidate: CrawlCandidate, terms: list[str], base_url: str) -> None:
@@ -389,7 +451,7 @@ def download_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
     if not image_url:
         return ""
     try:
-        response = open_url(image_url, timeout=30)
+        response = open_url(image_url, timeout=IMAGE_FETCH_TIMEOUT)
         data = response.read(8 * 1024 * 1024)
         content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
     except (HTTPError, URLError, TimeoutError, OSError):
@@ -412,16 +474,24 @@ def download_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
 
 
 def search_terms(task: TaskRecord) -> list[str]:
+    keyword = primary_keyword(task)
     fields = [
+        keyword,
         task.selected_title,
         task.topic,
-        primary_keyword(task),
         task.competitor_keyword,
     ]
     terms: list[str] = []
+    keyword_tokens = tokenize(keyword)
+    topic_tokens = tokenize(task.topic)
+    if keyword_tokens:
+        terms.append(" ".join(keyword_tokens[:4]))
+    if topic_tokens:
+        terms.append(" ".join(topic_tokens[:4]))
+
     for field in fields:
         value = normalize_space(field)
-        if value and not value.lower().startswith("http"):
+        if value and not value.lower().startswith("http") and not looks_like_question(value):
             terms.append(value)
 
     tokens = tokenize(" ".join(fields))
@@ -434,7 +504,7 @@ def search_terms(task: TaskRecord) -> list[str]:
     return unique([term for term in terms if term])
 
 
-def fetch_json(url: str, timeout: int = 15) -> Any:
+def fetch_json(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT) -> Any:
     text = fetch_text(url, timeout=timeout)
     if not text:
         return None
@@ -444,7 +514,7 @@ def fetch_json(url: str, timeout: int = 15) -> Any:
         return None
 
 
-def fetch_text(url: str, timeout: int = 15) -> str:
+def fetch_text(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT) -> str:
     try:
         response = open_url(url, timeout=timeout)
         raw = response.read(2 * 1024 * 1024)
@@ -454,7 +524,7 @@ def fetch_text(url: str, timeout: int = 15) -> str:
     return raw.decode(content_type, errors="ignore")
 
 
-def open_url(url: str, timeout: int = 15):
+def open_url(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT):
     req = request.Request(
         url,
         headers={
@@ -659,6 +729,11 @@ def looks_like_blog(url: str) -> bool:
     return any(part in path for part in ("/blog/", "/news/", "/article/", "/articles/"))
 
 
+def looks_like_question(value: str) -> bool:
+    lower = value.strip().lower()
+    return lower.endswith("?") or lower.startswith(("what ", "how ", "why ", "which ", "when ", "where "))
+
+
 def safe_filename(value: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*]+', "_", value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -686,3 +761,7 @@ def unique(values: list[str]) -> list[str]:
             seen.add(key)
             result.append(value)
     return result
+
+
+def expired(deadline: float) -> bool:
+    return time.monotonic() >= deadline
