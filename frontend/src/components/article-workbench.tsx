@@ -227,6 +227,8 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
 
   const selectedId = selectedTask?.id;
   const isBusy = Boolean(busy);
+  const articleWordLimit = config?.article.default_word_count ?? 1500;
+  const articleWords = englishWordCount(articleText);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -627,9 +629,13 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                       placeholder="生成或编辑正文"
                       height="h-[500px]"
                       meta={
-                        <div className="text-xs text-muted-foreground">
-                          目标：{config?.article.default_word_count ?? 1500} 词 / 当前：
-                          {englishWordCount(articleText)} 词
+                        <div
+                          className={cn(
+                            "text-xs text-muted-foreground",
+                            articleWords > articleWordLimit && "text-destructive",
+                          )}
+                        >
+                          上限：{articleWordLimit} 词 / 当前：{articleWords} 词
                         </div>
                       }
                       actions={

@@ -9,9 +9,11 @@ from services.knowledge import collect_customer_context
 from services.llm import LLMClient
 
 
-ARTICLE_WORD_TOLERANCE = 0.1
+ARTICLE_MIN_WORD_RATIO = 0.9
 MIN_ARTICLE_WORD_COUNT = 500
 MAX_ARTICLE_WORD_COUNT = 3000
+WORD_PATTERN = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*")
+MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]+\]\(https?://[^)\s]+\)")
 
 
 def parse_numbered_list(text: str, limit: int) -> list[str]:
@@ -145,8 +147,8 @@ def generate_article(config: AppConfig, task: TaskRecord, word_count: int | None
 Write a polished English B2B blog article.
 
 Title: {title}
-Target length: {target_words} English words
-Allowed word count range: {minimum_words}-{maximum_words} English words
+Target length: {minimum_words}-{maximum_words} English words
+Strict maximum: {maximum_words} English words
 Customer website: {task.customer}
 Topic: {task.topic}
 Primary keyword: {keyword}
@@ -165,7 +167,7 @@ Rules:
 - Use Markdown headings.
 - Start with # {title}.
 - Follow the approved outline and avoid unnecessary H4 headings.
-- Keep the final article within {minimum_words}-{maximum_words} English words. Do not exceed {maximum_words} words.
+- Keep the final article within {minimum_words}-{maximum_words} English words. Never exceed {maximum_words} words.
 - If the outline is too broad for the word limit, merge or shorten sections instead of expanding them.
 - Keep the writing specific and practical.
 - Use the primary keyword naturally and preserve its wording when it appears.
@@ -195,7 +197,7 @@ Rules:
         max_tokens=article_output_token_limit(target_words),
     )
     article = result or mock_article(title, task, outline)
-    return ensure_article_hyperlinks(article, task)
+    return finalize_article(article, task, target_words)
 
 
 def humanize_article(config: AppConfig, task: TaskRecord) -> str:
@@ -255,14 +257,149 @@ def normalized_article_word_count(word_count: int | None, default_word_count: in
 
 
 def article_word_bounds(target_words: int) -> tuple[int, int]:
-    minimum = int(target_words * (1 - ARTICLE_WORD_TOLERANCE))
-    maximum = int(target_words * (1 + ARTICLE_WORD_TOLERANCE))
+    minimum = int(target_words * ARTICLE_MIN_WORD_RATIO)
+    maximum = target_words
     return minimum, maximum
 
 
 def article_output_token_limit(target_words: int) -> int:
     # English prose usually needs about 1.3-1.6 output tokens per word.
-    return max(900, min(int(target_words * 1.7), 5200))
+    return max(850, min(int(target_words * 1.45), 4800))
+
+
+def finalize_article(article: str, task: TaskRecord, max_words: int) -> str:
+    article = ensure_article_hyperlinks(article, task)
+    if article_word_count(article) <= max_words:
+        return article
+
+    article = trim_article_to_word_limit(article, max_words)
+    return ensure_article_hyperlinks_within_limit(article, task, max_words)
+
+
+def article_word_count(value: str) -> int:
+    return len(WORD_PATTERN.findall(value))
+
+
+def trim_article_to_word_limit(article: str, max_words: int) -> str:
+    if article_word_count(article) <= max_words:
+        return article
+
+    main, protected_tail = split_protected_link_block(article)
+    if protected_tail:
+        tail_words = article_word_count(protected_tail)
+        if tail_words < max_words:
+            main_limit = max_words - tail_words
+            trimmed_main = trim_markdown_lines_to_word_limit(main, main_limit)
+            return (trimmed_main.rstrip() + "\n\n" + protected_tail.strip()).strip()
+
+    return trim_markdown_lines_to_word_limit(article, max_words)
+
+
+def ensure_article_hyperlinks_within_limit(article: str, task: TaskRecord, max_words: int) -> str:
+    article = ensure_article_hyperlinks(article, task)
+    if article_word_count(article) <= max_words:
+        return article
+
+    main, protected_tail = split_protected_link_block(article)
+    if protected_tail:
+        tail_words = article_word_count(protected_tail)
+        if tail_words < max_words:
+            main_limit = max_words - tail_words
+            trimmed_main = trim_markdown_lines_to_word_limit(main, main_limit)
+            return (trimmed_main.rstrip() + "\n\n" + protected_tail.strip()).strip()
+
+    return trim_markdown_lines_to_word_limit(article, max_words)
+
+
+def split_protected_link_block(article: str) -> tuple[str, str]:
+    marker = "\n## Useful Links\n"
+    index = article.rfind(marker)
+    if index < 0:
+        return article, ""
+    return article[:index], article[index + 1 :]
+
+
+def trim_markdown_lines_to_word_limit(markdown: str, max_words: int) -> str:
+    lines: list[str] = []
+    used_words = 0
+    for raw_line in markdown.splitlines():
+        line = raw_line.rstrip()
+        line_words = article_word_count(line)
+        if not line.strip():
+            if lines and lines[-1].strip():
+                lines.append("")
+            continue
+        if used_words + line_words <= max_words:
+            lines.append(line)
+            used_words += line_words
+            continue
+
+        remaining_words = max_words - used_words
+        if remaining_words <= 0:
+            break
+        if line.lstrip().startswith("#"):
+            break
+        trimmed = trim_line_to_word_limit(line, remaining_words)
+        if trimmed:
+            lines.append(trimmed)
+        break
+
+    return remove_trailing_dangling_heading("\n".join(lines).strip())
+
+
+def trim_line_to_word_limit(line: str, max_words: int) -> str:
+    if max_words <= 0:
+        return ""
+    prefix = ""
+    content = line.strip()
+    if content.startswith("- "):
+        prefix = "- "
+        content = content[2:].strip()
+
+    selected: list[str] = []
+    used_words = 0
+    for sentence in split_sentences(content):
+        sentence_words = article_word_count(sentence)
+        if used_words + sentence_words <= max_words:
+            selected.append(sentence)
+            used_words += sentence_words
+            continue
+        break
+
+    if selected:
+        return prefix + " ".join(selected).strip()
+    return prefix + cut_text_to_word_limit(content, max_words)
+
+
+def split_sentences(value: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", value) if part.strip()]
+
+
+def cut_text_to_word_limit(value: str, max_words: int) -> str:
+    matches = list(WORD_PATTERN.finditer(value))
+    if len(matches) <= max_words:
+        return value
+    cut_index = safe_markdown_cut_index(value, matches[max_words - 1].end())
+    trimmed = value[:cut_index].rstrip(" ,;:-")
+    if trimmed and not trimmed.endswith((".", "!", "?", ")")):
+        trimmed += "."
+    return trimmed
+
+
+def safe_markdown_cut_index(value: str, cut_index: int) -> int:
+    for match in MARKDOWN_LINK_PATTERN.finditer(value):
+        if match.start() < cut_index < match.end():
+            return match.start()
+    return cut_index
+
+
+def remove_trailing_dangling_heading(markdown: str) -> str:
+    lines = markdown.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].lstrip().startswith("#"):
+        lines.pop()
+    return "\n".join(lines).strip()
 
 
 def ensure_article_hyperlinks(article: str, task: TaskRecord) -> str:
