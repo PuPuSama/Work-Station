@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import ssl
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -19,13 +20,19 @@ from services.generator import primary_keyword
 from storage import write_json_artifact
 
 
-USER_AGENT = "ArticleWorkflowAgent/0.1 (+local)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 MAX_CRAWL_SECONDS = 28
 DEFAULT_FETCH_TIMEOUT = 5
 IMAGE_FETCH_TIMEOUT = 10
 MAX_ENRICH_CANDIDATES = 14
 MAX_RAW_CANDIDATES = 50
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MIN_IMAGE_BYTES = 1500
+MIN_IMAGE_WIDTH = 180
+MIN_IMAGE_HEIGHT = 120
 STOPWORDS = {
     "about",
     "after",
@@ -73,6 +80,12 @@ PRODUCT_PATH_HINTS = (
     "belt",
     "fastener",
 )
+PRODUCT_INDEX_PATHS = (
+    "/products/",
+    "/product/",
+    "/our-products/",
+    "/product-category/",
+)
 BAD_IMAGE_HINTS = (
     "logo",
     "icon",
@@ -81,6 +94,21 @@ BAD_IMAGE_HINTS = (
     "avatar",
     "banner",
     "loading",
+    "search",
+    "theme",
+    "themes",
+    "gedunew",
+    "magnifier",
+    "magnifying",
+    "menu",
+    "close",
+    "arrow",
+    "share",
+    "favicon",
+    "default",
+    "blank",
+    "transparent",
+    "ajax-loader",
     "wechat",
     "whatsapp",
     "facebook",
@@ -181,20 +209,28 @@ def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> l
         candidates = enriched_candidates
     candidates.sort(key=lambda item: item.score, reverse=True)
     products: list[Product] = []
-    for candidate in candidates[: max(limit * 3, limit)]:
+    fallback_products: list[Product] = []
+    for candidate in candidates[: max(limit * 4, limit + 6)]:
         if len(products) >= limit:
             break
         image_path = ""
         if candidate.image_url:
             image_path = download_product_image(task, candidate)
-        products.append(
-            Product(
-                name=candidate.name or product_name_from_url(candidate.url),
-                url=candidate.url,
-                image_path=image_path,
-                description=candidate.description[:420],
-            )
+        product = Product(
+            name=candidate.name or product_name_from_url(candidate.url),
+            url=candidate.url,
+            image_path=image_path,
+            description=candidate.description[:420],
         )
+        if image_path:
+            products.append(product)
+        else:
+            fallback_products.append(product)
+
+    for product in fallback_products:
+        if len(products) >= limit:
+            break
+        products.append(product)
 
     write_json_artifact(
         task,
@@ -217,6 +253,10 @@ def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> l
 
 def collect_candidates(base_url: str, terms: list[str], deadline: float) -> list[CrawlCandidate]:
     candidates: list[CrawlCandidate] = []
+    candidates.extend(candidates_from_product_indexes(base_url, terms, deadline))
+    if len(candidates) >= 10 or expired(deadline):
+        return candidates
+
     api_index = fetch_json(urljoin(base_url, "/wp-json/"))
     routes = api_index.get("routes", {}) if isinstance(api_index, dict) else {}
     endpoint_paths = ["/wp/v2/pages", "/wp/v2/posts", "/wp/v2/search"]
@@ -298,7 +338,7 @@ def candidates_from_media_search(base_url: str, term: str) -> list[CrawlCandidat
         if not isinstance(item, dict):
             continue
         image_url = best_media_url(item)
-        if not image_url:
+        if not image_url or is_bad_image_url(image_url):
             continue
         link = str(item.get("link") or base_url)
         title = clean_html_text(rest_rendered(item.get("title")) or item.get("alt_text") or product_name_from_url(image_url))
@@ -313,6 +353,39 @@ def candidates_from_media_search(base_url: str, term: str) -> list[CrawlCandidat
                 debug=[f"search={term}"],
             )
         )
+    return candidates
+
+
+def candidates_from_product_indexes(base_url: str, terms: list[str], deadline: float) -> list[CrawlCandidate]:
+    candidates: list[CrawlCandidate] = []
+    for index_path in PRODUCT_INDEX_PATHS:
+        if expired(deadline):
+            break
+        index_url = urljoin(base_url, index_path)
+        html = fetch_text(index_url)
+        if not html:
+            continue
+        parser = parse_html(html)
+        for link in parser.links:
+            href = link.get("href", "")
+            if not href:
+                continue
+            url = parse.urljoin(index_url, href)
+            if not same_site(base_url, url) or not is_product_index_candidate(index_url, url, terms):
+                continue
+            if normalize_url(url).rstrip("/") == normalize_url(index_url).rstrip("/"):
+                continue
+            name = clean_html_text(link.get("title") or link.get("aria-label") or product_name_from_url(url))
+            candidates.append(
+                CrawlCandidate(
+                    name=name,
+                    url=url,
+                    source="product-index",
+                    debug=[index_url],
+                )
+            )
+            if len(candidates) >= MAX_RAW_CANDIDATES:
+                return candidates
     return candidates
 
 
@@ -388,6 +461,8 @@ def enrich_candidate(candidate: CrawlCandidate, terms: list[str], deadline: floa
     elif not candidate.description:
         candidate.description = parser.text[:420]
 
+    if image_url and is_bad_image_url(parse.urljoin(candidate.url, image_url)):
+        image_url = ""
     if not image_url:
         image_url = best_html_image(candidate.url, parser, terms)
     if image_url:
@@ -448,13 +523,19 @@ def score_candidate(candidate: CrawlCandidate, terms: list[str], base_url: str) 
 
 def download_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
     image_url = candidate.image_url
-    if not image_url:
+    if not image_url or is_bad_image_url(image_url):
         return ""
+    existing_path = existing_product_image(task, candidate)
+    if existing_path:
+        return existing_path
     try:
         response = open_url(image_url, timeout=IMAGE_FETCH_TIMEOUT)
         data = response.read(8 * 1024 * 1024)
         content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
-    except (HTTPError, URLError, TimeoutError, OSError):
+    except (HTTPError, URLError, TimeoutError, OSError, UnicodeError):
+        return ""
+
+    if not is_valid_product_image(data, image_url, content_type):
         return ""
 
     extension = Path(parse.urlparse(image_url).path).suffix.lower()
@@ -471,6 +552,25 @@ def download_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
     output = unique_path(images_dir / filename)
     output.write_bytes(data)
     return str(output)
+
+
+def existing_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
+    images_dir = Path(task.task_dir) / "images"
+    if not images_dir.exists():
+        return ""
+    stem = safe_filename(candidate.name or product_name_from_url(candidate.url))
+    for path in images_dir.iterdir():
+        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        if path.stem != stem and not path.stem.startswith(stem + "-"):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if is_valid_product_image(data, path.name, "image/" + path.suffix.lower().lstrip(".")):
+            return str(path)
+    return ""
 
 
 def search_terms(task: TaskRecord) -> list[str]:
@@ -525,14 +625,41 @@ def fetch_text(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT) -> str:
 
 
 def open_url(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT):
+    safe_url = encode_url(url)
     req = request.Request(
-        url,
+        safe_url,
         headers={
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/json,image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         },
     )
+    contexts = [None]
+    if safe_url.lower().startswith("https://"):
+        contexts.extend([ssl._create_unverified_context(), ssl._create_unverified_context()])
+    last_error: Exception | None = None
+    for context in contexts:
+        try:
+            if context is None:
+                return request.urlopen(req, timeout=timeout)
+            return request.urlopen(req, timeout=timeout, context=context)
+        except (HTTPError, URLError, TimeoutError, OSError, ssl.SSLError) as error:
+            last_error = error
+    if last_error:
+        raise last_error
     return request.urlopen(req, timeout=timeout)
+
+
+def encode_url(url: str) -> str:
+    parsed = parse.urlsplit(str(url or ""))
+    try:
+        netloc = parsed.netloc.encode("idna").decode("ascii")
+    except UnicodeError:
+        netloc = parsed.netloc
+    path = parse.quote(parse.unquote(parsed.path), safe="/%:@")
+    query = parse.quote(parse.unquote(parsed.query), safe="=&%/:;+?@,")
+    fragment = parse.quote(parse.unquote(parsed.fragment), safe="=&%/:;+?@,")
+    return parse.urlunsplit((parsed.scheme, netloc, path, query, fragment))
 
 
 def parse_html(html: str) -> SimpleHTMLParser:
@@ -554,11 +681,23 @@ def best_html_image(page_url: str, parser: SimpleHTMLParser, terms: list[str]) -
     best = ""
     best_score = -999
     for image in parser.images:
-        source = image.get("src") or image.get("data-src") or image.get("data-lazy-src") or srcset_best(image.get("srcset", ""))
+        source = (
+            srcset_best(image.get("data-srcset", ""))
+            or srcset_best(image.get("data-lazy-srcset", ""))
+            or srcset_best(image.get("srcset", ""))
+            or image.get("data-large_image")
+            or image.get("data-zoom-image")
+            or image.get("data-original")
+            or image.get("data-src")
+            or image.get("data-lazy-src")
+            or image.get("src")
+        )
         if not source:
             continue
         alt = image.get("alt", "")
         candidate_url = parse.urljoin(page_url, source)
+        if is_bad_image_url(candidate_url):
+            continue
         text = f"{candidate_url} {alt}".lower()
         score = 0
         if any(term.lower() in text for term in terms):
@@ -578,6 +717,97 @@ def best_html_image(page_url: str, parser: SimpleHTMLParser, terms: list[str]) -
             best_score = score
             best = candidate_url
     return best
+
+
+def is_product_index_candidate(index_url: str, url: str, terms: list[str]) -> bool:
+    parsed = parse.urlparse(url)
+    path = parsed.path.lower()
+    if any(part in path for part in ("/tag/", "/category/", "/author/", "/wp-content/", "/feed/")):
+        return False
+    if parsed.query and not any(key in parsed.query.lower() for key in ("product", "p=")):
+        return False
+    index_path = parse.urlparse(index_url).path.rstrip("/").lower()
+    if index_path and path.rstrip("/").startswith(index_path + "/"):
+        return True
+    return is_relevant_product_url(url, terms)
+
+
+def is_bad_image_url(url: str) -> bool:
+    lower = parse.unquote(str(url or "")).lower()
+    if not lower:
+        return True
+    path = parse.urlparse(lower).path
+    if any(part in path for part in ("/wp-content/themes/", "/wp-includes/", "/assets/icons/", "/images/icons/")):
+        return True
+    filename = Path(path).name
+    return any(hint in lower or hint in filename for hint in BAD_IMAGE_HINTS)
+
+
+def is_valid_product_image(data: bytes, image_url: str, content_type: str) -> bool:
+    if is_bad_image_url(image_url) or len(data) < MIN_IMAGE_BYTES:
+        return False
+    content_type = content_type.lower()
+    if content_type and not content_type.startswith("image/"):
+        return False
+    dimensions = image_dimensions(data)
+    if not dimensions:
+        return len(data) >= 6000
+    width, height = dimensions
+    return width >= MIN_IMAGE_WIDTH and height >= MIN_IMAGE_HEIGHT
+
+
+def image_dimensions(data: bytes) -> tuple[int, int] | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data.startswith(b"\xff\xd8"):
+        return jpeg_dimensions(data)
+    if data.startswith(b"RIFF") and len(data) >= 30 and data[8:12] == b"WEBP":
+        return webp_dimensions(data)
+    return None
+
+
+def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    index = 2
+    while index + 9 < len(data):
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        marker = data[index + 1]
+        index += 2
+        while marker == 0xFF and index < len(data):
+            marker = data[index]
+            index += 1
+        if marker in {0xD8, 0xD9}:
+            continue
+        if index + 2 > len(data):
+            return None
+        segment_length = int.from_bytes(data[index : index + 2], "big")
+        if segment_length < 2 or index + segment_length > len(data):
+            return None
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+            height = int.from_bytes(data[index + 3 : index + 5], "big")
+            width = int.from_bytes(data[index + 5 : index + 7], "big")
+            return width, height
+        index += segment_length
+    return None
+
+
+def webp_dimensions(data: bytes) -> tuple[int, int] | None:
+    chunk = data[12:16]
+    if chunk == b"VP8X" and len(data) >= 30:
+        width = int.from_bytes(data[24:27], "little") + 1
+        height = int.from_bytes(data[27:30], "little") + 1
+        return width, height
+    if chunk == b"VP8 " and len(data) >= 30:
+        width = int.from_bytes(data[26:28], "little") & 0x3FFF
+        height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        return width, height
+    if chunk == b"VP8L" and len(data) >= 25:
+        bits = int.from_bytes(data[21:25], "little")
+        width = (bits & 0x3FFF) + 1
+        height = ((bits >> 14) & 0x3FFF) + 1
+        return width, height
+    return None
 
 
 def embedded_featured_image(item: dict[str, Any]) -> str:
@@ -672,6 +902,20 @@ def same_site(base_url: str, url: str) -> bool:
     base_host = parse.urlparse(base_url).netloc.lower().removeprefix("www.")
     host = parse.urlparse(url).netloc.lower().removeprefix("www.")
     return bool(host and (host == base_host or host.endswith("." + base_host)))
+
+
+def normalize_url(url: str) -> str:
+    parsed = parse.urlparse(url)
+    return parse.urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower().removeprefix("www."),
+            parsed.path.rstrip("/"),
+            "",
+            parsed.query,
+            "",
+        )
+    )
 
 
 def product_name_from_url(url: str) -> str:
