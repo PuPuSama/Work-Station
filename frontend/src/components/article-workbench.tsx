@@ -95,6 +95,10 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
+function englishWordCount(value: string) {
+  return value.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*/g)?.length ?? 0;
+}
+
 export function ArticleWorkbench({ customer }: { customer?: string }) {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
@@ -622,6 +626,12 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                       onChange={setArticleText}
                       placeholder="生成或编辑正文"
                       height="h-[500px]"
+                      meta={
+                        <div className="text-xs text-muted-foreground">
+                          目标：{config?.article.default_word_count ?? 1500} 词 / 当前：
+                          {englishWordCount(articleText)} 词
+                        </div>
+                      }
                       actions={
                         <>
                           <Button
@@ -786,17 +796,20 @@ function EditorPanel({
   onChange,
   placeholder,
   height,
+  meta,
   actions,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
   height: string;
+  meta?: ReactNode;
   actions: ReactNode;
 }) {
   return (
     <div className="grid gap-3">
       <div className="flex flex-wrap gap-2">{actions}</div>
+      {meta}
       <Textarea
         value={value}
         onChange={(event) => onChange(event.target.value)}

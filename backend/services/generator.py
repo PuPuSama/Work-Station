@@ -9,6 +9,11 @@ from services.knowledge import collect_customer_context
 from services.llm import LLMClient
 
 
+ARTICLE_WORD_TOLERANCE = 0.1
+MIN_ARTICLE_WORD_COUNT = 500
+MAX_ARTICLE_WORD_COUNT = 3000
+
+
 def parse_numbered_list(text: str, limit: int) -> list[str]:
     titles: list[str] = []
     for line in text.splitlines():
@@ -130,7 +135,8 @@ Rules:
 def generate_article(config: AppConfig, task: TaskRecord, word_count: int | None = None) -> str:
     title = task.selected_title or task.topic
     outline = task.outline or mock_outline(title, task)
-    target_words = word_count or config.default_word_count
+    target_words = normalized_article_word_count(word_count, config.default_word_count)
+    minimum_words, maximum_words = article_word_bounds(target_words)
     products = products_for_prompt(task.products)
     context = collect_customer_context(config, task.customer)
     llm = LLMClient(config)
@@ -139,7 +145,8 @@ def generate_article(config: AppConfig, task: TaskRecord, word_count: int | None
 Write a polished English B2B blog article.
 
 Title: {title}
-Target length: about {target_words} words
+Target length: {target_words} English words
+Allowed word count range: {minimum_words}-{maximum_words} English words
 Customer website: {task.customer}
 Topic: {task.topic}
 Primary keyword: {keyword}
@@ -158,6 +165,8 @@ Rules:
 - Use Markdown headings.
 - Start with # {title}.
 - Follow the approved outline and avoid unnecessary H4 headings.
+- Keep the final article within {minimum_words}-{maximum_words} English words. Do not exceed {maximum_words} words.
+- If the outline is too broad for the word limit, merge or shorten sections instead of expanding them.
 - Keep the writing specific and practical.
 - Use the primary keyword naturally and preserve its wording when it appears.
 - Introduce the customer company naturally within the opening section, within 300 words, with a homepage hyperlink if available.
@@ -183,7 +192,7 @@ Rules:
             {"role": "user", "content": prompt},
         ],
         temperature=0.65,
-        max_tokens=3600,
+        max_tokens=article_output_token_limit(target_words),
     )
     article = result or mock_article(title, task, outline)
     return ensure_article_hyperlinks(article, task)
@@ -238,6 +247,22 @@ def products_for_prompt(products: list[Product]) -> str:
             f"- {product.name} | URL: {product.url or 'N/A'} | Image: {product.image_path or 'N/A'} | Notes: {product.description or 'N/A'}"
         )
     return "\n".join(lines)
+
+
+def normalized_article_word_count(word_count: int | None, default_word_count: int) -> int:
+    target = word_count or default_word_count or 1500
+    return max(MIN_ARTICLE_WORD_COUNT, min(int(target), MAX_ARTICLE_WORD_COUNT))
+
+
+def article_word_bounds(target_words: int) -> tuple[int, int]:
+    minimum = int(target_words * (1 - ARTICLE_WORD_TOLERANCE))
+    maximum = int(target_words * (1 + ARTICLE_WORD_TOLERANCE))
+    return minimum, maximum
+
+
+def article_output_token_limit(target_words: int) -> int:
+    # English prose usually needs about 1.3-1.6 output tokens per word.
+    return max(900, min(int(target_words * 1.7), 5200))
 
 
 def ensure_article_hyperlinks(article: str, task: TaskRecord) -> str:
