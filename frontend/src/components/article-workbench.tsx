@@ -675,38 +675,24 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                     <EditorPanel
                       value={zeroGptReport}
                       onChange={setZeroGptReport}
-                      placeholder="粘贴 ZeroGPT 分数或报告"
+                      placeholder="粘贴 ZeroGPT 分数、检测报告或公司工作台处理记录"
                       height="h-[430px]"
                       actions={
-                        <>
-                          <Button
-                            variant="outline"
-                            onClick={() =>
-                              selectedId &&
-                              runAction("ZeroGPT 报告已保存", () =>
-                                apiPut<TaskRecord>(`/api/tasks/${selectedId}/zerogpt`, {
-                                  report: zeroGptReport,
-                                }),
-                              )
-                            }
-                            disabled={isBusy}
-                          >
-                            <Save />
-                            保存报告
-                          </Button>
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("正文已优化", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/humanize`),
-                              )
-                            }
-                            disabled={isBusy || !selectedTask.article}
-                          >
-                            <WandSparkles />
-                            优化正文
-                          </Button>
-                        </>
+                        <Button
+                          variant="outline"
+                          onClick={() =>
+                            selectedId &&
+                            runAction("ZeroGPT 报告已保存", () =>
+                              apiPut<TaskRecord>(`/api/tasks/${selectedId}/zerogpt`, {
+                                report: zeroGptReport,
+                              }),
+                            )
+                          }
+                          disabled={isBusy}
+                        >
+                          <Save />
+                          保存报告
+                        </Button>
                       }
                     />
                   </TabsContent>

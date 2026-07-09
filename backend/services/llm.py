@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 from config import AppConfig, ROOT_DIR
 
 
+LLM_TIMEOUT_SECONDS = 240
+
+
 class LLMClient:
     def __init__(self, config: AppConfig):
         load_dotenv(ROOT_DIR / ".env")
@@ -53,7 +56,7 @@ class LLMClient:
             },
         )
         try:
-            with request.urlopen(req, timeout=90) as response:
+            with request.urlopen(req, timeout=LLM_TIMEOUT_SECONDS) as response:
                 data: dict[str, Any] = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")

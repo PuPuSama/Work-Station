@@ -1,7 +1,7 @@
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
   "http://127.0.0.1:8000";
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 240_000;
 
 async function readJson<T>(response: Response): Promise<T> {
   const text = await response.text();

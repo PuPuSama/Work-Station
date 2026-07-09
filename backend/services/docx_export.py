@@ -102,21 +102,39 @@ def append_products(document: Document, products: list[Product], config: AppConf
                     pass
 
 
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 URL_PATTERN = re.compile(r"(https?://[^\s)]+)")
 
 
 def add_text_with_links(paragraph, text: str, config: AppConfig) -> None:
     cursor = 0
-    for match in URL_PATTERN.finditer(text):
+    for match in MARKDOWN_LINK_PATTERN.finditer(text):
         if match.start() > cursor:
-            run = paragraph.add_run(text[cursor : match.start()])
-            run.font.name = config.docx_font
-            run.font.size = Pt(config.body_size)
-        url = match.group(1)
-        add_hyperlink(paragraph, url, url)
+            add_plain_text_with_links(paragraph, text[cursor : match.start()], config)
+        add_hyperlink(paragraph, match.group(1), match.group(2))
         cursor = match.end()
     if cursor < len(text):
-        run = paragraph.add_run(text[cursor:])
+        add_plain_text_with_links(paragraph, text[cursor:], config)
+
+
+def add_plain_text_with_links(paragraph, text: str, config: AppConfig) -> None:
+    cursor = 0
+    for match in URL_PATTERN.finditer(text):
+        if match.start() > cursor:
+            add_run(paragraph, text[cursor : match.start()], config)
+        url = match.group(1).rstrip(".,;:")
+        trailing = match.group(1)[len(url) :]
+        add_hyperlink(paragraph, url, url)
+        if trailing:
+            add_run(paragraph, trailing, config)
+        cursor = match.end()
+    if cursor < len(text):
+        add_run(paragraph, text[cursor:], config)
+
+
+def add_run(paragraph, text: str, config: AppConfig) -> None:
+    if text:
+        run = paragraph.add_run(text)
         run.font.name = config.docx_font
         run.font.size = Pt(config.body_size)
 

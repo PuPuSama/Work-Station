@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib import parse
 
 from config import AppConfig
 from models import Product, TaskRecord
@@ -162,6 +163,9 @@ Rules:
 - Introduce the customer company naturally within the opening section, within 300 words, with a homepage hyperlink if available.
 - After the opening company mention, avoid repeating the brand name unless it is necessary for clarity.
 - Mention recommended products naturally and include their URLs when available.
+- Use Markdown hyperlinks for URLs, for example [descriptive anchor text](https://example.com).
+- Include the customer homepage as a Markdown hyperlink and include product page hyperlinks when products are available.
+- Do not leave bare URLs in the body copy unless there is no natural anchor text.
 - Add cohesive transition content between each H2 and its H3 subsections.
 - Remove repeated H2/H3 ideas instead of writing filler.
 - Prefer second-person wording where it sounds natural for a buyer guide.
@@ -181,7 +185,8 @@ Rules:
         temperature=0.65,
         max_tokens=3600,
     )
-    return result or mock_article(title, task, outline)
+    article = result or mock_article(title, task, outline)
+    return ensure_article_hyperlinks(article, task)
 
 
 def humanize_article(config: AppConfig, task: TaskRecord) -> str:
@@ -233,6 +238,73 @@ def products_for_prompt(products: list[Product]) -> str:
             f"- {product.name} | URL: {product.url or 'N/A'} | Image: {product.image_path or 'N/A'} | Notes: {product.description or 'N/A'}"
         )
     return "\n".join(lines)
+
+
+def ensure_article_hyperlinks(article: str, task: TaskRecord) -> str:
+    article = linkify_known_bare_urls(article, task)
+    homepage = site_homepage(task.customer)
+    if markdown_link_count(article) >= 2 and link_target_present(article, homepage):
+        return article
+
+    link_lines: list[str] = []
+    if homepage and not link_target_present(article, homepage):
+        link_lines.append(f"- [{customer_label(task.customer)}]({homepage})")
+
+    for product in task.products[:3]:
+        if not product.url or link_target_present(article, product.url):
+            continue
+        label = product.name or product.url
+        link_lines.append(f"- [{label}]({product.url})")
+
+    if not link_lines:
+        return article
+
+    addition = "\n\n## Useful Links\n\n" + "\n".join(link_lines)
+    return article.rstrip() + addition
+
+
+def markdown_link_count(value: str) -> int:
+    return len(re.findall(r"\[[^\]]+\]\(https?://[^)\s]+\)", value))
+
+
+def linkify_known_bare_urls(article: str, task: TaskRecord) -> str:
+    replacements = [(site_homepage(task.customer), customer_label(task.customer))]
+    replacements.extend((product.url, product.name or product.url) for product in task.products if product.url)
+    for url, label in replacements:
+        if not url:
+            continue
+        article = replace_bare_url(article, url, label)
+    return article
+
+
+def replace_bare_url(text: str, url: str, label: str) -> str:
+    pattern = re.compile(rf"(?<!\]\(){re.escape(url)}(?=$|[\s).,;:])")
+    return pattern.sub(f"[{label}]({url})", text)
+
+
+def link_target_present(article: str, url: str) -> bool:
+    if not url:
+        return False
+    target = url.rstrip("/")
+    return target in article or url in article
+
+
+def site_homepage(customer: str) -> str:
+    customer = customer.strip()
+    if not customer:
+        return ""
+    if customer.startswith(("http://", "https://")):
+        parsed = parse.urlparse(customer)
+    else:
+        parsed = parse.urlparse("https://" + customer.strip("/"))
+    if not parsed.netloc:
+        return ""
+    return parse.urlunparse((parsed.scheme or "https", parsed.netloc, "/", "", "", ""))
+
+
+def customer_label(customer: str) -> str:
+    host = parse.urlparse(site_homepage(customer)).netloc or customer
+    return host.removeprefix("www.") or "company website"
 
 
 def primary_keyword(task: TaskRecord) -> str:
