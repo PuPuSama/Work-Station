@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -23,6 +25,8 @@ class AppConfig:
     language: str
     title_candidates: int
     default_word_count: int
+    ai_pass_threshold: float
+    humanize_prompt_path: Path
     docx_font: str
     title_1_size: float
     title_2_size: float
@@ -59,6 +63,7 @@ def load_config() -> AppConfig:
     raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     paths = raw["paths"]
     article = raw["article"]
+    prompts = raw.get("prompts", {})
     docx = raw["docx_format"]
     styles = docx["styles"]
     llm = raw.get("llm", {})
@@ -73,7 +78,14 @@ def load_config() -> AppConfig:
         week_name_format=str(week["name_format"]),
         language=str(article.get("language", "English")),
         title_candidates=int(article.get("title_candidates", 10)),
-        default_word_count=int(article.get("default_word_count", 1500)),
+        default_word_count=int(article.get("default_word_count", 1200)),
+        ai_pass_threshold=float(article.get("ai_pass_threshold", 30)),
+        humanize_prompt_path=Path(
+            prompts.get(
+                "humanize",
+                ROOT_DIR.parent / "降ai提示词-未测试效果版.txt",
+            )
+        ),
         docx_font=str(docx.get("font", "Times New Roman")),
         title_1_size=float(styles["title_1"]["size_pt"]),
         title_2_size=float(styles["title_2"]["size_pt"]),
@@ -86,6 +98,9 @@ def load_config() -> AppConfig:
 
 
 def public_config(config: AppConfig) -> dict[str, Any]:
+    # Integration secrets stay server-side. The UI only needs a readiness flag.
+    load_dotenv(ROOT_DIR / ".env")
+    load_dotenv(ROOT_DIR / "backend" / ".env")
     return {
         "topic_library": str(config.topic_library),
         "knowledge_base": str(config.knowledge_base),
@@ -97,6 +112,10 @@ def public_config(config: AppConfig) -> dict[str, Any]:
             "language": config.language,
             "title_candidates": config.title_candidates,
             "default_word_count": config.default_word_count,
+            "ai_pass_threshold": config.ai_pass_threshold,
+        },
+        "prompts": {
+            "humanize": str(config.humanize_prompt_path),
         },
         "docx_format": {
             "font": config.docx_font,
@@ -109,5 +128,8 @@ def public_config(config: AppConfig) -> dict[str, Any]:
             "provider": config.llm_provider,
             "base_url": config.llm_base_url,
             "model": config.llm_model,
+        },
+        "integrations": {
+            "tavily_ready": bool(os.environ.get("TAVILY_API_KEY", "").strip()),
         },
     }

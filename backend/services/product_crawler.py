@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import mimetypes
 import re
+import socket
 import ssl
 import time
 import xml.etree.ElementTree as ET
@@ -10,13 +13,14 @@ from dataclasses import dataclass, field
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
 from config import AppConfig
 from models import Product, TaskRecord
 from services.generator import primary_keyword
+from services.tavily import TavilyClient, TavilyError
 from storage import write_json_artifact
 
 
@@ -24,11 +28,20 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+# Some Windows proxy/VPN clients use RFC 2544 benchmark addresses as fake-IP
+# placeholders for public hostnames. Permit that range only after resolving a
+# hostname; a literal http://198.18.x.x URL remains blocked.
+PROXY_FAKE_IP_NETWORKS = (ipaddress.ip_network("198.18.0.0/15"),)
 MAX_CRAWL_SECONDS = 28
+MAX_DISCOVERY_SECONDS = 12
+MIN_POST_DISCOVERY_SECONDS = 12
 DEFAULT_FETCH_TIMEOUT = 5
+DISCOVERY_FETCH_TIMEOUT = 2
 IMAGE_FETCH_TIMEOUT = 10
 MAX_ENRICH_CANDIDATES = 14
 MAX_RAW_CANDIDATES = 50
+MAX_CONTAINER_PROBES = 8
+DISCOVERY_TARGET_CANDIDATES = MAX_ENRICH_CANDIDATES
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MIN_IMAGE_BYTES = 1500
 MIN_IMAGE_WIDTH = 180
@@ -63,6 +76,34 @@ STOPWORDS = {
     "with",
     "your",
 }
+TAVILY_QUERY_STOPWORDS = STOPWORDS | {
+    "affect",
+    "affects",
+    "and",
+    "are",
+    "best",
+    "can",
+    "common",
+    "environment",
+    "environments",
+    "example",
+    "examples",
+    "how",
+    "impact",
+    "impacts",
+    "its",
+    "key",
+    "material",
+    "materials",
+    "performance",
+    "practical",
+    "select",
+    "selecting",
+    "the",
+    "type",
+    "types",
+    "why",
+}
 PRODUCT_PATH_HINTS = (
     "product",
     "products",
@@ -86,6 +127,38 @@ PRODUCT_INDEX_PATHS = (
     "/our-products/",
     "/product-category/",
 )
+CATEGORY_PATH_HINTS = (
+    "/category/",
+    "/product-category/",
+    "/product-categories/",
+    "/collection/",
+    "/collections/",
+    "/archive/",
+    "/tag/",
+    "/author/",
+    "/feed/",
+)
+LISTING_SCHEMA_TYPES = {
+    "collectionpage",
+    "itemlist",
+    "productcollection",
+    "archivepage",
+}
+LISTING_CLASS_HINTS = {
+    "archive",
+    "category",
+    "product-category",
+    "product-archive",
+    "post-type-archive-product",
+    "tax-product_cat",
+}
+DETAIL_CLASS_HINTS = {
+    "single-product",
+    "product-template-default",
+    "single_product",
+}
+TRACKING_QUERY_PREFIXES = ("utm_",)
+TRACKING_QUERY_KEYS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 BAD_IMAGE_HINTS = (
     "logo",
     "icon",
@@ -126,6 +199,7 @@ class CrawlCandidate:
     score: int = 0
     source: str = ""
     debug: list[str] = field(default_factory=list)
+    detail_verified: bool = False
 
 
 class SimpleHTMLParser(HTMLParser):
@@ -137,11 +211,24 @@ class SimpleHTMLParser(HTMLParser):
         self.links: list[dict[str, str]] = []
         self.images: list[dict[str, str]] = []
         self.text_parts: list[str] = []
+        self.body_class_tokens: set[str] = set()
+        self.json_ld_parts: list[str] = []
+        self._json_ld_buffer: list[str] = []
+        self.in_json_ld = False
         self.skip_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {key.lower(): value or "" for key, value in attrs}
         tag = tag.lower()
+        if tag == "body":
+            self.body_class_tokens.update(
+                token.casefold()
+                for token in re.split(r"\s+", attributes.get("class", "").strip())
+                if token
+            )
+        if tag == "script" and attributes.get("type", "").split(";", 1)[0].strip().casefold() == "application/ld+json":
+            self.in_json_ld = True
+            self._json_ld_buffer = []
         if tag in {"script", "style", "noscript", "svg"}:
             self.skip_depth += 1
         if tag == "title":
@@ -155,12 +242,21 @@ class SimpleHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag == "script" and self.in_json_ld:
+            payload = "".join(self._json_ld_buffer).strip()
+            if payload:
+                self.json_ld_parts.append(payload)
+            self._json_ld_buffer = []
+            self.in_json_ld = False
         if tag in {"script", "style", "noscript", "svg"} and self.skip_depth:
             self.skip_depth -= 1
         if tag == "title":
             self.in_title = False
 
     def handle_data(self, data: str) -> None:
+        if self.in_json_ld:
+            self._json_ld_buffer.append(data)
+            return
         text = normalize_space(data)
         if not text:
             return
@@ -178,22 +274,59 @@ class SimpleHTMLParser(HTMLParser):
         return normalize_space(" ".join(self.text_parts))
 
 
-def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> list[Product]:
+def recommend_products(
+    config: AppConfig,
+    task: TaskRecord,
+    limit: int = 3,
+    *,
+    tavily_client: TavilyClient | None = None,
+    download_images: bool = True,
+) -> list[Product]:
+    # Product recommendations feed the article image workflow, whose public
+    # contract allows at most three automatic recommendations.
+    limit = max(1, min(int(limit), 3))
     base_url = site_base_url(task.customer)
-    deadline = time.monotonic() + MAX_CRAWL_SECONDS
+    started_at = time.monotonic()
+    deadline = started_at + MAX_CRAWL_SECONDS
+    discovery_deadline = min(
+        started_at + MAX_DISCOVERY_SECONDS,
+        deadline - MIN_POST_DISCOVERY_SECONDS,
+    )
     terms = search_terms(task)
     candidates: list[CrawlCandidate] = []
     seen_urls: set[str] = set()
 
-    for candidate in collect_candidates(base_url, terms, deadline):
-        if not candidate.url or candidate.url in seen_urls:
+    tavily_audit: dict[str, Any] = {"status": "disabled", "query": "", "results": []}
+    if tavily_client is not None and tavily_client.ready:
+        tavily_candidates, tavily_audit = candidates_from_tavily(
+            tavily_client,
+            base_url,
+            terms,
+            max_results=min(MAX_ENRICH_CANDIDATES, 10),
+        )
+        for candidate in tavily_candidates:
+            normalized_candidate_url = normalize_url(candidate.url)
+            if not normalized_candidate_url or normalized_candidate_url in seen_urls:
+                continue
+            seen_urls.add(normalized_candidate_url)
+            rough_score_candidate(candidate, terms, base_url)
+            if candidate.score > 0:
+                candidates.append(candidate)
+
+    for candidate in collect_candidates(base_url, terms, discovery_deadline):
+        normalized_candidate_url = normalize_url(candidate.url)
+        if not normalized_candidate_url or normalized_candidate_url in seen_urls:
             continue
-        seen_urls.add(candidate.url)
+        seen_urls.add(normalized_candidate_url)
         rough_score_candidate(candidate, terms, base_url)
         if candidate.score > 0:
             candidates.append(candidate)
         if len(candidates) >= MAX_RAW_CANDIDATES or expired(deadline):
             break
+
+    # Tavily is a URL discovery layer only. Every result still passes the same
+    # local same-site and product-detail verification below before it can be used.
+    write_json_artifact(task, "product_assets/tavily_search.json", tavily_audit)
 
     candidates.sort(key=lambda item: item.score, reverse=True)
     enriched_candidates: list[CrawlCandidate] = []
@@ -201,27 +334,52 @@ def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> l
         if expired(deadline):
             break
         enrich_candidate(candidate, terms, deadline)
+        if not candidate.detail_verified:
+            continue
         score_candidate(candidate, terms, base_url)
         if candidate.score > 0:
             enriched_candidates.append(candidate)
 
-    if enriched_candidates:
-        candidates = enriched_candidates
+    # Never fall back to rough, unverified URLs. A relevant-looking path is not
+    # sufficient evidence that a page is an individual product detail page.
+    candidates = enriched_candidates
     candidates.sort(key=lambda item: item.score, reverse=True)
     products: list[Product] = []
     fallback_products: list[Product] = []
-    for candidate in candidates[: max(limit * 4, limit + 6)]:
+    seen_product_urls: set[str] = set()
+    seen_image_urls: set[str] = set()
+    seen_image_hashes: set[str] = set()
+    for candidate in candidates:
         if len(products) >= limit:
             break
+        normalized_product_url = normalize_url(candidate.url)
+        if not normalized_product_url or normalized_product_url in seen_product_urls:
+            continue
         image_path = ""
-        if candidate.image_url:
-            image_path = download_product_image(task, candidate)
+        if download_images and candidate.image_url:
+            normalized_image_url = normalize_url(candidate.image_url)
+            if normalized_image_url and normalized_image_url in seen_image_urls:
+                candidate.debug.append("duplicate-image-url")
+                continue
+            image_path = download_product_image(
+                task,
+                candidate,
+                seen_hashes=seen_image_hashes,
+            )
+            if not image_path and "duplicate-image-bytes" in candidate.debug:
+                continue
+            if image_path and normalized_image_url:
+                seen_image_urls.add(normalized_image_url)
         product = Product(
             name=candidate.name or product_name_from_url(candidate.url),
             url=candidate.url,
+            canonical_url=candidate.url,
             image_path=image_path,
             description=candidate.description[:420],
+            discovery_source=candidate.source,
+            detail_page_verified=candidate.detail_verified,
         )
+        seen_product_urls.add(normalized_product_url)
         if image_path:
             products.append(product)
         else:
@@ -249,6 +407,82 @@ def recommend_products(config: AppConfig, task: TaskRecord, limit: int = 3) -> l
         ],
     )
     return products
+
+
+def tavily_product_query(terms: list[str]) -> str:
+    """Collapse overlapping article phrases into one product-oriented query."""
+
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for term in unique(terms)[:6]:
+        if not term or term.lower().startswith("http"):
+            continue
+        for token in re.findall(r"[a-zA-Z0-9]+", term.casefold()):
+            if len(token) < 3 or token in TAVILY_QUERY_STOPWORDS or token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+            if len(tokens) >= 5:
+                break
+        if len(tokens) >= 5:
+            break
+
+    query = " ".join(tokens)
+    query = re.sub(r"\bself\s+tapper(?:s)?\b", "self tapping screw", query)
+    query = normalize_space(query)
+    if not query:
+        return "products"
+    if not re.search(r"\bproducts?\b", query, flags=re.IGNORECASE):
+        query = f"{query} products"
+    return query
+
+
+def candidates_from_tavily(
+    client: TavilyClient,
+    base_url: str,
+    terms: list[str],
+    *,
+    max_results: int = 10,
+) -> tuple[list[CrawlCandidate], dict[str, Any]]:
+    """Discover official URLs; never accept Tavily snippets or images as proof."""
+
+    host = parse.urlparse(base_url).netloc
+    query = tavily_product_query(terms)
+    audit: dict[str, Any] = {"status": "ok", "query": query, "results": []}
+    try:
+        response = client.search(query, host, max_results=max(1, min(max_results, 20)))
+    except TavilyError as exc:
+        audit.update({"status": "error", "error": str(exc)})
+        return [], audit
+
+    candidates: list[CrawlCandidate] = []
+    for result in response.results:
+        url = strip_url_fragment(result.url)
+        same_site_result = bool(url and same_site(base_url, url))
+        accepted = bool(same_site_result and not looks_like_blog(url))
+        audit["results"].append(
+            {
+                "title": result.title,
+                "url": url,
+                "score": result.score,
+                "same_site": same_site_result,
+                "eligible_product_url": accepted,
+            }
+        )
+        if not accepted:
+            continue
+        candidates.append(
+            CrawlCandidate(
+                name=clean_title(result.title),
+                url=url,
+                # Search snippets are not authoritative product facts. The
+                # official detail page fetched below supplies the description.
+                description="",
+                source="tavily",
+                debug=["official-domain Tavily discovery; pending local detail verification"],
+            )
+        )
+    return candidates, audit
 
 
 def collect_candidates(base_url: str, terms: list[str], deadline: float) -> list[CrawlCandidate]:
@@ -341,8 +575,14 @@ def candidates_from_media_search(base_url: str, term: str) -> list[CrawlCandidat
         if not image_url or is_bad_image_url(image_url):
             continue
         link = str(item.get("link") or base_url)
-        title = clean_html_text(rest_rendered(item.get("title")) or item.get("alt_text") or product_name_from_url(image_url))
-        description = clean_html_text(item.get("alt_text") or rest_rendered(item.get("caption")) or title)
+        title = clean_html_text(
+            rest_rendered(item.get("title"))
+            or item.get("alt_text")
+            or product_name_from_url(image_url)
+        )
+        description = clean_html_text(
+            item.get("alt_text") or rest_rendered(item.get("caption")) or title
+        )
         candidates.append(
             CrawlCandidate(
                 name=title,
@@ -358,33 +598,90 @@ def candidates_from_media_search(base_url: str, term: str) -> list[CrawlCandidat
 
 def candidates_from_product_indexes(base_url: str, terms: list[str], deadline: float) -> list[CrawlCandidate]:
     candidates: list[CrawlCandidate] = []
-    for index_path in PRODUCT_INDEX_PATHS:
-        if expired(deadline):
-            break
-        index_url = urljoin(base_url, index_path)
-        html = fetch_text(index_url)
-        if not html:
-            continue
-        parser = parse_html(html)
+    seen: set[str] = set()
+
+    def append_links(
+        parser: SimpleHTMLParser,
+        page_url: str,
+        *,
+        source: str,
+        debug: list[str],
+    ) -> list[CrawlCandidate]:
+        added: list[CrawlCandidate] = []
         for link in parser.links:
             href = link.get("href", "")
             if not href:
                 continue
-            url = parse.urljoin(index_url, href)
-            if not same_site(base_url, url) or not is_product_index_candidate(index_url, url, terms):
+            url = strip_url_fragment(parse.urljoin(page_url, href))
+            normalized = normalize_url(url)
+            if (
+                not normalized
+                or normalized in seen
+                or not same_site(base_url, url)
+                or not is_product_index_candidate(page_url, url, terms)
+            ):
                 continue
-            if normalize_url(url).rstrip("/") == normalize_url(index_url).rstrip("/"):
+            if normalize_url(url).rstrip("/") == normalize_url(page_url).rstrip("/"):
                 continue
-            name = clean_html_text(link.get("title") or link.get("aria-label") or product_name_from_url(url))
-            candidates.append(
-                CrawlCandidate(
-                    name=name,
-                    url=url,
-                    source="product-index",
-                    debug=[index_url],
-                )
+            seen.add(normalized)
+            name = clean_html_text(
+                link.get("title") or link.get("aria-label") or product_name_from_url(url)
             )
+            candidate = CrawlCandidate(
+                name=name,
+                url=url,
+                source=source,
+                debug=list(debug),
+            )
+            candidates.append(candidate)
+            added.append(candidate)
             if len(candidates) >= MAX_RAW_CANDIDATES:
+                break
+        return added
+
+    for index_path in PRODUCT_INDEX_PATHS:
+        if expired(deadline):
+            break
+        index_url = urljoin(base_url, index_path)
+        html = fetch_text(index_url, timeout=discovery_fetch_timeout(deadline))
+        if not html:
+            continue
+        parser = parse_html(html)
+        direct = append_links(
+            parser,
+            index_url,
+            source="product-index",
+            debug=[index_url],
+        )
+        if len(candidates) >= MAX_RAW_CANDIDATES:
+            return candidates
+        if len(candidates) >= DISCOVERY_TARGET_CANDIDATES:
+            return candidates
+
+        # Many B2B sites expose only category tiles on /products/. Probe a
+        # bounded number of those first-level links; confirmed listing pages
+        # are containers whose product-card links must be added to the pool.
+        for container in direct[:MAX_CONTAINER_PROBES]:
+            if expired(deadline) or len(candidates) >= MAX_RAW_CANDIDATES:
+                break
+            container_html = fetch_text(
+                container.url,
+                timeout=discovery_fetch_timeout(deadline),
+            )
+            if not container_html:
+                continue
+            container_parser = parse_html(container_html)
+            if not is_product_listing_page(container.url, container_parser, terms):
+                continue
+            container.debug.append("listing-container")
+            candidates.remove(container)
+            append_links(
+                container_parser,
+                container.url,
+                source="product-container",
+                debug=[index_url, container.url],
+            )
+            if len(candidates) >= DISCOVERY_TARGET_CANDIDATES:
                 return candidates
     return candidates
 
@@ -444,11 +741,17 @@ def candidates_from_homepage(base_url: str, terms: list[str]) -> list[CrawlCandi
 
 
 def enrich_candidate(candidate: CrawlCandidate, terms: list[str], deadline: float) -> None:
+    candidate.detail_verified = False
     if expired(deadline):
         return
-    html = fetch_text(candidate.url)
+    html, final_url = fetch_page(candidate.url)
     if not html:
         return
+    if final_url:
+        if not same_site(candidate.url, final_url):
+            candidate.debug.append(f"rejected-cross-site-redirect={final_url}")
+            return
+        candidate.url = strip_url_fragment(final_url)
     parser = parse_html(html)
     title = first_meta(parser, "og:title") or first_meta(parser, "twitter:title") or parser.title
     description = first_meta(parser, "og:description") or first_meta(parser, "description")
@@ -467,6 +770,11 @@ def enrich_candidate(candidate: CrawlCandidate, terms: list[str], deadline: floa
         image_url = best_html_image(candidate.url, parser, terms)
     if image_url:
         candidate.image_url = parse.urljoin(candidate.url, image_url)
+
+    if not is_product_detail_page(candidate.url, parser, terms):
+        candidate.debug.append("rejected-non-detail-page")
+        return
+    candidate.detail_verified = True
 
 
 def rough_score_candidate(candidate: CrawlCandidate, terms: list[str], base_url: str) -> None:
@@ -488,6 +796,8 @@ def rough_score_candidate(candidate: CrawlCandidate, terms: list[str], base_url:
         score += 6
     if candidate.source.startswith("rest"):
         score += 4
+    if candidate.source == "tavily":
+        score += 8
     if looks_like_blog(candidate.url):
         score -= 8
     candidate.score = score
@@ -512,21 +822,37 @@ def score_candidate(candidate: CrawlCandidate, terms: list[str], base_url: str) 
         score += 8
     if candidate.source.startswith("rest"):
         score += 5
+    if candidate.source == "tavily":
+        score += 8
     if candidate.source == "rest:media":
         score -= 8
-    if any(bad in haystack for bad in BAD_IMAGE_HINTS):
+    if contains_bad_image_hint(haystack):
         score -= 20
     if looks_like_blog(candidate.url):
         score -= 10
     candidate.score = score
 
 
-def download_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
+def download_product_image(
+    task: TaskRecord,
+    candidate: CrawlCandidate,
+    *,
+    seen_hashes: set[str] | None = None,
+) -> str:
     image_url = candidate.image_url
     if not image_url or is_bad_image_url(image_url):
         return ""
     existing_path = existing_product_image(task, candidate)
     if existing_path:
+        if seen_hashes is not None:
+            try:
+                digest = hashlib.sha256(Path(existing_path).read_bytes()).hexdigest()
+            except OSError:
+                return ""
+            if digest in seen_hashes:
+                candidate.debug.append("duplicate-image-bytes")
+                return ""
+            seen_hashes.add(digest)
         return existing_path
     try:
         response = open_url(image_url, timeout=IMAGE_FETCH_TIMEOUT)
@@ -537,6 +863,13 @@ def download_product_image(task: TaskRecord, candidate: CrawlCandidate) -> str:
 
     if not is_valid_product_image(data, image_url, content_type):
         return ""
+
+    digest = hashlib.sha256(data).hexdigest()
+    if seen_hashes is not None:
+        if digest in seen_hashes:
+            candidate.debug.append("duplicate-image-bytes")
+            return ""
+        seen_hashes.add(digest)
 
     extension = Path(parse.urlparse(image_url).path).suffix.lower()
     if extension not in IMAGE_EXTENSIONS:
@@ -582,6 +915,11 @@ def search_terms(task: TaskRecord) -> list[str]:
         task.competitor_keyword,
     ]
     terms: list[str] = []
+    for field in (task.competitor_keyword, task.selected_title, task.topic):
+        for compound in re.findall(r"\b[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)+\b", field or ""):
+            phrase = " ".join(tokenize(compound.replace("-", " ")))
+            if phrase:
+                terms.append(phrase)
     keyword_tokens = tokenize(keyword)
     topic_tokens = tokenize(task.topic)
     if keyword_tokens:
@@ -604,8 +942,38 @@ def search_terms(task: TaskRecord) -> list[str]:
     return unique([term for term in terms if term])
 
 
-def fetch_json(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT) -> Any:
-    text = fetch_text(url, timeout=timeout)
+RedirectValidator = Callable[[str], bool | None]
+
+
+class UnsafeOutboundURLError(ValueError):
+    """Raised before a request when its host or redirect target is unsafe."""
+
+
+class _ValidatingRedirectHandler(request.HTTPRedirectHandler):
+    def __init__(self, validator: RedirectValidator | None = None) -> None:
+        super().__init__()
+        self.validator = validator
+
+    def redirect_request(
+        self,
+        req,
+        fp,
+        code,
+        msg,
+        headers,
+        newurl,
+    ):
+        _validate_outbound_url(str(newurl), redirect_validator=self.validator)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_json(
+    url: str,
+    timeout: int = DEFAULT_FETCH_TIMEOUT,
+    *,
+    redirect_validator: RedirectValidator | None = None,
+) -> Any:
+    text = fetch_text(url, timeout=timeout, redirect_validator=redirect_validator)
     if not text:
         return None
     try:
@@ -614,18 +982,48 @@ def fetch_json(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT) -> Any:
         return None
 
 
-def fetch_text(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT) -> str:
+def fetch_text(
+    url: str,
+    timeout: int = DEFAULT_FETCH_TIMEOUT,
+    *,
+    redirect_validator: RedirectValidator | None = None,
+) -> str:
+    text, _ = fetch_page(url, timeout=timeout, redirect_validator=redirect_validator)
+    return text
+
+
+def fetch_page(
+    url: str,
+    timeout: int = DEFAULT_FETCH_TIMEOUT,
+    *,
+    redirect_validator: RedirectValidator | None = None,
+) -> tuple[str, str]:
+    """Fetch one text page and retain the final URL after redirects."""
+
     try:
-        response = open_url(url, timeout=timeout)
+        response = open_url(
+            url,
+            timeout=timeout,
+            redirect_validator=redirect_validator,
+        )
         raw = response.read(2 * 1024 * 1024)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError):
-        return ""
-    content_type = response.headers.get_content_charset() or "utf-8"
-    return raw.decode(content_type, errors="ignore")
+        return "", ""
+    get_charset = getattr(response.headers, "get_content_charset", None)
+    content_type = get_charset() if callable(get_charset) else None
+    final_url_getter = getattr(response, "geturl", None)
+    final_url = final_url_getter() if callable(final_url_getter) else url
+    return raw.decode(content_type or "utf-8", errors="ignore"), str(final_url or url)
 
 
-def open_url(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT):
+def open_url(
+    url: str,
+    timeout: int = DEFAULT_FETCH_TIMEOUT,
+    *,
+    redirect_validator: RedirectValidator | None = None,
+):
     safe_url = encode_url(url)
+    _validate_outbound_url(safe_url, redirect_validator=redirect_validator)
     req = request.Request(
         safe_url,
         headers={
@@ -636,18 +1034,93 @@ def open_url(url: str, timeout: int = DEFAULT_FETCH_TIMEOUT):
     )
     contexts = [None]
     if safe_url.lower().startswith("https://"):
-        contexts.extend([ssl._create_unverified_context(), ssl._create_unverified_context()])
+        contexts.append(ssl._create_unverified_context())
     last_error: Exception | None = None
     for context in contexts:
         try:
-            if context is None:
-                return request.urlopen(req, timeout=timeout)
-            return request.urlopen(req, timeout=timeout, context=context)
+            handlers: list[object] = [_ValidatingRedirectHandler(redirect_validator)]
+            if context is not None:
+                handlers.append(request.HTTPSHandler(context=context))
+            opener = request.build_opener(*handlers)
+            return opener.open(req, timeout=timeout)
         except (HTTPError, URLError, TimeoutError, OSError, ssl.SSLError) as error:
             last_error = error
     if last_error:
         raise last_error
-    return request.urlopen(req, timeout=timeout)
+    opener = request.build_opener(_ValidatingRedirectHandler(redirect_validator))
+    return opener.open(req, timeout=timeout)
+
+
+def _validate_outbound_url(
+    url: str,
+    *,
+    redirect_validator: RedirectValidator | None = None,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    parsed = parse.urlsplit(str(url or ""))
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+        raise UnsafeOutboundURLError("Outbound URL must use HTTP(S) and include a hostname.")
+    if parsed.username or parsed.password:
+        raise UnsafeOutboundURLError("Outbound URL credentials are not allowed.")
+    if redirect_validator is not None:
+        try:
+            allowed = redirect_validator(str(url))
+        except Exception as exc:
+            raise UnsafeOutboundURLError("Outbound URL failed its redirect policy.") from exc
+        if allowed is False:
+            raise UnsafeOutboundURLError("Outbound URL was rejected by its redirect policy.")
+
+    host = parsed.hostname.rstrip(".")
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise UnsafeOutboundURLError("Outbound URL hostname is invalid.") from exc
+    try:
+        literal_host = ipaddress.ip_address(ascii_host)
+    except ValueError:
+        literal_host = None
+    try:
+        port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+    except ValueError as exc:
+        raise UnsafeOutboundURLError("Outbound URL port is invalid.") from exc
+    try:
+        records = socket.getaddrinfo(
+            ascii_host,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror as exc:
+        raise UnsafeOutboundURLError("Outbound URL hostname could not be resolved.") from exc
+
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for record in records:
+        sockaddr = record[4]
+        if not sockaddr:
+            continue
+        raw_address = str(sockaddr[0]).split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw_address)
+        except ValueError as exc:
+            raise UnsafeOutboundURLError("DNS returned an invalid address.") from exc
+        mapped = getattr(address, "ipv4_mapped", None)
+        checked = mapped or address
+        unsafe = (
+            checked.is_private
+            or checked.is_loopback
+            or checked.is_link_local
+            or checked.is_multicast
+            or checked.is_reserved
+            or checked.is_unspecified
+        )
+        proxy_fake_ip = literal_host is None and any(
+            checked in network for network in PROXY_FAKE_IP_NETWORKS
+        )
+        if unsafe and not proxy_fake_ip:
+            raise UnsafeOutboundURLError("Outbound URL resolved to a non-public address.")
+        addresses.append(address)
+    if not addresses:
+        raise UnsafeOutboundURLError("Outbound URL hostname returned no usable A/AAAA records.")
+    return tuple(addresses)
 
 
 def encode_url(url: str) -> str:
@@ -675,6 +1148,163 @@ def first_meta(parser: SimpleHTMLParser, name: str) -> str:
         if key == wanted:
             return meta.get("content", "")
     return ""
+
+
+def json_ld_types(parser: SimpleHTMLParser) -> set[str]:
+    """Return every Schema.org ``@type`` found in JSON-LD blocks."""
+
+    types: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            raw_type = value.get("@type")
+            values = raw_type if isinstance(raw_type, list) else [raw_type]
+            for item in values:
+                if item:
+                    types.add(str(item).rsplit("/", 1)[-1].casefold())
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+
+    for raw in parser.json_ld_parts:
+        payload: Any = None
+        for candidate in (raw, unescape(raw)):
+            try:
+                payload = json.loads(candidate)
+                break
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if payload is not None:
+            collect(payload)
+    return types
+
+
+def product_page_links(page_url: str, parser: SimpleHTMLParser, terms: list[str]) -> list[str]:
+    """Collect unique same-site links that could lead to products or product containers."""
+
+    links: list[str] = []
+    seen: set[str] = set()
+    current = normalize_url(page_url)
+    for link in parser.links:
+        href = str(link.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        url = strip_url_fragment(parse.urljoin(page_url, href))
+        normalized = normalize_url(url)
+        if (
+            not normalized
+            or normalized == current
+            or normalized in seen
+            or not same_site(page_url, url)
+            or not is_relevant_product_url(url, terms)
+        ):
+            continue
+        seen.add(normalized)
+        links.append(url)
+    return links
+
+
+def _has_listing_pagination(parser: SimpleHTMLParser) -> bool:
+    for link in parser.links:
+        href = str(link.get("href") or "").casefold()
+        if re.search(r"(?:/page/\d+/?(?:[?#]|$)|[?&](?:page|paged)=\d+)", href):
+            return True
+    return False
+
+
+def _has_class_hint(tokens: set[str], hints: set[str]) -> bool:
+    return any(hint == token or hint in token for token in tokens for hint in hints)
+
+
+def is_known_listing_url(url: str) -> bool:
+    parsed = parse.urlparse(url)
+    path = re.sub(r"/{2,}", "/", parse.unquote(parsed.path)).casefold()
+    stripped = path.rstrip("/") or "/"
+    if stripped in {item.rstrip("/") or "/" for item in PRODUCT_INDEX_PATHS}:
+        return True
+    return any(hint in path for hint in CATEGORY_PATH_HINTS)
+
+
+def is_pagination_url(url: str) -> bool:
+    parsed = parse.urlparse(url)
+    if re.search(r"/page/\d+/?$", parsed.path, flags=re.IGNORECASE):
+        return True
+    return any(
+        key.casefold() in {"page", "paged"} and str(value).isdigit()
+        for key, value in parse.parse_qsl(parsed.query, keep_blank_values=True)
+    )
+
+
+def is_product_listing_page(
+    page_url: str,
+    parser: SimpleHTMLParser,
+    terms: list[str],
+) -> bool:
+    """Identify containers/archives without treating ordinary related products as a listing."""
+
+    schema_types = json_ld_types(parser)
+    if is_known_listing_url(page_url):
+        return True
+    if _has_class_hint(parser.body_class_tokens, LISTING_CLASS_HINTS):
+        return True
+    if schema_types.intersection(LISTING_SCHEMA_TYPES - {"itemlist"}):
+        return True
+
+    outgoing_products = product_page_links(page_url, parser, terms)
+    text = parser.text.casefold()
+    has_filter = bool(
+        re.search(
+            r"\bfilter\b|\ball products\b|\bproduct categor(?:y|ies)\b|\bshop by categor(?:y|ies)\b",
+            text,
+        )
+    )
+    has_pagination = _has_listing_pagination(parser)
+    if len(outgoing_products) >= 4 and (has_filter or has_pagination):
+        return True
+    if "itemlist" in schema_types and len(outgoing_products) >= 4 and "product" not in schema_types:
+        return True
+    return False
+
+
+def is_product_detail_page(
+    page_url: str,
+    parser: SimpleHTMLParser,
+    terms: list[str],
+) -> bool:
+    """Require strong product evidence, with a conservative generic fallback."""
+
+    if not page_url or looks_like_blog(page_url) or is_product_listing_page(page_url, parser, terms):
+        return False
+
+    schema_types = json_ld_types(parser)
+    og_type = first_meta(parser, "og:type").strip().casefold()
+    if (
+        "product" in schema_types
+        or og_type == "product"
+        or _has_class_hint(parser.body_class_tokens, DETAIL_CLASS_HINTS)
+    ):
+        return True
+
+    # Custom B2B sites sometimes publish product pages as ordinary WordPress
+    # pages. Accept that shape only when the page is relevant, substantive and
+    # has a plausible product image. Listing signals above still take priority.
+    title = first_meta(parser, "og:title") or first_meta(parser, "twitter:title") or parser.title
+    description = first_meta(parser, "og:description") or first_meta(parser, "description")
+    haystack = " ".join((page_url, title, description)).casefold()
+    relevant = is_relevant_product_url(page_url, terms) and any(
+        token in haystack for term in terms for token in tokenize(term)
+    )
+    if not relevant:
+        relevant = any(hint in haystack for hint in PRODUCT_PATH_HINTS)
+    has_image = bool(
+        first_meta(parser, "og:image")
+        or first_meta(parser, "twitter:image")
+        or best_html_image(page_url, parser, terms)
+    )
+    substantive = len(clean_html_text(description)) >= 40 or len(parser.text) >= 220
+    return bool(relevant and has_image and substantive)
 
 
 def best_html_image(page_url: str, parser: SimpleHTMLParser, terms: list[str]) -> str:
@@ -705,7 +1335,7 @@ def best_html_image(page_url: str, parser: SimpleHTMLParser, terms: list[str]) -
         for token in tokenize(" ".join(terms)):
             if token in text:
                 score += 2
-        if any(bad in text for bad in BAD_IMAGE_HINTS):
+        if contains_bad_image_hint(text):
             score -= 40
         width = numeric(image.get("width", "0"))
         height = numeric(image.get("height", "0"))
@@ -722,14 +1352,16 @@ def best_html_image(page_url: str, parser: SimpleHTMLParser, terms: list[str]) -
 def is_product_index_candidate(index_url: str, url: str, terms: list[str]) -> bool:
     parsed = parse.urlparse(url)
     path = parsed.path.lower()
-    if any(part in path for part in ("/tag/", "/category/", "/author/", "/wp-content/", "/feed/")):
+    if is_pagination_url(url):
+        return False
+    if any(part in path for part in ("/tag/", "/author/", "/wp-content/", "/feed/")):
         return False
     if parsed.query and not any(key in parsed.query.lower() for key in ("product", "p=")):
         return False
     index_path = parse.urlparse(index_url).path.rstrip("/").lower()
     if index_path and path.rstrip("/").startswith(index_path + "/"):
         return True
-    return is_relevant_product_url(url, terms)
+    return is_known_listing_url(url) or is_relevant_product_url(url, terms)
 
 
 def is_bad_image_url(url: str) -> bool:
@@ -739,8 +1371,30 @@ def is_bad_image_url(url: str) -> bool:
     path = parse.urlparse(lower).path
     if any(part in path for part in ("/wp-content/themes/", "/wp-includes/", "/assets/icons/", "/images/icons/")):
         return True
-    filename = Path(path).name
-    return any(hint in lower or hint in filename for hint in BAD_IMAGE_HINTS)
+    return contains_bad_image_hint(lower)
+
+
+def contains_bad_image_hint(value: str) -> bool:
+    """Match UI/decorative image hints on token boundaries.
+
+    A substring check incorrectly rejected legitimate names such as
+    ``shared-product.jpg`` because ``share`` appeared inside ``shared``.
+    """
+
+    tokens = re.findall(r"[a-z0-9]+", parse.unquote(str(value or "")).casefold())
+    for hint in BAD_IMAGE_HINTS:
+        hint_tokens = re.findall(r"[a-z0-9]+", hint.casefold())
+        if not hint_tokens:
+            continue
+        if len(hint_tokens) == 1:
+            word = hint_tokens[0]
+            if any(token in {word, word + "s", word + "es"} for token in tokens):
+                return True
+            continue
+        size = len(hint_tokens)
+        if any(tokens[index : index + size] == hint_tokens for index in range(len(tokens) - size + 1)):
+            return True
+    return False
 
 
 def is_valid_product_image(data: bytes, image_url: str, content_type: str) -> bool:
@@ -880,7 +1534,11 @@ def sitemap_locations(text: str) -> list[str]:
 def is_relevant_product_url(url: str, terms: list[str]) -> bool:
     parsed = parse.urlparse(url)
     path = parsed.path.lower()
-    if any(part in path for part in ("/tag/", "/category/", "/author/", "/wp-content/")):
+    if (
+        is_known_listing_url(url)
+        or is_pagination_url(url)
+        or any(part in path for part in ("/author/", "/wp-content/"))
+    ):
         return False
     hint_score = any(hint in path for hint in PRODUCT_PATH_HINTS)
     term_score = any(token in path for term in terms for token in tokenize(term))
@@ -906,16 +1564,39 @@ def same_site(base_url: str, url: str) -> bool:
 
 def normalize_url(url: str) -> str:
     parsed = parse.urlparse(url)
+    if not parsed.netloc:
+        return ""
+    scheme = parsed.scheme.casefold()
+    if scheme in {"http", "https"}:
+        scheme = "https"
+    netloc = parsed.netloc.casefold().removeprefix("www.")
+    if netloc.endswith(":80") and scheme == "https":
+        netloc = netloc[:-3]
+    if netloc.endswith(":443") and scheme == "https":
+        netloc = netloc[:-4]
+    path = re.sub(r"/{2,}", "/", parse.unquote(parsed.path)).rstrip("/").casefold()
+    query_items = []
+    for key, value in parse.parse_qsl(parsed.query, keep_blank_values=True):
+        lowered = key.casefold()
+        if lowered in TRACKING_QUERY_KEYS or lowered.startswith(TRACKING_QUERY_PREFIXES):
+            continue
+        query_items.append((key, value))
+    query = parse.urlencode(sorted(query_items), doseq=True)
     return parse.urlunparse(
         (
-            parsed.scheme.lower(),
-            parsed.netloc.lower().removeprefix("www."),
-            parsed.path.rstrip("/"),
+            scheme,
+            netloc,
+            path,
             "",
-            parsed.query,
+            query,
             "",
         )
     )
+
+
+def strip_url_fragment(url: str) -> str:
+    parsed = parse.urlsplit(str(url or ""))
+    return parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
 def product_name_from_url(url: str) -> str:
@@ -1009,3 +1690,10 @@ def unique(values: list[str]) -> list[str]:
 
 def expired(deadline: float) -> bool:
     return time.monotonic() >= deadline
+
+
+def discovery_fetch_timeout(deadline: float) -> int:
+    """Bound one discovery request so retries cannot consume the full crawl budget."""
+
+    remaining = max(0.0, deadline - time.monotonic())
+    return max(1, min(DISCOVERY_FETCH_TIMEOUT, int(max(1.0, remaining / 2))))

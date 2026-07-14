@@ -3,17 +3,118 @@ export type WorkflowStatus =
   | "titles_ready"
   | "title_selected"
   | "outline_ready"
+  | "outline_confirmed"
   | "draft_ready"
+  | "initial_ai_checked"
+  | "humanized_ready"
+  | "final_ai_checked"
+  | "links_verified"
+  | "images_ready"
   | "docx_exported";
 
 export type Product = {
+  product_id?: string;
   name: string;
   url: string;
+  canonical_url?: string;
   image_path: string;
   description: string;
+  reference_summary?: string;
+  reference_facts?: string[];
+  specifications?: Record<string, string>;
+  reference_path?: string;
+  asset_manifest_path?: string;
+  asset_count?: number;
+  selected_asset_id?: string;
+  selection_confidence?: number | null;
+  selection_reason?: string;
+  discovery_source?: string;
+  detail_page_verified?: boolean;
+  asset_status?: string;
+  asset_error?: string;
+};
+
+export type AiCheckRecord = {
+  confirmed: boolean;
+  score: number | null;
+  report: string;
+  screenshot_path: string;
+  article_hash: string;
+  confirmed_at: string;
+};
+
+export type ArticleLink = {
+  anchor: string;
+  url: string;
+  count?: number;
+  heading?: string;
+  context?: string;
+};
+
+export type CompressionRecord = {
+  required: boolean;
+  attempted_at: string;
+  before_words: number;
+  after_words: number;
+  prompt_version?: string;
+};
+
+export type ArticleImage = {
+  id: string;
+  source_path: string;
+  prepared_path: string;
+  role: "hero" | "product" | string;
+  anchor_heading: string;
+  anchor_text?: string;
+  anchor_after?: string;
+  filename: string;
+  marker: string;
+  product_name?: string;
+  status?: string;
+  error?: string;
+  anchor_candidates?: Array<{
+    id: string;
+    heading: string;
+    anchor_heading: string;
+    level: number;
+    line_index: number;
+  }>;
+};
+
+export type LinkValidation = {
+  passed: boolean;
+  source_count: number;
+  preserved_count: number;
+  missing_links: ArticleLink[];
+  unexpected_links: ArticleLink[];
+  visible_text_unchanged: boolean | null;
+  article_hash: string;
+  verified_at: string;
+  error: string;
+};
+
+export type WorkflowError = {
+  code: string;
+  message: string;
+  stage: string;
+  recoverable: boolean;
+  blocking?: boolean;
+};
+
+export type TdkMetadata = {
+  title: string;
+  description: string;
+  keywords: string[];
+  description_character_count: number;
+  source_article_hash: string;
+  generated_at: string;
+  prompt_version: string;
 };
 
 export type TaskRecord = {
+  schema_version?: number;
+  revision?: number;
+  workflow_error?: WorkflowError | null;
   id: string;
   week_folder: string;
   customer: string;
@@ -27,8 +128,33 @@ export type TaskRecord = {
   selected_title: string;
   outline: string;
   article: string;
+  raw_draft_article?: string;
+  initial_article?: string;
+  humanized_article?: string;
+  linked_article?: string;
+  final_article?: string;
+  raw_draft_word_count?: number;
+  initial_article_word_count?: number;
+  humanized_article_word_count?: number;
+  linked_article_word_count?: number;
+  final_article_word_count?: number;
+  compression?: CompressionRecord;
+  initial_ai_check?: AiCheckRecord;
+  final_ai_check?: AiCheckRecord;
+  source_links?: ArticleLink[];
+  link_validation?: LinkValidation;
   products: Product[];
+  hero_image?: string;
+  images?: ArticleImage[];
+  transition_added?: boolean;
+  allowed_actions?: string[];
+  initial_article_ready?: boolean;
+  initial_article_issues?: string[];
+  legacy_export?: boolean;
   docx_path: string;
+  tdk?: TdkMetadata;
+  tdk_path?: string;
+  delivery_package_path?: string;
   zero_gpt_report: string;
   created_at: string;
   updated_at: string;
@@ -55,6 +181,10 @@ export type PublicConfig = {
     language: string;
     title_candidates: number;
     default_word_count: number;
+    ai_pass_threshold: number;
+  };
+  prompts?: {
+    humanize: string;
   };
   docx_format: {
     font: string;
@@ -67,6 +197,9 @@ export type PublicConfig = {
     provider: string;
     base_url: string;
     model: string;
+  };
+  integrations?: {
+    tavily_ready: boolean;
   };
 };
 

@@ -11,7 +11,11 @@ week_folder:
 article:
   language: "English"
   title_candidates: 10
-  default_word_count: 1500
+  default_word_count: 1200
+  ai_pass_threshold: 30
+
+prompts:
+  humanize: "D:\\article\\降ai提示词-未测试效果版.txt"
 
 docx_format:
   font: "Times New Roman"
