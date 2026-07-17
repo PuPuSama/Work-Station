@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +10,25 @@ import yaml
 from dotenv import load_dotenv
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT_DIR / "config.yaml"
+def _application_root() -> Path:
+    configured = os.environ.get("ARTICLE_AGENT_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+ROOT_DIR = _application_root()
+CONFIG_PATH = Path(
+    os.environ.get("ARTICLE_AGENT_CONFIG", str(ROOT_DIR / "config.yaml"))
+).expanduser().resolve()
+PROJECT_SCOPE = "全部项目"
+
+
+def _configured_path(value: object) -> Path:
+    path = Path(str(value or "")).expanduser()
+    return path.resolve() if path.is_absolute() else (ROOT_DIR / path).resolve()
 
 
 @dataclass(frozen=True)
@@ -38,25 +55,20 @@ class AppConfig:
 
     @property
     def current_week_folder(self) -> str:
-        start, end = current_work_week()
-        return self.week_name_format.format(
-            start_month=start.month,
-            start_day=start.day,
-            end_month=end.month,
-            end_day=end.day,
-            owner=self.week_owner,
-        )
+        """Compatibility label for clients which still call this a week.
+
+        Tasks are now persistent project records.  Keeping the old response
+        field avoids breaking deployed frontends while removing dates from
+        task identity and filesystem layout.
+        """
+
+        return PROJECT_SCOPE
 
     @property
     def current_week_path(self) -> Path:
-        return self.output_root / self.current_week_folder
+        """Compatibility path for the project-wide, non-weekly workspace."""
 
-
-def current_work_week(today: date | None = None) -> tuple[date, date]:
-    today = today or date.today()
-    monday = today - timedelta(days=today.weekday())
-    friday = monday + timedelta(days=4)
-    return monday, friday
+        return self.output_root
 
 
 def load_config() -> AppConfig:
@@ -67,20 +79,22 @@ def load_config() -> AppConfig:
     docx = raw["docx_format"]
     styles = docx["styles"]
     llm = raw.get("llm", {})
-    week = raw["week_folder"]
+    legacy_week = raw.get("week_folder", {})
 
     return AppConfig(
-        topic_library=Path(paths["topic_library"]),
-        knowledge_base=Path(paths["knowledge_base"]),
-        output_root=Path(paths["output_root"]),
-        data_file=Path(paths["data_file"]),
-        week_owner=str(week["owner"]),
-        week_name_format=str(week["name_format"]),
+        topic_library=_configured_path(paths["topic_library"]),
+        knowledge_base=_configured_path(paths["knowledge_base"]),
+        output_root=_configured_path(paths["output_root"]),
+        data_file=_configured_path(paths["data_file"]),
+        # Compatibility-only fields. Task identity and paths no longer use
+        # owner/date formatting.
+        week_owner=str(legacy_week.get("owner", "")),
+        week_name_format=str(legacy_week.get("name_format", "")),
         language=str(article.get("language", "English")),
         title_candidates=int(article.get("title_candidates", 10)),
         default_word_count=int(article.get("default_word_count", 1200)),
         ai_pass_threshold=float(article.get("ai_pass_threshold", 30)),
-        humanize_prompt_path=Path(
+        humanize_prompt_path=_configured_path(
             prompts.get(
                 "humanize",
                 ROOT_DIR.parent / "降ai提示词-未测试效果版.txt",

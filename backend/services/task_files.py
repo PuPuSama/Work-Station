@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from config import AppConfig
@@ -27,10 +28,17 @@ def resolve_task_directory(config: AppConfig, task: TaskRecord) -> Path:
 
 def open_task_directory(config: AppConfig, task: TaskRecord) -> Path:
     directory = resolve_task_directory(config, task)
-    if os.name != "nt" or not hasattr(os, "startfile"):
+    if os.name != "nt":
         raise TaskDirectoryError("Opening task folders is supported only on Windows.")
+
+    explorer = Path(os.environ.get("WINDIR", r"C:\Windows")) / "explorer.exe"
     try:
-        os.startfile(str(directory))  # type: ignore[attr-defined]
-    except OSError as exc:
-        raise TaskDirectoryError(f"Unable to open task directory: {directory}") from exc
+        subprocess.Popen(
+            [str(explorer), str(directory)],
+            close_fds=True,
+        )
+    except OSError as explorer_error:
+        raise TaskDirectoryError(
+            f"Unable to open task directory: {directory} ({explorer_error})"
+        ) from explorer_error
     return directory

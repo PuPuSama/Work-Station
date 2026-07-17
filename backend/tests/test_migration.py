@@ -25,6 +25,8 @@ from models import (  # noqa: E402
     SourceLink,
     TaskRecord,
 )
+from services.task_identity import article_source_key  # noqa: E402
+from services.topics import make_task_id  # noqa: E402
 from storage import (  # noqa: E402
     RevisionConflictError,
     TaskStore,
@@ -105,6 +107,17 @@ class MigrationUnitTests(unittest.TestCase):
         self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(migrated["future_only"], "value")
 
+    def test_schema_v2_is_upgraded_with_writing_context_defaults(self) -> None:
+        migrated, changed = migrate_task_payload(v1_task(schema_version=2))
+
+        self.assertTrue(changed)
+        self.assertEqual(migrated["schema_version"], SCHEMA_VERSION)
+        self.assertEqual(migrated["project_introduction"], "")
+        self.assertEqual(migrated["project_notes"], "")
+        self.assertEqual(migrated["topic_notes"], "")
+        self.assertFalse(migrated["use_outline_custom_prompt"])
+        self.assertTrue(migrated["include_project_introduction"])
+
     def test_nested_models_are_validated_on_assignment(self) -> None:
         task = TaskRecord.model_validate(v1_task())
         task.source_links = [{"anchor": "site", "url": "https://example.com"}]
@@ -143,11 +156,17 @@ class TaskStoreMigrationTests(unittest.TestCase):
             store.migration_backup_path.read_text(encoding="utf-8"), original_json
         )
 
-        persisted = json.loads(self.data_path.read_text(encoding="utf-8"))
+        self.assertFalse(self.data_path.exists())
+        self.assertTrue(store.database_path.exists())
+        self.assertTrue(store.monolith_backup_path.exists())
+        persisted = store.repository.load_all()
         self.assertEqual(persisted[0]["schema_version"], SCHEMA_VERSION)
         self.assertEqual(persisted[0]["initial_article"], "Initial article")
         self.assertEqual(
             persisted[0]["unknown_extension"], {"nested": [1, 2, 3]}
+        )
+        self.assertEqual(
+            store.monolith_backup_path.read_text(encoding="utf-8"), original_json
         )
 
     def test_put_preserves_extensions_and_rejects_stale_revision(self) -> None:
@@ -171,6 +190,50 @@ class TaskStoreMigrationTests(unittest.TestCase):
         current = store.get("task-1")
         self.assertEqual(current.topic, "Updated once")
         self.assertEqual(current.model_dump()["extra_owner"], "future-client")
+
+    def test_legacy_import_is_idempotent_and_uses_sqlite_after_archiving(self) -> None:
+        original_json = json.dumps(
+            [v1_task(id="task-1", topic="Imported once")],
+            ensure_ascii=False,
+        )
+        self.data_path.write_text(original_json, encoding="utf-8")
+
+        first_store = TaskStore(self.config)
+        first = first_store.load()
+        self.assertEqual([task.topic for task in first], ["Imported once"])
+        self.assertFalse(self.data_path.exists())
+
+        # A second instance reads the row store, not the archived monolith.
+        second_store = TaskStore(self.config)
+        second = second_store.load()
+        self.assertEqual([task.id for task in second], ["task-1"])
+        self.assertEqual(
+            second_store.monolith_backup_path.read_text(encoding="utf-8"),
+            original_json,
+        )
+
+    def test_single_task_put_does_not_replace_unrelated_rows(self) -> None:
+        store = TaskStore(self.config)
+        store.save(
+            [
+                TaskRecord.model_validate(v1_task(id="task-a", topic="A")),
+                TaskRecord.model_validate(v1_task(id="task-b", topic="B")),
+            ]
+        )
+        original_replace_all = store.repository.replace_all
+
+        first = store.get("task-a")
+        first.topic = "A changed"
+        with unittest.mock.patch.object(
+            store.repository,
+            "replace_all",
+            wraps=original_replace_all,
+        ) as replace_all:
+            store.put(first)
+
+        replace_all.assert_not_called()
+        self.assertEqual(store.get("task-a").topic, "A changed")
+        self.assertEqual(store.get("task-b").topic, "B")
 
     def test_concurrent_updates_to_different_tasks_do_not_lose_data(self) -> None:
         store = TaskStore(self.config)
@@ -230,21 +293,132 @@ class TaskStoreMigrationTests(unittest.TestCase):
         self.assertEqual(merged.selected_title, "Keep this title")
         self.assertTrue(merged.model_dump()["extension_flag"])
 
+    def test_weekly_duplicates_collapse_into_canonical_tasks_and_copy_files(self) -> None:
+        old_root = Path(self.temp_dir.name) / "7.6-7.10-owner"
+        old_task_one = old_root / "example.com" / "topic_001"
+        old_task_two = old_root / "example.com" / "topic_002"
+        old_task_one.mkdir(parents=True)
+        old_task_two.mkdir(parents=True)
+        (old_task_one / "export.docx").write_bytes(b"legacy export")
+        (old_task_one / "source_row.json").write_text(
+            "old source", encoding="utf-8"
+        )
+
+        records = [
+            v1_task(
+                id="old-one-new",
+                week_folder="7.6-7.10-owner",
+                topic_index=1,
+                topic="Repeated topic",
+                status=STATUS_NEW,
+                task_dir=str(old_task_one),
+                updated_at="2026-07-10T10:00:00",
+            ),
+            v1_task(
+                id="old-one-complete",
+                week_folder="7.13-7.17-owner",
+                topic_index=1,
+                topic="Repeated topic",
+                status=STATUS_DOCX_EXPORTED,
+                article="Finished article",
+                docx_path=str(old_task_one / "export.docx"),
+                task_dir=str(old_task_one),
+                updated_at="2026-07-17T10:00:00",
+            ),
+            v1_task(
+                id="old-two",
+                week_folder="7.13-7.17-owner",
+                topic_index=2,
+                topic="Repeated topic",
+                status=STATUS_DRAFT_READY,
+                article="Different row draft",
+                task_dir=str(old_task_two),
+                updated_at="2026-07-17T11:00:00",
+            ),
+        ]
+        self.data_path.write_text(json.dumps(records), encoding="utf-8")
+
+        canonical_root = Path(self.temp_dir.name) / "example.com"
+        canonical_one = canonical_root / "topic_001"
+        canonical_two = canonical_root / "topic_002"
+        canonical_one.mkdir(parents=True)
+        (canonical_one / "source_row.json").write_text(
+            "current source", encoding="utf-8"
+        )
+        incoming = [
+            TaskRecord.model_validate(
+                v1_task(
+                    id=make_task_id("example.com", 1, "Repeated topic"),
+                    week_folder="全部项目",
+                    topic_index=1,
+                    topic="Repeated topic",
+                    task_dir=str(canonical_one),
+                )
+            ),
+            TaskRecord.model_validate(
+                v1_task(
+                    id=make_task_id("example.com", 2, "Repeated topic"),
+                    week_folder="全部项目",
+                    topic_index=2,
+                    topic="Repeated topic",
+                    task_dir=str(canonical_two),
+                )
+            ),
+        ]
+
+        store = TaskStore(self.config)
+        synced = store.upsert_many(incoming)
+
+        self.assertEqual(len(synced), 2)
+        self.assertEqual(len(store.load()), 2)
+        self.assertTrue(store.weekly_backup_path.is_file())
+        by_index = {task.topic_index: task for task in synced}
+        self.assertEqual(by_index[1].status, STATUS_DOCX_EXPORTED)
+        self.assertEqual(by_index[1].article, "Finished article")
+        self.assertEqual(by_index[1].synced_from_task_id, "old-one-complete")
+        self.assertEqual(by_index[1].docx_path, str(canonical_one / "export.docx"))
+        self.assertEqual(by_index[2].status, STATUS_DRAFT_READY)
+        self.assertEqual(by_index[2].article, "Different row draft")
+        self.assertNotEqual(by_index[1].source_key, by_index[2].source_key)
+        self.assertEqual(
+            (canonical_one / "export.docx").read_bytes(), b"legacy export"
+        )
+        self.assertEqual(
+            (canonical_one / "source_row.json").read_text(encoding="utf-8"),
+            "current source",
+        )
+
+    def test_source_identity_keeps_duplicate_topic_rows_distinct(self) -> None:
+        first = article_source_key("www.example.com", "Same topic", 1)
+        second = article_source_key("example.com", "Same topic", 2)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            make_task_id("example.com", 1, "Same topic"), first[:12]
+        )
+
 
 class RealTaskDataTests(unittest.TestCase):
     def test_current_records_validate_without_losing_existing_keys(self) -> None:
         data_path = PROJECT_DIR / "data" / "tasks.json"
-        if not data_path.exists():
+        backup_path = PROJECT_DIR / "data" / "tasks.monolith.backup.json"
+        sqlite_path = data_path.with_suffix(".sqlite3")
+        source_path = data_path if data_path.exists() else backup_path
+        if not source_path.exists() or (not data_path.exists() and not sqlite_path.exists()):
             self.skipTest("Ignored local task data is not present in this checkout.")
 
-        raw = json.loads(data_path.read_text(encoding="utf-8"))
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
+        current = {
+            task.id: task.model_dump(mode="json")
+            for task in TaskStore(SimpleNamespace(data_file=data_path)).load()
+        }
         # The local task store grows whenever another weekly topic library is
         # scanned. Keep the original baseline while allowing later weeks.
         self.assertGreaterEqual(len(raw), 774)
+        self.assertGreaterEqual(len(current), 774)
 
         for original in raw:
-            migrated, _ = migrate_task_payload(original)
-            dumped = TaskRecord.model_validate(migrated).model_dump(mode="json")
+            dumped = current[original["id"]]
             for key in original:
                 self.assertIn(key, dumped)
             self.assertIn("hero_image", dumped)

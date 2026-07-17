@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -13,9 +14,12 @@ from models import (
     SCHEMA_VERSION,
     STATUS_DOCX_EXPORTED,
     STATUS_DRAFT_READY,
+    WORKFLOW_STATUSES,
     AICheck,
     TaskRecord,
 )
+from services.task_identity import article_source_key, normalized_customer
+from services.task_repository import SQLiteTaskRepository
 
 
 _TASK_STORE_LOCK = RLock()
@@ -32,6 +36,21 @@ def content_hash(content: str) -> str:
 V2_DEFAULTS: dict[str, Any] = {
     "revision": 0,
     "workflow_error": None,
+    "brand_name": "",
+    "project_introduction": "",
+    "project_notes": "",
+    "topic_notes": "",
+    "outline_custom_prompt": "",
+    "outline_draft": "",
+    "article_custom_prompt": "",
+    "use_outline_custom_prompt": False,
+    "use_article_custom_prompt": False,
+    "include_project_introduction": True,
+    "include_project_notes": True,
+    "include_topic_notes": True,
+    "source_key": "",
+    "synced_from_task_id": "",
+    "synced_from_week": "",
     "hero_image": "",
     "raw_draft_article": "",
     "initial_article": "",
@@ -80,7 +99,11 @@ class RevisionConflictError(RuntimeError):
 
 
 def migrate_v1_to_v2(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a schema-v2 copy without dropping fields unknown to this app."""
+    """Return a current-schema copy without dropping unknown fields.
+
+    The historical function name is retained for import compatibility. Its
+    defaults now cover every supported legacy schema up to ``SCHEMA_VERSION``.
+    """
 
     migrated = copy.deepcopy(dict(payload))
     for key, default in V2_DEFAULTS.items():
@@ -128,40 +151,67 @@ def migrate_task_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any], bo
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid task schema_version: {version!r}") from exc
 
-    if version_number <= 1:
+    if version_number < SCHEMA_VERSION:
         return migrate_v1_to_v2(payload), True
     return copy.deepcopy(dict(payload)), False
 
 
 class TaskStore:
-    """JSON task storage with atomic writes, migration, and revision checks."""
+    """Task workflow storage with migration and optimistic revision checks."""
 
     SOURCE_REFRESH_FIELDS = {
         "week_folder",
         "customer",
+        "source_key",
         "topic_index",
         "topic",
         "competitor_keyword",
         "competitor_blog",
         "task_dir",
+    }
+    HISTORY_SYNC_IDENTITY_FIELDS = {
+        "id",
+        "week_folder",
+        "customer",
+        "brand_name",
+        "project_introduction",
+        "project_notes",
+        "source_key",
+        "topic_index",
+        "topic",
+        "competitor_keyword",
+        "competitor_blog",
+        "task_dir",
+        "created_at",
         "updated_at",
+        "revision",
+        "schema_version",
     }
 
     def __init__(self, config: AppConfig):
         self.path = config.data_file
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.repository = SQLiteTaskRepository(self.path)
+        self.database_path = self.repository.database_path
         self.migration_backup_path = self.path.with_name(
             f"{self.path.stem}.v1.backup{self.path.suffix}"
+        )
+        self.monolith_backup_path = self.path.with_name(
+            f"{self.path.stem}.monolith.backup{self.path.suffix}"
+        )
+        self.weekly_backup_path = self.path.with_name(
+            f"{self.path.stem}.weekly.backup{self.path.suffix}"
         )
 
     def _write_records(self, tasks: Iterable[TaskRecord]) -> None:
         records = [task.model_dump(mode="json") for task in tasks]
-        tmp = self.path.with_name(f"{self.path.name}.tmp")
-        tmp.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
+        self.repository.replace_all(records)
+
+    def _archive_monolith(self, original: str) -> None:
+        if not self.monolith_backup_path.exists():
+            self.monolith_backup_path.write_text(original, encoding="utf-8")
+        if self.path.exists():
+            self.path.unlink()
 
     def _backup_v1(self, original: str) -> None:
         if not self.migration_backup_path.exists():
@@ -169,13 +219,18 @@ class TaskStore:
 
     def load(self) -> list[TaskRecord]:
         with _TASK_STORE_LOCK:
-            if not self.path.exists():
+            original = ""
+            imported_monolith = False
+            if self.repository.is_initialized():
+                raw = self.repository.load_all()
+            elif self.path.exists():
+                original = self.path.read_text(encoding="utf-8")
+                raw = json.loads(original)
+                if not isinstance(raw, list):
+                    raise ValueError("Task data file must contain a JSON array.")
+                imported_monolith = True
+            else:
                 return []
-
-            original = self.path.read_text(encoding="utf-8")
-            raw = json.loads(original)
-            if not isinstance(raw, list):
-                raise ValueError("Task data file must contain a JSON array.")
 
             migrated_any = False
             tasks: list[TaskRecord] = []
@@ -184,20 +239,35 @@ class TaskStore:
                 tasks.append(TaskRecord.model_validate(migrated))
                 migrated_any = migrated_any or changed
 
-            if migrated_any:
+            if migrated_any and original:
                 self._backup_v1(original)
+            if migrated_any or imported_monolith:
                 self._write_records(tasks)
+            if imported_monolith:
+                # Archive only after the SQLite transaction has committed.
+                self._archive_monolith(original)
             return tasks
 
     def save(self, tasks: Iterable[TaskRecord]) -> None:
         with _TASK_STORE_LOCK:
+            original = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
             self._write_records(tasks)
+            if original:
+                self._archive_monolith(original)
 
     def get(self, task_id: str) -> TaskRecord:
-        for task in self.load():
-            if task.id == task_id:
-                return task
-        raise KeyError(task_id)
+        with _TASK_STORE_LOCK:
+            # Trigger one-time legacy import before using the direct row lookup.
+            if not self.repository.is_initialized():
+                self.load()
+            payload = self.repository.get(task_id)
+            if payload is None:
+                raise KeyError(task_id)
+            migrated, changed = migrate_task_payload(payload)
+            task = TaskRecord.model_validate(migrated)
+            if changed:
+                self.repository.upsert(task.model_dump(mode="json"))
+            return task
 
     def put(
         self,
@@ -206,12 +276,12 @@ class TaskStore:
         expected_revision: int | None = None,
     ) -> TaskRecord:
         with _TASK_STORE_LOCK:
-            tasks = self.load()
-            replaced = False
-            for index, existing in enumerate(tasks):
-                if existing.id != task.id:
-                    continue
+            try:
+                existing = self.get(task.id)
+            except KeyError:
+                existing = None
 
+            if existing is not None:
                 expected = task.revision if expected_revision is None else expected_revision
                 if expected != existing.revision:
                     raise RevisionConflictError(task.id, expected, existing.revision)
@@ -227,25 +297,220 @@ class TaskStore:
                 task.revision = existing.revision + 1
                 task.schema_version = max(SCHEMA_VERSION, task.schema_version)
                 task.updated_at = now_iso()
-                tasks[index] = task
-                replaced = True
-                break
-
-            if not replaced:
+            else:
                 if expected_revision not in (None, 0):
                     raise RevisionConflictError(task.id, expected_revision, 0)
                 task.schema_version = max(SCHEMA_VERSION, task.schema_version)
                 task.revision = max(0, task.revision)
                 task.updated_at = now_iso()
-                tasks.append(task)
-
-            self.save(tasks)
+            self.repository.upsert(task.model_dump(mode="json"))
             return task
+
+    def update_customer_brand(self, customer: str, brand_name: str) -> int:
+        normalized = normalized_customer(customer)
+        cleaned_brand = " ".join(str(brand_name or "").split())
+        with _TASK_STORE_LOCK:
+            tasks = self.load()
+            matched = [
+                task for task in tasks if normalized_customer(task.customer) == normalized
+            ]
+            if not matched:
+                raise KeyError(customer)
+
+            updated_at = now_iso()
+            for task in matched:
+                task.brand_name = cleaned_brand
+                task.source_key = article_source_key(
+                    task.customer,
+                    task.topic,
+                    task.topic_index,
+                )
+                task.revision += 1
+                task.updated_at = updated_at
+            self.repository.upsert_many(
+                task.model_dump(mode="json") for task in matched
+            )
+            return len(matched)
+
+    def update_customer_context(
+        self,
+        customer: str,
+        project_introduction: str,
+        project_notes: str,
+    ) -> int:
+        normalized = normalized_customer(customer)
+        cleaned_introduction = str(project_introduction or "").replace("\r\n", "\n").strip()
+        cleaned_notes = str(project_notes or "").replace("\r\n", "\n").strip()
+        with _TASK_STORE_LOCK:
+            tasks = self.load()
+            matched = [
+                task for task in tasks if normalized_customer(task.customer) == normalized
+            ]
+            if not matched:
+                raise KeyError(customer)
+
+            updated_at = now_iso()
+            for task in matched:
+                task.project_introduction = cleaned_introduction
+                task.project_notes = cleaned_notes
+                task.revision += 1
+                task.updated_at = updated_at
+            self.repository.upsert_many(
+                task.model_dump(mode="json") for task in matched
+            )
+            return len(matched)
+
+    def _inherit_history(
+        self,
+        current: TaskRecord,
+        historical: TaskRecord,
+    ) -> TaskRecord:
+        self._copy_missing_history_files(historical, current)
+        inherited = self._remap_history_paths(
+            historical.model_dump(mode="json"),
+            Path(historical.task_dir),
+            Path(current.task_dir),
+        )
+        current_payload = current.model_dump(mode="json")
+        for field in self.HISTORY_SYNC_IDENTITY_FIELDS:
+            inherited[field] = copy.deepcopy(current_payload[field])
+
+        inherited["brand_name"] = current.brand_name or historical.brand_name
+        inherited["project_introduction"] = (
+            current.project_introduction or historical.project_introduction
+        )
+        inherited["project_notes"] = current.project_notes or historical.project_notes
+        inherited["synced_from_task_id"] = historical.id
+        inherited["synced_from_week"] = historical.week_folder
+        for key, value in (current.model_extra or {}).items():
+            inherited[key] = copy.deepcopy(value)
+        return TaskRecord.model_validate(inherited)
+
+    @classmethod
+    def _remap_history_paths(
+        cls,
+        value: Any,
+        source: Path,
+        destination: Path,
+    ) -> Any:
+        """Point copied nested artifact paths at the canonical task folder."""
+
+        if isinstance(value, dict):
+            return {
+                key: cls._remap_history_paths(item, source, destination)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                cls._remap_history_paths(item, source, destination)
+                for item in value
+            ]
+        if not isinstance(value, str) or not value:
+            return value
+
+        normalized_value = value.replace("\\", "/")
+        normalized_source = str(source).replace("\\", "/").rstrip("/")
+        if normalized_value.casefold() == normalized_source.casefold():
+            return str(destination)
+        prefix = f"{normalized_source}/"
+        if normalized_value.casefold().startswith(prefix.casefold()):
+            relative = normalized_value[len(prefix) :]
+            return str(destination.joinpath(*relative.split("/")))
+        return value
+
+    @staticmethod
+    def _copy_missing_history_files(
+        historical: TaskRecord,
+        current: TaskRecord,
+    ) -> None:
+        """Copy legacy artifacts into the canonical directory without overwrites."""
+
+        source = Path(historical.task_dir)
+        destination = Path(current.task_dir)
+        if not source.is_dir():
+            return
+        try:
+            if source.resolve() == destination.resolve():
+                return
+        except OSError:
+            return
+
+        destination.mkdir(parents=True, exist_ok=True)
+        for source_path in source.rglob("*"):
+            relative = source_path.relative_to(source)
+            # The scanner has just written current workbook metadata.  Never
+            # replace it with last week's source row.
+            if relative == Path("source_row.json"):
+                continue
+            destination_path = destination / relative
+            if source_path.is_dir():
+                destination_path.mkdir(parents=True, exist_ok=True)
+            elif source_path.is_file() and not destination_path.exists():
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, destination_path)
 
     def upsert_many(self, incoming: Iterable[TaskRecord]) -> list[TaskRecord]:
         with _TASK_STORE_LOCK:
-            existing = {task.id: task for task in self.load()}
+            incoming = list(incoming)
+            if not incoming:
+                return self.load()
+
+            loaded = self.load()
+            for task in loaded:
+                task.source_key = article_source_key(
+                    task.customer,
+                    task.topic,
+                    task.topic_index,
+                )
+
+            scope = incoming[0].week_folder
+            if any(task.week_folder != scope for task in loaded):
+                if not self.weekly_backup_path.exists():
+                    self.weekly_backup_path.write_text(
+                        json.dumps(
+                            [task.model_dump(mode="json") for task in loaded],
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+
+            existing = {
+                task.id: task for task in loaded if task.week_folder == scope
+            }
+            brand_by_customer: dict[str, str] = {}
+            context_by_customer: dict[str, tuple[str, str]] = {}
+            for task in sorted(loaded, key=lambda item: item.updated_at):
+                if task.brand_name:
+                    brand_by_customer[normalized_customer(task.customer)] = task.brand_name
+                if task.project_introduction or task.project_notes:
+                    context_by_customer[normalized_customer(task.customer)] = (
+                        task.project_introduction,
+                        task.project_notes,
+                    )
+
+            history_by_source: dict[str, list[TaskRecord]] = {}
+            status_rank = {
+                status: index for index, status in enumerate(WORKFLOW_STATUSES)
+            }
+            for task in loaded:
+                history_by_source.setdefault(task.source_key, []).append(task)
+            for historical in history_by_source.values():
+                historical.sort(
+                    key=lambda item: (
+                        status_rank.get(item.status, -1),
+                        item.updated_at,
+                        item.created_at,
+                    ),
+                    reverse=True,
+                )
+
             for task in incoming:
+                task.source_key = article_source_key(
+                    task.customer,
+                    task.topic,
+                    task.topic_index,
+                )
                 if task.id in existing:
                     previous = existing[task.id]
                     merged = previous.model_dump(mode="json")
@@ -256,13 +521,51 @@ class TaskStore:
                     merged["schema_version"] = max(
                         SCHEMA_VERSION, int(merged.get("schema_version", SCHEMA_VERSION))
                     )
-                    existing[task.id] = TaskRecord.model_validate(merged)
+                    candidate = TaskRecord.model_validate(merged)
                 else:
                     task.schema_version = SCHEMA_VERSION
-                    existing[task.id] = task
-            tasks = list(existing.values())
+                    candidate = task
+
+                customer_key = normalized_customer(candidate.customer)
+                if not candidate.brand_name and customer_key in brand_by_customer:
+                    candidate.brand_name = brand_by_customer[customer_key]
+                if customer_key in context_by_customer:
+                    introduction, notes = context_by_customer[customer_key]
+                    if not candidate.project_introduction:
+                        candidate.project_introduction = introduction
+                    if not candidate.project_notes:
+                        candidate.project_notes = notes
+
+                # A canonical task is created only once.  On that first sync,
+                # inherit the furthest legacy workflow for the same customer
+                # and topic so completed articles do not restart as new merely
+                # because they were produced in a dated folder.
+                if task.id not in existing:
+                    historical = next(
+                        (
+                            item
+                            for item in history_by_source.get(candidate.source_key, [])
+                            if item.id != candidate.id
+                        ),
+                        None,
+                    )
+                    if historical is not None:
+                        candidate = self._inherit_history(candidate, historical)
+
+                existing[task.id] = candidate
+            # The topic library is the current source of truth.  Save exactly
+            # one canonical record for every scanned source row; dated copies
+            # have already served as migration input and remain available in
+            # the one-time backup above.
+            incoming_ids = list(dict.fromkeys(task.id for task in incoming))
+            tasks = [existing[task_id] for task_id in incoming_ids]
             self.save(tasks)
             return tasks
+
+    def canonical_tasks(self, scope: str) -> list[TaskRecord]:
+        """Return persistent project tasks while hiding retained weekly rows."""
+
+        return [task for task in self.load() if task.week_folder == scope]
 
 
 def write_text_artifact(task: TaskRecord, filename: str, content: str) -> Path:

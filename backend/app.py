@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from threading import Lock
+from typing import Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+from PIL import Image, UnidentifiedImageError
 
 from config import ROOT_DIR, load_config, public_config
 from models import (
@@ -18,12 +21,22 @@ from models import (
     ArticleImage,
     ArticleUpdateRequest,
     ArticleVersion,
+    AutoProductsRequest,
+    BatchCreateRequest,
+    BatchCreateResponse,
+    BatchJobRecord,
+    BatchPreflightIssue,
+    BatchRecord,
     DashboardSummary,
     GenerateArticleRequest,
+    GenerateOutlineRequest,
     ImagesUpdateRequest,
     LinkValidation,
     OutlineUpdateRequest,
     ProductsUpdateRequest,
+    ProjectBrandUpdateRequest,
+    ProjectContextUpdateRequest,
+    RevisionedRequest,
     SelectTitleRequest,
     SourceLink,
     STATUS_DOCX_EXPORTED,
@@ -38,7 +51,9 @@ from models import (
     STATUS_TITLE_SELECTED,
     STATUS_TITLES_READY,
     TaskRecord,
+    VersionRestoreRequest,
     WorkflowError,
+    WritingSettingsUpdateRequest,
     ZeroGptReportRequest,
 )
 from services.article_images import (
@@ -73,8 +88,16 @@ from services.generator import (
     humanize_article,
     restore_article_links,
     site_homepage,
+    validate_minimum_h3_per_h2,
 )
 from services.llm import LLMClient
+from services.job_queue import (
+    ActiveJobError,
+    BatchJobRunner,
+    JobCancelled,
+    JobConflict,
+    JobQueue,
+)
 from services.product_asset_pipeline import enrich_product_assets
 from services.product_crawler import recommend_products
 from services.tavily import TavilyClient
@@ -101,6 +124,7 @@ from workflow.state_machine import (
     ACTION_PREPARE_IMAGES,
     ACTION_PACKAGE_DELIVERY,
     ACTION_RESTORE_LINKS,
+    ACTION_REWRITE_FROM_SCRATCH,
     ACTION_SELECT_TITLE,
     ACTION_UPDATE_ARTICLE,
     ACTION_UPDATE_IMAGES,
@@ -112,6 +136,7 @@ from workflow.state_machine import (
     allowed_actions,
     ensure_action_allowed,
     invalidate_downstream,
+    reset_for_full_rewrite,
     transition_task,
 )
 
@@ -120,7 +145,52 @@ load_dotenv(ROOT_DIR / ".env")
 load_dotenv(ROOT_DIR / "backend" / ".env")
 
 
-app = FastAPI(title="Article Workflow Agent", version="0.2.0")
+@asynccontextmanager
+async def app_lifespan(application: FastAPI):
+    cfg = config()
+    queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
+    writing_runner = BatchJobRunner(
+        queue,
+        _execute_batch_job,
+        concurrency=3,
+        operations=(
+            "titles",
+            "outline",
+            "article",
+            "rewrite_article",
+            "humanize",
+            "restore_links",
+            "generate_tdk",
+        ),
+    )
+    product_runner = BatchJobRunner(
+        queue,
+        _execute_batch_job,
+        concurrency=2,
+        operations=(
+            "products",
+            "prepare_images",
+            "export_docx",
+            "package_delivery",
+        ),
+    )
+    application.state.job_queue = queue
+    application.state.batch_runner = writing_runner
+    application.state.batch_runners = (writing_runner, product_runner)
+    writing_runner.start()
+    product_runner.start()
+    try:
+        yield
+    finally:
+        product_runner.stop()
+        writing_runner.stop()
+
+
+app = FastAPI(
+    title="Article Workflow Agent",
+    version="0.3.0",
+    lifespan=app_lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -140,6 +210,24 @@ def config():
 
 def store() -> TaskStore:
     return TaskStore(config())
+
+
+def batch_queue() -> JobQueue:
+    queue = getattr(app.state, "job_queue", None)
+    expected_path = config().data_file.with_name("job_queue.sqlite3")
+    if queue is None or queue.path != expected_path:
+        queue = JobQueue(expected_path)
+        app.state.job_queue = queue
+    return queue
+
+
+def wake_batch_runner() -> None:
+    runners = getattr(app.state, "batch_runners", None)
+    if runners is None:
+        runner = getattr(app.state, "batch_runner", None)
+        runners = (runner,) if runner is not None else ()
+    for runner in runners:
+        runner.wake()
 
 
 def expose_task(task: TaskRecord) -> TaskRecord:
@@ -273,21 +361,23 @@ def initial_readiness_issues(task: TaskRecord) -> list[str]:
         validate_article_layout(article)
     except ArticleStructureError as exc:
         issues.append(str(exc))
-    known_urls = {site_homepage(task.customer).rstrip("/")}
-    known_urls.update(
-        str(product.canonical_url or product.url).rstrip("/")
-        for product in task.products
-        if (not product.asset_status or product.detail_page_verified)
-        and (product.canonical_url or product.url)
-    )
-    article_urls = {
-        str(link.get("url") or "").rstrip("/")
+    homepage = site_homepage(task.customer).rstrip("/")
+    homepage_links = [
+        link
         for link in extract_link_inventory(article)
-    }
-    known_urls.discard("")
-    if known_urls and not (known_urls & article_urls):
+        if str(link.get("url") or "").rstrip("/") == homepage
+    ]
+    if homepage and not homepage_links:
         issues.append(
-            "第一版未包含客户官网或已确认产品的 Markdown 超链接，后续无法按第一版恢复链接。"
+            "第一版未包含客户官网的 Markdown 超链接，后续无法按第一版恢复链接。"
+        )
+    brand_name = " ".join(task.brand_name.split())
+    if homepage_links and brand_name and not any(
+        str(link.get("anchor") or "").strip() == brand_name
+        for link in homepage_links
+    ):
+        issues.append(
+            f"客户官网超链接必须附在准确品牌名“{brand_name}”上，请重新保存第一版。"
         )
     return issues
 
@@ -335,36 +425,36 @@ def read_config() -> dict:
 @app.get("/api/dashboard", response_model=DashboardSummary)
 def dashboard() -> DashboardSummary:
     cfg = config()
-    tasks = store().load()
-    current_week_tasks = [task for task in tasks if task.week_folder == cfg.current_week_folder]
-    status_counts = dict(Counter(task.status for task in current_week_tasks))
+    tasks = store().canonical_tasks(cfg.current_week_folder)
+    status_counts = dict(Counter(task.status for task in tasks))
     return DashboardSummary(
         week_folder=cfg.current_week_folder,
         week_path=str(cfg.current_week_path),
-        customer_count=len({task.customer for task in current_week_tasks}),
-        task_count=len(current_week_tasks),
-        completed_count=sum(1 for task in current_week_tasks if task.status == STATUS_DOCX_EXPORTED),
+        customer_count=len({task.customer for task in tasks}),
+        task_count=len(tasks),
+        completed_count=sum(1 for task in tasks if task.status == STATUS_DOCX_EXPORTED),
         status_counts=status_counts,
         llm_ready=LLMClient(cfg).ready,
     )
 
 
-@app.post("/api/init-week", response_model=ApiMessage)
-def init_week() -> ApiMessage:
+@app.post("/api/sync-tasks", response_model=ApiMessage)
+@app.post("/api/init-week", response_model=ApiMessage, deprecated=True)
+def sync_tasks() -> ApiMessage:
     cfg = config()
     scanned = scan_topic_library(cfg)
-    tasks = store().upsert_many(scanned)
-    current_week_count = sum(1 for task in tasks if task.week_folder == cfg.current_week_folder)
+    store().upsert_many(scanned)
+    task_count = len(store().canonical_tasks(cfg.current_week_folder))
     return ApiMessage(
-        message=f"Initialized {current_week_count} tasks for {cfg.current_week_folder}.",
-        data={"week_folder": cfg.current_week_folder, "task_count": current_week_count},
+        message=f"已同步 {task_count} 个长期任务。",
+        data={"week_folder": cfg.current_week_folder, "task_count": task_count},
     )
 
 
 @app.get("/api/tasks", response_model=list[TaskRecord])
 def list_tasks(customer: str | None = None, status: str | None = None) -> list[TaskRecord]:
     cfg = config()
-    tasks = [task for task in store().load() if task.week_folder == cfg.current_week_folder]
+    tasks = store().canonical_tasks(cfg.current_week_folder)
     if customer:
         tasks = [task for task in tasks if task.customer == customer]
     if status:
@@ -390,19 +480,145 @@ def open_task_folder(task_id: str) -> ApiMessage:
     )
 
 
-@app.post("/api/tasks/{task_id}/titles", response_model=TaskRecord)
-def create_titles(task_id: str) -> TaskRecord:
+def append_version(task: TaskRecord, kind: str, content: str, source_kind: str = "") -> None:
+    """Append a changed snapshot without duplicating the latest entry."""
+
+    record = version_record(kind, content, source_kind)
+    if task.article_versions:
+        latest = task.article_versions[-1]
+        if (
+            latest.kind == record.kind
+            and latest.content_hash == record.content_hash
+            and latest.source_kind == record.source_kind
+        ):
+            return
+    task.article_versions.append(record)
+
+
+@app.put("/api/projects/{customer}/brand", response_model=ApiMessage)
+def update_project_brand(
+    customer: str,
+    request: ProjectBrandUpdateRequest,
+) -> ApiMessage:
+    brand_name = " ".join(request.brand_name.split())
+    if any(character in brand_name for character in "[]"):
+        raise HTTPException(
+            status_code=422,
+            detail="Brand name cannot contain Markdown square brackets.",
+        )
+    try:
+        updated_tasks = store().update_customer_brand(customer, brand_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}") from None
+    return ApiMessage(
+        message=(
+            f"已保存品牌名：{brand_name}。" if brand_name else "已清空品牌名，将使用官网域名作为默认名称。"
+        ),
+        data={
+            "customer": customer,
+            "brand_name": brand_name,
+            "updated_tasks": updated_tasks,
+        },
+    )
+
+
+@app.put("/api/projects/{customer}/context", response_model=ApiMessage)
+def update_project_context(
+    customer: str,
+    request: ProjectContextUpdateRequest,
+) -> ApiMessage:
+    try:
+        updated_tasks = store().update_customer_context(
+            customer,
+            request.project_introduction,
+            request.project_notes,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}") from None
+    return ApiMessage(
+        message="项目介绍和项目注意事项已保存。",
+        data={
+            "customer": customer,
+            "project_introduction": request.project_introduction.strip(),
+            "project_notes": request.project_notes.strip(),
+            "updated_tasks": updated_tasks,
+        },
+    )
+
+
+@app.put("/api/tasks/{task_id}/writing-settings", response_model=TaskRecord)
+def update_writing_settings(
+    task_id: str,
+    request: WritingSettingsUpdateRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    task.topic_notes = request.topic_notes.strip()
+    task.outline_custom_prompt = request.outline_custom_prompt.strip()
+    task.article_custom_prompt = request.article_custom_prompt.strip()
+    task.use_outline_custom_prompt = request.use_outline_custom_prompt
+    task.use_article_custom_prompt = request.use_article_custom_prompt
+    task.include_project_introduction = request.include_project_introduction
+    task.include_project_notes = request.include_project_notes
+    task.include_topic_notes = request.include_topic_notes
+    write_json_artifact(
+        task,
+        "writing_settings.json",
+        {
+            "topic_notes": task.topic_notes,
+            "outline_custom_prompt": task.outline_custom_prompt,
+            "article_custom_prompt": task.article_custom_prompt,
+            "use_outline_custom_prompt": task.use_outline_custom_prompt,
+            "use_article_custom_prompt": task.use_article_custom_prompt,
+            "include_project_introduction": task.include_project_introduction,
+            "include_project_notes": task.include_project_notes,
+            "include_topic_notes": task.include_topic_notes,
+        },
+    )
+    return save_task(task, request.revision)
+
+
+@app.post("/api/tasks/{task_id}/rewrite-from-scratch", response_model=TaskRecord)
+def rewrite_task_from_scratch(
+    task_id: str,
+    request: RevisionedRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    require_action(task, ACTION_REWRITE_FROM_SCRATCH)
+    reset_for_full_rewrite(task)
+    return save_task(task, request.revision)
+
+
+def perform_title_generation(
+    task_id: str,
+    request: RevisionedRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_GENERATE_TITLES)
-    task.title_candidates = generate_titles(config(), task)
+    candidates = generate_titles(config(), task)
+    raise_if_batch_cancelled(cancelled)
+    task.title_candidates = candidates
     invalidate_downstream(task, "titles")
     task.status = STATUS_TITLES_READY
+    saved = save_task(task, request.revision)
     write_text_artifact(
-        task,
+        saved,
         "title_candidates.md",
-        "\n".join(f"{index + 1}. {title}" for index, title in enumerate(task.title_candidates)),
+        "\n".join(
+            f"{index + 1}. {title}"
+            for index, title in enumerate(saved.title_candidates)
+        ),
     )
-    return save_task(task)
+    return saved
+
+
+@app.post("/api/tasks/{task_id}/titles", response_model=TaskRecord)
+def create_titles(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_title_generation(task_id, request or RevisionedRequest())
 
 
 @app.post("/api/tasks/{task_id}/select-title", response_model=TaskRecord)
@@ -445,8 +661,12 @@ def update_products(task_id: str, request: ProductsUpdateRequest) -> TaskRecord:
         return saved
 
 
-@app.post("/api/tasks/{task_id}/products/auto", response_model=TaskRecord)
-def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
+def perform_auto_products(
+    task_id: str,
+    request: AutoProductsRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     with product_processing(task_id):
         task = get_task_or_404(task_id)
         _require_workflow_action(task, ACTION_UPDATE_PRODUCTS)
@@ -455,7 +675,7 @@ def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
             discovered = recommend_products(
                 cfg,
                 task,
-                max(1, min(limit, 3)),
+                request.limit,
                 tavily_client=TavilyClient(timeout=15),
                 download_images=False,
             )
@@ -466,6 +686,7 @@ def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
                 status_code=422,
                 detail="No verified official product detail pages were found; existing products were kept.",
             )
+        raise_if_batch_cancelled(cancelled)
         try:
             task.products = enrich_product_assets(
                 cfg,
@@ -475,8 +696,9 @@ def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Official product asset crawl failed: {exc}") from exc
+        raise_if_batch_cancelled(cancelled)
         invalidate_downstream(task, "products")
-        saved = save_task(task)
+        saved = save_task(task, request.revision)
         write_json_artifact(
             saved,
             "products.json",
@@ -485,8 +707,23 @@ def auto_products(task_id: str, limit: int = 3) -> TaskRecord:
         return saved
 
 
+@app.post("/api/tasks/{task_id}/products/auto", response_model=TaskRecord)
+def auto_products(
+    task_id: str,
+    limit: int = 3,
+    revision: int | None = None,
+) -> TaskRecord:
+    return perform_auto_products(
+        task_id,
+        AutoProductsRequest(limit=max(1, min(limit, 3)), revision=revision),
+    )
+
+
 @app.post("/api/tasks/{task_id}/products/assets", response_model=TaskRecord)
-def refresh_product_assets(task_id: str) -> TaskRecord:
+def refresh_product_assets(
+    task_id: str,
+    revision: int | None = None,
+) -> TaskRecord:
     with product_processing(task_id):
         task = get_task_or_404(task_id)
         _require_workflow_action(task, ACTION_UPDATE_PRODUCTS)
@@ -512,7 +749,7 @@ def refresh_product_assets(task_id: str) -> TaskRecord:
             merged[index] = product
         task.products = merged
         invalidate_downstream(task, "products")
-        saved = save_task(task)
+        saved = save_task(task, revision)
         write_json_artifact(
             saved,
             "products.json",
@@ -521,39 +758,189 @@ def refresh_product_assets(task_id: str) -> TaskRecord:
         return saved
 
 
-@app.post("/api/tasks/{task_id}/outline", response_model=TaskRecord)
-def create_outline(task_id: str) -> TaskRecord:
+def apply_generation_options(
+    task: TaskRecord,
+    request: GenerateOutlineRequest | GenerateArticleRequest,
+    *,
+    prompt_field: str,
+    enabled_field: str,
+) -> None:
+    if request.custom_prompt is not None:
+        setattr(task, prompt_field, request.custom_prompt.strip())
+    if request.use_custom_prompt is not None:
+        setattr(task, enabled_field, request.use_custom_prompt)
+    for field in (
+        "include_project_introduction",
+        "include_project_notes",
+        "include_topic_notes",
+    ):
+        value = getattr(request, field)
+        if value is not None:
+            setattr(task, field, value)
+
+
+def raise_if_batch_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise JobCancelled("Batch job was cancelled before its result was saved.")
+
+
+def perform_outline_generation(
+    task_id: str,
+    request: GenerateOutlineRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_GENERATE_OUTLINE)
-    task.outline = generate_outline(config(), task)
-    task.status = STATUS_OUTLINE_READY
-    task.workflow_error = None
-    write_text_artifact(task, "outline.md", task.outline)
-    return save_task(task)
+    apply_generation_options(
+        task,
+        request,
+        prompt_field="outline_custom_prompt",
+        enabled_field="use_outline_custom_prompt",
+    )
+    outline = generate_outline(
+        config(),
+        task,
+        custom_prompt=(
+            task.outline_custom_prompt if task.use_outline_custom_prompt else ""
+        ),
+        include_project_introduction=task.include_project_introduction,
+        include_project_notes=task.include_project_notes,
+        include_topic_notes=task.include_topic_notes,
+    )
+    raise_if_batch_cancelled(cancelled)
+    task.outline = outline
+    task.outline_draft = outline
+    append_version(task, "outline", outline, "generated")
+    invalidate_downstream(task, "outline")
+    saved = save_task(task, request.revision)
+    write_text_artifact(saved, "outline.md", saved.outline)
+    return saved
+
+
+@app.post("/api/tasks/{task_id}/outline", response_model=TaskRecord)
+def create_outline(
+    task_id: str,
+    request: GenerateOutlineRequest | None = None,
+) -> TaskRecord:
+    return perform_outline_generation(task_id, request or GenerateOutlineRequest())
 
 
 @app.put("/api/tasks/{task_id}/outline", response_model=TaskRecord)
 def update_outline(task_id: str, request: OutlineUpdateRequest) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_UPDATE_OUTLINE)
-    task.outline = request.outline.strip()
-    if not task.outline:
+    outline = request.outline.strip()
+    if not outline:
         raise HTTPException(status_code=422, detail="Outline cannot be empty.")
-    invalidate_downstream(task, "outline")
-    advance(task, STATUS_OUTLINE_CONFIRMED)
-    write_text_artifact(task, "outline.md", task.outline)
-    return save_task(task, request.revision)
+    task.outline_draft = outline
+    append_version(
+        task,
+        "outline" if request.confirmed else "outline_draft",
+        outline,
+        "manual_confirmed" if request.confirmed else "manual_draft",
+    )
+    if request.confirmed:
+        task.outline = outline
+        invalidate_downstream(task, "outline")
+        advance(task, STATUS_OUTLINE_CONFIRMED)
+    # Commit the revision before replacing the human-readable artifact.  A
+    # stale client must not overwrite outline.md and then fail to save tasks.json.
+    saved = save_task(task, request.revision)
+    write_text_artifact(saved, "outline-draft.md", saved.outline_draft)
+    if request.confirmed:
+        write_text_artifact(saved, "outline.md", saved.outline)
+    return saved
 
 
-@app.post("/api/tasks/{task_id}/article", response_model=TaskRecord)
-def create_article(task_id: str, request: GenerateArticleRequest) -> TaskRecord:
+@app.post("/api/tasks/{task_id}/versions/restore", response_model=TaskRecord)
+def restore_content_version(task_id: str, request: VersionRestoreRequest) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    if request.version_index >= len(task.article_versions):
+        raise HTTPException(status_code=404, detail="The selected version no longer exists.")
+    version = task.article_versions[request.version_index]
+    content = version.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="The selected version is empty.")
+
+    if version.kind in {"outline", "outline_draft"}:
+        require_action(task, ACTION_UPDATE_OUTLINE)
+        # Restore into the editable buffer so comparison and confirmation stay
+        # separate; downstream work is untouched until explicit confirmation.
+        task.outline_draft = content
+        append_version(task, "outline_draft", content, "restored")
+        saved = save_task(task, request.revision)
+        write_text_artifact(saved, "outline-draft.md", saved.outline_draft)
+        return saved
+
+    if version.kind != "initial":
+        raise HTTPException(
+            status_code=422,
+            detail="Only outline and first-version article snapshots can be restored here.",
+        )
+
+    require_action(task, ACTION_UPDATE_ARTICLE)
+    try:
+        initial = ensure_article_hyperlinks(content, task)
+        validate_article_layout(initial)
+        validate_minimum_h3_per_h2(initial)
+        if not has_intro_transition(initial):
+            raise ArticleStructureError(
+                "Article must include a transition paragraph between its H1 and first H2."
+            )
+    except (ArticleStructureError, ArticleGenerationError, PromptTemplateError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    task.initial_article = initial
+    task.initial_article_word_count = visible_word_count(initial)
+    task.initial_article_hash = content_hash(initial)
+    task.article = initial
+    invalidate_downstream(task, "initial_article")
+    task.source_links = source_links(initial)
+    task.transition_added = True
+    append_version(task, "initial", initial, "restored")
+    saved = save_task(task, request.revision)
+    write_text_artifact(saved, "02_initial_article.md", saved.initial_article)
+    write_json_artifact(
+        saved,
+        "02_initial_links.json",
+        [link.model_dump() for link in saved.source_links],
+    )
+    return saved
+
+
+def perform_article_generation(
+    task_id: str,
+    request: GenerateArticleRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_GENERATE_ARTICLE)
     cfg = config()
     client = LLMClient(cfg)
     original_revision = task.revision
+    is_regeneration = bool(task.initial_article.strip())
 
-    raw_article = generate_raw_article(cfg, task, request.word_count, llm=client)
+    apply_generation_options(
+        task,
+        request,
+        prompt_field="article_custom_prompt",
+        enabled_field="use_article_custom_prompt",
+    )
+
+    raw_article = generate_raw_article(
+        cfg,
+        task,
+        request.word_count,
+        custom_prompt=(
+            task.article_custom_prompt if task.use_article_custom_prompt else ""
+        ),
+        include_project_introduction=task.include_project_introduction,
+        include_project_notes=task.include_project_notes,
+        include_topic_notes=task.include_topic_notes,
+        llm=client,
+    )
+    raise_if_batch_cancelled(cancelled)
     task.raw_draft_article = raw_article
     task.raw_draft_word_count = visible_word_count(raw_article)
     task.raw_draft_hash = content_hash(raw_article)
@@ -562,6 +949,7 @@ def create_article(task_id: str, request: GenerateArticleRequest) -> TaskRecord:
     try:
         transition_was_present = has_intro_transition(raw_article)
         prepared = ensure_transition_before_first_h2(cfg, task, raw_article, llm=client)
+        raise_if_batch_cancelled(cancelled)
         initial = ensure_article_hyperlinks(prepared, task)
         validate_article_layout(initial)
     except (
@@ -577,10 +965,18 @@ def create_article(task_id: str, request: GenerateArticleRequest) -> TaskRecord:
     task.initial_article_word_count = visible_word_count(initial)
     task.initial_article_hash = content_hash(initial)
     task.article = initial
+    invalidate_downstream(task, "initial_article")
     task.transition_added = not transition_was_present
     task.source_links = source_links(initial)
     task.article_versions.extend(
-        [version_record("raw_draft", raw_article), version_record("initial", initial, "raw_draft")]
+        [
+            version_record("raw_draft", raw_article),
+            version_record(
+                "initial",
+                initial,
+                "regenerated_raw_draft" if is_regeneration else "raw_draft",
+            ),
+        ]
     )
     task.compression = {
         "required": False,
@@ -590,22 +986,330 @@ def create_article(task_id: str, request: GenerateArticleRequest) -> TaskRecord:
         "prompt_version": "disabled",
     }
     task.workflow_error = None
-    advance(task, STATUS_DRAFT_READY)
+    raise_if_batch_cancelled(cancelled)
     write_text_artifact(task, "02_initial_article.md", initial)
     write_json_artifact(task, "02_initial_links.json", [link.model_dump() for link in task.source_links])
     return save_task(task, request.revision if request.revision is not None else original_revision)
+
+
+@app.post("/api/tasks/{task_id}/article", response_model=TaskRecord)
+def create_article(task_id: str, request: GenerateArticleRequest) -> TaskRecord:
+    return perform_article_generation(task_id, request)
+
+
+def batch_request_snapshot(
+    task: TaskRecord,
+    operation: str,
+    *,
+    word_count: int | None = None,
+) -> dict:
+    if operation == "titles":
+        return RevisionedRequest(revision=task.revision).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    if operation == "products":
+        return AutoProductsRequest(revision=task.revision, limit=3).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    if operation in {
+        "humanize",
+        "restore_links",
+        "prepare_images",
+        "export_docx",
+        "generate_tdk",
+        "package_delivery",
+    }:
+        return RevisionedRequest(revision=task.revision).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    shared = {
+        "revision": task.revision,
+        "include_project_introduction": task.include_project_introduction,
+        "include_project_notes": task.include_project_notes,
+        "include_topic_notes": task.include_topic_notes,
+    }
+    if operation == "outline":
+        return GenerateOutlineRequest(
+            **shared,
+            custom_prompt=task.outline_custom_prompt,
+            use_custom_prompt=task.use_outline_custom_prompt,
+        ).model_dump(mode="json", exclude_none=True)
+    return GenerateArticleRequest(
+        **shared,
+        word_count=word_count or config().default_word_count,
+        custom_prompt=task.article_custom_prompt,
+        use_custom_prompt=task.use_article_custom_prompt,
+    ).model_dump(mode="json", exclude_none=True)
+
+
+def batch_preflight_issue(task: TaskRecord, operation: str) -> str:
+    if product_processing_active(task.id):
+        return "该任务正在抓取产品或处理图片资产。"
+    actions = allowed_actions(task)
+    if operation == "titles":
+        if ACTION_GENERATE_TITLES not in actions:
+            return f"当前状态“{task.status}”不能生成候选标题。"
+        return ""
+    if operation == "products":
+        if ACTION_UPDATE_PRODUCTS not in actions:
+            return f"当前状态“{task.status}”不能自动查找产品。"
+        return ""
+    if operation == "outline":
+        if ACTION_GENERATE_OUTLINE not in actions:
+            return f"当前状态“{task.status}”不能生成大纲。"
+        return ""
+    action_by_operation = {
+        "humanize": ACTION_HUMANIZE_ARTICLE,
+        "restore_links": ACTION_RESTORE_LINKS,
+        "prepare_images": ACTION_PREPARE_IMAGES,
+        "export_docx": ACTION_EXPORT_DOCX,
+        "generate_tdk": ACTION_GENERATE_TDK,
+        "package_delivery": ACTION_PACKAGE_DELIVERY,
+    }
+    if operation in action_by_operation:
+        if action_by_operation[operation] not in actions:
+            return f"当前状态“{task.status}”不能执行操作“{operation}”。"
+        return ""
+    if ACTION_GENERATE_ARTICLE not in actions:
+        return f"当前状态“{task.status}”不能生成正文。"
+    has_article = bool(task.initial_article.strip() or task.raw_draft_article.strip())
+    if operation == "article" and has_article:
+        return "已经存在第一版，请使用“批量仅重写正文”。"
+    if operation == "rewrite_article" and not has_article:
+        return "还没有第一版，请使用“批量生成正文”。"
+    return ""
+
+
+def _execute_batch_job(
+    job: dict,
+    cancelled: Callable[[], bool],
+) -> int:
+    task_id = str(job["task_id"])
+    try:
+        current = store().get(task_id)
+    except KeyError as exc:
+        raise JobConflict(f"任务 {task_id} 已不存在。") from exc
+    expected_revision = int(job["source_revision"])
+    if current.revision != expected_revision:
+        raise JobConflict(
+            f"任务在排队后被修改，未覆盖新内容：排队版本 {expected_revision}，"
+            f"当前版本 {current.revision}。"
+        )
+    issue = batch_preflight_issue(current, str(job["operation"]))
+    if issue:
+        raise JobConflict(issue)
+    if cancelled():
+        raise JobCancelled("Batch job cancelled before model request.")
+    try:
+        if job["operation"] == "products":
+            request = AutoProductsRequest.model_validate(job["request"])
+            saved = perform_auto_products(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "titles":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_title_generation(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "outline":
+            request = GenerateOutlineRequest.model_validate(job["request"])
+            saved = perform_outline_generation(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "humanize":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_humanize(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "restore_links":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_restore_links(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "prepare_images":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_prepare_images(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "export_docx":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_export_docx(task_id, request)
+        elif job["operation"] == "generate_tdk":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_generate_tdk(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "package_delivery":
+            request = RevisionedRequest.model_validate(job["request"])
+            saved = perform_package_delivery(task_id, request)
+        else:
+            request = GenerateArticleRequest.model_validate(job["request"])
+            saved = perform_article_generation(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        if exc.status_code == 409:
+            raise JobConflict(detail) from exc
+        raise
+    return saved.revision
+
+
+@app.post("/api/batches", response_model=BatchCreateResponse)
+def create_batch(request: BatchCreateRequest) -> BatchCreateResponse:
+    queue = batch_queue()
+    task_ids = list(dict.fromkeys(task_id.strip() for task_id in request.task_ids if task_id.strip()))
+    if not task_ids:
+        raise HTTPException(status_code=422, detail="请至少选择一个任务。")
+    active_ids = queue.active_task_ids(task_ids)
+    rejected: list[BatchPreflightIssue] = []
+    accepted: list[dict] = []
+    customers: set[str] = set()
+    for task_id in task_ids:
+        try:
+            task = store().get(task_id)
+        except KeyError:
+            rejected.append(BatchPreflightIssue(task_id=task_id, message="任务不存在。"))
+            continue
+        if task_id in active_ids:
+            rejected.append(
+                BatchPreflightIssue(task_id=task_id, message="该任务已有排队或执行中的批量操作。")
+            )
+            continue
+        issue = batch_preflight_issue(task, request.operation)
+        if issue:
+            rejected.append(BatchPreflightIssue(task_id=task_id, message=issue))
+            continue
+        customers.add(task.customer)
+        accepted.append(
+            {
+                "task_id": task.id,
+                "customer": task.customer,
+                "topic_index": task.topic_index,
+                "topic": task.topic,
+                "source_revision": task.revision,
+                "request": batch_request_snapshot(
+                    task,
+                    request.operation,
+                    word_count=request.word_count,
+                ),
+            }
+        )
+    if not accepted:
+        return BatchCreateResponse(batch=None, rejected=rejected)
+    try:
+        payload = queue.create_batch(
+            request.operation,
+            accepted,
+            customer=next(iter(customers)) if len(customers) == 1 else "",
+        )
+    except ActiveJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    wake_batch_runner()
+    return BatchCreateResponse(
+        batch=BatchRecord.model_validate(payload),
+        rejected=rejected,
+    )
+
+
+@app.get("/api/batches", response_model=list[BatchRecord])
+def list_batches(customer: str = "", limit: int = 10) -> list[BatchRecord]:
+    return [
+        BatchRecord.model_validate(item)
+        for item in batch_queue().list_batches(customer=customer, limit=limit)
+    ]
+
+
+@app.get("/api/batches/{batch_id}", response_model=BatchRecord)
+def read_batch(batch_id: str) -> BatchRecord:
+    try:
+        return BatchRecord.model_validate(batch_queue().get_batch(batch_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="批量任务不存在。") from None
+
+
+@app.post("/api/batches/{batch_id}/cancel", response_model=BatchRecord)
+def cancel_batch(batch_id: str) -> BatchRecord:
+    try:
+        result = batch_queue().cancel_batch(batch_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="批量任务不存在。") from None
+    wake_batch_runner()
+    return BatchRecord.model_validate(result)
+
+
+@app.post("/api/batch-jobs/{job_id}/cancel", response_model=BatchJobRecord)
+def cancel_batch_job(job_id: str) -> BatchJobRecord:
+    try:
+        result = batch_queue().request_cancel(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="批量任务条目不存在。") from None
+    wake_batch_runner()
+    return BatchJobRecord.model_validate(result)
+
+
+@app.post("/api/batch-jobs/{job_id}/retry", response_model=BatchJobRecord)
+def retry_batch_job(job_id: str) -> BatchJobRecord:
+    queue = batch_queue()
+    try:
+        previous = queue.get_job(job_id)
+        task = store().get(str(previous["task_id"]))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="任务或批量任务条目不存在。") from None
+    issue = batch_preflight_issue(task, str(previous["operation"]))
+    if issue:
+        raise HTTPException(status_code=409, detail=issue)
+    snapshot = batch_request_snapshot(
+        task,
+        str(previous["operation"]),
+        word_count=previous["request"].get("word_count"),
+    )
+    try:
+        result = queue.retry_job(
+            job_id,
+            source_revision=task.revision,
+            request=snapshot,
+        )
+    except (ActiveJobError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    wake_batch_runner()
+    return BatchJobRecord.model_validate(result)
 
 
 @app.put("/api/tasks/{task_id}/article", response_model=TaskRecord)
 def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_UPDATE_ARTICLE)
-    cfg = config()
-    client = LLMClient(cfg)
     try:
-        prepared = ensure_transition_before_first_h2(cfg, task, request.article, llm=client)
-        initial = ensure_article_hyperlinks(prepared, task)
+        # PUT is a deterministic persistence endpoint.  Generation may repair
+        # a missing transition with the LLM, but saving pasted/edited text must
+        # never trigger a model call or silently rewrite prose.
+        initial = ensure_article_hyperlinks(request.article, task)
         validate_article_layout(initial)
+        validate_minimum_h3_per_h2(initial)
+        if not has_intro_transition(initial):
+            raise ArticleStructureError(
+                "Article must include a transition paragraph between its H1 and first H2."
+            )
     except (
         ArticleStructureError,
         ArticleGenerationError,
@@ -620,9 +1324,16 @@ def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
     task.source_links = source_links(initial)
     task.transition_added = has_intro_transition(initial)
     task.article_versions.append(version_record("initial", initial, "manual_edit"))
-    write_text_artifact(task, "02_initial_article.md", initial)
-    write_json_artifact(task, "02_initial_links.json", [link.model_dump() for link in task.source_links])
-    return save_task(task, request.revision)
+    # Revision validation happens in save_task.  Only publish artifacts after
+    # it succeeds so a stale editor cannot overwrite the accepted version.
+    saved = save_task(task, request.revision)
+    write_text_artifact(saved, "02_initial_article.md", saved.initial_article)
+    write_json_artifact(
+        saved,
+        "02_initial_links.json",
+        [link.model_dump() for link in saved.source_links],
+    )
+    return saved
 
 
 @app.put("/api/tasks/{task_id}/checks/initial-ai", response_model=TaskRecord)
@@ -653,6 +1364,7 @@ def confirm_initial_ai(task_id: str, request: AICheckUpdateRequest) -> TaskRecor
 def upload_ai_rate_screenshot(
     task_id: str,
     stage: str,
+    revision: int | None = None,
     file: UploadFile = File(...),
 ) -> TaskRecord:
     task = get_task_or_404(task_id)
@@ -681,7 +1393,7 @@ def upload_ai_rate_screenshot(
     check.screenshot_path = str(output)
     task.delivery_package_path = ""
     write_json_artifact(task, artifact_name, check.model_dump(mode="json"))
-    return save_task(task)
+    return save_task(task, revision)
 
 
 @app.put("/api/tasks/{task_id}/zerogpt", response_model=TaskRecord)
@@ -693,8 +1405,12 @@ def update_legacy_zero_gpt_report(task_id: str, request: ZeroGptReportRequest) -
     return save_task(task, request.revision)
 
 
-@app.post("/api/tasks/{task_id}/humanize", response_model=TaskRecord)
-def humanize(task_id: str) -> TaskRecord:
+def perform_humanize(
+    task_id: str,
+    request: RevisionedRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_HUMANIZE_ARTICLE)
     rehumanizing = (
@@ -714,8 +1430,10 @@ def humanize(task_id: str) -> TaskRecord:
         PromptTemplateError,
     ) as exc:
         set_stage_error(task, code="humanize_failed", message=str(exc), stage="humanize")
-        save_task(task)
+        if cancelled is None:
+            save_task(task, request.revision)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    raise_if_batch_cancelled(cancelled)
     task.humanized_article = humanized
     task.humanized_article_word_count = visible_word_count(humanized)
     task.humanized_article_hash = content_hash(humanized)
@@ -738,7 +1456,15 @@ def humanize(task_id: str) -> TaskRecord:
         "04_humanize_prompt.txt",
         build_humanize_prompt(config(), source_article),
     )
-    return save_task(task)
+    return save_task(task, request.revision)
+
+
+@app.post("/api/tasks/{task_id}/humanize", response_model=TaskRecord)
+def humanize(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_humanize(task_id, request or RevisionedRequest())
 
 
 @app.put("/api/tasks/{task_id}/humanized-article", response_model=TaskRecord)
@@ -795,8 +1521,12 @@ def confirm_final_ai(task_id: str, request: AICheckUpdateRequest) -> TaskRecord:
     return save_task(task, request.revision)
 
 
-@app.post("/api/tasks/{task_id}/restore-links", response_model=TaskRecord)
-def restore_links(task_id: str) -> TaskRecord:
+def perform_restore_links(
+    task_id: str,
+    request: RevisionedRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_RESTORE_LINKS)
     try:
@@ -805,8 +1535,10 @@ def restore_links(task_id: str) -> TaskRecord:
         )
     except LinkRestorationError as exc:
         set_stage_error(task, code="link_restore_failed", message=str(exc), stage="links")
-        save_task(task)
+        if cancelled is None:
+            save_task(task, request.revision)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    raise_if_batch_cancelled(cancelled)
 
     task.linked_article = restored
     task.linked_article_word_count = visible_word_count(restored)
@@ -828,7 +1560,15 @@ def restore_links(task_id: str) -> TaskRecord:
     advance(task, STATUS_LINKS_VERIFIED)
     write_text_artifact(task, "06_links_restored.md", restored)
     write_json_artifact(task, "06_link_validation.json", task.link_validation.model_dump())
-    return save_task(task)
+    return save_task(task, request.revision)
+
+
+@app.post("/api/tasks/{task_id}/restore-links", response_model=TaskRecord)
+def restore_links(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_restore_links(task_id, request or RevisionedRequest())
 
 
 @app.put("/api/tasks/{task_id}/images", response_model=TaskRecord)
@@ -836,19 +1576,30 @@ def update_images(task_id: str, request: ImagesUpdateRequest) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_UPDATE_IMAGES)
     task.hero_image = request.hero_image.strip()
-    if request.images:
+    if request.images is not None:
         task.images = request.images
     invalidate_downstream(task, "hero_image")
+    # As with outline/article saves, reject a stale revision before touching
+    # the artifact visible in the task directory.
+    saved = save_task(task, request.revision)
     write_json_artifact(
-        task,
+        saved,
         "images.json",
-        {"hero_image": task.hero_image, "images": [image.model_dump() for image in task.images]},
+        {
+            "hero_image": saved.hero_image,
+            "images": [image.model_dump() for image in saved.images],
+        },
     )
-    return save_task(task, request.revision)
+    return saved
 
 
 @app.post("/api/tasks/{task_id}/images/upload", response_model=TaskRecord)
-def upload_image(task_id: str, role: str = "hero", file: UploadFile = File(...)) -> TaskRecord:
+def upload_image(
+    task_id: str,
+    role: str = "hero",
+    revision: int | None = None,
+    file: UploadFile = File(...),
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_UPDATE_IMAGES)
     if role != "hero":
@@ -870,11 +1621,58 @@ def upload_image(task_id: str, role: str = "hero", file: UploadFile = File(...))
             output.write(chunk)
     task.hero_image = str(destination)
     invalidate_downstream(task, "hero_image")
-    return save_task(task)
+    return save_task(task, revision)
 
 
-@app.post("/api/tasks/{task_id}/prepare-images", response_model=TaskRecord)
-def prepare_images(task_id: str) -> TaskRecord:
+@app.get("/api/tasks/{task_id}/images/preview", response_class=FileResponse)
+def preview_task_image(task_id: str, path: str) -> FileResponse:
+    task = get_task_or_404(task_id)
+    raw_path = path.strip()
+    if not raw_path:
+        raise HTTPException(status_code=422, detail="Image path is empty.")
+
+    source = Path(raw_path).expanduser()
+    if not source.is_absolute():
+        source = Path(task.task_dir) / source
+    try:
+        resolved = source.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=404, detail=f"Image not found: {source}") from None
+
+    task_root = Path(task.task_dir).resolve()
+    try:
+        resolved.relative_to(task_root)
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail="Image preview is limited to the current task directory.",
+        ) from None
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail=f"Image not found: {resolved}")
+    if resolved.stat().st_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image preview exceeds 25 MB.")
+
+    try:
+        with Image.open(resolved) as image:
+            image_format = image.format or ""
+            image.verify()
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=422, detail="The selected file is not a valid image.") from None
+
+    media_type = Image.MIME.get(image_format, "application/octet-stream")
+    return FileResponse(
+        resolved,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def perform_prepare_images(
+    task_id: str,
+    request: RevisionedRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_PREPARE_IMAGES)
     article = task.linked_article or task.humanized_article
@@ -889,7 +1687,8 @@ def prepare_images(task_id: str) -> TaskRecord:
             message=str(exc),
             stage="images",
         )
-        save_task(task)
+        if cancelled is None:
+            save_task(task, request.revision)
         raise HTTPException(
             status_code=409,
             detail={"message": str(exc), "unresolved": exc.unresolved},
@@ -901,8 +1700,11 @@ def prepare_images(task_id: str) -> TaskRecord:
             message=str(exc),
             stage="images",
         )
-        save_task(task)
+        if cancelled is None:
+            save_task(task, request.revision)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    raise_if_batch_cancelled(cancelled)
 
     task.final_article = article
     task.final_article_word_count = visible_word_count(article)
@@ -917,11 +1719,18 @@ def prepare_images(task_id: str) -> TaskRecord:
         build_image_audit_markdown(article, task.images),
     )
     write_json_artifact(task, "07_images.json", [image.model_dump() for image in task.images])
-    return save_task(task)
+    return save_task(task, request.revision)
 
 
-@app.post("/api/tasks/{task_id}/export-docx", response_model=TaskRecord)
-def export_docx(task_id: str) -> TaskRecord:
+@app.post("/api/tasks/{task_id}/prepare-images", response_model=TaskRecord)
+def prepare_images(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_prepare_images(task_id, request or RevisionedRequest())
+
+
+def perform_export_docx(task_id: str, request: RevisionedRequest) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_EXPORT_DOCX)
     try:
@@ -932,15 +1741,28 @@ def export_docx(task_id: str) -> TaskRecord:
     task.delivery_package_path = ""
     task.workflow_error = None
     advance(task, STATUS_DOCX_EXPORTED)
-    return save_task(task)
+    return save_task(task, request.revision)
 
 
-@app.post("/api/tasks/{task_id}/generate-tdk", response_model=TaskRecord)
-def generate_tdk(task_id: str) -> TaskRecord:
+@app.post("/api/tasks/{task_id}/export-docx", response_model=TaskRecord)
+def export_docx(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_export_docx(task_id, request or RevisionedRequest())
+
+
+def perform_generate_tdk(
+    task_id: str,
+    request: RevisionedRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_GENERATE_TDK)
     try:
         metadata = generate_tdk_metadata(config(), task)
+        raise_if_batch_cancelled(cancelled)
         output = export_tdk_docx(task, metadata)
     except TdkGenerationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -950,11 +1772,18 @@ def generate_tdk(task_id: str) -> TaskRecord:
     task.delivery_package_path = ""
     task.workflow_error = None
     write_json_artifact(task, "08_tdk.json", metadata.model_dump(mode="json"))
-    return save_task(task)
+    return save_task(task, request.revision)
 
 
-@app.post("/api/tasks/{task_id}/package-delivery", response_model=TaskRecord)
-def build_delivery_package(task_id: str) -> TaskRecord:
+@app.post("/api/tasks/{task_id}/generate-tdk", response_model=TaskRecord)
+def generate_tdk(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_generate_tdk(task_id, request or RevisionedRequest())
+
+
+def perform_package_delivery(task_id: str, request: RevisionedRequest) -> TaskRecord:
     task = get_task_or_404(task_id)
     require_action(task, ACTION_PACKAGE_DELIVERY)
     try:
@@ -964,4 +1793,12 @@ def build_delivery_package(task_id: str) -> TaskRecord:
 
     task.delivery_package_path = str(output)
     task.workflow_error = None
-    return save_task(task)
+    return save_task(task, request.revision)
+
+
+@app.post("/api/tasks/{task_id}/package-delivery", response_model=TaskRecord)
+def build_delivery_package(
+    task_id: str,
+    request: RevisionedRequest | None = None,
+) -> TaskRecord:
+    return perform_package_delivery(task_id, request or RevisionedRequest())

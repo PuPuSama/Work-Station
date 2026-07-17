@@ -10,6 +10,7 @@ from models import Product, TaskRecord
 from services.article_validation import (
     ArticleStructureError,
     LinkRestorationError,
+    MARKDOWN_LINK_PATTERN,
     assert_no_unexpected_candidate_links,
     extract_link_inventory,
     has_intro_transition,
@@ -126,7 +127,14 @@ def generate_titles(
 
 
 def generate_outline(
-    config: AppConfig, task: TaskRecord, *, llm: LLMClient | None = None
+    config: AppConfig,
+    task: TaskRecord,
+    *,
+    custom_prompt: str = "",
+    include_project_introduction: bool = True,
+    include_project_notes: bool = True,
+    include_topic_notes: bool = True,
+    llm: LLMClient | None = None,
 ) -> str:
     title = task.selected_title or task.topic
     client = llm or LLMClient(config)
@@ -141,6 +149,19 @@ def generate_outline(
         TARGET_WORDS=normalized_article_word_count(None, config.default_word_count),
         PRODUCTS=products_for_prompt(task.products),
         CUSTOMER_CONTEXT=collect_customer_context(config, task.customer),
+        PROJECT_INTRODUCTION=generation_context_value(
+            getattr(task, "project_introduction", ""),
+            include_project_introduction,
+        ),
+        PROJECT_NOTES=generation_context_value(
+            getattr(task, "project_notes", ""),
+            include_project_notes,
+        ),
+        TOPIC_NOTES=generation_context_value(
+            getattr(task, "topic_notes", ""),
+            include_topic_notes,
+        ),
+        CUSTOM_INSTRUCTIONS=custom_instruction_value(custom_prompt),
     )
     result = client.chat(
         [
@@ -158,6 +179,10 @@ def generate_raw_article(
     task: TaskRecord,
     word_count: int | None = None,
     *,
+    custom_prompt: str = "",
+    include_project_introduction: bool = True,
+    include_project_notes: bool = True,
+    include_topic_notes: bool = True,
     llm: LLMClient | None = None,
 ) -> str:
     title = task.selected_title or task.topic
@@ -172,6 +197,8 @@ def generate_raw_article(
         TARGET_WORDS=target_words,
         TARGET_CHARACTERS=approximate_character_target(target_words),
         CUSTOMER=task.customer,
+        BRAND_NAME=customer_brand_name(task),
+        HOMEPAGE_URL=site_homepage(task.customer),
         TOPIC=task.topic,
         PRIMARY_KEYWORD=primary_keyword(task),
         COMPETITOR_KEYWORD=task.competitor_keyword or "Not supplied",
@@ -179,6 +206,19 @@ def generate_raw_article(
         PRODUCTS=products_for_prompt(task.products),
         OUTLINE=outline,
         CUSTOMER_CONTEXT=collect_customer_context(config, task.customer),
+        PROJECT_INTRODUCTION=generation_context_value(
+            getattr(task, "project_introduction", ""),
+            include_project_introduction,
+        ),
+        PROJECT_NOTES=generation_context_value(
+            getattr(task, "project_notes", ""),
+            include_project_notes,
+        ),
+        TOPIC_NOTES=generation_context_value(
+            getattr(task, "topic_notes", ""),
+            include_topic_notes,
+        ),
+        CUSTOM_INSTRUCTIONS=custom_instruction_value(custom_prompt),
     )
     result = client.chat(
         [
@@ -189,6 +229,18 @@ def generate_raw_article(
         max_tokens=article_output_token_limit(target_words),
     )
     return strip_llm_code_fence(result) if result else mock_article(title, task, outline)
+
+
+def generation_context_value(value: object, included: bool) -> str:
+    if not included:
+        return "[Not included for this generation by the operator.]"
+    cleaned = str(value or "").replace("\r\n", "\n").strip()
+    return cleaned or "[Not supplied.]"
+
+
+def custom_instruction_value(value: object) -> str:
+    cleaned = str(value or "").replace("\r\n", "\n").strip()
+    return cleaned or "[No additional custom instructions.]"
 
 
 def generate_article(
@@ -223,6 +275,7 @@ def generate_article_versions(
     with_transition = ensure_transition_before_first_h2(config, task, raw_article, llm=client)
     prepared_article = ensure_article_hyperlinks(with_transition, task)
     validate_article_layout(prepared_article)
+    validate_minimum_h3_per_h2(prepared_article)
     return GeneratedArticle(
         raw_article=raw_article,
         initial_article=prepared_article,
@@ -231,6 +284,40 @@ def generate_article_versions(
         transition_added=not transition_was_present,
         compressed=False,
     )
+
+
+def validate_minimum_h3_per_h2(article: str) -> None:
+    """Require two direct H3 subsections under every content H2.
+
+    FAQ is deliberately excluded because its locked format uses bold Q/A lines and
+    explicitly forbids H3 headings.
+    """
+
+    current_h2 = ""
+    h3_count = 0
+    invalid_sections: list[tuple[str, int]] = []
+
+    def finish_section() -> None:
+        if current_h2 and current_h2.casefold() != "faq" and h3_count < 2:
+            invalid_sections.append((current_h2, h3_count))
+
+    for level, text in heading_sequence(article):
+        if level == 2:
+            finish_section()
+            current_h2 = text.strip()
+            h3_count = 0
+        elif level == 3 and current_h2:
+            h3_count += 1
+    finish_section()
+
+    if invalid_sections:
+        details = "; ".join(
+            f"{heading!r} has {count}" for heading, count in invalid_sections
+        )
+        raise ArticleStructureError(
+            "Every H2 section except FAQ must contain at least two H3 subsections; "
+            f"invalid sections: {details}."
+        )
 
 
 def ensure_transition_before_first_h2(
@@ -495,13 +582,93 @@ def markdown_link_count(value: str) -> int:
 
 
 def ensure_article_hyperlinks(article: str, task: TaskRecord) -> str:
-    """Linkify supplied bare URLs only; never append a synthetic links section."""
+    """Normalize official links without appending a synthetic links section."""
 
-    return linkify_known_bare_urls(article, task)
+    return linkify_known_bare_urls(enforce_homepage_brand_link(article, task), task)
+
+
+def customer_brand_name(task: TaskRecord) -> str:
+    """Return the operator-managed brand name, falling back to the site host."""
+
+    brand_name = " ".join(str(getattr(task, "brand_name", "") or "").split())
+    customer = str(getattr(task, "customer", "") or "")
+    return brand_name or customer_label(customer)
+
+
+def normalized_link_target(url: str) -> str:
+    parsed = parse.urlparse(str(url or "").strip())
+    if not parsed.netloc:
+        return str(url or "").strip().rstrip("/").casefold()
+    path = parsed.path.rstrip("/") or "/"
+    return parse.urlunparse(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            path,
+            "",
+            parsed.query,
+            "",
+        )
+    )
+
+
+def enforce_homepage_brand_link(article: str, task: TaskRecord) -> str:
+    """Put the homepage URL on the exact project brand name in body copy."""
+
+    homepage = site_homepage(str(getattr(task, "customer", "") or ""))
+    brand_name = customer_brand_name(task)
+    if not homepage or not brand_name:
+        return article
+
+    homepage_target = normalized_link_target(homepage)
+
+    def normalize_markdown_link(match: re.Match[str]) -> str:
+        if normalized_link_target(match.group("url")) != homepage_target:
+            return match.group(0)
+        return f"[{brand_name}]({homepage})"
+
+    article = MARKDOWN_LINK_PATTERN.sub(normalize_markdown_link, article)
+    article = replace_bare_url(article, homepage, brand_name)
+    without_trailing_slash = homepage.rstrip("/")
+    if without_trailing_slash != homepage:
+        article = replace_bare_url(article, without_trailing_slash, brand_name)
+
+    if any(
+        normalized_link_target(str(link.get("url") or "")) == homepage_target
+        for link in extract_link_inventory(article)
+    ):
+        return article
+
+    brand_pattern = re.compile(
+        rf"(?<![\w]){re.escape(brand_name)}(?![\w])",
+        flags=re.IGNORECASE,
+    )
+    lines = article.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        protected_spans = [
+            (match.start(), match.end())
+            for pattern in (MARKDOWN_LINK_PATTERN, re.compile(r"https?://[^\s)]+"))
+            for match in pattern.finditer(line)
+        ]
+        for brand_match in brand_pattern.finditer(line):
+            if any(
+                span_start <= brand_match.start() < span_end
+                for span_start, span_end in protected_spans
+            ):
+                continue
+            lines[index] = (
+                line[: brand_match.start()]
+                + f"[{brand_name}]({homepage})"
+                + line[brand_match.end() :]
+            )
+            return "".join(lines)
+    return article
 
 
 def linkify_known_bare_urls(article: str, task: TaskRecord) -> str:
-    replacements = [(site_homepage(task.customer), customer_label(task.customer))]
+    replacements = [(site_homepage(task.customer), customer_brand_name(task))]
     replacements.extend(
         (
             product.canonical_url or product.url,
@@ -636,17 +803,34 @@ Ask how the supplier controls raw materials, production, inspection, and packagi
 
 Use only confirmed product details when moving from general education to a specific recommendation.
 
+### Confirmed Product Details
+
 {product_lines}
+
+### Selection Fit
+
+Compare each confirmed option against the application, specification, order volume, and documentation requirements before making a shortlist.
 
 ## What Should You Check Before Ordering?
 
+### Inquiry Details
+
 - Confirm the application and target market.
 - Prepare specifications before requesting a quote.
+
+### Supplier Evidence
+
 - Compare quality control and support as well as price.
 
 ## Conclusion and Next Step
 
+### Final Evaluation
+
 Choosing {task.topic} becomes easier when requirements are clear and supplier claims are checked against confirmed product information. Use that evidence to narrow the options and decide the next sourcing step.
+
+### Practical Next Step
+
+Prepare the application details and questions that the shortlisted supplier must answer before requesting a final quotation.
 
 ## FAQ
 

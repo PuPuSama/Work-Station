@@ -3,25 +3,43 @@ const API_BASE =
   "http://127.0.0.1:8000";
 const DEFAULT_TIMEOUT_MS = 240_000;
 
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+
+  constructor(status: number, message: string, detail?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+export function apiFileUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const text = await response.text();
   if (!response.ok) {
+    let detail: unknown = text;
     if (text) {
       try {
         const payload = JSON.parse(text) as { detail?: unknown };
-        const detail = payload.detail;
-        if (typeof detail === "string") throw new Error(detail);
-        if (detail && typeof detail === "object" && "message" in detail) {
-          throw new Error(String((detail as { message: unknown }).message));
-        }
-        throw new Error(JSON.stringify(detail ?? payload));
-      } catch (error) {
-        if (error instanceof Error && error.message !== "Unexpected end of JSON input") {
-          throw error;
-        }
+        detail = payload.detail ?? payload;
+      } catch {
+        detail = text;
       }
     }
-    throw new Error(text || `Request failed with ${response.status}`);
+    const message =
+      typeof detail === "string"
+        ? detail
+        : detail && typeof detail === "object" && "message" in detail
+          ? String((detail as { message: unknown }).message)
+          : detail
+            ? JSON.stringify(detail)
+            : `Request failed with ${response.status}`;
+    throw new ApiError(response.status, message, detail);
   }
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
@@ -65,12 +83,16 @@ export async function apiPost<T>(
   return readJson<T>(response);
 }
 
-export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+export async function apiPut<T>(
+  path: string,
+  body: unknown,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }, timeoutMs);
   return readJson<T>(response);
 }
 

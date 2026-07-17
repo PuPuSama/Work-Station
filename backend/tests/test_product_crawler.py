@@ -60,6 +60,43 @@ def verified(candidate: crawler.CrawlCandidate, _terms: list[str], _deadline: fl
 
 
 class ProductPageClassificationTests(unittest.TestCase):
+    def test_tavily_latency_does_not_consume_official_site_discovery_budget(self) -> None:
+        now = [0.0]
+        captured: dict[str, float] = {}
+
+        class SlowEmptyTavily:
+            ready = True
+
+            def search(self, _query: str, _host: str, max_results: int = 10):
+                now[0] = 20.0
+                return SimpleNamespace(results=())
+
+        def collect(_base_url: str, _terms: list[str], deadline: float):
+            captured["deadline"] = deadline
+            return []
+
+        task = SimpleNamespace(
+            customer="www.jadduo.cn",
+            task_dir="unused",
+            topic="Stool ladder buying guide",
+            selected_title="Stool ladder buying guide",
+            competitor_keyword="",
+        )
+        with (
+            patch.object(crawler.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(crawler, "collect_candidates", side_effect=collect),
+            patch.object(crawler, "write_json_artifact"),
+        ):
+            products = crawler.recommend_products(
+                SimpleNamespace(),
+                task,
+                tavily_client=SlowEmptyTavily(),
+                download_images=False,
+            )
+
+        self.assertEqual(products, [])
+        self.assertEqual(captured["deadline"], 20.0 + crawler.MAX_DISCOVERY_SECONDS)
+
     def test_tavily_is_only_used_to_discover_same_site_urls(self) -> None:
         class FakeTavily:
             ready = True
@@ -117,6 +154,50 @@ class ProductPageClassificationTests(unittest.TestCase):
         query = crawler.tavily_product_query(crawler.search_terms(task))
 
         self.assertEqual(query, "self tapping screw products")
+
+    def test_woodscrew_article_focuses_search_on_the_product_family(self) -> None:
+        task = SimpleNamespace(
+            customer="www.qewitfastener.com",
+            task_dir="unused",
+            topic=(
+                "What are some common mistakes to avoid when selecting and using "
+                "woodscrews in woodworking projects?"
+            ),
+            selected_title="Woodscrew Size, Material, and Thread Mistakes B2B Buyers Should Avoid",
+            competitor_keyword="",
+        )
+
+        terms = crawler.search_terms(task)
+
+        self.assertEqual(terms[0], "wood screws")
+        self.assertEqual(crawler.tavily_product_query(terms), "wood screws products")
+
+    def test_stool_ladder_article_focuses_search_on_the_product_family(self) -> None:
+        task = SimpleNamespace(
+            customer="www.jadduo.cn",
+            task_dir="unused",
+            topic="Small But Mighty: The Benefits of A Stool Ladder For Everyday Tasks",
+            selected_title="Small But Mighty: The Benefits of A Stool Ladder For Everyday Tasks",
+            competitor_keyword="",
+        )
+
+        terms = crawler.search_terms(task)
+
+        self.assertEqual(terms[0], "stool ladder")
+        self.assertEqual(crawler.tavily_product_query(terms), "stool ladder products")
+
+        step_category = crawler.CrawlCandidate(
+            name="Step Ladder",
+            url="https://www.jadduo.cn/product-category/step-ladder/",
+        )
+        aluminum_category = crawler.CrawlCandidate(
+            name="Aluminum",
+            url="https://www.jadduo.cn/product-category/telescopic-ladder/aluminum/",
+        )
+        self.assertGreater(
+            crawler.category_relevance_score(step_category, terms),
+            crawler.category_relevance_score(aluminum_category, terms),
+        )
 
     def test_bad_image_hints_use_token_boundaries(self) -> None:
         self.assertTrue(crawler.is_bad_image_url("https://www.example.com/assets/share.png"))
@@ -188,6 +269,48 @@ class ProductPageClassificationTests(unittest.TestCase):
             )
         )
 
+    def test_single_product_template_wins_over_footer_category_signals(self) -> None:
+        related = "".join(
+            f'<a href="/product/related-{index}/">Related {index}</a>'
+            for index in range(1, 6)
+        )
+        html = f"""
+        <html><head><title>Steel Folding Stool Ladder - Jadduo</title></head>
+        <body class="single single-product product-template-default woocommerce">
+          <h1>Steel Folding Stool Ladder</h1>
+          <img src="/wp-content/uploads/steel-folding-stool-ladder.webp" width="800" height="800">
+          <p>This official product detail page describes the materials, folding frame,
+          non-slip steps, household applications, packaging options, and purchasing
+          information for professional wholesale buyers.</p>
+          <footer><h2>Product Categories</h2>{related}</footer>
+        </body></html>
+        """
+        parser = crawler.parse_html(html)
+        url = "https://www.jadduo.cn/product/steel-folding-stool-ladder/"
+
+        self.assertFalse(crawler.is_product_listing_page(url, parser, ["stool ladder"]))
+        self.assertTrue(crawler.is_product_detail_page(url, parser, ["stool ladder"]))
+
+    def test_uc_post_list_context_excludes_navigation_links(self) -> None:
+        parser = crawler.parse_html(
+            """
+            <nav><a href="/services/">Services</a></nav>
+            <div class="uc_post_list uc-items-wrapper">
+              <div class="uc_post_list_box">
+                <a href="/product/steel-folding-stool-ladder/">Steel Folding Stool Ladder</a>
+              </div>
+            </div>
+            <footer><a href="/contact-us/">Contact</a></footer>
+            """
+        )
+
+        links = crawler.listing_member_links(parser)
+
+        self.assertEqual(
+            [link["href"] for link in links],
+            ["/product/steel-folding-stool-ladder/"],
+        )
+
     def test_product_index_expands_listing_container_to_detail_links(self) -> None:
         index_url = "https://www.example.com/products/"
         category_url = "https://www.example.com/pet-molds/"
@@ -222,7 +345,59 @@ class ProductPageClassificationTests(unittest.TestCase):
                 "https://www.example.com/products/model-d/",
             ],
         )
-        self.assertTrue(all(candidate.source == "product-container" for candidate in candidates))
+        self.assertTrue(all(candidate.source == "product-category" for candidate in candidates))
+
+    def test_relevant_category_excludes_global_hot_sale_products(self) -> None:
+        index_url = "https://www.example.com/products/"
+        nuts_url = "https://www.example.com/category/fasteners/nuts/"
+        screws_url = "https://www.example.com/category/fasteners/screws/"
+        woodscrews_url = (
+            "https://www.example.com/category/fasteners/screws/"
+            "woodscrews-dry-wall-screws/"
+        )
+        pages = {
+            index_url: f"""
+                <a href="{nuts_url}">Nuts</a>
+                <a href="{screws_url}">Screws</a>
+                <a href="{woodscrews_url}">Woodscrews &amp; Dry Wall Screws</a>
+            """,
+            woodscrews_url: """
+                <html><body class="category">
+                  <div class="newpro hot-sale">
+                    <a href="/metric-nylon-insert-nut/">Metric Nylon Insert Nut</a>
+                    <a href="/twist-drill/">Twist Drill</a>
+                    <a href="/non-standard-nuts/">Non Standard Nuts</a>
+                  </div>
+                  <div class="productny-list"><ul class="fixed">
+                    <li><div class="p-item"><a href="/drywall-screws/">Dry Wall Screws</a></div></li>
+                    <li><div class="p-item"><a href="/chipboard-screws/">Chipboard Screws</a></div></li>
+                    <li><div class="p-item"><a href="/coach-screws/">Coach Screws</a></div></li>
+                    <li><div class="p-item"><a href="/twin-thread-woodscrews/">Twin Thread Woodscrews</a></div></li>
+                  </ul></div>
+                </body></html>
+            """,
+        }
+        fetched: list[str] = []
+
+        def fetch(url: str, timeout: int = 5) -> str:
+            fetched.append(url)
+            return pages.get(url, "")
+
+        with patch.object(crawler, "fetch_text", side_effect=fetch):
+            candidates = crawler.candidates_from_product_indexes(
+                "https://www.example.com",
+                ["wood screws", "woodscrews woodworking"],
+                crawler.time.monotonic() + 10,
+            )
+
+        self.assertEqual(fetched[:2], [index_url, woodscrews_url])
+        self.assertEqual(
+            [candidate.name for candidate in candidates],
+            ["Dry Wall Screws", "Chipboard Screws", "Coach Screws", "Twin Thread Woodscrews"],
+        )
+        self.assertTrue(all(candidate.source == "product-category" for candidate in candidates))
+        self.assertTrue(all(candidate.category_url == woodscrews_url for candidate in candidates))
+        self.assertNotIn("https://www.example.com/non-standard-nuts/", [item.url for item in candidates])
 
 
 class OutboundRequestSafetyTests(unittest.TestCase):

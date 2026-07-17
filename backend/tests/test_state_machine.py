@@ -26,6 +26,7 @@ from models import (  # noqa: E402
     ArticleImage,
     ArticleVersion,
     LinkValidation,
+    Product,
     SourceLink,
     TaskRecord,
     WorkflowError,
@@ -34,13 +35,19 @@ from workflow.state_machine import (  # noqa: E402
     ACTION_CLEAR_WORKFLOW_ERROR,
     ACTION_CONFIRM_INITIAL_AI,
     ACTION_EXPORT_DOCX,
+    ACTION_GENERATE_ARTICLE,
+    ACTION_GENERATE_OUTLINE,
     ACTION_GENERATE_TDK,
     ACTION_PACKAGE_DELIVERY,
     ACTION_HUMANIZE_ARTICLE,
     ACTION_PREPARE_IMAGES,
     ACTION_RESTORE_LINKS,
+    ACTION_REWRITE_FROM_SCRATCH,
     ACTION_UPDATE_ARTICLE,
     ACTION_UPDATE_HUMANIZED,
+    ACTION_UPDATE_IMAGES,
+    ACTION_UPDATE_OUTLINE,
+    ACTION_UPDATE_PRODUCTS,
     LEGAL_TRANSITIONS,
     InvalidWorkflowTransition,
     WorkflowActionNotAllowed,
@@ -48,6 +55,7 @@ from workflow.state_machine import (  # noqa: E402
     can_transition,
     ensure_action_allowed,
     invalidate_downstream,
+    reset_for_full_rewrite,
     transition_task,
 )
 
@@ -131,6 +139,72 @@ class AllowedActionsTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertIn(ACTION_UPDATE_ARTICLE, allowed_actions(task_at(status)))
 
+    def test_article_can_be_regenerated_from_every_downstream_status(self) -> None:
+        for status in (
+            STATUS_OUTLINE_CONFIRMED,
+            STATUS_DRAFT_READY,
+            STATUS_INITIAL_AI_CHECKED,
+            STATUS_HUMANIZED_READY,
+            STATUS_FINAL_AI_CHECKED,
+            STATUS_LINKS_VERIFIED,
+            STATUS_IMAGES_READY,
+            STATUS_DOCX_EXPORTED,
+        ):
+            with self.subTest(status=status):
+                self.assertIn(ACTION_GENERATE_ARTICLE, allowed_actions(task_at(status)))
+
+    def test_first_version_can_be_manually_replaced_from_every_downstream_status(self) -> None:
+        for status in (
+            STATUS_DRAFT_READY,
+            STATUS_INITIAL_AI_CHECKED,
+            STATUS_HUMANIZED_READY,
+            STATUS_FINAL_AI_CHECKED,
+            STATUS_LINKS_VERIFIED,
+            STATUS_IMAGES_READY,
+            STATUS_DOCX_EXPORTED,
+        ):
+            with self.subTest(status=status):
+                self.assertIn(ACTION_UPDATE_ARTICLE, allowed_actions(task_at(status)))
+
+    def test_outline_can_be_rewritten_from_every_stage_after_title_selection(self) -> None:
+        for status in (
+            STATUS_TITLE_SELECTED,
+            STATUS_OUTLINE_READY,
+            STATUS_OUTLINE_CONFIRMED,
+            STATUS_DRAFT_READY,
+            STATUS_INITIAL_AI_CHECKED,
+            STATUS_HUMANIZED_READY,
+            STATUS_FINAL_AI_CHECKED,
+            STATUS_LINKS_VERIFIED,
+            STATUS_IMAGES_READY,
+            STATUS_DOCX_EXPORTED,
+        ):
+            with self.subTest(status=status):
+                actions = allowed_actions(task_at(status))
+                self.assertIn(ACTION_GENERATE_OUTLINE, actions)
+                self.assertIn(ACTION_UPDATE_OUTLINE, actions)
+
+    def test_images_can_be_reopened_after_export(self) -> None:
+        actions = allowed_actions(task_at(STATUS_DOCX_EXPORTED))
+        self.assertIn(ACTION_UPDATE_IMAGES, actions)
+        self.assertIn(ACTION_PREPARE_IMAGES, actions)
+
+    def test_products_can_be_reopened_from_every_downstream_stage(self) -> None:
+        for status in (
+            STATUS_TITLE_SELECTED,
+            STATUS_OUTLINE_READY,
+            STATUS_OUTLINE_CONFIRMED,
+            STATUS_DRAFT_READY,
+            STATUS_INITIAL_AI_CHECKED,
+            STATUS_HUMANIZED_READY,
+            STATUS_FINAL_AI_CHECKED,
+            STATUS_LINKS_VERIFIED,
+            STATUS_IMAGES_READY,
+            STATUS_DOCX_EXPORTED,
+        ):
+            with self.subTest(status=status):
+                self.assertIn(ACTION_UPDATE_PRODUCTS, allowed_actions(task_at(status)))
+
     def test_manual_first_version_can_recover_a_failed_generation(self) -> None:
         task = task_at(STATUS_OUTLINE_READY)
         task.workflow_error = WorkflowError(
@@ -160,12 +234,20 @@ class AllowedActionsTests(unittest.TestCase):
         self.assertIn(ACTION_UPDATE_ARTICLE, actions)
         self.assertIn(ACTION_CONFIRM_INITIAL_AI, actions)
 
-    def test_nonrecoverable_blocking_error_has_no_actions(self) -> None:
+    def test_nonrecoverable_blocking_error_still_allows_full_rewrite(self) -> None:
         task = task_at(STATUS_DRAFT_READY)
         task.workflow_error = WorkflowError(
             code="corrupt_source", blocking=True, recoverable=False
         )
-        self.assertEqual(allowed_actions(task), [])
+        self.assertEqual(allowed_actions(task), [ACTION_REWRITE_FROM_SCRATCH])
+
+    def test_full_rewrite_is_available_from_every_status(self) -> None:
+        for status in LEGAL_TRANSITIONS:
+            with self.subTest(status=status):
+                self.assertIn(
+                    ACTION_REWRITE_FROM_SCRATCH,
+                    allowed_actions(task_at(status)),
+                )
 
     def test_stage_failures_expose_the_direct_retry_action(self) -> None:
         cases = (
@@ -248,7 +330,10 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.tdk.title, "")
         self.assertFalse(task.legacy_export)
         self.assertIsNone(task.workflow_error)
-        self.assertEqual([v.kind for v in task.article_versions], ["raw", "initial"])
+        self.assertEqual(
+            [v.kind for v in task.article_versions],
+            ["raw", "initial", "humanized", "linked", "final"],
+        )
 
     def test_legacy_article_edit_becomes_the_new_initial_version(self) -> None:
         task = self.populated_task()
@@ -272,7 +357,10 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.docx_path, "")
         self.assertEqual(task.tdk_path, "")
         self.assertEqual(task.delivery_package_path, "")
-        self.assertEqual([v.kind for v in task.article_versions], ["raw", "initial", "humanized"])
+        self.assertEqual(
+            [v.kind for v in task.article_versions],
+            ["raw", "initial", "humanized", "linked", "final"],
+        )
 
     def test_confirmed_final_check_returns_to_final_checked_and_clears_links(self) -> None:
         task = self.populated_task()
@@ -313,6 +401,47 @@ class InvalidationTests(unittest.TestCase):
     def test_unknown_invalidation_stage_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             invalidate_downstream(self.populated_task(), "made_up_stage")
+
+    def test_full_rewrite_clears_workflow_but_preserves_source_identity(self) -> None:
+        task = self.populated_task()
+        task.title_candidates = ["Old title"]
+        task.selected_title = "Old title"
+        task.products = [Product(name="Old product", url="https://example.com/old")]
+        task.outline = "Old outline"
+        task.article = "Old compatibility article"
+        task.hero_image = "D:/old-hero.jpg"
+        task.zero_gpt_report = "Old report"
+        task.compression = {"required": True}
+
+        reset_for_full_rewrite(task)
+
+        self.assertEqual(task.status, STATUS_NEW)
+        self.assertEqual(task.id, "task-1")
+        self.assertEqual(task.topic, "Topic")
+        self.assertEqual(task.task_dir, "D:/article/example/topic_001")
+        self.assertEqual(task.title_candidates, [])
+        self.assertEqual(task.selected_title, "")
+        self.assertEqual(task.products, [])
+        self.assertEqual(task.outline, "")
+        self.assertEqual(task.article, "")
+        self.assertEqual(task.raw_draft_article, "")
+        self.assertEqual(task.initial_article, "")
+        self.assertEqual(task.humanized_article, "")
+        self.assertEqual(task.linked_article, "")
+        self.assertEqual(task.final_article, "")
+        self.assertEqual(task.article_versions, [])
+        self.assertFalse(task.initial_ai_check.confirmed)
+        self.assertFalse(task.final_ai_check.confirmed)
+        self.assertEqual(task.source_links, [])
+        self.assertFalse(task.link_validation.passed)
+        self.assertEqual(task.hero_image, "")
+        self.assertEqual(task.images, [])
+        self.assertEqual(task.docx_path, "")
+        self.assertEqual(task.tdk_path, "")
+        self.assertEqual(task.delivery_package_path, "")
+        self.assertEqual(task.zero_gpt_report, "")
+        self.assertFalse(hasattr(task, "compression"))
+        self.assertIsNone(task.workflow_error)
 
 
 if __name__ == "__main__":

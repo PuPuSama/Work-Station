@@ -2,6 +2,8 @@
 @import "tw-animate-css";
 
 :root {
+  --font-app-sans: "Segoe UI", "Microsoft YaHei UI", Arial, sans-serif;
+  --font-app-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
   --radius: 0.5rem;
   --background: oklch(0.985 0.006 95);
   --foreground: oklch(0.19 0.02 250);
@@ -44,8 +46,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-app-sans);
+  --font-mono: var(--font-app-mono);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

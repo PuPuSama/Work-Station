@@ -152,6 +152,62 @@ def _paragraph_end_index(lines: list[str], start_index: int) -> int:
     return end_index
 
 
+def _section_end_index(lines: list[str], anchor_index: int) -> int:
+    """Return the last content line in the nearest H2/H3 content block.
+
+    Product matching identifies the relevant sentence, but an image placed
+    immediately after that sentence can split the rest of the same subsection.
+    Keep non-hero images at the end of the smallest surrounding H2/H3 block:
+    before the next heading at the same or a higher level.
+    """
+
+    if anchor_index < 0 or anchor_index >= len(lines):
+        return anchor_index
+
+    heading_index = -1
+    heading_level = 0
+    for index in range(anchor_index, -1, -1):
+        match = re.match(r"^\s*(#{2,3})\s+", lines[index])
+        if match:
+            heading_index = index
+            heading_level = len(match.group(1))
+            break
+
+    if heading_index < 0:
+        return _paragraph_end_index(lines, anchor_index)
+
+    boundary = len(lines)
+    for index in range(heading_index + 1, len(lines)):
+        match = re.match(r"^\s*(#{1,6})\s+", lines[index])
+        if match and len(match.group(1)) <= heading_level:
+            boundary = index
+            break
+
+    for index in range(boundary - 1, heading_index, -1):
+        stripped = lines[index].strip()
+        if not stripped or stripped in {"---", "***", "___"}:
+            continue
+        if re.match(r"^(?:#{1,6}\s+|!\[|img\.)", stripped, re.IGNORECASE):
+            continue
+        return index
+
+    return _paragraph_end_index(lines, anchor_index)
+
+
+def _anchor_text_at(lines: list[str], line_index: int) -> str:
+    """Return stable visible text for the logical block ending at ``line_index``."""
+
+    if line_index < 0 or line_index >= len(lines):
+        return ""
+    if _is_paragraph_boundary(lines[line_index]):
+        return _visible_markdown(lines[line_index])
+
+    start_index = line_index
+    while start_index > 0 and not _is_paragraph_boundary(lines[start_index - 1]):
+        start_index -= 1
+    return _visible_markdown(" ".join(lines[start_index : line_index + 1]))
+
+
 def article_anchor_candidates(markdown: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for index, raw_line in enumerate((markdown or "").splitlines()):
@@ -208,7 +264,7 @@ def _find_manual_anchor(lines: list[str], override: object) -> tuple[int, str] |
     except (TypeError, ValueError):
         anchor_line = -1
     if 0 <= anchor_line < len(lines) and not re.match(r"^\s*#{1,6}\s+", lines[anchor_line]):
-        return _paragraph_end_index(lines, anchor_line), "manual_line"
+        return _section_end_index(lines, anchor_line), "manual_line"
 
     anchor_after = str(_value(override, "anchor_after", default="") or "").strip()
     anchor_text = str(_value(override, "anchor_text", default="") or "").strip()
@@ -218,7 +274,7 @@ def _find_manual_anchor(lines: list[str], override: object) -> tuple[int, str] |
         target = _normalise_text(requested)
         for index, raw_line in enumerate(lines):
             if target and _normalise_text(raw_line) == target:
-                return _paragraph_end_index(lines, index), "manual_text"
+                return _section_end_index(lines, index), "manual_text"
 
     anchor_heading = str(_value(override, "anchor_heading", default="") or "").strip()
     if anchor_heading:
@@ -228,7 +284,7 @@ def _find_manual_anchor(lines: list[str], override: object) -> tuple[int, str] |
             if match and _normalise_text(match.group(1)) == target:
                 body_index = _first_body_line_after_heading(lines, index)
                 if body_index != index:
-                    return _paragraph_end_index(lines, body_index), "manual_heading"
+                    return _section_end_index(lines, body_index), "manual_heading"
     return None
 
 
@@ -276,9 +332,8 @@ def _find_product_anchor(
         if body_index == index:
             return None
         index = body_index
-    paragraph_start = index
-    index = _paragraph_end_index(lines, paragraph_start)
-    anchor_text = _visible_markdown(" ".join(lines[paragraph_start : index + 1]))
+    index = _section_end_index(lines, index)
+    anchor_text = _anchor_text_at(lines, index)
     return index, anchor_text, _nearest_heading(lines, index), match_kind
 
 
@@ -691,6 +746,39 @@ def prepare_task_images(
         )
         fingerprints.append(source_fingerprint)
         next_index += 1
+
+    if product_overrides:
+        hero_items = [item for item in prepared if item.get("role") == "hero"]
+        body_items = [item for item in prepared if item.get("role") != "hero"]
+
+        def override_slot(item: dict[str, Any]) -> int:
+            item_url = str(item.get("product_url") or "").strip()
+            item_name = str(item.get("product_name") or "").strip().casefold()
+            item_source = str(item.get("source_path") or "").strip().casefold()
+            for slot, override in enumerate(product_overrides):
+                override_url = str(_value(override, "product_url", default="") or "").strip()
+                override_name = str(
+                    _value(override, "product_name", default="") or ""
+                ).strip().casefold()
+                override_source = str(
+                    _value(
+                        override,
+                        "source_path",
+                        "prepared_path",
+                        "image_path",
+                        default="",
+                    )
+                    or ""
+                ).strip().casefold()
+                if item_url and override_url == item_url:
+                    return slot
+                if item_name and override_name == item_name:
+                    return slot
+                if item_source and override_source == item_source:
+                    return slot
+            return len(product_overrides) + body_items.index(item)
+
+        prepared = [*hero_items, *sorted(body_items, key=override_slot)]
 
     return prepared
 

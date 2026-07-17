@@ -59,6 +59,17 @@ export type CompressionRecord = {
   prompt_version?: string;
 };
 
+export type ContentVersion = {
+  kind: string;
+  content: string;
+  word_count: number;
+  content_hash: string;
+  created_at: string;
+  source_kind: string;
+  source_hash?: string;
+  prompt_version?: string;
+};
+
 export type ArticleImage = {
   id: string;
   source_path: string;
@@ -70,6 +81,7 @@ export type ArticleImage = {
   filename: string;
   marker: string;
   product_name?: string;
+  product_url?: string;
   status?: string;
   error?: string;
   anchor_candidates?: Array<{
@@ -118,6 +130,20 @@ export type TaskRecord = {
   id: string;
   week_folder: string;
   customer: string;
+  brand_name?: string;
+  project_introduction?: string;
+  project_notes?: string;
+  topic_notes?: string;
+  outline_custom_prompt?: string;
+  article_custom_prompt?: string;
+  use_outline_custom_prompt?: boolean;
+  use_article_custom_prompt?: boolean;
+  include_project_introduction?: boolean;
+  include_project_notes?: boolean;
+  include_topic_notes?: boolean;
+  source_key?: string;
+  synced_from_task_id?: string;
+  synced_from_week?: string;
   topic_index: number;
   topic: string;
   competitor_keyword: string;
@@ -127,12 +153,14 @@ export type TaskRecord = {
   title_candidates: string[];
   selected_title: string;
   outline: string;
+  outline_draft?: string;
   article: string;
   raw_draft_article?: string;
   initial_article?: string;
   humanized_article?: string;
   linked_article?: string;
   final_article?: string;
+  article_versions?: ContentVersion[];
   raw_draft_word_count?: number;
   initial_article_word_count?: number;
   humanized_article_word_count?: number;
@@ -201,6 +229,74 @@ export type PublicConfig = {
   integrations?: {
     tavily_ready: boolean;
   };
+};
+
+export type BatchOperation =
+  | "titles"
+  | "products"
+  | "outline"
+  | "article"
+  | "rewrite_article"
+  | "humanize"
+  | "restore_links"
+  | "prepare_images"
+  | "export_docx"
+  | "generate_tdk"
+  | "package_delivery";
+
+export type BatchJobStatus =
+  | "queued"
+  | "running"
+  | "retry_wait"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "conflict";
+
+export type BatchJobRecord = {
+  id: string;
+  batch_id: string;
+  task_id: string;
+  customer: string;
+  topic_index: number;
+  topic: string;
+  operation: BatchOperation;
+  status: BatchJobStatus;
+  request: Record<string, unknown>;
+  source_revision: number;
+  result_revision: number | null;
+  attempts: number;
+  max_attempts: number;
+  available_at: number;
+  cancel_requested: boolean;
+  error: string;
+  created_at: string;
+  started_at: string;
+  finished_at: string;
+  updated_at: string;
+};
+
+export type BatchRecord = {
+  id: string;
+  operation: BatchOperation;
+  customer: string;
+  status:
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "cancelled"
+    | "completed_with_errors";
+  total: number;
+  completed: number;
+  status_counts: Record<string, number>;
+  jobs: BatchJobRecord[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type BatchCreateResponse = {
+  batch: BatchRecord | null;
+  rejected: Array<{ task_id: string; message: string }>;
 };
 
 export type ApiMessage = {

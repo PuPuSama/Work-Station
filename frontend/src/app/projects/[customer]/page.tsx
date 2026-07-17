@@ -1,4 +1,4 @@
-import { ArticleWorkbench } from "@/components/article-workbench";
+import { redirect } from "next/navigation";
 
 type ProjectPageProps = {
   params: Promise<{
@@ -8,5 +8,6 @@ type ProjectPageProps = {
 
 export default async function ProjectPage({ params }: ProjectPageProps) {
   const { customer } = await params;
-  return <ArticleWorkbench customer={decodeURIComponent(customer)} />;
+  const projectName = decodeURIComponent(customer);
+  redirect(`/projects/${encodeURIComponent(projectName)}/articles`);
 }

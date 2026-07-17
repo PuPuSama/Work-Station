@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 STATUS_NEW = "new"
 STATUS_TITLES_READY = "titles_ready"
@@ -154,6 +154,20 @@ class TaskRecord(WorkflowModel):
     id: str
     week_folder: str
     customer: str
+    brand_name: str = ""
+    project_introduction: str = ""
+    project_notes: str = ""
+    topic_notes: str = ""
+    outline_custom_prompt: str = ""
+    article_custom_prompt: str = ""
+    use_outline_custom_prompt: bool = False
+    use_article_custom_prompt: bool = False
+    include_project_introduction: bool = True
+    include_project_notes: bool = True
+    include_topic_notes: bool = True
+    source_key: str = ""
+    synced_from_task_id: str = ""
+    synced_from_week: str = ""
     topic_index: int
     topic: str
     competitor_keyword: str = ""
@@ -163,6 +177,9 @@ class TaskRecord(WorkflowModel):
     title_candidates: list[str] = Field(default_factory=list)
     selected_title: str = ""
     outline: str = ""
+    # Editable outline buffer. ``outline`` remains the last confirmed version
+    # used for article generation, while this field may contain a newer draft.
+    outline_draft: str = ""
 
     # `article` remains the compatibility mirror used by the v1 API/exporter.
     article: str = ""
@@ -214,10 +231,15 @@ class SelectTitleRequest(RevisionedRequest):
 
 class OutlineUpdateRequest(RevisionedRequest):
     outline: str
+    confirmed: bool = True
 
 
 class ArticleUpdateRequest(RevisionedRequest):
     article: str
+
+
+class VersionRestoreRequest(RevisionedRequest):
+    version_index: int = Field(ge=0)
 
 
 class ProductsUpdateRequest(RevisionedRequest):
@@ -230,6 +252,43 @@ class ZeroGptReportRequest(RevisionedRequest):
 
 class GenerateArticleRequest(RevisionedRequest):
     word_count: int | None = None
+    custom_prompt: str | None = Field(default=None, max_length=40000)
+    use_custom_prompt: bool | None = None
+    include_project_introduction: bool | None = None
+    include_project_notes: bool | None = None
+    include_topic_notes: bool | None = None
+
+
+class GenerateOutlineRequest(RevisionedRequest):
+    custom_prompt: str | None = Field(default=None, max_length=40000)
+    use_custom_prompt: bool | None = None
+    include_project_introduction: bool | None = None
+    include_project_notes: bool | None = None
+    include_topic_notes: bool | None = None
+
+
+class AutoProductsRequest(RevisionedRequest):
+    limit: int = Field(default=3, ge=1, le=3)
+
+
+class ProjectBrandUpdateRequest(WorkflowModel):
+    brand_name: str = Field(default="", max_length=120)
+
+
+class ProjectContextUpdateRequest(WorkflowModel):
+    project_introduction: str = Field(default="", max_length=30000)
+    project_notes: str = Field(default="", max_length=30000)
+
+
+class WritingSettingsUpdateRequest(RevisionedRequest):
+    topic_notes: str = Field(default="", max_length=30000)
+    outline_custom_prompt: str = Field(default="", max_length=40000)
+    article_custom_prompt: str = Field(default="", max_length=40000)
+    use_outline_custom_prompt: bool = False
+    use_article_custom_prompt: bool = False
+    include_project_introduction: bool = True
+    include_project_notes: bool = True
+    include_topic_notes: bool = True
 
 
 class AICheckUpdateRequest(RevisionedRequest):
@@ -240,7 +299,9 @@ class AICheckUpdateRequest(RevisionedRequest):
 
 class ImagesUpdateRequest(RevisionedRequest):
     hero_image: str = ""
-    images: list[ArticleImage] = Field(default_factory=list)
+    # ``None`` means the client only updates the hero path.  An explicit empty
+    # list is meaningful and clears previously prepared/anchored images.
+    images: list[ArticleImage] | None = None
 
 
 class DashboardSummary(WorkflowModel):
@@ -251,6 +312,88 @@ class DashboardSummary(WorkflowModel):
     completed_count: int
     status_counts: dict[str, int]
     llm_ready: bool
+
+
+BatchOperation = Literal[
+    "titles",
+    "products",
+    "outline",
+    "article",
+    "rewrite_article",
+    "humanize",
+    "restore_links",
+    "prepare_images",
+    "export_docx",
+    "generate_tdk",
+    "package_delivery",
+]
+BatchJobStatus = Literal[
+    "queued",
+    "running",
+    "retry_wait",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "conflict",
+]
+
+
+class BatchCreateRequest(WorkflowModel):
+    operation: BatchOperation
+    task_ids: list[str] = Field(min_length=1, max_length=100)
+    word_count: int | None = Field(default=None, ge=300, le=5000)
+
+
+class BatchPreflightIssue(WorkflowModel):
+    task_id: str
+    message: str
+
+
+class BatchJobRecord(WorkflowModel):
+    id: str
+    batch_id: str
+    task_id: str
+    customer: str
+    topic_index: int
+    topic: str
+    operation: BatchOperation
+    status: BatchJobStatus
+    request: dict[str, Any] = Field(default_factory=dict)
+    source_revision: int
+    result_revision: int | None = None
+    attempts: int = 0
+    max_attempts: int = 4
+    available_at: float = 0
+    cancel_requested: bool = False
+    error: str = ""
+    created_at: str
+    started_at: str = ""
+    finished_at: str = ""
+    updated_at: str
+
+
+class BatchRecord(WorkflowModel):
+    id: str
+    operation: BatchOperation
+    customer: str = ""
+    status: Literal[
+        "queued",
+        "running",
+        "succeeded",
+        "cancelled",
+        "completed_with_errors",
+    ]
+    total: int
+    completed: int
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    jobs: list[BatchJobRecord] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class BatchCreateResponse(WorkflowModel):
+    batch: BatchRecord | None = None
+    rejected: list[BatchPreflightIssue] = Field(default_factory=list)
 
 
 class ApiMessage(WorkflowModel):

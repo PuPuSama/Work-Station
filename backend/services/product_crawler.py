@@ -42,6 +42,7 @@ MAX_ENRICH_CANDIDATES = 14
 MAX_RAW_CANDIDATES = 50
 MAX_CONTAINER_PROBES = 8
 DISCOVERY_TARGET_CANDIDATES = MAX_ENRICH_CANDIDATES
+MIN_PREFERRED_CATEGORY_MEMBERS = 3
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MIN_IMAGE_BYTES = 1500
 MIN_IMAGE_WIDTH = 180
@@ -77,32 +78,101 @@ STOPWORDS = {
     "your",
 }
 TAVILY_QUERY_STOPWORDS = STOPWORDS | {
+    "a",
     "affect",
     "affects",
     "and",
+    "an",
     "are",
     "best",
+    "benefit",
+    "benefits",
     "can",
     "common",
+    "complete",
     "environment",
     "environments",
+    "everyday",
     "example",
     "examples",
+    "for",
     "how",
     "impact",
     "impacts",
     "its",
     "key",
+    "guide",
     "material",
     "materials",
+    "mighty",
+    "of",
     "performance",
     "practical",
     "select",
     "selecting",
+    "small",
+    "task",
+    "tasks",
     "the",
+    "to",
     "type",
     "types",
     "why",
+}
+PRODUCT_FOCUS_HEADS = {
+    "anchor",
+    "anchors",
+    "attachment",
+    "attachments",
+    "belt",
+    "belts",
+    "bolt",
+    "bolts",
+    "drill",
+    "drills",
+    "equipment",
+    "fastener",
+    "fasteners",
+    "insert",
+    "inserts",
+    "jewelry",
+    "jewellery",
+    "ladder",
+    "ladders",
+    "lamp",
+    "lamps",
+    "light",
+    "lights",
+    "machine",
+    "machines",
+    "mold",
+    "molds",
+    "mould",
+    "moulds",
+    "nut",
+    "nuts",
+    "screw",
+    "screws",
+    "washer",
+    "washers",
+}
+CATEGORY_GENERIC_TOKENS = TAVILY_QUERY_STOPWORDS | {
+    "avoid",
+    "avoiding",
+    "buyer",
+    "buyers",
+    "b2b",
+    "common",
+    "installation",
+    "mistake",
+    "mistakes",
+    "project",
+    "projects",
+    "selecting",
+    "selection",
+    "size",
+    "thread",
+    "using",
 }
 PRODUCT_PATH_HINTS = (
     "product",
@@ -152,6 +222,37 @@ LISTING_CLASS_HINTS = {
     "post-type-archive-product",
     "tax-product_cat",
 }
+LISTING_PRODUCT_CONTEXT_HINTS = (
+    "catalog-grid",
+    "collection-grid",
+    "p-item",
+    "product-card",
+    "product-grid",
+    "product-item",
+    "product-list",
+    "productny-list",
+    "products-grid",
+    "shop-loop",
+    "uc-items-wrapper",
+    "uc-post-list",
+    "uc_post_list",
+    "woocommerce",
+)
+LISTING_EXCLUDED_CONTEXT_HINTS = (
+    "cross-sell",
+    "featured-product",
+    "hot-sale",
+    "hot_sale",
+    "hotsale",
+    "main-menu",
+    "navigation",
+    "newpro",
+    "recommend",
+    "related-product",
+    "site-footer",
+    "site-header",
+    "upsell",
+)
 DETAIL_CLASS_HINTS = {
     "single-product",
     "product-template-default",
@@ -200,6 +301,7 @@ class CrawlCandidate:
     source: str = ""
     debug: list[str] = field(default_factory=list)
     detail_verified: bool = False
+    category_url: str = ""
 
 
 class SimpleHTMLParser(HTMLParser):
@@ -216,10 +318,19 @@ class SimpleHTMLParser(HTMLParser):
         self._json_ld_buffer: list[str] = []
         self.in_json_ld = False
         self.skip_depth = 0
+        self._element_stack: list[tuple[str, str]] = []
+        self._link_stack: list[dict[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {key.lower(): value or "" for key, value in attrs}
         tag = tag.lower()
+        context = normalize_space(
+            " ".join(
+                value
+                for _, value in self._element_stack
+                if value
+            )
+        )
         if tag == "body":
             self.body_class_tokens.update(
                 token.casefold()
@@ -236,9 +347,49 @@ class SimpleHTMLParser(HTMLParser):
         elif tag == "meta":
             self.meta.append(attributes)
         elif tag == "a":
-            self.links.append(attributes)
+            link = dict(attributes)
+            link["_context"] = normalize_space(
+                " ".join(
+                    [
+                        context,
+                        attributes.get("id", ""),
+                        attributes.get("class", ""),
+                        attributes.get("role", ""),
+                    ]
+                )
+            )
+            link["_text"] = ""
+            self.links.append(link)
+            self._link_stack.append(link)
         elif tag == "img":
             self.images.append(attributes)
+        if tag not in {
+            "area",
+            "base",
+            "br",
+            "col",
+            "embed",
+            "hr",
+            "img",
+            "input",
+            "link",
+            "meta",
+            "param",
+            "source",
+            "track",
+            "wbr",
+        }:
+            descriptor = normalize_space(
+                " ".join(
+                    [
+                        tag,
+                        attributes.get("id", ""),
+                        attributes.get("class", ""),
+                        attributes.get("role", ""),
+                    ]
+                )
+            )
+            self._element_stack.append((tag, descriptor))
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -252,6 +403,12 @@ class SimpleHTMLParser(HTMLParser):
             self.skip_depth -= 1
         if tag == "title":
             self.in_title = False
+        if tag == "a" and self._link_stack:
+            self._link_stack.pop()
+        for index in range(len(self._element_stack) - 1, -1, -1):
+            if self._element_stack[index][0] == tag:
+                del self._element_stack[index:]
+                break
 
     def handle_data(self, data: str) -> None:
         if self.in_json_ld:
@@ -264,6 +421,9 @@ class SimpleHTMLParser(HTMLParser):
             self.title_parts.append(text)
         elif not self.skip_depth:
             self.text_parts.append(text)
+            if self._link_stack:
+                link = self._link_stack[-1]
+                link["_text"] = normalize_space(f'{link.get("_text", "")} {text}')
 
     @property
     def title(self) -> str:
@@ -286,12 +446,6 @@ def recommend_products(
     # contract allows at most three automatic recommendations.
     limit = max(1, min(int(limit), 3))
     base_url = site_base_url(task.customer)
-    started_at = time.monotonic()
-    deadline = started_at + MAX_CRAWL_SECONDS
-    discovery_deadline = min(
-        started_at + MAX_DISCOVERY_SECONDS,
-        deadline - MIN_POST_DISCOVERY_SECONDS,
-    )
     terms = search_terms(task)
     candidates: list[CrawlCandidate] = []
     seen_urls: set[str] = set()
@@ -312,6 +466,17 @@ def recommend_products(
             rough_score_candidate(candidate, terms, base_url)
             if candidate.score > 0:
                 candidates.append(candidate)
+
+    # Tavily has its own request timeout and is only a supplementary URL
+    # discovery source. Start the official-site crawl budget afterwards so a
+    # slow search response cannot consume the time needed to expand category
+    # pages and verify product details.
+    started_at = time.monotonic()
+    deadline = started_at + MAX_CRAWL_SECONDS
+    discovery_deadline = min(
+        started_at + MAX_DISCOVERY_SECONDS,
+        deadline - MIN_POST_DISCOVERY_SECONDS,
+    )
 
     for candidate in collect_candidates(base_url, terms, discovery_deadline):
         normalized_candidate_url = normalize_url(candidate.url)
@@ -401,6 +566,7 @@ def recommend_products(
                 "image_url": candidate.image_url,
                 "score": candidate.score,
                 "source": candidate.source,
+                "category_url": candidate.category_url,
                 "debug": candidate.debug,
             }
             for candidate in candidates[:20]
@@ -411,6 +577,10 @@ def recommend_products(
 
 def tavily_product_query(terms: list[str]) -> str:
     """Collapse overlapping article phrases into one product-oriented query."""
+
+    focus = product_focus_phrase(terms)
+    if focus:
+        return f"{focus} products"
 
     tokens: list[str] = []
     seen: set[str] = set()
@@ -435,6 +605,94 @@ def tavily_product_query(terms: list[str]) -> str:
     if not re.search(r"\bproducts?\b", query, flags=re.IGNORECASE):
         query = f"{query} products"
     return query
+
+
+def product_focus_phrase(terms: list[str]) -> str:
+    """Extract the product family and drop article-angle wording from search."""
+
+    for term in unique(terms):
+        value = normalize_space(term).casefold()
+        if not value or value.startswith("http"):
+            continue
+        if re.search(r"\bself[\s-]+tappers?\b", value):
+            return "self tapping screw"
+        if re.search(r"\bwoodscrews?\b|\bwood[\s-]+screws?\b", value):
+            return "wood screws"
+        if re.search(r"\bdrywall[\s-]*screws?\b|\bdry[\s-]+wall[\s-]+screws?\b", value):
+            return "drywall screws"
+
+        raw_tokens = re.findall(r"[a-z0-9]+", value)
+        for index, token in enumerate(raw_tokens):
+            if token not in PRODUCT_FOCUS_HEADS:
+                continue
+            start = max(0, index - 3)
+            phrase_tokens = [
+                item
+                for item in raw_tokens[start : index + 1]
+                if item not in CATEGORY_GENERIC_TOKENS
+            ]
+            if phrase_tokens:
+                return " ".join(phrase_tokens)
+    return ""
+
+
+def taxonomy_tokens(value: str) -> set[str]:
+    """Normalize simple singular/plural and compound product-family variants."""
+
+    normalized: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+", parse.unquote(str(value or "")).casefold()):
+        normalized.add(token)
+        if len(token) > 4 and token.endswith("ies"):
+            normalized.add(token[:-3] + "y")
+        elif len(token) > 4 and token.endswith("s") and not token.endswith("ss"):
+            normalized.add(token[:-1])
+        if re.fullmatch(r"woodscrews?", token):
+            normalized.update({"wood", "screw", "woodscrew"})
+        if token == "drywall":
+            normalized.update({"dry", "wall"})
+        if token == "stool":
+            # A stool ladder is normally catalogued as a compact step ladder,
+            # not under a generic telescopic-ladder branch.
+            normalized.add("step")
+    return normalized
+
+
+def category_relevance_score(candidate: CrawlCandidate, terms: list[str]) -> int:
+    """Prefer the narrowest official category that overlaps the article product family."""
+
+    topic_tokens = taxonomy_tokens(" ".join(terms)) - CATEGORY_GENERIC_TOKENS
+    category_tokens = taxonomy_tokens(f"{candidate.name} {candidate.url}")
+    overlap = topic_tokens.intersection(category_tokens)
+    if not overlap:
+        return 0
+    score = sum(2 if len(token) >= 5 else 1 for token in overlap)
+    path_depth = len([part for part in parse.urlparse(candidate.url).path.split("/") if part])
+    # Specific taxonomy overlap must dominate path depth. Otherwise a deeper
+    # but unrelated branch (for example telescopic/aluminum) can beat the
+    # correct Step Ladder category merely because it has one extra segment.
+    return score * 10 + min(path_depth, 5)
+
+
+def link_has_excluded_listing_context(link: dict[str, str]) -> bool:
+    context = link.get("_context", "").casefold()
+    return any(hint in context for hint in LISTING_EXCLUDED_CONTEXT_HINTS)
+
+
+def link_has_product_listing_context(link: dict[str, str]) -> bool:
+    context = link.get("_context", "").casefold()
+    return any(hint in context for hint in LISTING_PRODUCT_CONTEXT_HINTS)
+
+
+def listing_member_links(parser: SimpleHTMLParser) -> list[dict[str, str]]:
+    """Keep product-card links and discard navigation, related, and Hot Sale modules."""
+
+    allowed = [
+        link
+        for link in parser.links
+        if link.get("href") and not link_has_excluded_listing_context(link)
+    ]
+    scoped = [link for link in allowed if link_has_product_listing_context(link)]
+    return scoped or allowed
 
 
 def candidates_from_tavily(
@@ -606,9 +864,12 @@ def candidates_from_product_indexes(base_url: str, terms: list[str], deadline: f
         *,
         source: str,
         debug: list[str],
+        category_members_only: bool = False,
+        category_url: str = "",
     ) -> list[CrawlCandidate]:
         added: list[CrawlCandidate] = []
-        for link in parser.links:
+        links = listing_member_links(parser) if category_members_only else parser.links
+        for link in links:
             href = link.get("href", "")
             if not href:
                 continue
@@ -621,17 +882,27 @@ def candidates_from_product_indexes(base_url: str, terms: list[str], deadline: f
                 or not is_product_index_candidate(page_url, url, terms)
             ):
                 continue
+            if category_members_only and (
+                is_known_listing_url(url)
+                or looks_like_blog(url)
+                or link_has_excluded_listing_context(link)
+            ):
+                continue
             if normalize_url(url).rstrip("/") == normalize_url(page_url).rstrip("/"):
                 continue
             seen.add(normalized)
             name = clean_html_text(
-                link.get("title") or link.get("aria-label") or product_name_from_url(url)
+                link.get("_text")
+                or link.get("title")
+                or link.get("aria-label")
+                or product_name_from_url(url)
             )
             candidate = CrawlCandidate(
                 name=name,
                 url=url,
                 source=source,
                 debug=list(debug),
+                category_url=category_url,
             )
             candidates.append(candidate)
             added.append(candidate)
@@ -653,36 +924,69 @@ def candidates_from_product_indexes(base_url: str, terms: list[str], deadline: f
             source="product-index",
             debug=[index_url],
         )
-        if len(candidates) >= MAX_RAW_CANDIDATES:
-            return candidates
-        if len(candidates) >= DISCOVERY_TARGET_CANDIDATES:
-            return candidates
 
-        # Many B2B sites expose only category tiles on /products/. Probe a
-        # bounded number of those first-level links; confirmed listing pages
-        # are containers whose product-card links must be added to the pool.
-        for container in direct[:MAX_CONTAINER_PROBES]:
-            if expired(deadline) or len(candidates) >= MAX_RAW_CANDIDATES:
+        # Many B2B sites expose only category tiles on /products/. Rank those
+        # containers against the article's product family before probing them,
+        # so a woodscrew article reaches the woodscrew category before broad
+        # Hot Sale, drill-bit, or nut pages.
+        ranked_containers = sorted(
+            enumerate(direct),
+            key=lambda item: (category_relevance_score(item[1], terms), -item[0]),
+            reverse=True,
+        )
+        preferred_members: list[CrawlCandidate] = []
+        preferred_score = 0
+        for _, container in ranked_containers[:MAX_CONTAINER_PROBES]:
+            if expired(deadline):
                 break
+            relevance = category_relevance_score(container, terms)
+            fetch_timeout = discovery_fetch_timeout(deadline)
+            if relevance > 0:
+                remaining = max(1, int(deadline - time.monotonic()))
+                fetch_timeout = max(fetch_timeout, min(DEFAULT_FETCH_TIMEOUT, remaining))
             container_html = fetch_text(
                 container.url,
-                timeout=discovery_fetch_timeout(deadline),
+                timeout=fetch_timeout,
             )
             if not container_html:
                 continue
             container_parser = parse_html(container_html)
             if not is_product_listing_page(container.url, container_parser, terms):
                 continue
+            previous_candidates = list(candidates)
+            previous_seen = set(seen)
             container.debug.append("listing-container")
             candidates.remove(container)
-            append_links(
+            source = "product-category" if relevance > 0 else "product-container"
+            if relevance > 0:
+                # A full generic index must not prevent the closest taxonomy
+                # category from supplying its own product-detail candidates.
+                candidates.clear()
+                seen.clear()
+            added = append_links(
                 container_parser,
                 container.url,
-                source="product-container",
-                debug=[index_url, container.url],
+                source=source,
+                debug=[index_url, f"category={container.url}"],
+                category_members_only=True,
+                category_url=container.url,
             )
+            if relevance > 0 and not added:
+                candidates[:] = previous_candidates
+                seen.clear()
+                seen.update(previous_seen)
+            if relevance > preferred_score and added:
+                preferred_score = relevance
+                preferred_members = added
+            if relevance > 0 and len(added) >= MIN_PREFERRED_CATEGORY_MEMBERS:
+                return added
             if len(candidates) >= DISCOVERY_TARGET_CANDIDATES:
                 return candidates
+        if preferred_members:
+            preferred_urls = {normalize_url(item.url) for item in preferred_members}
+            return preferred_members + [
+                item for item in candidates if normalize_url(item.url) not in preferred_urls
+            ]
     return candidates
 
 
@@ -798,6 +1102,8 @@ def rough_score_candidate(candidate: CrawlCandidate, terms: list[str], base_url:
         score += 4
     if candidate.source == "tavily":
         score += 8
+    if candidate.source == "product-category":
+        score += 80
     if looks_like_blog(candidate.url):
         score -= 8
     candidate.score = score
@@ -824,6 +1130,8 @@ def score_candidate(candidate: CrawlCandidate, terms: list[str], base_url: str) 
         score += 5
     if candidate.source == "tavily":
         score += 8
+    if candidate.source == "product-category":
+        score += 100
     if candidate.source == "rest:media":
         score -= 8
     if contains_bad_image_hint(haystack):
@@ -939,7 +1247,11 @@ def search_terms(task: TaskRecord) -> list[str]:
             if len(phrase) >= 8:
                 terms.append(phrase)
     terms.extend(tokens[:8])
-    return unique([term for term in terms if term])
+    terms = unique([term for term in terms if term])
+    focus = product_focus_phrase(terms)
+    if focus:
+        terms = [focus] + [term for term in terms if term.casefold() != focus.casefold()]
+    return terms
 
 
 RedirectValidator = Callable[[str], bool | None]
@@ -1247,6 +1559,16 @@ def is_product_listing_page(
     schema_types = json_ld_types(parser)
     if is_known_listing_url(page_url):
         return True
+    og_type = first_meta(parser, "og:type").strip().casefold()
+    if (
+        "product" in schema_types
+        or og_type == "product"
+        or _has_class_hint(parser.body_class_tokens, DETAIL_CLASS_HINTS)
+    ):
+        # Product detail templates often repeat a category menu and several
+        # related products in their footer. Explicit detail-page evidence must
+        # win over those generic listing signals (for example jadduo.cn).
+        return False
     if _has_class_hint(parser.body_class_tokens, LISTING_CLASS_HINTS):
         return True
     if schema_types.intersection(LISTING_SCHEMA_TYPES - {"itemlist"}):

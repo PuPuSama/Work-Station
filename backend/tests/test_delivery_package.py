@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -67,7 +66,7 @@ class DeliveryPackageTests(unittest.TestCase):
             self.assertTrue((output / "final-ai-rate.png").is_file())
             self.assertFalse((output / "images").exists())
             self.assertFalse((output / "AI rate screenshots").exists())
-            self.assertTrue((output / "delivery_manifest.json").is_file())
+            self.assertFalse((output / "delivery_manifest.json").exists())
 
             second_output = package_delivery(task)
             self.assertEqual(second_output, output)
@@ -138,7 +137,7 @@ class DeliveryPackageTests(unittest.TestCase):
 
             self.assertFalse((Path(task.task_dir) / "www.example.com").exists())
 
-    def test_repackage_removes_empty_legacy_image_directories(self) -> None:
+    def test_repackage_removes_legacy_files_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             task = task_at(root)
@@ -157,22 +156,15 @@ class DeliveryPackageTests(unittest.TestCase):
             old_screenshot.parent.mkdir(parents=True)
             old_image.write_bytes(b"old-image")
             old_screenshot.write_bytes(b"old-screenshot")
-            (delivery / "delivery_manifest.json").write_text(
-                json.dumps(
-                    {
-                        "files": [
-                            {"delivery": str(old_image)},
-                            {"delivery": str(old_screenshot)},
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
+            (delivery / "delivery_manifest.json").write_text("{}", encoding="utf-8")
+            (delivery / "stale-file.txt").write_text("stale", encoding="utf-8")
 
             package_delivery(task)
 
             self.assertFalse((delivery / "images").exists())
             self.assertFalse((delivery / "AI rate screenshots").exists())
+            self.assertFalse((delivery / "delivery_manifest.json").exists())
+            self.assertFalse((delivery / "stale-file.txt").exists())
             self.assertTrue((delivery / "hero.webp").is_file())
             self.assertTrue((delivery / "final-ai-rate.png").is_file())
 

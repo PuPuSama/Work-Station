@@ -2,7 +2,7 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { ArrowRight, Loader2, RefreshCw, Search, Sparkles } from "lucide-react";
+import { ArrowRight, Loader2, RefreshCw, Search, Settings2, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -25,6 +25,9 @@ import type { ApiMessage, DashboardSummary, PublicConfig, TaskRecord } from "@/t
 
 type ProjectSummary = {
   customer: string;
+  brandName: string;
+  projectIntroduction: string;
+  projectNotes: string;
   taskCount: number;
   completedCount: number;
   updatedAt: string;
@@ -39,9 +42,20 @@ export function ProjectSelector() {
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [query, setQuery] = useState("");
-  const [busy, setBusy] = useState("");
+  const [pendingActions, setPendingActions] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  function setPending(key: string, pending: boolean) {
+    setPendingActions((current) => {
+      if (pending) return { ...current, [key]: true };
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  const isPending = (key: string) => Boolean(pendingActions[key]);
 
   const loadData = useCallback(async () => {
     const [nextDashboard, nextConfig, nextTasks] = await Promise.all([
@@ -65,6 +79,9 @@ export function ProjectSelector() {
       if (!existing) {
         grouped.set(task.customer, {
           customer: task.customer,
+          brandName: task.brand_name ?? "",
+          projectIntroduction: task.project_introduction ?? "",
+          projectNotes: task.project_notes ?? "",
           taskCount: 1,
           completedCount: task.status === "docx_exported" ? 1 : 0,
           updatedAt: task.updated_at,
@@ -72,6 +89,15 @@ export function ProjectSelector() {
         continue;
       }
       existing.taskCount += 1;
+      if (task.brand_name) {
+        existing.brandName = task.brand_name;
+      }
+      if (task.project_introduction) {
+        existing.projectIntroduction = task.project_introduction;
+      }
+      if (task.project_notes) {
+        existing.projectNotes = task.project_notes;
+      }
       if (task.status === "docx_exported") {
         existing.completedCount += 1;
       }
@@ -89,27 +115,42 @@ export function ProjectSelector() {
     if (!normalized) {
       return projects;
     }
-    return projects.filter((project) =>
-      project.customer.toLowerCase().includes(normalized),
+    return projects.filter(
+      (project) =>
+        project.customer.toLowerCase().includes(normalized) ||
+        project.brandName.toLowerCase().includes(normalized),
     );
   }, [projects, query]);
 
-  async function initializeWeek() {
-    setBusy("init");
+  async function syncTasks() {
+    setPending("sync", true);
     setError("");
     setMessage("");
     try {
-      const result = await apiPost<ApiMessage>("/api/init-week");
+      const result = await apiPost<ApiMessage>("/api/sync-tasks");
       await loadData();
       setMessage(result.message);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
-      setBusy("");
+      setPending("sync", false);
     }
   }
 
-  const isBusy = Boolean(busy);
+  async function refreshProjects() {
+    setPending("refresh", true);
+    setError("");
+    setMessage("");
+    try {
+      await loadData();
+      setMessage("数据已刷新");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPending("refresh", false);
+    }
+  }
+
   const completion = dashboard?.task_count
     ? Math.round((dashboard.completed_count / dashboard.task_count) * 100)
     : 0;
@@ -128,26 +169,29 @@ export function ProjectSelector() {
               </Badge>
             </div>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-              <span>{dashboard?.week_folder ?? config?.current_week_folder ?? "未初始化"}</span>
-              <span>{dashboard?.week_path ?? config?.current_week_path}</span>
+              <span>长期任务，不按周重复创建</span>
+              <span>{config?.output_root}</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
-              onClick={() =>
-                loadData()
-                  .then(() => setMessage("数据已刷新"))
-                  .catch((err) => setError(errorMessage(err)))
-              }
-              disabled={isBusy}
+              onClick={() => void refreshProjects()}
+              disabled={isPending("sync") || isPending("refresh")}
             >
-              <RefreshCw />
+              {isPending("refresh") ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <RefreshCw />
+              )}
               刷新
             </Button>
-            <Button onClick={initializeWeek} disabled={isBusy}>
-              {isBusy ? <Loader2 className="animate-spin" /> : <Sparkles />}
-              初始化本周任务
+            <Button
+              onClick={syncTasks}
+              disabled={isPending("sync") || isPending("refresh")}
+            >
+              {isPending("sync") ? <Loader2 className="animate-spin" /> : <Sparkles />}
+              同步话题库
             </Button>
           </div>
         </div>
@@ -210,30 +254,70 @@ export function ProjectSelector() {
                       ? Math.round((project.completedCount / project.taskCount) * 100)
                       : 0;
                     return (
-                      <Link
+                      <div
                         key={project.customer}
-                        href={`/projects/${encodeURIComponent(project.customer)}`}
-                        className="block rounded-lg border bg-card p-4 text-card-foreground transition-colors hover:bg-accent/40"
+                        className="overflow-hidden rounded-lg border bg-card text-card-foreground"
                       >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="truncate font-medium">
-                              {project.customer}
+                        <Link
+                          href={`/projects/${encodeURIComponent(project.customer)}/articles`}
+                          className="block p-4 transition-colors hover:bg-accent/40"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
+                                {project.brandName || project.customer}
+                              </div>
+                              {project.brandName && (
+                                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                                  {project.customer}
+                                </div>
+                              )}
+                              <div className="mt-1 text-sm text-muted-foreground">
+                                {project.taskCount} tasks / {project.completedCount} exported
+                              </div>
                             </div>
-                            <div className="mt-1 text-sm text-muted-foreground">
-                              {project.taskCount} tasks / {project.completedCount} exported
+                            <ArrowRight className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                          </div>
+                          <div className="mt-4 grid gap-2">
+                            <div className="flex items-center justify-between text-xs text-muted-foreground">
+                              <span>完成率</span>
+                              <span>{percent}%</span>
                             </div>
+                            <Progress value={percent} />
                           </div>
-                          <ArrowRight className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                        </div>
-                        <div className="mt-4 grid gap-2">
-                          <div className="flex items-center justify-between text-xs text-muted-foreground">
-                            <span>完成率</span>
-                            <span>{percent}%</span>
+                        </Link>
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 p-3">
+                          <div className="flex flex-wrap gap-2">
+                            <Badge variant={project.brandName ? "secondary" : "outline"}>
+                              {project.brandName ? "品牌名已设置" : "品牌名待设置"}
+                            </Badge>
+                            <Badge
+                              variant={
+                                project.projectIntroduction && project.projectNotes
+                                  ? "secondary"
+                                  : "outline"
+                              }
+                            >
+                              {project.projectIntroduction && project.projectNotes
+                                ? "项目资料已完善"
+                                : "项目资料待完善"}
+                            </Badge>
                           </div>
-                          <Progress value={percent} />
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            nativeButton={false}
+                            render={
+                              <Link
+                                href={`/projects/${encodeURIComponent(project.customer)}/settings`}
+                              />
+                            }
+                          >
+                            <Settings2 />
+                            项目设置
+                          </Button>
                         </div>
-                      </Link>
+                      </div>
                     );
                   })}
                 </div>

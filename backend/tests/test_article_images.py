@@ -33,6 +33,66 @@ def make_webp(path: Path, color: tuple[int, int, int]) -> None:
 
 
 class ArticleImageTests(unittest.TestCase):
+    def test_manual_product_image_override_order_controls_body_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_dir = Path(temporary) / "task"
+            first = task_dir / "incoming" / "first.png"
+            second = task_dir / "incoming" / "second.png"
+            make_png(first, (20, 80, 140))
+            make_png(second, (140, 80, 20))
+            article = """# Product Guide
+
+This introduction explains the available products.
+
+## Product Choices
+
+Choose [Product One](https://example.com/one) for one application.
+
+Choose [Product Two](https://example.com/two) for another application.
+"""
+            products = [
+                SimpleNamespace(
+                    name="Product One",
+                    url="https://example.com/one",
+                    image_path=str(first),
+                ),
+                SimpleNamespace(
+                    name="Product Two",
+                    url="https://example.com/two",
+                    image_path=str(second),
+                ),
+            ]
+            task = SimpleNamespace(
+                task_dir=str(task_dir),
+                selected_title="Product Guide",
+                article=article,
+                hero_image="",
+                products=products,
+                images=[
+                    SimpleNamespace(
+                        id="slot-2",
+                        role="product",
+                        source_path=str(second),
+                        product_name="Product Two",
+                        product_url="https://example.com/two",
+                    ),
+                    SimpleNamespace(
+                        id="slot-3",
+                        role="product",
+                        source_path=str(first),
+                        product_name="Product One",
+                        product_url="https://example.com/one",
+                    ),
+                ],
+            )
+
+            prepared = prepare_task_images(task)
+
+            self.assertEqual(
+                [item["product_name"] for item in prepared],
+                ["Product Two", "Product One"],
+            )
+
     def test_safe_names_webp_conversion_and_duplicate_product_names(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             task_dir = Path(temporary) / "task"
@@ -352,7 +412,7 @@ Choose [Duplicate Product](https://example.com/duplicate).
             )
             self.assertNotEqual(prepared[0]["anchor_after"], "end_of_article")
 
-    def test_product_image_is_placed_after_the_complete_hard_wrapped_paragraph(self) -> None:
+    def test_product_image_is_placed_at_the_end_of_its_smallest_heading_block(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             task_dir = Path(temporary) / "task"
             product_image = task_dir / "incoming" / "product.png"
@@ -367,6 +427,10 @@ Choose [Product Alpha](https://example.com/alpha) for the specified application
 when the material and dimensions match the confirmed requirements.
 
 This is a separate paragraph.
+
+## Next Section
+
+This content must remain after the product image.
 """
             task = SimpleNamespace(
                 task_dir=str(task_dir),
@@ -384,22 +448,20 @@ This is a separate paragraph.
             )
 
             prepared = prepare_task_images(task)
-            continuation_index = article.splitlines().index(
-                "when the material and dimensions match the confirmed requirements."
-            )
-            self.assertEqual(prepared[0]["anchor_line"], continuation_index)
+            section_end_index = article.splitlines().index("This is a separate paragraph.")
+            self.assertEqual(prepared[0]["anchor_line"], section_end_index)
 
             audit = build_image_audit_markdown(article, prepared)
             self.assertLess(
-                audit.index("when the material and dimensions match"),
+                audit.index("This is a separate paragraph."),
                 audit.index("img.Product Alpha.webp"),
             )
             self.assertLess(
                 audit.index("img.Product Alpha.webp"),
-                audit.index("This is a separate paragraph."),
+                audit.index("## Next Section"),
             )
 
-    def test_manual_heading_anchor_uses_the_end_of_its_first_prose_paragraph(self) -> None:
+    def test_manual_heading_anchor_uses_the_end_of_the_selected_heading_block(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             task_dir = Path(temporary) / "task"
             product_image = task_dir / "incoming" / "product.png"
@@ -444,10 +506,54 @@ A: Buyers should check the application requirements first.
             prepared[0]["anchor_heading"] = "Target Section"
             prepared[0]["status"] = "pending"
             placement = resolve_image_placements(article, prepared)[0]
-            expected_index = article.splitlines().index(
-                "and this line completes the same paragraph."
-            )
+            expected_index = article.splitlines().index("Another paragraph follows.")
             self.assertEqual(placement.line_index, expected_index)
+
+    def test_saved_early_line_anchor_is_advanced_to_current_subsection_end(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_dir = Path(temporary)
+            image_path = task_dir / "product.webp"
+            make_webp(image_path, (30, 70, 110))
+            article = """# Existing Anchor
+
+Opening transition.
+
+## Product Options
+
+### Drywall Systems
+
+Choose [Product Alpha](https://example.com/alpha) for the drywall application.
+
+This qualification belongs to the same product subsection.
+
+### Woodscrew Systems
+
+The next product starts here.
+"""
+            product_line = article.splitlines().index(
+                "Choose [Product Alpha](https://example.com/alpha) for the drywall application."
+            )
+            images = [
+                {
+                    "id": "product-1",
+                    "role": "product",
+                    "prepared_path": str(image_path),
+                    "filename": image_path.name,
+                    "product_name": "Product Alpha",
+                    "product_url": "https://example.com/alpha",
+                    "anchor_line": product_line,
+                    "anchor_after": "Choose Product Alpha for the drywall application.",
+                }
+            ]
+
+            placement = resolve_image_placements(article, images)[0]
+
+            self.assertEqual(
+                placement.line_index,
+                article.splitlines().index(
+                    "This qualification belongs to the same product subsection."
+                ),
+            )
 
     def test_corrupt_image_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

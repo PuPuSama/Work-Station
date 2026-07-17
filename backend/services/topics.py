@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -9,6 +8,7 @@ from openpyxl import load_workbook
 
 from config import AppConfig
 from models import STATUS_NEW, TaskRecord
+from services.task_identity import article_source_key
 from storage import now_iso
 
 
@@ -81,9 +81,10 @@ def find_columns(headers: list[str]) -> tuple[int | None, int | None, int | None
     return topic_index, keyword_index, blog_index
 
 
-def make_task_id(week_folder: str, customer: str, row_index: int, topic: str) -> str:
-    raw = f"{week_folder}|{customer}|{row_index}|{topic}"
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+def make_task_id(customer: str, topic_index: int, topic: str) -> str:
+    """Return a stable task id which survives date/week folder changes."""
+
+    return article_source_key(customer, topic, topic_index)[:12]
 
 
 def scan_topic_library(config: AppConfig) -> list[TaskRecord]:
@@ -127,17 +128,13 @@ def scan_topic_library(config: AppConfig) -> list[TaskRecord]:
 
                 task_dir = customer_dir / f"topic_{article_number:03d}"
                 task_dir.mkdir(parents=True, exist_ok=True)
-                task_id = make_task_id(
-                    config.current_week_folder,
-                    customer,
-                    article_number,
-                    f"{sheet.title}|{excel_row_number}|{topic}",
-                )
+                task_id = make_task_id(customer, article_number, topic)
                 created_at = now_iso()
                 task = TaskRecord(
                     id=task_id,
                     week_folder=config.current_week_folder,
                     customer=customer,
+                    source_key=article_source_key(customer, topic, article_number),
                     topic_index=article_number,
                     topic=topic,
                     competitor_keyword=competitor_keyword,

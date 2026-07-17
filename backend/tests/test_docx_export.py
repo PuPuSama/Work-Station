@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from xml.etree import ElementTree
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from PIL import Image
 
 
@@ -63,6 +64,341 @@ def paragraph_text(paragraph) -> str:
 
 
 class DocxExportTests(unittest.TestCase):
+    def test_homepage_link_uses_project_brand_name_in_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_dir = Path(temporary) / "task"
+            article = """# Brand Link Export
+
+This transition introduces the [Company Website](https://company.example/).
+
+## First Section
+
+This section gives buyers practical detail.
+
+""" + FAQ_BLOCK
+            task = SimpleNamespace(
+                task_dir=str(task_dir),
+                customer="https://company.example/",
+                brand_name="Acme Fasteners",
+                selected_title="Brand Link Export",
+                topic="Topic",
+                article=article,
+                final_article="",
+                linked_article="",
+                humanized_article="",
+                initial_article="",
+                hero_image="",
+                products=[],
+                images=[],
+            )
+
+            output = export_task_docx(test_config(), task)
+            exported = Document(output)
+            display = [paragraph_text(paragraph) for paragraph in exported.paragraphs]
+            self.assertIn(
+                "This transition introduces the Acme Fasteners.",
+                display,
+            )
+            self.assertNotIn("Company Website", "\n".join(display))
+
+            with zipfile.ZipFile(output) as archive:
+                document_xml = ElementTree.fromstring(archive.read("word/document.xml"))
+                hyperlinks = document_xml.findall(f".//{{{WORD_NS}}}hyperlink")
+                self.assertEqual(len(hyperlinks), 1)
+                hyperlink = hyperlinks[0]
+                self.assertEqual(
+                    "".join(
+                        node.text or ""
+                        for node in hyperlink.findall(f".//{{{WORD_NS}}}t")
+                    ),
+                    "Acme Fasteners",
+                )
+                self.assertEqual(
+                    hyperlink.find(f".//{{{WORD_NS}}}color").attrib[f"{{{WORD_NS}}}val"],
+                    "0563C1",
+                )
+
+    def test_markdown_table_exports_as_a_real_styled_docx_table(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_dir = Path(temporary) / "task"
+            article = """# Product Comparison
+
+This transition introduces the product comparison.
+
+## Comparison Table
+
+| Product | Quantity | Product Page |
+| :--- | ---: | :---: |
+| **Product Alpha** | 12 | [View Product](https://example.com/product-alpha) |
+| Special \\| Product | 8 | **[Open Product](https://example.com/product-special)** |
+Plain Product | 5 | Ends with an escaped pipe \\|
+
+The table helps buyers compare the available options.
+
+""" + FAQ_BLOCK
+            task = SimpleNamespace(
+                task_dir=str(task_dir),
+                selected_title="Product Comparison",
+                topic="Topic",
+                article=article,
+                final_article="",
+                linked_article="",
+                humanized_article="",
+                initial_article="",
+                hero_image="",
+                products=[],
+                images=[],
+            )
+
+            output = export_task_docx(test_config(), task)
+            exported = Document(output)
+            self.assertEqual(len(exported.tables), 1)
+            table = exported.tables[0]
+            self.assertEqual(len(table.rows), 4)
+            self.assertEqual(len(table.columns), 3)
+            visible_cells = [
+                [paragraph_text(cell.paragraphs[0]) for cell in row.cells]
+                for row in table.rows
+            ]
+            self.assertEqual(
+                visible_cells,
+                [
+                    ["Product", "Quantity", "Product Page"],
+                    ["Product Alpha", "12", "View Product"],
+                    ["Special | Product", "8", "Open Product"],
+                    ["Plain Product", "5", "Ends with an escaped pipe |"],
+                ],
+            )
+            self.assertEqual(
+                [cell.paragraphs[0].alignment for cell in table.rows[1].cells],
+                [
+                    WD_ALIGN_PARAGRAPH.LEFT,
+                    WD_ALIGN_PARAGRAPH.RIGHT,
+                    WD_ALIGN_PARAGRAPH.CENTER,
+                ],
+            )
+
+            with zipfile.ZipFile(output) as archive:
+                document_xml = ElementTree.fromstring(archive.read("word/document.xml"))
+                relationships = ElementTree.fromstring(
+                    archive.read("word/_rels/document.xml.rels")
+                )
+                table_xml = document_xml.find(f".//{{{WORD_NS}}}tbl")
+                self.assertIsNotNone(table_xml)
+
+                table_width = table_xml.find(
+                    f"{{{WORD_NS}}}tblPr/{{{WORD_NS}}}tblW"
+                )
+                table_indent = table_xml.find(
+                    f"{{{WORD_NS}}}tblPr/{{{WORD_NS}}}tblInd"
+                )
+                table_layout = table_xml.find(
+                    f"{{{WORD_NS}}}tblPr/{{{WORD_NS}}}tblLayout"
+                )
+                width_value = int(table_width.attrib[f"{{{WORD_NS}}}w"])
+                self.assertEqual(table_width.attrib[f"{{{WORD_NS}}}type"], "dxa")
+                self.assertEqual(table_indent.attrib[f"{{{WORD_NS}}}w"], "120")
+                self.assertEqual(table_layout.attrib[f"{{{WORD_NS}}}type"], "fixed")
+
+                grid_widths = [
+                    int(column.attrib[f"{{{WORD_NS}}}w"])
+                    for column in table_xml.findall(
+                        f"{{{WORD_NS}}}tblGrid/{{{WORD_NS}}}gridCol"
+                    )
+                ]
+                self.assertEqual(sum(grid_widths), width_value)
+                for row_xml in table_xml.findall(f"{{{WORD_NS}}}tr"):
+                    cell_widths = [
+                        int(
+                            cell.find(
+                                f"{{{WORD_NS}}}tcPr/{{{WORD_NS}}}tcW"
+                            ).attrib[f"{{{WORD_NS}}}w"]
+                        )
+                        for cell in row_xml.findall(f"{{{WORD_NS}}}tc")
+                    ]
+                    self.assertEqual(cell_widths, grid_widths)
+
+                header_row = table_xml.find(f"{{{WORD_NS}}}tr")
+                self.assertIsNotNone(
+                    header_row.find(
+                        f"{{{WORD_NS}}}trPr/{{{WORD_NS}}}tblHeader"
+                    )
+                )
+                header_fills = {
+                    shading.attrib.get(f"{{{WORD_NS}}}fill")
+                    for shading in header_row.findall(
+                        f".//{{{WORD_NS}}}tcPr/{{{WORD_NS}}}shd"
+                    )
+                }
+                self.assertEqual(header_fills, {"E7E6E6"})
+
+                for run in table_xml.findall(f".//{{{WORD_NS}}}r"):
+                    fonts = run.find(f"{{{WORD_NS}}}rPr/{{{WORD_NS}}}rFonts")
+                    self.assertIsNotNone(fonts)
+                    self.assertEqual(
+                        fonts.attrib[f"{{{WORD_NS}}}ascii"],
+                        "Times New Roman",
+                    )
+
+                hyperlinks = table_xml.findall(f".//{{{WORD_NS}}}hyperlink")
+                self.assertEqual(len(hyperlinks), 2)
+                linked_text = {
+                    "".join(
+                        node.text or ""
+                        for node in hyperlink.findall(f".//{{{WORD_NS}}}t")
+                    )
+                    for hyperlink in hyperlinks
+                }
+                self.assertEqual(linked_text, {"View Product", "Open Product"})
+                external_targets = {
+                    relationship.attrib.get("Target")
+                    for relationship in relationships.findall(f"{{{REL_NS}}}Relationship")
+                    if relationship.attrib.get("TargetMode") == "External"
+                }
+                self.assertEqual(
+                    external_targets,
+                    {
+                        "https://example.com/product-alpha",
+                        "https://example.com/product-special",
+                    },
+                )
+
+    def test_malformed_markdown_table_remains_plain_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_dir = Path(temporary) / "task"
+            article = """# Malformed Table
+
+This transition introduces an intentionally malformed table.
+
+## Comparison
+
+| Product | Quantity |
+| --- | --- |
+| Missing second cell |
+
+The malformed block should remain editable text.
+
+""" + FAQ_BLOCK
+            task = SimpleNamespace(
+                task_dir=str(task_dir),
+                selected_title="Malformed Table",
+                topic="Topic",
+                article=article,
+                final_article="",
+                linked_article="",
+                humanized_article="",
+                initial_article="",
+                hero_image="",
+                products=[],
+                images=[],
+            )
+
+            output = export_task_docx(test_config(), task)
+            exported = Document(output)
+            self.assertEqual(exported.tables, [])
+            display = [paragraph_text(paragraph) for paragraph in exported.paragraphs]
+            self.assertIn("| Product | Quantity |", display)
+            self.assertIn("| Missing second cell |", display)
+
+    def test_heading_links_and_bold_wrapped_links_render_as_real_hyperlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_dir = Path(temporary) / "task"
+            article = """# Linked Heading Export
+
+This transition explains what buyers can compare.
+
+## Product Options
+
+### [Product Alpha](https://example.com/product-alpha)
+
+**[Product Beta](https://example.com/product-beta)**
+
+The product descriptions follow these links.
+
+""" + FAQ_BLOCK
+            task = SimpleNamespace(
+                task_dir=str(task_dir),
+                selected_title="Linked Heading Export",
+                topic="Topic",
+                article=article,
+                final_article="",
+                linked_article="",
+                humanized_article="",
+                initial_article="",
+                hero_image="",
+                products=[],
+                images=[],
+            )
+
+            output = export_task_docx(test_config(), task)
+            exported = Document(output)
+            display = [paragraph_text(paragraph) for paragraph in exported.paragraphs]
+            self.assertIn("Product Alpha", display)
+            self.assertIn("Product Beta", display)
+            self.assertNotIn("**", "\n".join(display))
+            self.assertNotIn("[Product Alpha](https://example.com/product-alpha)", display)
+
+            with zipfile.ZipFile(output) as archive:
+                document_xml = ElementTree.fromstring(archive.read("word/document.xml"))
+                relationships = ElementTree.fromstring(
+                    archive.read("word/_rels/document.xml.rels")
+                )
+                relationship_targets = {
+                    relationship.attrib["Id"]: relationship.attrib.get("Target")
+                    for relationship in relationships.findall(f"{{{REL_NS}}}Relationship")
+                    if relationship.attrib.get("TargetMode") == "External"
+                }
+
+                hyperlinks = document_xml.findall(f".//{{{WORD_NS}}}hyperlink")
+                self.assertEqual(len(hyperlinks), 2)
+                linked_text = {
+                    "".join(
+                        node.text or ""
+                        for node in hyperlink.findall(f".//{{{WORD_NS}}}t")
+                    ): relationship_targets[
+                        hyperlink.attrib[
+                            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+                        ]
+                    ]
+                    for hyperlink in hyperlinks
+                }
+                self.assertEqual(
+                    linked_text,
+                    {
+                        "Product Alpha": "https://example.com/product-alpha",
+                        "Product Beta": "https://example.com/product-beta",
+                    },
+                )
+
+                alpha_hyperlink = next(
+                    hyperlink
+                    for hyperlink in hyperlinks
+                    if "".join(
+                        node.text or ""
+                        for node in hyperlink.findall(f".//{{{WORD_NS}}}t")
+                    ) == "Product Alpha"
+                )
+                alpha_run = alpha_hyperlink.find(f"{{{WORD_NS}}}r")
+                self.assertIsNotNone(alpha_run.find(f"{{{WORD_NS}}}rPr/{{{WORD_NS}}}b"))
+                self.assertEqual(
+                    alpha_run.find(f"{{{WORD_NS}}}rPr/{{{WORD_NS}}}sz").attrib[
+                        f"{{{WORD_NS}}}val"
+                    ],
+                    "26",
+                )
+                self.assertEqual(
+                    alpha_run.find(f"{{{WORD_NS}}}rPr/{{{WORD_NS}}}color").attrib[
+                        f"{{{WORD_NS}}}val"
+                    ],
+                    "0563C1",
+                )
+                self.assertEqual(
+                    alpha_run.find(f"{{{WORD_NS}}}rPr/{{{WORD_NS}}}u").attrib[
+                        f"{{{WORD_NS}}}val"
+                    ],
+                    "single",
+                )
+
     def test_images_are_inline_marked_and_links_are_real_and_bold(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             task_dir = Path(temporary) / "task"
@@ -82,7 +418,10 @@ This section introduces the decision.
 
 ### Product Alpha
 
-Choose [Product Alpha](https://example.com/product-alpha) for this application.
+Choose [Product Alpha](https://example.com/product-alpha) for this application
+when the confirmed dimensions match the assembly.
+
+This qualification remains in the same product subsection.
 
 ## FAQ
 
@@ -137,8 +476,21 @@ A: Buyers should compare capability, quality control, delivery, and support.
             product_paragraph_index = next(
                 index for index, value in enumerate(display) if value.startswith("Choose Product Alpha")
             )
-            self.assertEqual(display[product_paragraph_index + 1], "[IMAGE]")
-            self.assertEqual(display[product_paragraph_index + 2], "img.Product Alpha.webp")
+            self.assertEqual(
+                display[product_paragraph_index],
+                "Choose Product Alpha for this application when the confirmed dimensions match the assembly.",
+            )
+            qualification_index = display.index(
+                "This qualification remains in the same product subsection."
+            )
+            self.assertEqual(display[qualification_index + 1], "[IMAGE]")
+            self.assertEqual(display[qualification_index + 2], "img.Product Alpha.webp")
+            audit = (task_dir / "07_final_with_images.md").read_text(encoding="utf-8")
+            self.assertLess(
+                audit.index("This qualification remains in the same product subsection."),
+                audit.index("img.Product Alpha.webp"),
+            )
+            self.assertLess(audit.index("img.Product Alpha.webp"), audit.index("## FAQ"))
             self.assertNotIn("Recommended Products", display)
             faq_index = display.index("FAQ")
             self.assertGreater(faq_index, product_paragraph_index)

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from models import TaskRecord
-from storage import now_iso
 
 
 INVALID_WINDOWS_CHARS = '<>:"/\\|?*'
@@ -88,34 +86,27 @@ def _validate_delivery_images(image_sources: list[Path]) -> None:
         seen_hashes[content_hash] = source
 
 
-def _remove_previous_delivery_files(destination: Path) -> None:
-    manifest_path = destination / "delivery_manifest.json"
-    if not manifest_path.is_file():
-        return
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return
+def _reset_delivery_directory(task_directory: Path, destination: Path) -> None:
+    """Rebuild the generated delivery folder without shipping internal metadata."""
 
+    task_root = task_directory.resolve()
     destination_root = destination.resolve()
-    for item in manifest.get("files", []):
-        if not isinstance(item, dict) or not item.get("delivery"):
-            continue
-        candidate = Path(str(item["delivery"]))
-        try:
-            resolved = candidate.resolve()
-            resolved.relative_to(destination_root)
-        except (OSError, ValueError):
-            continue
-        if resolved.is_file():
-            resolved.unlink()
+    try:
+        destination_root.relative_to(task_root)
+    except ValueError as exc:
+        raise DeliveryPackageError(
+            f"Delivery folder must stay inside the task directory: {destination}"
+        ) from exc
+    if destination_root == task_root:
+        raise DeliveryPackageError("Delivery folder cannot replace the task directory.")
 
-    for legacy_directory in (
-        destination / "images",
-        destination / "AI rate screenshots",
-    ):
-        if legacy_directory.is_dir() and not any(legacy_directory.iterdir()):
-            legacy_directory.rmdir()
+    if destination.exists():
+        if not destination.is_dir():
+            raise DeliveryPackageError(
+                f"Delivery destination is not a folder: {destination}"
+            )
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
 
 
 def package_delivery(task: TaskRecord) -> Path:
@@ -136,11 +127,10 @@ def package_delivery(task: TaskRecord) -> Path:
         "Final AI-rate screenshot",
     )
 
-    destination = Path(task.task_dir) / official_website_folder_name(task.customer)
-    destination.mkdir(parents=True, exist_ok=True)
-    _remove_previous_delivery_files(destination)
+    task_directory = Path(task.task_dir)
+    destination = task_directory / official_website_folder_name(task.customer)
+    _reset_delivery_directory(task_directory, destination)
 
-    copied: list[dict[str, str]] = []
     article_filename = (
         article_docx.name
         if article_docx.name.casefold() != "d.docx"
@@ -150,33 +140,19 @@ def package_delivery(task: TaskRecord) -> Path:
         (article_docx, destination / article_filename),
         (tdk_docx, destination / "D.docx"),
     ):
-        output = _copy_file(source, target)
-        copied.append({"source": str(source), "delivery": str(output)})
+        _copy_file(source, target)
 
     used_image_names: set[str] = {
         article_filename.casefold(),
         "d.docx",
         "final-ai-rate.png",
-        "delivery_manifest.json",
     }
     for source in image_sources:
-        output = _copy_file(
+        _copy_file(
             source,
             _unique_destination(destination, source.name, used_image_names),
         )
-        copied.append({"source": str(source), "delivery": str(output)})
 
-    output = _copy_file(final_screenshot, destination / "final-ai-rate.png")
-    copied.append({"source": str(final_screenshot), "delivery": str(output)})
+    _copy_file(final_screenshot, destination / "final-ai-rate.png")
 
-    manifest = {
-        "official_website": task.customer,
-        "task_id": task.id,
-        "created_at": now_iso(),
-        "files": copied,
-    }
-    (destination / "delivery_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     return destination

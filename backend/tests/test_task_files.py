@@ -58,11 +58,15 @@ class TaskDirectoryTests(unittest.TestCase):
             cfg = replace(load_config(), output_root=root)
             with (
                 patch.object(task_files.os, "name", "nt"),
-                patch.object(task_files.os, "startfile", create=True) as startfile,
+                patch.dict(task_files.os.environ, {"WINDIR": r"C:\Windows"}),
+                patch.object(task_files.subprocess, "Popen") as popen,
             ):
                 opened = open_task_directory(cfg, task_for(task_dir))
             self.assertEqual(opened, task_dir.resolve())
-            startfile.assert_called_once_with(str(task_dir.resolve()))
+            popen.assert_called_once_with(
+                [r"C:\Windows\explorer.exe", str(task_dir.resolve())],
+                close_fds=True,
+            )
 
 
 if __name__ == "__main__":

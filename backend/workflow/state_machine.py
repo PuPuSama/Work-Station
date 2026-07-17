@@ -65,6 +65,7 @@ ACTION_GENERATE_TDK = "generate_tdk"
 ACTION_PACKAGE_DELIVERY = "package_delivery"
 ACTION_RETRY_COMPRESSION = "retry_compression"
 ACTION_CLEAR_WORKFLOW_ERROR = "clear_workflow_error"
+ACTION_REWRITE_FROM_SCRATCH = "rewrite_from_scratch"
 
 
 LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -90,54 +91,92 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_SELECT_TITLE,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
         ACTION_UPDATE_ARTICLE,
     ),
     STATUS_OUTLINE_READY: (
         ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
         ACTION_UPDATE_ARTICLE,
     ),
     STATUS_OUTLINE_CONFIRMED: (
         ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
         ACTION_GENERATE_ARTICLE,
         ACTION_UPDATE_ARTICLE,
     ),
     STATUS_DRAFT_READY: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
         ACTION_UPDATE_ARTICLE,
         ACTION_CONFIRM_INITIAL_AI,
         ACTION_UPDATE_HUMANIZED,
     ),
     STATUS_INITIAL_AI_CHECKED: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
         ACTION_UPDATE_ARTICLE,
         ACTION_HUMANIZE_ARTICLE,
         ACTION_UPDATE_HUMANIZED,
     ),
     STATUS_HUMANIZED_READY: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
+        ACTION_UPDATE_ARTICLE,
         ACTION_HUMANIZE_ARTICLE,
         ACTION_UPDATE_HUMANIZED,
         ACTION_CONFIRM_FINAL_AI,
     ),
     STATUS_FINAL_AI_CHECKED: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
+        ACTION_UPDATE_ARTICLE,
         ACTION_HUMANIZE_ARTICLE,
         ACTION_UPDATE_HUMANIZED,
         ACTION_RESTORE_LINKS,
         ACTION_VERIFY_LINKS,
     ),
     STATUS_LINKS_VERIFIED: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
+        ACTION_UPDATE_ARTICLE,
         ACTION_UPDATE_HUMANIZED,
         ACTION_RESTORE_LINKS,
         ACTION_UPDATE_IMAGES,
         ACTION_PREPARE_IMAGES,
     ),
     STATUS_IMAGES_READY: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
+        ACTION_UPDATE_ARTICLE,
         ACTION_UPDATE_HUMANIZED,
         ACTION_UPDATE_IMAGES,
         ACTION_PREPARE_IMAGES,
         ACTION_EXPORT_DOCX,
     ),
     STATUS_DOCX_EXPORTED: (
+        ACTION_UPDATE_PRODUCTS,
+        ACTION_GENERATE_OUTLINE,
+        ACTION_UPDATE_OUTLINE,
+        ACTION_GENERATE_ARTICLE,
+        ACTION_UPDATE_ARTICLE,
         ACTION_UPDATE_HUMANIZED,
+        ACTION_UPDATE_IMAGES,
+        ACTION_PREPARE_IMAGES,
         ACTION_DOWNLOAD_DOCX,
         ACTION_EXPORT_DOCX,
         ACTION_GENERATE_TDK,
@@ -186,15 +225,15 @@ def allowed_actions(task_or_status: TaskRecord | str) -> list[str]:
     actions = list(_ACTIONS_BY_STATUS.get(status, ()))
 
     if task is None or task.workflow_error is None:
-        return actions
+        return _with_rewrite_action(actions)
 
     error = task.workflow_error
     if error.code == "compression_failed":
-        return actions
+        return _with_rewrite_action(actions)
     if not error.blocking:
         if ACTION_CLEAR_WORKFLOW_ERROR not in actions:
             actions.append(ACTION_CLEAR_WORKFLOW_ERROR)
-        return actions
+        return _with_rewrite_action(actions)
 
     recovery_actions: list[str] = []
     if error.recoverable:
@@ -229,7 +268,11 @@ def allowed_actions(task_or_status: TaskRecord | str) -> list[str]:
             if action in actions:
                 recovery_actions.append(action)
         recovery_actions.append(ACTION_CLEAR_WORKFLOW_ERROR)
-    return list(dict.fromkeys(recovery_actions))
+    return _with_rewrite_action(recovery_actions)
+
+
+def _with_rewrite_action(actions: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys([*actions, ACTION_REWRITE_FROM_SCRATCH]))
 
 
 def ensure_action_allowed(task: TaskRecord, action: str) -> None:
@@ -239,19 +282,9 @@ def ensure_action_allowed(task: TaskRecord, action: str) -> None:
 
 
 def _keep_versions(task: TaskRecord, maximum_phase: int) -> None:
-    phase = {
-        "raw": 0,
-        "raw_draft": 0,
-        "initial": 1,
-        "humanized": 2,
-        "linked": 3,
-        "final": 4,
-    }
-    task.article_versions = [
-        version
-        for version in task.article_versions
-        if phase.get(version.kind, 99) <= maximum_phase
-    ]
+    """Keep append-only history while runtime fields are invalidated separately."""
+
+    del task, maximum_phase
 
 
 def _clear_tdk(task: TaskRecord) -> None:
@@ -307,6 +340,34 @@ def _clear_raw_and_after(task: TaskRecord) -> None:
     _clear_initial_and_after(task)
 
 
+def reset_for_full_rewrite(task: TaskRecord) -> TaskRecord:
+    """Return a task to its source-only state so the article can be rebuilt."""
+
+    task.title_candidates = []
+    task.selected_title = ""
+    task.products = []
+    task.outline = ""
+    task.outline_draft = ""
+    task.hero_image = ""
+    _clear_raw_and_after(task)
+    task.article = ""
+    task.article_versions = []
+    task.zero_gpt_report = ""
+    task.status = STATUS_NEW
+    task.workflow_error = None
+
+    # These are legacy/derived extension fields rather than source task data.
+    if task.__pydantic_extra__:
+        for field in (
+            "allowed_actions",
+            "compression",
+            "initial_article_ready",
+            "initial_article_issues",
+        ):
+            task.__pydantic_extra__.pop(field, None)
+    return task
+
+
 def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
     """Invalidate every artifact/check which depends on an edited upstream stage.
 
@@ -322,18 +383,21 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
     if stage in {"title_candidates", "titles"}:
         task.selected_title = ""
         task.outline = ""
+        task.outline_draft = ""
         _clear_raw_and_after(task)
         task.article = ""
         _keep_versions(task, -1)
         task.status = STATUS_TITLES_READY
     elif stage in {"selected_title", "title"}:
         task.outline = ""
+        task.outline_draft = ""
         _clear_raw_and_after(task)
         task.article = ""
         _keep_versions(task, -1)
         task.status = STATUS_TITLE_SELECTED
     elif stage in {"products", "product"}:
         task.outline = ""
+        task.outline_draft = ""
         _clear_raw_and_after(task)
         task.article = ""
         _keep_versions(task, -1)

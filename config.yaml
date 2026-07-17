@@ -4,10 +4,6 @@ paths:
   output_root: "D:\\article"
   data_file: "D:\\article\\article-agent\\data\\tasks.json"
 
-week_folder:
-  owner: "谷瑞勋"
-  name_format: "{start_month}.{start_day}-{end_month}.{end_day}-{owner}"
-
 article:
   language: "English"
   title_candidates: 10
@@ -32,4 +28,4 @@ docx_format:
 llm:
   provider: "responses"
   base_url: "https://api.openai.com/v1"
-  model: ""
+  model: "gpt-5.6-sol"

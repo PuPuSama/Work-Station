@@ -7,6 +7,7 @@ from .state_machine import (
     ensure_action_allowed,
     ensure_transition,
     invalidate_downstream,
+    reset_for_full_rewrite,
     set_workflow_error,
     transition_task,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "ensure_action_allowed",
     "ensure_transition",
     "invalidate_downstream",
+    "reset_for_full_rewrite",
     "set_workflow_error",
     "transition_task",
 ]

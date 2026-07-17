@@ -4,29 +4,30 @@
 
 import {
   ArrowLeft,
-  CheckCircle2,
-  Clipboard,
-  Download,
   ExternalLink,
   FileText,
   FolderOpen,
-  ImageIcon,
-  Link2,
   Loader2,
   Package,
-  Plus,
   RefreshCw,
-  Save,
-  ShieldCheck,
+  RotateCcw,
   Sparkles,
-  Upload,
   WandSparkles,
   X,
 } from "lucide-react";
 import Link from "next/link";
-import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ProjectNavigation } from "@/components/project-navigation";
+import { ArticleDeliveryStep } from "@/components/article-delivery-step";
+import { ArticleReviewStep } from "@/components/article-review-step";
+import { ArticleMediaStep } from "@/components/article-media-step";
+import { ArticleDraftStep } from "@/components/article-draft-step";
+import { ArticleOutlineStep } from "@/components/article-outline-step";
+import { ArticleProductsStep } from "@/components/article-products-step";
+import { ArticleTitleStep } from "@/components/article-title-step";
+import { ArticleWritingRequirementsStep } from "@/components/article-writing-requirements-step";
+import { RevisionConflictDialog } from "@/components/revision-conflict-dialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,11 +40,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import {
   Table,
   TableBody,
@@ -52,12 +50,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
-import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { ApiError, apiFileUrl, apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
   ApiMessage,
+  ArticleImage,
+  BatchCreateResponse,
+  BatchJobRecord,
+  BatchOperation,
+  BatchRecord,
   DashboardSummary,
   Product,
   PublicConfig,
@@ -97,12 +99,166 @@ const STATUS_FILTERS: Array<"all" | WorkflowStatus> = [
 ];
 
 const PRODUCT_ASSET_TIMEOUT_MS = 15 * 60 * 1000;
+const QUICK_SAVE_TIMEOUT_MS = 20_000;
+
+type WorkbenchTab =
+  | "titles"
+  | "products"
+  | "requirements"
+  | "outline"
+  | "article"
+  | "review"
+  | "media"
+  | "files";
+
+function isWorkbenchTab(value: string | undefined): value is WorkbenchTab {
+  return Boolean(value && WORKBENCH_TABS.some((tab) => tab.value === value));
+}
+
+const WORKBENCH_TABS: Array<{
+  value: WorkbenchTab;
+  step: number;
+  label: string;
+}> = [
+  { value: "titles", step: 1, label: "标题" },
+  { value: "products", step: 2, label: "产品" },
+  { value: "requirements", step: 3, label: "写作要求" },
+  { value: "outline", step: 4, label: "大纲" },
+  { value: "article", step: 5, label: "第一版" },
+  { value: "review", step: 6, label: "人工处理" },
+  { value: "media", step: 7, label: "图片" },
+  { value: "files", step: 8, label: "交付" },
+];
+
+type WorkflowStage = "prepare" | "writing" | "review" | "media" | "delivery";
+
+const WORKFLOW_STAGES: Array<{
+  value: WorkflowStage;
+  step: number;
+  label: string;
+  tabs: WorkbenchTab[];
+}> = [
+  { value: "prepare", step: 1, label: "内容准备", tabs: ["titles", "products", "requirements"] },
+  { value: "writing", step: 2, label: "写作", tabs: ["outline", "article"] },
+  { value: "review", step: 3, label: "人工质检", tabs: ["review"] },
+  { value: "media", step: 4, label: "图片", tabs: ["media"] },
+  { value: "delivery", step: 5, label: "交付", tabs: ["files"] },
+];
+
+const STATUS_PHASE: Record<WorkflowStatus, number> = {
+  new: 0,
+  titles_ready: 1,
+  title_selected: 2,
+  outline_ready: 3,
+  outline_confirmed: 4,
+  draft_ready: 5,
+  initial_ai_checked: 6,
+  humanized_ready: 7,
+  final_ai_checked: 8,
+  links_verified: 9,
+  images_ready: 10,
+  docx_exported: 11,
+};
 
 function emptyProduct(): Product {
   return { name: "", url: "", image_path: "", description: "" };
 }
 
+function normalizeImagePath(value: string) {
+  return value.trim().replaceAll("\\", "/").toLowerCase();
+}
+
 type EditableProductField = "name" | "url" | "image_path" | "description";
+
+type RunActionOptions = {
+  scope?: "task" | "app";
+  ownerId?: string;
+  key?: string;
+  refresh?: "none" | "all";
+};
+
+type EditableSection =
+  | "titles"
+  | "products"
+  | "requirements"
+  | "outline"
+  | "article"
+  | "review"
+  | "media"
+  | "files";
+
+type ServerConflict = {
+  section: EditableSection;
+  latest: TaskRecord;
+  message: string;
+};
+
+function actionSection(label: string): EditableSection {
+  if (label.includes("标题")) return "titles";
+  if (label.includes("产品") || label.includes("官网资产")) return "products";
+  if (label.includes("写作要求")) return "requirements";
+  if (label.includes("大纲")) return "outline";
+  if (label.includes("正文")) return "article";
+  if (label.includes("AI") || label.includes("链接")) return "review";
+  if (label.includes("图片") || label.includes("首图") || label.includes("锚点")) return "media";
+  return "files";
+}
+
+function taskSectionText(task: TaskRecord, section: EditableSection) {
+  if (section === "titles") {
+    return JSON.stringify(
+      { selected_title: task.selected_title, candidates: task.title_candidates },
+      null,
+      2,
+    );
+  }
+  if (section === "products") return JSON.stringify(task.products || [], null, 2);
+  if (section === "requirements") {
+    return JSON.stringify(
+      {
+        topic_notes: task.topic_notes || "",
+        outline_custom_prompt: task.outline_custom_prompt || "",
+        article_custom_prompt: task.article_custom_prompt || "",
+        use_outline_custom_prompt: task.use_outline_custom_prompt ?? false,
+        use_article_custom_prompt: task.use_article_custom_prompt ?? false,
+        include_project_introduction: task.include_project_introduction ?? true,
+        include_project_notes: task.include_project_notes ?? true,
+        include_topic_notes: task.include_topic_notes ?? true,
+      },
+      null,
+      2,
+    );
+  }
+  if (section === "outline") return currentOutlineDraft(task);
+  if (section === "article") return currentFirstVersion(task);
+  if (section === "review") {
+    return JSON.stringify(
+      {
+        humanized_article: currentHumanizedVersion(task),
+        initial_ai_check: task.initial_ai_check,
+        final_ai_check: task.final_ai_check,
+      },
+      null,
+      2,
+    );
+  }
+  if (section === "media") {
+    return JSON.stringify(
+      { hero_image: task.hero_image || "", images: task.images || [] },
+      null,
+      2,
+    );
+  }
+  return JSON.stringify(
+    {
+      docx_path: task.docx_path || "",
+      tdk_path: task.tdk_path || "",
+      delivery_package_path: task.delivery_package_path || "",
+    },
+    null,
+    2,
+  );
+}
 
 function statusLabel(status: string) {
   return STATUS_LABELS[status as WorkflowStatus] ?? status;
@@ -136,7 +292,57 @@ function englishWordCount(value: string) {
   return visible.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*/g)?.length ?? 0;
 }
 
-export function ArticleWorkbench({ customer }: { customer?: string }) {
+function recommendedTab(task: TaskRecord): WorkbenchTab {
+  if (task.status === "new" || task.status === "titles_ready") return "titles";
+  if (task.status === "title_selected") return "products";
+  if (task.status === "outline_ready") return "outline";
+  if (task.status === "outline_confirmed") return "article";
+  if (
+    task.status === "draft_ready" ||
+    task.status === "initial_ai_checked" ||
+    task.status === "humanized_ready" ||
+    task.status === "final_ai_checked"
+  ) {
+    return "review";
+  }
+  if (task.status === "links_verified" || task.status === "images_ready") {
+    return "media";
+  }
+  return "files";
+}
+
+function isTaskRecordResult(value: unknown): value is TaskRecord {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<TaskRecord>;
+  return Boolean(candidate.id && candidate.customer && candidate.status);
+}
+
+function currentFirstVersion(task: TaskRecord | null): string {
+  if (!task) return "";
+  return task.initial_article || task.raw_draft_article || task.article || "";
+}
+
+function currentOutlineDraft(task: TaskRecord | null): string {
+  if (!task) return "";
+  return task.outline_draft || task.outline || "";
+}
+
+function currentHumanizedVersion(task: TaskRecord | null): string {
+  if (!task) return "";
+  return task.linked_article || task.humanized_article || task.final_article || "";
+}
+
+export function ArticleWorkbench({
+  customer,
+  initialTaskId,
+  initialStep,
+  focusMode = false,
+}: {
+  customer?: string;
+  initialTaskId?: string;
+  initialStep?: string;
+  focusMode?: boolean;
+}) {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
@@ -146,6 +352,14 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
   const [titleChoice, setTitleChoice] = useState("");
   const [outlineText, setOutlineText] = useState("");
   const [articleText, setArticleText] = useState("");
+  const [topicNotes, setTopicNotes] = useState("");
+  const [outlineCustomPrompt, setOutlineCustomPrompt] = useState("");
+  const [articleCustomPrompt, setArticleCustomPrompt] = useState("");
+  const [useOutlineCustomPrompt, setUseOutlineCustomPrompt] = useState(false);
+  const [useArticleCustomPrompt, setUseArticleCustomPrompt] = useState(false);
+  const [includeProjectIntroduction, setIncludeProjectIntroduction] = useState(true);
+  const [includeProjectNotes, setIncludeProjectNotes] = useState(true);
+  const [includeTopicNotes, setIncludeTopicNotes] = useState(true);
   const [humanizedText, setHumanizedText] = useState("");
   const [initialAiScore, setInitialAiScore] = useState("");
   const [initialAiReport, setInitialAiReport] = useState("");
@@ -153,74 +367,205 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
   const [finalAiReport, setFinalAiReport] = useState("");
   const [heroImage, setHeroImage] = useState("");
   const [heroUpload, setHeroUpload] = useState<File | null>(null);
+  const [heroUploadPreview, setHeroUploadPreview] = useState("");
+  const [heroPreviewFailed, setHeroPreviewFailed] = useState(false);
   const [products, setProducts] = useState<Product[]>([emptyProduct()]);
-  const [busy, setBusy] = useState("");
+  const [activeTab, setActiveTab] = useState<WorkbenchTab>(
+    isWorkbenchTab(initialStep) ? initialStep : "titles",
+  );
+  const [pendingActions, setPendingActions] = useState<Record<string, string>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [serverConflict, setServerConflict] = useState<ServerConflict | null>(null);
+  const [batchSelectedIds, setBatchSelectedIds] = useState<Set<string>>(new Set());
+  const [batches, setBatches] = useState<BatchRecord[]>([]);
+  const [batchBusy, setBatchBusy] = useState("");
+  const lastBatchUpdate = useRef("");
+  const lastTabTaskId = useRef("");
+  const dirtySectionsRef = useRef<Set<EditableSection>>(new Set());
+  const hydratedTaskIdRef = useRef("");
 
   const projectName = customer ? decodeURIComponent(customer) : "";
+  const taskListPath = projectName
+    ? `/api/tasks?customer=${encodeURIComponent(projectName)}`
+    : "/api/tasks";
+
+  const selectTab = useCallback(
+    (tab: WorkbenchTab) => {
+      setActiveTab(tab);
+      if (!focusMode || typeof window === "undefined") return;
+      const url = new URL(window.location.href);
+      url.searchParams.set("step", tab);
+      window.history.replaceState(window.history.state, "", url);
+    },
+    [focusMode],
+  );
 
   const loadData = useCallback(async (preferredTaskId?: string) => {
-    const taskPath = projectName
-      ? `/api/tasks?customer=${encodeURIComponent(projectName)}`
-      : "/api/tasks";
+    const focusedTaskId = preferredTaskId ?? initialTaskId;
+    const taskRequest = focusMode && focusedTaskId
+      ? apiGet<TaskRecord>(`/api/tasks/${focusedTaskId}`).then((task) => [task])
+      : apiGet<TaskRecord[]>(taskListPath);
     const [nextDashboard, nextConfig, nextTasks] = await Promise.all([
       apiGet<DashboardSummary>("/api/dashboard"),
       apiGet<PublicConfig>("/api/config"),
-      apiGet<TaskRecord[]>(taskPath),
+      taskRequest,
     ]);
     setDashboard(nextDashboard);
     setConfig(nextConfig);
     setTasks(nextTasks);
     setSelectedTask((current) => {
-      const preferred = preferredTaskId ?? current?.id;
+      const preferred =
+        preferredTaskId ?? current?.id ?? (focusMode ? initialTaskId : undefined);
+      if (focusMode && preferred) {
+        return nextTasks.find((task) => task.id === preferred) ?? null;
+      }
       return (
         nextTasks.find((task) => task.id === preferred) ??
         nextTasks[0] ??
         null
       );
     });
-  }, [projectName]);
+  }, [focusMode, initialTaskId, taskListPath]);
+
+  const refreshTaskListInBackground = useCallback(async () => {
+    const taskRequest = focusMode && initialTaskId
+      ? apiGet<TaskRecord>(`/api/tasks/${initialTaskId}`).then((task) => [task])
+      : apiGet<TaskRecord[]>(taskListPath);
+    const [nextDashboard, nextTasks] = await Promise.all([
+      apiGet<DashboardSummary>("/api/dashboard"),
+      taskRequest,
+    ]);
+    setDashboard(nextDashboard);
+    setTasks(nextTasks);
+    // Batch polling may refresh a clean task, but must not replace text being edited.
+    setSelectedTask((current) => {
+      if (!current) return nextTasks[0] ?? null;
+      return nextTasks.find((task) => task.id === current.id) ?? current;
+    });
+  }, [focusMode, initialTaskId, taskListPath]);
+
+  const refreshBatches = useCallback(async () => {
+    const path = projectName
+      ? `/api/batches?customer=${encodeURIComponent(projectName)}&limit=8`
+      : "/api/batches?limit=8";
+    const nextBatches = await apiGet<BatchRecord[]>(path);
+    const updateKey = nextBatches
+      .map((batch) => `${batch.id}:${batch.updated_at}:${batch.completed}`)
+      .join("|");
+    if (lastBatchUpdate.current && lastBatchUpdate.current !== updateKey) {
+      await refreshTaskListInBackground();
+    }
+    lastBatchUpdate.current = updateKey;
+    setBatches(nextBatches);
+    return nextBatches;
+  }, [projectName, refreshTaskListInBackground]);
 
   useEffect(() => {
-    loadData().catch((err) => setError(errorMessage(err)));
-  }, [loadData]);
+    loadData(initialTaskId).catch((err) => setError(errorMessage(err)));
+  }, [initialTaskId, loadData]);
 
   useEffect(() => {
-    setTitleChoice(selectedTask?.selected_title || "");
-    setOutlineText(selectedTask?.outline || "");
-    setArticleText(
-      selectedTask?.initial_article ||
-        selectedTask?.raw_draft_article ||
-        selectedTask?.article ||
-        "",
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      let delay = 12_000;
+      try {
+        const nextBatches = await refreshBatches();
+        const hasActive = nextBatches.some(
+          (batch) => batch.status === "queued" || batch.status === "running",
+        );
+        delay = hasActive ? 2500 : 12_000;
+      } catch (err) {
+        if (!cancelled) setError(errorMessage(err));
+      } finally {
+        if (!cancelled) timer = window.setTimeout(poll, delay);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [refreshBatches]);
+
+  useEffect(() => {
+    const availableIds = new Set(tasks.map((task) => task.id));
+    setBatchSelectedIds(
+      (current) => new Set([...current].filter((taskId) => availableIds.has(taskId))),
     );
-    setHumanizedText(
-      selectedTask?.linked_article ||
-        selectedTask?.humanized_article ||
-        selectedTask?.final_article ||
-        "",
-    );
-    setInitialAiScore(
-      selectedTask?.initial_ai_check?.score == null
-        ? ""
-        : String(selectedTask.initial_ai_check.score),
-    );
-    setInitialAiReport(
-      selectedTask?.initial_ai_check?.report || selectedTask?.zero_gpt_report || "",
-    );
-    setFinalAiScore(
-      selectedTask?.final_ai_check?.score == null
-        ? ""
-        : String(selectedTask.final_ai_check.score),
-    );
-    setFinalAiReport(selectedTask?.final_ai_check?.report || "");
-    setHeroImage(selectedTask?.hero_image || "");
-    setHeroUpload(null);
-    setProducts(
-      selectedTask?.products?.length ? selectedTask.products : [emptyProduct()],
-    );
+  }, [tasks]);
+
+  useEffect(() => {
+    const taskChanged = hydratedTaskIdRef.current !== (selectedTask?.id || "");
+    const dirty = dirtySectionsRef.current;
+    if (taskChanged || !dirty.has("titles")) {
+      setTitleChoice(selectedTask?.selected_title || "");
+    }
+    if (taskChanged || !dirty.has("outline")) {
+      setOutlineText(currentOutlineDraft(selectedTask));
+    }
+    if (taskChanged || !dirty.has("requirements")) {
+      setTopicNotes(selectedTask?.topic_notes || "");
+      setOutlineCustomPrompt(selectedTask?.outline_custom_prompt || "");
+      setArticleCustomPrompt(selectedTask?.article_custom_prompt || "");
+      setUseOutlineCustomPrompt(selectedTask?.use_outline_custom_prompt ?? false);
+      setUseArticleCustomPrompt(selectedTask?.use_article_custom_prompt ?? false);
+      setIncludeProjectIntroduction(selectedTask?.include_project_introduction ?? true);
+      setIncludeProjectNotes(selectedTask?.include_project_notes ?? true);
+      setIncludeTopicNotes(selectedTask?.include_topic_notes ?? true);
+    }
+    if (taskChanged || !dirty.has("article")) {
+      setArticleText(currentFirstVersion(selectedTask));
+    }
+    if (taskChanged || !dirty.has("review")) {
+      setHumanizedText(currentHumanizedVersion(selectedTask));
+      setInitialAiScore(
+        selectedTask?.initial_ai_check?.score == null
+          ? ""
+          : String(selectedTask.initial_ai_check.score),
+      );
+      setInitialAiReport(
+        selectedTask?.initial_ai_check?.report || selectedTask?.zero_gpt_report || "",
+      );
+      setFinalAiScore(
+        selectedTask?.final_ai_check?.score == null
+          ? ""
+          : String(selectedTask.final_ai_check.score),
+      );
+      setFinalAiReport(selectedTask?.final_ai_check?.report || "");
+    }
+    if (taskChanged || !dirty.has("media")) {
+      setHeroImage(selectedTask?.hero_image || "");
+      setHeroUpload(null);
+    }
+    if (taskChanged || !dirty.has("products")) {
+      setProducts(selectedTask?.products?.length ? selectedTask.products : [emptyProduct()]);
+    }
+    hydratedTaskIdRef.current = selectedTask?.id || "";
   }, [selectedTask]);
+
+  useEffect(() => {
+    if (selectedTask && lastTabTaskId.current !== selectedTask.id) {
+      const firstFocusedTask = focusMode && lastTabTaskId.current === "";
+      lastTabTaskId.current = selectedTask.id;
+      selectTab(
+        firstFocusedTask && isWorkbenchTab(initialStep)
+          ? initialStep
+          : recommendedTab(selectedTask),
+      );
+    }
+  }, [focusMode, initialStep, selectedTask, selectTab]);
+
+  useEffect(() => {
+    if (!heroUpload) {
+      setHeroUploadPreview("");
+      return;
+    }
+    const previewUrl = URL.createObjectURL(heroUpload);
+    setHeroUploadPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [heroUpload]);
 
   const filteredTasks = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -239,6 +584,9 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
       return matchesStatus && (!normalizedQuery || haystack.includes(normalizedQuery));
     });
   }, [query, statusFilter, tasks]);
+  const allFilteredBatchTasksSelected =
+    filteredTasks.length > 0 &&
+    filteredTasks.every((task) => batchSelectedIds.has(task.id));
 
   const completedCount = useMemo(
     () => tasks.filter((task) => task.status === "docx_exported").length,
@@ -253,30 +601,280 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
     label: string,
     action: () => Promise<T>,
     after?: (result: T) => void,
+    options: RunActionOptions = {},
   ) {
-    setBusy(label);
+    const scope = options.scope ?? "task";
+    const ownerId = options.ownerId ?? selectedTask?.id ?? "unselected";
+    const section = actionSection(label);
+    const pendingKey = options.key ??
+      `${scope === "app" ? "app" : `task:${ownerId}`}:${section}`;
+    setPendingActions((current) => ({ ...current, [pendingKey]: label }));
     setError("");
     setMessage("");
     try {
       const result = await action();
-      after?.(result);
-      const maybeTask = result as TaskRecord;
-      await loadData(maybeTask?.id ?? selectedTask?.id);
+      if (isTaskRecordResult(result)) {
+        setTasks((current) => {
+          const exists = current.some((task) => task.id === result.id);
+          return exists
+            ? current.map((task) => (task.id === result.id ? result : task))
+            : [...current, result];
+        });
+        setSelectedTask((current) =>
+          current?.id === result.id ? result : current,
+        );
+        void apiGet<DashboardSummary>("/api/dashboard")
+          .then(setDashboard)
+          .catch(() => undefined);
+      } else if (options.refresh === "all") {
+        await loadData(ownerId === "unselected" ? undefined : ownerId);
+      }
       setMessage(label);
+      after?.(result);
     } catch (err) {
-      setError(errorMessage(err));
-      await loadData(selectedTask?.id).catch(() => undefined);
+      if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        /revision conflict/i.test(err.message) &&
+        scope === "task" &&
+        ownerId !== "unselected"
+      ) {
+        try {
+          const latest = await apiGet<TaskRecord>(`/api/tasks/${ownerId}`);
+          setTasks((current) =>
+            current.map((task) => (task.id === latest.id ? latest : task)),
+          );
+          setSelectedTask((current) => (current?.id === latest.id ? latest : current));
+          setServerConflict({ section, latest, message: err.message });
+          setError("");
+        } catch (refreshError) {
+          setError(`${err.message} 无法加载服务器最新版本：${errorMessage(refreshError)}`);
+        }
+      } else {
+        setError(errorMessage(err));
+      }
     } finally {
-      setBusy("");
+      setPendingActions((current) => {
+        const next = { ...current };
+        delete next[pendingKey];
+        return next;
+      });
     }
   }
 
-  async function initializeWeek() {
+  async function syncTasks() {
     await runAction<ApiMessage>(
-      "本周任务已初始化",
-      () => apiPost<ApiMessage>("/api/init-week"),
+      "话题库已同步",
+      () => apiPost<ApiMessage>("/api/sync-tasks"),
       (result) => setMessage(result.message),
+      { scope: "app", refresh: "all" },
     );
+  }
+
+  function toggleBatchTask(taskId: string, checked: boolean) {
+    setBatchSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(taskId);
+      else next.delete(taskId);
+      return next;
+    });
+  }
+
+  function toggleFilteredBatchTasks(checked: boolean) {
+    setBatchSelectedIds((current) => {
+      const next = new Set(current);
+      for (const task of filteredTasks) {
+        if (checked) next.add(task.id);
+        else next.delete(task.id);
+      }
+      return next;
+    });
+  }
+
+  async function startBatch(operation: BatchOperation) {
+    if (!batchSelectedIds.size) {
+      setError("请先勾选要批量处理的文章。");
+      return;
+    }
+    const selectedBatchTasks = tasks.filter((task) => batchSelectedIds.has(task.id));
+    if (operation === "outline") {
+      const replacementCount = selectedBatchTasks.filter((task) => task.outline.trim()).length;
+      const downstreamCount = selectedBatchTasks.filter(
+        (task) => STATUS_PHASE[task.status] > STATUS_PHASE.outline_confirmed,
+      ).length;
+      if (
+        replacementCount > 0 &&
+        !window.confirm(
+          `选中的任务中有 ${replacementCount} 篇已有大纲。重新生成会替换这些大纲；其中 ${downstreamCount} 篇已有正文或后续结果，这些结果会清空。确定加入批量队列吗？`,
+        )
+      ) {
+        return;
+      }
+    }
+    if (operation === "products") {
+      const downstreamCount = selectedBatchTasks.filter(
+        (task) => STATUS_PHASE[task.status] >= STATUS_PHASE.outline_ready,
+      ).length;
+      if (
+        downstreamCount > 0 &&
+        !window.confirm(
+          `选中的任务中有 ${downstreamCount} 篇已经进入大纲或后续阶段。重新查找产品会清空这些任务的大纲和后续结果。确定加入批量队列吗？`,
+        )
+      ) {
+        return;
+      }
+    }
+    if (
+      operation === "rewrite_article" &&
+      !window.confirm(
+        `确定仅重写选中的 ${batchSelectedIds.size} 篇正文吗？每篇文章的标题、产品、大纲和写作要求会保留，正文之后的人工检测、链接、图片和导出结果会失效。`,
+      )
+    ) {
+      return;
+    }
+    setBatchBusy(operation);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiPost<BatchCreateResponse>("/api/batches", {
+        operation,
+        task_ids: [...batchSelectedIds],
+        word_count: config?.article.default_word_count ?? 1200,
+      });
+      const acceptedIds = new Set(result.batch?.jobs.map((job) => job.task_id) ?? []);
+      setBatchSelectedIds(
+        (current) => new Set([...current].filter((taskId) => !acceptedIds.has(taskId))),
+      );
+      if (result.batch) {
+        const rejectedSummary = result.rejected
+          .slice(0, 3)
+          .map((item) => `${item.task_id}: ${item.message}`)
+          .join("；");
+        setMessage(
+          `已加入 ${result.batch.total} 篇；后端并行处理，关闭或刷新页面不会中断。${
+            result.rejected.length
+              ? ` 另有 ${result.rejected.length} 篇未加入：${rejectedSummary}${
+                  result.rejected.length > 3 ? "；其余仍保留勾选" : ""
+                }`
+              : ""
+          }`,
+        );
+      } else {
+        setError(result.rejected.map((item) => item.message).join("；") || "没有可加入队列的任务。");
+      }
+      await refreshBatches();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBatchBusy("");
+    }
+  }
+
+  async function enqueueSingleOperation(operation: BatchOperation, successLabel: string) {
+    if (!selectedTask) return;
+    const blockingSections: Partial<Record<BatchOperation, EditableSection[]>> = {
+      titles: ["titles"],
+      products: ["products"],
+      outline: ["outline", "requirements"],
+      article: ["outline", "article", "requirements"],
+      rewrite_article: ["outline", "article", "requirements"],
+      humanize: ["review"],
+      restore_links: ["review"],
+      export_docx: ["article", "review", "media"],
+      generate_tdk: ["article", "review", "media"],
+      package_delivery: ["article", "review", "media"],
+    };
+    const dirtyBlockers = (blockingSections[operation] || []).filter((section) =>
+      dirtySectionsRef.current.has(section),
+    );
+    if (dirtyBlockers.length) {
+      setError("当前步骤存在未保存修改，请先保存或撤销修改，再加入后台队列。");
+      return;
+    }
+    setBatchBusy(`single:${operation}`);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiPost<BatchCreateResponse>("/api/batches", {
+        operation,
+        task_ids: [selectedTask.id],
+        word_count: config?.article.default_word_count ?? 1200,
+      });
+      if (!result.batch) {
+        setError(result.rejected.map((item) => item.message).join("；") || "任务未能加入后台队列。");
+        return;
+      }
+      setMessage(`${successLabel}已加入后台队列。现在可以切换页面或处理其他文章。`);
+      await refreshBatches();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBatchBusy("");
+    }
+  }
+
+  async function cancelBatch(batchId: string) {
+    setBatchBusy(batchId);
+    setError("");
+    try {
+      await apiPost<BatchRecord>(`/api/batches/${batchId}/cancel`);
+      setMessage("已请求取消该批次；正在调用模型的条目会在返回后停止保存。");
+      await refreshBatches();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBatchBusy("");
+    }
+  }
+
+  async function retryBatchJob(jobId: string) {
+    setBatchBusy(jobId);
+    setError("");
+    try {
+      await apiPost<BatchJobRecord>(`/api/batch-jobs/${jobId}/retry`);
+      setMessage("失败条目已按当前文章版本重新加入队列。");
+      await refreshBatches();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBatchBusy("");
+    }
+  }
+
+  function selectTask(task: TaskRecord): boolean {
+    if (selectedTask?.id === task.id) return true;
+    if (
+      unsavedSections.length &&
+      !window.confirm(
+        `当前任务还有未保存内容：${unsavedSections.join("、")}。\n\n确定放弃这些修改并切换任务吗？`,
+      )
+    ) {
+      return false;
+    }
+    setSelectedTask(task);
+    setError("");
+    setMessage("");
+    return true;
+  }
+
+  function openBatchTask(taskId: string) {
+    const task = tasks.find((candidate) => candidate.id === taskId);
+    if (!task) {
+      setError("当前任务列表中找不到这篇文章，请先刷新任务数据。");
+      return;
+    }
+    setStatusFilter("all");
+    setQuery("");
+    if (!selectTask(task)) return;
+    setError("");
+    setMessage(
+      `已定位到 ${task.customer} / topic_${String(task.topic_index).padStart(3, "0")}`,
+    );
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById("task-workbench")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
 
   async function copyArticle(value: string, label: string) {
@@ -303,9 +901,438 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
       stage === "initial" ? "初检 AI 率截图已保存" : "复检 AI 率截图已保存",
       () =>
         apiUpload<TaskRecord>(
-          `/api/tasks/${selectedId}/checks/${stage}-ai/screenshot`,
+          `/api/tasks/${selectedId}/checks/${stage}-ai/screenshot?revision=${selectedTask?.revision ?? 0}`,
           body,
         ),
+    );
+  }
+
+  function generateOrRegenerateArticle() {
+    if (!selectedId || !selectedTask) return;
+    if (writingSettingsDirty) {
+      setError("写作要求有未保存修改，请先保存写作要求，再生成正文。");
+      return;
+    }
+    if (hasGeneratedFirstVersion) {
+      const confirmed = window.confirm(
+        "确定只重写正文吗？当前第一版将被替换，AI 检测、降 AI 文本、链接、图片、Word、TDK 和交付状态都会清空；标题、产品、已确认大纲和写作要求都会保留。",
+      );
+      if (!confirmed) return;
+    }
+    void enqueueSingleOperation(
+      hasGeneratedFirstVersion ? "rewrite_article" : "article",
+      hasGeneratedFirstVersion ? "正文重写" : "正文生成",
+    );
+  }
+
+  function generateOrRegenerateOutline() {
+    if (!selectedId || !selectedTask) return;
+    if (writingSettingsDirty) {
+      setError("写作要求有未保存修改，请先保存写作要求，再生成大纲。");
+      return;
+    }
+    if (selectedTask.outline.trim() || outlineDirty) {
+      const impact = outlineHasDownstream
+        ? "标题、产品和写作要求会保留；当前正文、AI 检测、链接、图片及导出结果会清空。"
+        : "当前大纲会被新生成的大纲替换。";
+      if (
+        !window.confirm(
+          `确定重新生成大纲吗？${outlineDirty ? "当前未保存的大纲修改也会丢失。" : ""}\n\n${impact}`,
+        )
+      ) {
+        return;
+      }
+    }
+    void enqueueSingleOperation("outline", selectedTask.outline.trim() ? "大纲重新生成" : "大纲生成");
+  }
+
+  function saveOutline(confirmed: boolean) {
+    if (!selectedId || !selectedTask || !canSaveOutline) return;
+    if (
+      confirmed &&
+      outlineDirty &&
+      outlineHasDownstream &&
+      !window.confirm(
+        "保存修改后的大纲会保留标题、产品和写作要求，并清空正文、AI 检测、链接、图片及导出结果。确定继续吗？",
+      )
+    ) {
+      return;
+    }
+    void runAction(
+      confirmed ? "大纲已保存并确认" : "大纲草稿已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedId}/outline`,
+          {
+            revision: selectedTask.revision,
+            outline: outlineText,
+            confirmed,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      undefined,
+      { key: `task:${selectedId}:outline` },
+    );
+  }
+
+  function restoreVersion(versionIndex: number, kind: string) {
+    if (!selectedId || !selectedTask) return;
+    const version = selectedTask.article_versions?.[versionIndex];
+    if (!version) return;
+    const restoringOutline = kind === "outline" || kind === "outline_draft";
+    const impact = restoringOutline
+      ? "该版本会恢复到大纲草稿，不会立即替换已确认大纲，也不会清空正文。检查后可再点击“保存并确认”。"
+      : "该版本会替换当前第一版，并清空 AI 检测、降 AI 稿、链接、图片、Word、D 文档和交付包。";
+    if (!window.confirm(`确定恢复这个版本吗？\n\n${impact}`)) return;
+
+    if (restoringOutline) {
+      dirtySectionsRef.current.delete("outline");
+      setOutlineText(version.content);
+    } else {
+      dirtySectionsRef.current.delete("article");
+      setArticleText(version.content);
+    }
+    void runAction(
+      restoringOutline ? "大纲版本已恢复为草稿" : "第一版正文已恢复",
+      () =>
+        apiPost<TaskRecord>(`/api/tasks/${selectedId}/versions/restore`, {
+          revision: selectedTask.revision,
+          version_index: versionIndex,
+        }),
+      undefined,
+      { key: `task:${selectedId}:${restoringOutline ? "outline" : "article"}` },
+    );
+  }
+
+  function localSectionText(section: EditableSection) {
+    if (section === "titles") {
+      return JSON.stringify(
+        { selected_title: titleChoice, candidates: selectedTask?.title_candidates || [] },
+        null,
+        2,
+      );
+    }
+    if (section === "products") return JSON.stringify(persistedProducts(), null, 2);
+    if (section === "requirements") {
+      return JSON.stringify(
+        {
+          topic_notes: topicNotes,
+          outline_custom_prompt: outlineCustomPrompt,
+          article_custom_prompt: articleCustomPrompt,
+          use_outline_custom_prompt: useOutlineCustomPrompt,
+          use_article_custom_prompt: useArticleCustomPrompt,
+          include_project_introduction: includeProjectIntroduction,
+          include_project_notes: includeProjectNotes,
+          include_topic_notes: includeTopicNotes,
+        },
+        null,
+        2,
+      );
+    }
+    if (section === "outline") return outlineText;
+    if (section === "article") return articleText;
+    if (section === "review") {
+      return JSON.stringify(
+        {
+          humanized_article: humanizedText,
+          initial_ai_score: initialAiScore,
+          initial_ai_report: initialAiReport,
+          final_ai_score: finalAiScore,
+          final_ai_report: finalAiReport,
+        },
+        null,
+        2,
+      );
+    }
+    if (section === "media") {
+      return JSON.stringify(
+        { hero_image: heroImage, images: selectedTask?.images || [] },
+        null,
+        2,
+      );
+    }
+    return selectedTask ? taskSectionText(selectedTask, "files") : "";
+  }
+
+  function adoptServerConflict() {
+    if (!serverConflict) return;
+    const latest = serverConflict.latest;
+    const section = serverConflict.section;
+    if (section === "titles") setTitleChoice(latest.selected_title || "");
+    if (section === "products") {
+      setProducts(latest.products?.length ? latest.products : [emptyProduct()]);
+    }
+    if (section === "requirements") {
+      setTopicNotes(latest.topic_notes || "");
+      setOutlineCustomPrompt(latest.outline_custom_prompt || "");
+      setArticleCustomPrompt(latest.article_custom_prompt || "");
+      setUseOutlineCustomPrompt(latest.use_outline_custom_prompt ?? false);
+      setUseArticleCustomPrompt(latest.use_article_custom_prompt ?? false);
+      setIncludeProjectIntroduction(latest.include_project_introduction ?? true);
+      setIncludeProjectNotes(latest.include_project_notes ?? true);
+      setIncludeTopicNotes(latest.include_topic_notes ?? true);
+    }
+    if (section === "outline") setOutlineText(currentOutlineDraft(latest));
+    if (section === "article") setArticleText(currentFirstVersion(latest));
+    if (section === "review") {
+      setHumanizedText(currentHumanizedVersion(latest));
+      setInitialAiScore(
+        latest.initial_ai_check?.score == null ? "" : String(latest.initial_ai_check.score),
+      );
+      setInitialAiReport(
+        latest.initial_ai_check?.report || latest.zero_gpt_report || "",
+      );
+      setFinalAiScore(
+        latest.final_ai_check?.score == null ? "" : String(latest.final_ai_check.score),
+      );
+      setFinalAiReport(latest.final_ai_check?.report || "");
+    }
+    if (section === "media") {
+      setHeroImage(latest.hero_image || "");
+      setHeroUpload(null);
+    }
+    dirtySectionsRef.current.delete(section);
+    setSelectedTask(latest);
+    setServerConflict(null);
+    setMessage("已采用服务器版本，本地冲突草稿已放弃。");
+  }
+
+  function keepLocalConflict() {
+    if (!serverConflict) return;
+    setSelectedTask(serverConflict.latest);
+    setServerConflict(null);
+    setMessage("已保留本地修改并更新到服务器最新修订号，请检查后重新保存。");
+  }
+
+  function saveHeroPath() {
+    if (!selectedId || !selectedTask || !heroImage.trim()) return;
+    if (
+      heroDirty &&
+      ["images_ready", "docx_exported"].includes(selectedTask.status) &&
+      !window.confirm(
+        "更换首图后需要重新准备图片并重新导出 Word。确定保存新的首图吗？",
+      )
+    ) {
+      return;
+    }
+    void runAction(
+      "首图设置已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedId}/images`,
+          {
+            revision: selectedTask.revision,
+            hero_image: heroImage,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      undefined,
+      { key: `task:${selectedId}:media` },
+    );
+  }
+
+  function saveHeroThenPrepare() {
+    if (!selectedId || !selectedTask || (!heroUpload && !heroImage.trim())) return;
+    if (
+      heroDirty &&
+      ["images_ready", "docx_exported"].includes(selectedTask.status) &&
+      !window.confirm(
+        "更换首图后会重新准备图片，现有 Word 需要重新导出。确定继续吗？",
+      )
+    ) {
+      return;
+    }
+    void runAction(
+      "首图已保存，图片准备已加入后台队列",
+      async () => {
+        let saved = selectedTask;
+        if (heroUpload) {
+          const body = new FormData();
+          body.append("file", heroUpload);
+          saved = await apiUpload<TaskRecord>(
+            `/api/tasks/${selectedId}/images/upload?role=hero&revision=${saved.revision ?? 0}`,
+            body,
+          );
+        } else if (heroImage.trim() !== (selectedTask.hero_image || "").trim()) {
+          saved = await apiPut<TaskRecord>(
+            `/api/tasks/${selectedId}/images`,
+            {
+              revision: saved.revision,
+              hero_image: heroImage.trim(),
+            },
+            QUICK_SAVE_TIMEOUT_MS,
+          );
+        }
+        const queued = await apiPost<BatchCreateResponse>("/api/batches", {
+          operation: "prepare_images",
+          task_ids: [selectedId],
+        });
+        if (!queued.batch) {
+          throw new Error(
+            queued.rejected.map((item) => item.message).join("；") ||
+              "图片准备任务未能加入后台队列。",
+          );
+        }
+        void refreshBatches();
+        return saved;
+      },
+      (result) => {
+        setHeroImage(result.hero_image || heroImage.trim());
+        setHeroUpload(null);
+      },
+      { key: `task:${selectedId}:media` },
+    );
+  }
+
+  function saveBodyImageOverrides(nextImages: ArticleImage[], label: string) {
+    if (!selectedId || !selectedTask) return;
+    if (activeTaskJob) {
+      setError("当前文章已有后台任务，请等待完成或先取消，再调整图片槽位。");
+      return;
+    }
+    void runAction(
+      `${label}，图片准备已加入后台队列`,
+      async () => {
+        const saved = await apiPut<TaskRecord>(
+          `/api/tasks/${selectedId}/images`,
+          {
+            revision: selectedTask.revision,
+            hero_image: heroImage.trim() || selectedTask.hero_image || "",
+            images: nextImages.slice(0, 3),
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        );
+        const queued = await apiPost<BatchCreateResponse>("/api/batches", {
+          operation: "prepare_images",
+          task_ids: [selectedId],
+        });
+        if (!queued.batch) {
+          throw new Error(
+            queued.rejected.map((item) => item.message).join("；") ||
+              "图片准备任务未能加入后台队列。",
+          );
+        }
+        void refreshBatches();
+        return saved;
+      },
+      undefined,
+      { key: `task:${selectedId}:media` },
+    );
+  }
+
+  function selectBodyImage(product: Product, slotIndex: number) {
+    if (!selectedTask || !product.image_path.trim()) return;
+    const existing = selectedTask.images || [];
+    const hero = existing.find((image) => image.role === "hero");
+    const body = existing.filter((image) => image.role !== "hero");
+    if (slotIndex > body.length) {
+      setError("请先选择前一个正文图片槽位。");
+      return;
+    }
+    const selectedKey = normalizeImagePath(product.image_path);
+    const duplicateSlot = body.findIndex(
+      (image, index) =>
+        index !== slotIndex && normalizeImagePath(image.source_path) === selectedKey,
+    );
+    if (duplicateSlot >= 0) {
+      setError(`该图片已经用于正文图槽位 ${duplicateSlot + 2}，不能重复使用。`);
+      return;
+    }
+    const previous = body[slotIndex];
+    body[slotIndex] = {
+      id: previous?.id || `manual-product-${slotIndex + 1}`,
+      role: "product",
+      source_path: product.image_path,
+      prepared_path: "",
+      filename: "",
+      marker: "",
+      product_name: product.name,
+      product_url: product.url,
+      anchor_heading: previous?.anchor_heading || "",
+      anchor_text: previous?.anchor_text || "",
+      anchor_after: previous?.anchor_after || "",
+      status: "pending",
+      error: "",
+    };
+    saveBodyImageOverrides(
+      [...(hero ? [hero] : []), ...body],
+      `正文图槽位 ${slotIndex + 2} 已更新`,
+    );
+  }
+
+  function moveBodyImage(slotIndex: number, direction: -1 | 1) {
+    if (!selectedTask) return;
+    const existing = selectedTask.images || [];
+    const hero = existing.find((image) => image.role === "hero");
+    const body = existing.filter((image) => image.role !== "hero");
+    const target = slotIndex + direction;
+    if (target < 0 || target >= body.length) return;
+    [body[slotIndex], body[target]] = [body[target], body[slotIndex]];
+    saveBodyImageOverrides(
+      [...(hero ? [hero] : []), ...body],
+      "正文图片顺序已调整",
+    );
+  }
+
+  function confirmProductChanges(action: string): boolean {
+    if (!selectedTask || STATUS_PHASE[selectedTask.status] < STATUS_PHASE.outline_ready) {
+      return true;
+    }
+    return window.confirm(
+      `${action}可能改变文章引用的产品事实或图片，因此会清空当前大纲和后续正文、检测、图片及导出结果。标题和写作要求会保留。确定继续吗？`,
+    );
+  }
+
+  function saveProducts() {
+    if (!selectedId || !selectedTask || !productsDirty) return;
+    if (!confirmProductChanges("保存产品修改")) return;
+    void runAction(
+      "产品已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedId}/products`,
+          {
+            revision: selectedTask.revision,
+            products: persistedProducts(),
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      undefined,
+      { key: `task:${selectedId}:products` },
+    );
+  }
+
+  function saveWritingSettings() {
+    if (!selectedId || !selectedTask) return;
+    void runAction("写作要求已保存", () =>
+      apiPut<TaskRecord>(
+        `/api/tasks/${selectedId}/writing-settings`,
+        {
+          revision: selectedTask.revision,
+          topic_notes: topicNotes,
+          outline_custom_prompt: outlineCustomPrompt,
+          article_custom_prompt: articleCustomPrompt,
+          use_outline_custom_prompt: useOutlineCustomPrompt,
+          use_article_custom_prompt: useArticleCustomPrompt,
+          include_project_introduction: includeProjectIntroduction,
+          include_project_notes: includeProjectNotes,
+          include_topic_notes: includeTopicNotes,
+        },
+        QUICK_SAVE_TIMEOUT_MS,
+      ),
+    );
+  }
+
+  function rewriteFromScratch() {
+    if (!selectedId || !selectedTask) return;
+    const confirmed = window.confirm(
+      "确定要完全重写这篇文章吗？当前标题、产品、大纲、正文、AI 检测、链接、图片及导出状态都会清空，并回到“待生成标题”。项目目录中的旧文件不会直接删除。",
+    );
+    if (!confirmed) return;
+    void runAction("任务已回滚，可从标题开始完全重写", () =>
+      apiPost<TaskRecord>(`/api/tasks/${selectedId}/rewrite-from-scratch`, {
+        revision: selectedTask.revision,
+      }),
     );
   }
 
@@ -349,7 +1376,40 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
   }
 
   const selectedId = selectedTask?.id;
-  const isBusy = Boolean(busy);
+  const activeTaskJob = batches
+    .flatMap((batch) => batch.jobs)
+    .find(
+      (job) =>
+        job.task_id === selectedId &&
+        ["queued", "running", "retry_wait"].includes(job.status),
+    );
+  const savedHeroPreview =
+    selectedId && heroImage.trim()
+      ? apiFileUrl(
+          `/api/tasks/${selectedId}/images/preview?path=${encodeURIComponent(heroImage.trim())}`,
+        )
+      : "";
+  const heroPreviewUrl = heroUploadPreview || savedHeroPreview;
+  const pendingEntries = Object.entries(pendingActions);
+  const currentTaskPrefix = selectedId ? `task:${selectedId}:` : "";
+  const sectionPending = (section: EditableSection) =>
+    currentTaskPrefix ? pendingActions[`${currentTaskPrefix}${section}`] : undefined;
+  const appPending = pendingEntries.find(([key]) => key.startsWith("app:"));
+  const isCurrentTaskBusy = Boolean(
+    currentTaskPrefix && pendingEntries.some(([key]) => key.startsWith(currentTaskPrefix)),
+  );
+  const currentPending = pendingEntries.find(
+    ([key]) =>
+      key.startsWith("app:") ||
+      (currentTaskPrefix && key === `${currentTaskPrefix}${activeTab}`),
+  );
+  const busy = currentPending?.[1] ?? "";
+  const isBusy = Boolean(currentPending);
+  const isAnyBusy = pendingEntries.length > 0;
+
+  useEffect(() => {
+    setHeroPreviewFailed(false);
+  }, [heroPreviewUrl]);
   const canAction = (action: string) =>
     selectedTask?.allowed_actions == null ||
     selectedTask.allowed_actions.includes(action);
@@ -362,14 +1422,149 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
         selectedTask.status,
       )
     : false;
+  const hasGeneratedFirstVersion = Boolean(
+    selectedTask?.initial_article ||
+      selectedTask?.raw_draft_article ||
+      (selectedTask?.status !== "outline_confirmed" && selectedTask?.article),
+  );
+  const outlineDirty = Boolean(
+    selectedTask && outlineText !== currentOutlineDraft(selectedTask),
+  );
+  const articleDirty = Boolean(
+    selectedTask && articleText !== currentFirstVersion(selectedTask),
+  );
+  const humanizedDirty = Boolean(
+    selectedTask && humanizedText !== currentHumanizedVersion(selectedTask),
+  );
+  const heroDirty = Boolean(
+    selectedTask &&
+      (heroUpload || heroImage.trim() !== (selectedTask.hero_image || "").trim()),
+  );
+  const productsDirty = Boolean(
+    selectedTask &&
+      JSON.stringify(persistedProducts()) !== JSON.stringify(selectedTask.products || []),
+  );
+  const writingSettingsDirty = Boolean(
+    selectedTask &&
+      (topicNotes !== (selectedTask.topic_notes || "") ||
+        outlineCustomPrompt !== (selectedTask.outline_custom_prompt || "") ||
+        articleCustomPrompt !== (selectedTask.article_custom_prompt || "") ||
+        useOutlineCustomPrompt !== (selectedTask.use_outline_custom_prompt ?? false) ||
+        useArticleCustomPrompt !== (selectedTask.use_article_custom_prompt ?? false) ||
+        includeProjectIntroduction !==
+          (selectedTask.include_project_introduction ?? true) ||
+        includeProjectNotes !== (selectedTask.include_project_notes ?? true) ||
+        includeTopicNotes !== (selectedTask.include_topic_notes ?? true)),
+  );
+  const titleDirty = Boolean(
+    selectedTask && titleChoice && titleChoice !== selectedTask.selected_title,
+  );
+  const initialReviewDirty = Boolean(
+    selectedTask &&
+      (initialAiScore !==
+        (selectedTask.initial_ai_check?.score == null
+          ? ""
+          : String(selectedTask.initial_ai_check.score)) ||
+        initialAiReport !==
+          (selectedTask.initial_ai_check?.report || selectedTask.zero_gpt_report || "")),
+  );
+  const finalReviewDirty = Boolean(
+    selectedTask &&
+      (finalAiScore !==
+        (selectedTask.final_ai_check?.score == null
+          ? ""
+          : String(selectedTask.final_ai_check.score)) ||
+        finalAiReport !== (selectedTask.final_ai_check?.report || "")),
+  );
+  const unsavedSections = [
+    titleDirty && "标题选择",
+    productsDirty && "产品",
+    writingSettingsDirty && "写作要求",
+    outlineDirty && "大纲",
+    articleDirty && "第一版",
+    (humanizedDirty || initialReviewDirty || finalReviewDirty) && "人工处理",
+    heroDirty && "首图",
+  ].filter((label): label is string => Boolean(label));
+  const dirtyTabs = new Set<WorkbenchTab>([
+    ...(titleDirty ? (["titles"] as WorkbenchTab[]) : []),
+    ...(productsDirty ? (["products"] as WorkbenchTab[]) : []),
+    ...(writingSettingsDirty ? (["requirements"] as WorkbenchTab[]) : []),
+    ...(outlineDirty ? (["outline"] as WorkbenchTab[]) : []),
+    ...(articleDirty ? (["article"] as WorkbenchTab[]) : []),
+    ...(humanizedDirty || initialReviewDirty || finalReviewDirty
+      ? (["review"] as WorkbenchTab[])
+      : []),
+    ...(heroDirty ? (["media"] as WorkbenchTab[]) : []),
+  ]);
+  const unsavedKey = unsavedSections.join("、");
+  const suggestedTab = selectedTask ? recommendedTab(selectedTask) : "titles";
+  const suggestedTabLabel =
+    WORKBENCH_TABS.find((tab) => tab.value === suggestedTab)?.label || "标题";
+  const activeStage =
+    WORKFLOW_STAGES.find((stage) => stage.tabs.includes(activeTab)) ?? WORKFLOW_STAGES[0];
+  const outlineHasDownstream = Boolean(
+    selectedTask && STATUS_PHASE[selectedTask.status] > STATUS_PHASE.outline_confirmed,
+  );
+  const outlineNeedsConfirmation = Boolean(
+    selectedTask &&
+      (selectedTask.status === "outline_ready" ||
+        currentOutlineDraft(selectedTask) !== selectedTask.outline),
+  );
+  const canSaveOutline = Boolean(
+    outlineText.trim() && (outlineDirty || outlineNeedsConfirmation),
+  );
+
+  useEffect(() => {
+    const next = new Set<EditableSection>();
+    if (titleDirty) next.add("titles");
+    if (productsDirty) next.add("products");
+    if (writingSettingsDirty) next.add("requirements");
+    if (outlineDirty) next.add("outline");
+    if (articleDirty) next.add("article");
+    if (humanizedDirty || initialReviewDirty || finalReviewDirty) next.add("review");
+    if (heroDirty) next.add("media");
+    dirtySectionsRef.current = next;
+  }, [
+    articleDirty,
+    finalReviewDirty,
+    heroDirty,
+    humanizedDirty,
+    initialReviewDirty,
+    outlineDirty,
+    productsDirty,
+    titleDirty,
+    writingSettingsDirty,
+  ]);
+
+  useEffect(() => {
+    if (!unsavedKey) return;
+    const warnBeforeLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeave);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeave);
+  }, [unsavedKey]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
+      <RevisionConflictDialog
+        open={Boolean(serverConflict)}
+        message={serverConflict?.message || ""}
+        localValue={serverConflict ? localSectionText(serverConflict.section) : ""}
+        serverValue={serverConflict ? taskSectionText(serverConflict.latest, serverConflict.section) : ""}
+        onAdoptServer={adoptServerConflict}
+        onKeepLocal={keepLocalConflict}
+      />
       <div className="border-b bg-[color-mix(in_oklch,var(--background),var(--accent)_22%)]">
-        <div className="mx-auto flex max-w-[1500px] flex-col gap-4 px-5 py-5 lg:flex-row lg:items-center lg:justify-between">
+        <div className="mx-auto max-w-[1500px] px-5 py-5">
+          {projectName && focusMode && (
+            <ProjectNavigation customer={projectName} className="mb-4" />
+          )}
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              {projectName && (
+              {projectName && !focusMode && (
                 <Button
                   variant="outline"
                   size="icon-sm"
@@ -392,23 +1587,41 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
               </Badge>
             </div>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-              <span>{dashboard?.week_folder ?? "未初始化"}</span>
-              <span>{dashboard?.week_path ?? config?.current_week_path}</span>
+              <span>长期任务，不按周重复创建</span>
+              <span>{config?.output_root}</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
-              onClick={() => runAction("数据已刷新", () => loadData())}
-              disabled={isBusy}
+              onClick={() => {
+                if (
+                  unsavedSections.length &&
+                  !window.confirm(
+                    `刷新会放弃未保存内容：${unsavedSections.join("、")}。确定刷新吗？`,
+                  )
+                ) {
+                  return;
+                }
+                void runAction(
+                  "数据已刷新",
+                  () => loadData(),
+                  undefined,
+                  { scope: "app", key: "app:refresh" },
+                );
+              }}
+              disabled={isAnyBusy}
             >
               <RefreshCw />
               刷新
             </Button>
-            <Button onClick={initializeWeek} disabled={isBusy}>
-              {busy ? <Loader2 className="animate-spin" /> : <Sparkles />}
-              初始化本周任务
-            </Button>
+            {!focusMode && (
+              <Button onClick={syncTasks} disabled={isAnyBusy}>
+                {isAnyBusy ? <Loader2 className="animate-spin" /> : <Sparkles />}
+                同步话题库
+              </Button>
+            )}
+          </div>
           </div>
         </div>
       </div>
@@ -428,7 +1641,7 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
           </Alert>
         )}
 
-        <section className="grid gap-3 md:grid-cols-4">
+        {!focusMode && <section className="grid gap-3 md:grid-cols-4">
           <SummaryCard
             title={projectName ? "项目任务" : "客户"}
             value={projectName ? tasks.length : dashboard?.customer_count ?? 0}
@@ -447,10 +1660,16 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
               <Progress value={completion} />
             </CardContent>
           </Card>
-        </section>
+        </section>}
 
-        <section className="grid min-h-[720px] gap-4 xl:grid-cols-[minmax(460px,0.95fr)_minmax(0,1.05fr)]">
-          <Card className="min-w-0 rounded-lg">
+        <section
+          className={cn(
+            "grid min-h-[720px] gap-4",
+            !focusMode &&
+              "xl:grid-cols-[minmax(460px,0.95fr)_minmax(0,1.05fr)]",
+          )}
+        >
+          {!focusMode && <Card className="min-w-0 rounded-lg">
             <CardHeader className="border-b">
               <CardTitle>任务队列</CardTitle>
               <CardDescription>
@@ -466,6 +1685,80 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
               </CardAction>
             </CardHeader>
             <CardContent className="grid gap-3">
+              <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-medium">批量生成中心</div>
+                    <div className="text-xs text-muted-foreground">
+                      已选 {batchSelectedIds.size} 篇；写作并发 3、找产品并发 2，同一文章不会重复执行。
+                    </div>
+                  </div>
+                  {batchSelectedIds.size > 0 && (
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => setBatchSelectedIds(new Set())}
+                    >
+                      清空选择
+                    </Button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={Boolean(batchBusy) || !batchSelectedIds.size}
+                    onClick={() => void startBatch("titles")}
+                  >
+                    {batchBusy === "titles" ? <Loader2 className="animate-spin" /> : <Sparkles />}
+                    批量生成标题
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={Boolean(batchBusy) || !batchSelectedIds.size}
+                    onClick={() => void startBatch("products")}
+                  >
+                    {batchBusy === "products" ? <Loader2 className="animate-spin" /> : <Package />}
+                    批量找产品
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={Boolean(batchBusy) || !batchSelectedIds.size}
+                    onClick={() => void startBatch("outline")}
+                  >
+                    {batchBusy === "outline" ? <Loader2 className="animate-spin" /> : <WandSparkles />}
+                    批量生成大纲
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={Boolean(batchBusy) || !batchSelectedIds.size}
+                    onClick={() => void startBatch("article")}
+                  >
+                    {batchBusy === "article" ? <Loader2 className="animate-spin" /> : <FileText />}
+                    批量生成正文
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={Boolean(batchBusy) || !batchSelectedIds.size}
+                    onClick={() => void startBatch("rewrite_article")}
+                  >
+                    {batchBusy === "rewrite_article" ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                    批量仅重写正文
+                  </Button>
+                </div>
+                {batches.length > 0 && (
+                  <BatchQueuePanel
+                    batches={batches}
+                    busy={batchBusy}
+                    onCancel={(batchId) => void cancelBatch(batchId)}
+                    onRetry={(jobId) => void retryBatchJob(jobId)}
+                    onOpenTask={openBatchTask}
+                  />
+                )}
+              </div>
               <div className="flex flex-wrap gap-2">
                 {STATUS_FILTERS.map((status) => (
                   <Button
@@ -478,10 +1771,26 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                   </Button>
                 ))}
               </div>
-              <ScrollArea className="h-[585px] rounded-lg border">
+              <ScrollArea
+                className={cn(
+                  "rounded-lg border",
+                  batches.length ? "h-[410px]" : "h-[585px]",
+                )}
+              >
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-[42px]">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-emerald-700"
+                          aria-label="选择当前筛选结果"
+                          checked={allFilteredBatchTasksSelected}
+                          onChange={(event) =>
+                            toggleFilteredBatchTasks(event.target.checked)
+                          }
+                        />
+                      </TableHead>
                       {projectName && <TableHead className="w-[100px]">编号</TableHead>}
                       {!projectName && <TableHead className="w-[170px]">客户</TableHead>}
                       <TableHead>话题</TableHead>
@@ -496,8 +1805,21 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                           "cursor-pointer",
                           selectedTask?.id === task.id && "bg-accent/60",
                         )}
-                        onClick={() => setSelectedTask(task)}
+                        onClick={() => selectTask(task)}
                       >
+                        <TableCell
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-emerald-700"
+                            aria-label={`选择 topic_${String(task.topic_index).padStart(3, "0")}`}
+                            checked={batchSelectedIds.has(task.id)}
+                            onChange={(event) =>
+                              toggleBatchTask(task.id, event.target.checked)
+                            }
+                          />
+                        </TableCell>
                         {projectName ? (
                           <TableCell className="text-xs text-muted-foreground">
                             topic_{String(task.topic_index).padStart(3, "0")}
@@ -531,11 +1853,11 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                 </Table>
               </ScrollArea>
             </CardContent>
-          </Card>
+          </Card>}
 
-          <Card className="min-w-0 rounded-lg">
+          <Card id="task-workbench" className="min-w-0 rounded-lg scroll-mt-4">
             <CardHeader className="border-b">
-              <CardTitle>任务处理</CardTitle>
+              <CardTitle>文章工作台</CardTitle>
               <CardDescription>
                 {selectedTask
                   ? `${selectedTask.customer} / topic_${String(
@@ -545,6 +1867,21 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
               </CardDescription>
               {selectedTask && (
                 <CardAction className="flex items-center gap-2">
+                  {selectedTask.status !== "new" && (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={rewriteFromScratch}
+                      disabled={
+                        Boolean(appPending) ||
+                        isCurrentTaskBusy ||
+                        !canAction("rewrite_from_scratch")
+                      }
+                    >
+                      <RotateCcw />
+                      完全重写
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -554,7 +1891,7 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
                         apiPost<ApiMessage>(`/api/tasks/${selectedId}/open-folder`),
                       )
                     }
-                    disabled={isBusy}
+                    disabled={Boolean(appPending) || Boolean(sectionPending("files"))}
                   >
                     <FolderOpen />
                     打开项目目录
@@ -568,875 +1905,495 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
             <CardContent>
               {!selectedTask ? (
                 <div className="flex h-[610px] items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
-                  初始化本周任务后选择一行
+                  {focusMode ? "找不到指定文章，请返回文章列表重新进入。" : "同步话题库后选择一行"}
                 </div>
               ) : (
-                <Tabs defaultValue="titles" className="h-full min-w-0">
-                  <TabsList className="grid h-auto w-full grid-cols-4 gap-1 sm:grid-cols-7">
-                    <TabsTrigger value="titles">标题</TabsTrigger>
-                    <TabsTrigger value="products">产品</TabsTrigger>
-                    <TabsTrigger value="outline">大纲</TabsTrigger>
-                    <TabsTrigger value="article">第一版</TabsTrigger>
-                    <TabsTrigger value="review">人工处理</TabsTrigger>
-                    <TabsTrigger value="media">图片导出</TabsTrigger>
-                    <TabsTrigger value="files">文件</TabsTrigger>
-                  </TabsList>
+                <Tabs
+                  value={activeTab}
+                  onValueChange={(value) => selectTab(value as WorkbenchTab)}
+                  className="h-full min-w-0"
+                >
+                  <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1 sm:grid-cols-5">
+                    {WORKFLOW_STAGES.map((stage) => {
+                      const stageBusy = stage.tabs.some((tab) => sectionPending(tab));
+                      const stageDirty = stage.tabs.some((tab) => dirtyTabs.has(tab));
+                      return (
+                        <Button
+                          key={stage.value}
+                          type="button"
+                          size="sm"
+                          variant={activeStage.value === stage.value ? "default" : "ghost"}
+                          className="gap-2"
+                          onClick={() => selectTab(stage.tabs[0])}
+                        >
+                          <span className="text-[10px] opacity-70">{stage.step}</span>
+                          {stage.label}
+                          {stageBusy && <Loader2 className="size-3 animate-spin" />}
+                          {stageDirty && (
+                            <span className="size-1.5 rounded-full bg-amber-500" />
+                          )}
+                        </Button>
+                      );
+                    })}
+                  </div>
+
+                  {activeStage.tabs.length > 1 && (
+                    <div className="mt-2 flex flex-wrap gap-2 border-b pb-2">
+                      {activeStage.tabs.map((tabValue) => {
+                        const tab = WORKBENCH_TABS.find((item) => item.value === tabValue);
+                        if (!tab) return null;
+                        return (
+                          <Button
+                            key={tab.value}
+                            type="button"
+                            size="sm"
+                            variant={activeTab === tab.value ? "secondary" : "ghost"}
+                            onClick={() => selectTab(tab.value)}
+                          >
+                            {tab.label}
+                            {sectionPending(tab.value) && (
+                              <Loader2 className="size-3 animate-spin" />
+                            )}
+                            {dirtyTabs.has(tab.value) && (
+                              <span className="size-1.5 rounded-full bg-amber-500" />
+                            )}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-sm">
+                    <span className="text-muted-foreground">建议下一步：</span>
+                    <Button
+                      size="xs"
+                      variant={activeTab === suggestedTab ? "secondary" : "outline"}
+                      onClick={() => selectTab(suggestedTab)}
+                    >
+                      {suggestedTabLabel}
+                    </Button>
+                    {unsavedSections.length > 0 && (
+                      <Badge variant="outline" className="border-amber-300 text-amber-800">
+                        未保存：{unsavedSections.join("、")}
+                      </Badge>
+                    )}
+                    {busy && (
+                      <Badge variant="secondary" className="ml-auto gap-1">
+                        <Loader2 className="size-3 animate-spin" />
+                        {busy}
+                      </Badge>
+                    )}
+                    {activeTaskJob && (
+                      <Badge variant="secondary" className="ml-auto gap-1">
+                        <Loader2 className="size-3 animate-spin" />
+                        后台{batchOperationLabel(activeTaskJob.operation)}：
+                        {batchJobStatusLabel(activeTaskJob.status)}
+                      </Badge>
+                    )}
+                  </div>
 
                   <TabsContent value="titles" className="min-w-0 pt-4">
-                    <div className="grid gap-4">
-                      <TaskBrief task={selectedTask} />
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          onClick={() =>
-                            selectedId &&
-                            runAction("标题已生成", () =>
-                              apiPost<TaskRecord>(`/api/tasks/${selectedId}/titles`),
-                            )
-                          }
-                          disabled={isBusy || !canAction("generate_titles")}
-                        >
-                          <WandSparkles />
-                          生成 10 个标题
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() =>
-                            selectedId &&
-                            runAction("标题已保存", () =>
-                              apiPost<TaskRecord>(
-                                `/api/tasks/${selectedId}/select-title`,
-                                { title: titleChoice },
-                              ),
-                            )
-                          }
-                          disabled={isBusy || !titleChoice || !canAction("select_title")}
-                        >
-                          <CheckCircle2 />
-                          选用标题
-                        </Button>
-                      </div>
-                      <ScrollArea className="h-[470px] pr-3">
-                      <RadioGroup
-                        value={titleChoice}
-                        onValueChange={setTitleChoice}
-                        className="gap-2"
-                      >
-                        {selectedTask.title_candidates.length ? (
-                          selectedTask.title_candidates.map((title) => (
-                            <label
-                              key={title}
-                              className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 hover:bg-accent/50"
-                            >
-                              <RadioGroupItem value={title} className="mt-1" />
-                              <span className="text-sm leading-6">{title}</span>
-                            </label>
-                          ))
-                        ) : (
-                          <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                            暂无候选标题
-                          </div>
-                        )}
-                      </RadioGroup>
-                      </ScrollArea>
-                    </div>
+
+                    <ArticleTitleStep
+
+                      task={selectedTask}
+
+                      titleChoice={titleChoice}
+
+                      titleDirty={titleDirty}
+
+                      busy={isBusy}
+
+                      hasActiveJob={Boolean(activeTaskJob)}
+
+                      canGenerate={canAction("generate_titles")}
+
+                      canSelect={canAction("select_title")}
+
+                      onGenerate={() => void enqueueSingleOperation("titles", "标题生成")}
+
+                      onSelect={() => {
+
+                        if (!selectedId) return;
+
+                        void runAction("标题已保存", () =>
+
+                          apiPost<TaskRecord>(
+
+                            `/api/tasks/${selectedId}/select-title`,
+
+                            {
+
+                              revision: selectedTask.revision,
+
+                              title: titleChoice,
+
+                            },
+
+                          ),
+
+                        );
+
+                      }}
+
+                      onTitleChoiceChange={setTitleChoice}
+
+                    />
+
                   </TabsContent>
 
                   <TabsContent value="products" className="min-w-0 pt-4">
-                    <div className="grid gap-3">
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          onClick={() => setProducts((current) => [...current, emptyProduct()])}
-                          disabled={isBusy}
-                        >
-                          <Plus />
-                          添加产品
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          onClick={() =>
-                            selectedId &&
-                            runAction("官网产品与资产已自动抓取", () =>
-                              apiPost<TaskRecord>(
-                                `/api/tasks/${selectedId}/products/auto?limit=3`,
-                                undefined,
-                                PRODUCT_ASSET_TIMEOUT_MS,
-                              ),
-                            )
-                          }
-                          disabled={isBusy || !selectedId || !canAction("update_products")}
-                        >
-                          {isBusy ? <Loader2 className="animate-spin" /> : <WandSparkles />}
-                          自动抓取产品与官网资产
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() =>
-                            selectedId &&
-                            runAction("官网资产已重新抓取并选图", async () => {
-                              await apiPut<TaskRecord>(
-                                `/api/tasks/${selectedId}/products`,
-                                { products: persistedProducts() },
-                              );
-                              return apiPost<TaskRecord>(
-                                `/api/tasks/${selectedId}/products/assets`,
-                                undefined,
-                                PRODUCT_ASSET_TIMEOUT_MS,
-                              );
-                            })
-                          }
-                          disabled={
-                            isBusy ||
-                            !selectedId ||
-                            !persistedProducts().some((product) => product.url.trim()) ||
-                            !canAction("update_products")
-                          }
-                        >
-                          {isBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                          重新核验官网资产并 AI 选图
-                        </Button>
-                        <Button
-                          className="ml-auto"
-                          onClick={() =>
-                            selectedId &&
-                            runAction("产品已保存", () =>
-                              apiPut<TaskRecord>(`/api/tasks/${selectedId}/products`, {
+
+                    <ArticleProductsStep
+
+                      products={products}
+
+                      productsDirty={productsDirty}
+
+                      busy={isBusy}
+
+                      hasActiveJob={Boolean(activeTaskJob)}
+
+                      canUpdate={Boolean(selectedId) && canAction("update_products")}
+
+                      canRevalidateAssets={persistedProducts().some((product) =>
+
+                        product.url.trim(),
+
+                      )}
+
+                      onAdd={() => setProducts((current) => [...current, emptyProduct()])}
+
+                      onRemove={(index) =>
+
+                        setProducts((current) =>
+
+                          current.filter((_, productIndex) => productIndex !== index),
+
+                        )
+
+                      }
+
+                      onUpdate={updateProduct}
+
+                      onAutoFetch={() => {
+
+                        if (!selectedId || !selectedTask) return;
+
+                        if (!confirmProductChanges("自动重新查找产品")) return;
+
+                        void enqueueSingleOperation("products", "官网产品与资产抓取");
+
+                      }}
+
+                      onRevalidateAssets={() => {
+
+                        if (!selectedId || !selectedTask) return;
+
+                        if (!confirmProductChanges("重新核验官网资产")) return;
+
+                        void runAction("官网资产已重新抓取并选图", async () => {
+
+                          let revision = selectedTask.revision ?? 0;
+
+                          if (productsDirty) {
+
+                            const saved = await apiPut<TaskRecord>(
+
+                              `/api/tasks/${selectedId}/products`,
+
+                              {
+
+                                revision,
+
                                 products: persistedProducts(),
-                              }),
-                            )
+
+                              },
+
+                              QUICK_SAVE_TIMEOUT_MS,
+
+                            );
+
+                            revision = saved.revision ?? revision + 1;
+
                           }
-                          disabled={isBusy || !canAction("update_products")}
-                        >
-                          <Save />
-                          保存产品
-                        </Button>
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        Tavily 只负责发现官网详情页；系统会从每个详情页归档对应产品资产，再由视觉模型按资产编号选图。每篇最多使用 3 张不同图片，证据不足的产品会跳过，不要求操作人员猜图。
-                      </div>
-                      <ScrollArea className="h-[520px] pr-3">
-                        <div className="grid gap-3">
-                          {products.map((product, index) => (
-                            <div key={index} className="rounded-lg border p-3">
-                              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <div className="font-medium">产品 {index + 1}</div>
-                                  {product.detail_page_verified && (
-                                    <Badge variant="outline">官网详情页已核验</Badge>
-                                  )}
-                                  {product.discovery_source === "tavily" && (
-                                    <Badge variant="outline">Tavily 发现</Badge>
-                                  )}
-                                  {(product.asset_count ?? 0) > 0 && (
-                                    <Badge variant="secondary">
-                                      官网资产 {product.asset_count}
-                                    </Badge>
-                                  )}
-                                  {product.selected_asset_id && (
-                                    <Badge>
-                                      已选图
-                                      {product.selection_confidence != null
-                                        ? ` ${Math.round(product.selection_confidence * 100)}%`
-                                        : ""}
-                                    </Badge>
-                                  )}
-                                  {product.url && (
-                                    <a
-                                      href={product.canonical_url || product.url}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                                    >
-                                      <ExternalLink className="size-3.5" />
-                                      打开官网详情页
-                                    </a>
-                                  )}
-                                </div>
-                                <Button
-                                  size="icon-sm"
-                                  variant="ghost"
-                                  onClick={() =>
-                                    setProducts((current) =>
-                                      current.filter((_, productIndex) => productIndex !== index),
-                                    )
-                                  }
-                                  disabled={products.length === 1}
-                                >
-                                  <X />
-                                </Button>
-                              </div>
-                              <div className="grid gap-3 md:grid-cols-2">
-                                <Field
-                                  label="产品名"
-                                  value={product.name}
-                                  onChange={(value) => updateProduct(index, "name", value)}
-                                />
-                                <Field
-                                  label="产品 URL"
-                                  value={product.url}
-                                  onChange={(value) => updateProduct(index, "url", value)}
-                                />
-                                <Field
-                                  label="图片路径"
-                                  value={product.image_path}
-                                  onChange={(value) => updateProduct(index, "image_path", value)}
-                                />
-                                <div className="grid gap-2 md:col-span-2">
-                                  <Label>描述</Label>
-                                  <Textarea
-                                    value={product.description}
-                                    onChange={(event) =>
-                                      updateProduct(index, "description", event.target.value)
-                                    }
-                                    className="h-[86px] resize-none overflow-y-auto"
-                                  />
-                                </div>
-                                {(product.reference_summary || product.selection_reason) && (
-                                  <div className="grid gap-2 rounded-md bg-muted/45 p-3 text-xs md:col-span-2">
-                                    {product.reference_summary && (
-                                      <div>
-                                        <span className="font-medium">官网资料摘要：</span>
-                                        <span className="text-muted-foreground">
-                                          {product.reference_summary}
-                                        </span>
-                                      </div>
-                                    )}
-                                    {product.selection_reason && (
-                                      <div>
-                                        <span className="font-medium">选图依据：</span>
-                                        <span className="text-muted-foreground">
-                                          {product.selection_reason}
-                                        </span>
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                                {product.asset_error && (
-                                  <div className="text-xs text-destructive md:col-span-2">
-                                    官网资产未采用：{product.asset_error}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </ScrollArea>
-                    </div>
+
+                          return apiPost<TaskRecord>(
+
+                            `/api/tasks/${selectedId}/products/assets?revision=${revision}`,
+
+                            undefined,
+
+                            PRODUCT_ASSET_TIMEOUT_MS,
+
+                          );
+
+                        });
+
+                      }}
+
+                      onSave={saveProducts}
+
+                    />
+
                   </TabsContent>
 
-                  <TabsContent value="outline" className="min-w-0 pt-4">
-                    <EditorPanel
-                      value={outlineText}
-                      onChange={setOutlineText}
-                      placeholder="生成或编辑大纲"
-                      height="h-[480px]"
-                      actions={
-                        <>
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("大纲已生成", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/outline`),
-                              )
-                            }
-                            disabled={isBusy || !canAction("generate_outline")}
-                          >
-                            <WandSparkles />
-                            生成大纲
-                          </Button>
-                          <Button
-                            variant="outline"
-                            onClick={() =>
-                              selectedId &&
-                              runAction("大纲已保存", () =>
-                                apiPut<TaskRecord>(`/api/tasks/${selectedId}/outline`, {
-                                  outline: outlineText,
-                                }),
-                              )
-                            }
-                            disabled={isBusy || !outlineText.trim() || !canAction("update_outline")}
-                          >
-                            <Save />
-                            保存大纲
-                          </Button>
-                        </>
-                      }
+                  <TabsContent value="requirements" className="min-w-0 pt-4">
+
+                    <ArticleWritingRequirementsStep
+
+                      task={selectedTask}
+
+                      topicNotes={topicNotes}
+
+                      includeProjectIntroduction={includeProjectIntroduction}
+
+                      includeProjectNotes={includeProjectNotes}
+
+                      includeTopicNotes={includeTopicNotes}
+
+                      useOutlineCustomPrompt={useOutlineCustomPrompt}
+
+                      outlineCustomPrompt={outlineCustomPrompt}
+
+                      useArticleCustomPrompt={useArticleCustomPrompt}
+
+                      articleCustomPrompt={articleCustomPrompt}
+
+                      dirty={writingSettingsDirty}
+
+                      busy={isBusy}
+
+                      canSave={Boolean(selectedId)}
+
+                      onTopicNotesChange={setTopicNotes}
+
+                      onIncludeProjectIntroductionChange={setIncludeProjectIntroduction}
+
+                      onIncludeProjectNotesChange={setIncludeProjectNotes}
+
+                      onIncludeTopicNotesChange={setIncludeTopicNotes}
+
+                      onUseOutlineCustomPromptChange={setUseOutlineCustomPrompt}
+
+                      onOutlineCustomPromptChange={setOutlineCustomPrompt}
+
+                      onUseArticleCustomPromptChange={setUseArticleCustomPrompt}
+
+                      onArticleCustomPromptChange={setArticleCustomPrompt}
+
+                      onSave={saveWritingSettings}
+
+                    />
+
+                  </TabsContent>
+
+<TabsContent value="outline" className="min-w-0 pt-4">
+                    <ArticleOutlineStep
+                      task={selectedTask}
+                      outlineText={outlineText}
+                      outlineDirty={outlineDirty}
+                      outlineNeedsConfirmation={outlineNeedsConfirmation}
+                      outlineHasDownstream={outlineHasDownstream}
+                      canSaveOutline={canSaveOutline}
+                      busy={isBusy}
+                      hasActiveJob={Boolean(activeTaskJob)}
+                      canAction={canAction}
+                      onOutlineChange={setOutlineText}
+                      onGenerate={generateOrRegenerateOutline}
+                      onSaveDraft={() => saveOutline(false)}
+                      onSaveAndConfirm={() => saveOutline(true)}
+                      onRestore={restoreVersion}
                     />
                   </TabsContent>
 
                   <TabsContent value="article" className="min-w-0 pt-4">
-                    <EditorPanel
-                      value={articleText}
-                      onChange={setArticleText}
-                      placeholder="生成或编辑正文"
-                      height="h-[500px]"
-                      meta={
-                        <div className="text-xs text-muted-foreground">
-                          生成范围：1000–{articleTarget} 词（约 {articleCharacterTarget.toLocaleString()}
-                          字符，含空格）/ 当前：{articleWords} 词；不机械截断或自动压缩。FAQ
-                          固定为最后一个 H2，3 个 Q 均需整行加粗
-                        </div>
-                      }
-                      actions={
-                        <>
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("正文已生成", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/article`, {
-                                  word_count: config?.article.default_word_count ?? 1200,
-                                }),
-                              )
-                            }
-                            disabled={isBusy || !canAction("generate_article")}
-                          >
-                            <FileText />
-                            生成正文
-                          </Button>
-                          <Button
-                            variant="outline"
-                            onClick={() =>
-                              selectedId &&
-                              runAction("正文已保存", () =>
-                                apiPut<TaskRecord>(`/api/tasks/${selectedId}/article`, {
-                                  article: articleText,
-                                }),
-                              )
-                            }
-                            disabled={isBusy || !articleText.trim() || !canAction("update_article")}
-                          >
-                            <Save />
-                            保存第一版
-                          </Button>
-                        </>
-                      }
+                    <ArticleDraftStep
+                      task={selectedTask}
+                      articleText={articleText}
+                      articleTarget={articleTarget}
+                      articleCharacterTarget={articleCharacterTarget}
+                      articleWords={articleWords}
+                      hasGeneratedFirstVersion={hasGeneratedFirstVersion}
+                      articleDirty={articleDirty}
+                      busy={isBusy}
+                      hasActiveJob={Boolean(activeTaskJob)}
+                      canAction={canAction}
+                      onArticleChange={setArticleText}
+                      onGenerate={generateOrRegenerateArticle}
+                      onSave={() => {
+                        if (!selectedId) return;
+                        void runAction("正文已保存", () =>
+                          apiPut<TaskRecord>(
+                            `/api/tasks/${selectedId}/article`,
+                            {
+                              revision: selectedTask.revision,
+                              article: articleText,
+                            },
+                            QUICK_SAVE_TIMEOUT_MS,
+                          ),
+                        );
+                      }}
+                      onRestore={restoreVersion}
                     />
                   </TabsContent>
 
                   <TabsContent value="review" className="min-w-0 pt-4">
-                    <ScrollArea className="h-[570px] pr-3">
-                      <div className="grid gap-4">
-                        <WorkflowStep
-                          number="1"
-                          title="ZeroGPT 初检（人工）"
-                          description="复制第一版正文到 ZeroGPT，检测后把分数或备注保存回来。系统不会自动访问 ZeroGPT。"
-                          done={Boolean(selectedTask.initial_ai_check?.confirmed)}
-                        >
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              variant="outline"
-                              onClick={() =>
-                                copyArticle(
-                                  selectedTask.initial_article || articleText,
-                                  "第一版正文已复制",
-                                ).catch((err) => setError(errorMessage(err)))
-                              }
-                            >
-                              <Clipboard />
-                              复制第一版正文
-                            </Button>
-                          </div>
-                          {selectedTask.initial_article_issues?.length ? (
-                            <Alert className="border-amber-500/40 bg-amber-50">
-                              <AlertTitle>第一版尚未满足检测条件</AlertTitle>
-                              <AlertDescription>
-                                {selectedTask.initial_article_issues.join(" ")}
-                              </AlertDescription>
-                            </Alert>
-                          ) : null}
-                          <div className="grid gap-3 md:grid-cols-[150px_1fr]">
-                            <Field
-                              label="AI 率（可选）"
-                              value={initialAiScore}
-                              onChange={setInitialAiScore}
-                              inputType="number"
-                            />
-                            <div className="grid gap-2">
-                              <Label>初检报告或备注</Label>
-                              <Textarea
-                                value={initialAiReport}
-                                onChange={(event) => setInitialAiReport(event.target.value)}
-                                placeholder="粘贴 ZeroGPT 结果，或记录已在公司工作台完成初检"
-                                className="h-[92px] resize-none"
-                              />
-                            </div>
-                          </div>
-                          <AiScreenshotInput
-                            label="初检 AI 率截图"
-                            path={selectedTask.initial_ai_check?.screenshot_path || ""}
-                            disabled={isBusy}
-                            onImage={(file) => uploadAiScreenshot("initial", file)}
-                          />
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("ZeroGPT 初检已确认", () =>
-                                apiPut<TaskRecord>(
-                                  `/api/tasks/${selectedId}/checks/initial-ai`,
-                                  {
-                                    score: optionalScore(initialAiScore),
-                                    report: initialAiReport,
-                                  },
-                                ),
-                              )
-                            }
-                            disabled={
-                              isBusy ||
-                              !canAction("confirm_initial_ai_check") ||
-                              selectedTask.initial_article_ready === false ||
-                              (!initialAiScore &&
-                                !initialAiReport.trim() &&
-                                !selectedTask.initial_ai_check?.screenshot_path)
-                            }
-                          >
-                            <ShieldCheck />
-                            确认初检完成
-                          </Button>
-                        </WorkflowStep>
-
-                        <WorkflowStep
-                          number="2"
-                          title="生成或粘贴降 AI 稿"
-                          description={`可在完成初检后调用本地提示词，也可以直接粘贴外部已经降 AI 的正文并保存。提示词：${config?.prompts?.humanize ?? "D:\\article\\降ai提示词-未测试效果版.txt"}`}
-                          done={Boolean(selectedTask.humanized_article)}
-                        >
-                          <div className="text-xs text-muted-foreground">
-                            当前候选稿：{humanizedWords} 词；不设最大词数，不会自动压缩。
-                          </div>
-                          {humanizedEditRollsBack && (
-                            <Alert className="border-amber-500/40 bg-amber-50">
-                              <AlertTitle>保存修改会回退后续步骤</AlertTitle>
-                              <AlertDescription>
-                                将回退到“待 ZeroGPT 复检”，并清除旧正文对应的复检确认、链接恢复、图片准备、Word、TDK 和交付包记录。
-                              </AlertDescription>
-                            </Alert>
-                          )}
-                          <Textarea
-                            value={humanizedText}
-                            onChange={(event) => setHumanizedText(event.target.value)}
-                            placeholder="可直接粘贴外部已经降 AI 的完整正文，或完成初检后点击下方模型改写"
-                            className="h-[220px] resize-none overflow-y-auto font-mono text-sm leading-6"
-                          />
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <Button
-                              onClick={() =>
-                                selectedId &&
-                                runAction("降 AI 候选稿已生成", () =>
-                                  apiPost<TaskRecord>(`/api/tasks/${selectedId}/humanize`),
-                                )
-                              }
-                              disabled={isBusy || !canAction("humanize_article")}
-                            >
-                              <WandSparkles />
-                              执行内置 AI 改写
-                            </Button>
-                            <Button
-                              variant="outline"
-                              onClick={() =>
-                                selectedId &&
-                                runAction(
-                                  humanizedEditRollsBack
-                                    ? "正文修改已保存，后续步骤已回退"
-                                    : "外部降 AI 稿已保存",
-                                  () =>
-                                    apiPut<TaskRecord>(
-                                      `/api/tasks/${selectedId}/humanized-article`,
-                                      { article: humanizedText },
-                                    ),
-                                )
-                              }
-                              disabled={
-                                isBusy ||
-                                !humanizedText.trim() ||
-                                !canAction("update_humanized_article")
-                              }
-                            >
-                              <Save />
-                              {humanizedEditRollsBack
-                                ? "保存修改并回退后续步骤"
-                                : "保存粘贴的降 AI 稿"}
-                            </Button>
-                          </div>
-                        </WorkflowStep>
-
-                        <WorkflowStep
-                          number="3"
-                          title="ZeroGPT 复检（人工）"
-                          description={`复制降 AI 版本再次检测。默认参考线 < ${config?.article.ai_pass_threshold ?? 30}%，但最终由你确认。`}
-                          done={Boolean(selectedTask.final_ai_check?.confirmed)}
-                        >
-                          <Button
-                            variant="outline"
-                            onClick={() =>
-                              copyArticle(
-                                selectedTask.humanized_article || humanizedText,
-                                "降 AI 正文已复制",
-                              ).catch((err) => setError(errorMessage(err)))
-                            }
-                            disabled={!humanizedText.trim()}
-                          >
-                            <Clipboard />
-                            复制降 AI 正文
-                          </Button>
-                          <div className="grid gap-3 md:grid-cols-[150px_1fr]">
-                            <Field
-                              label="复检 AI 率（可选）"
-                              value={finalAiScore}
-                              onChange={setFinalAiScore}
-                              inputType="number"
-                            />
-                            <div className="grid gap-2">
-                              <Label>复检报告或备注</Label>
-                              <Textarea
-                                value={finalAiReport}
-                                onChange={(event) => setFinalAiReport(event.target.value)}
-                                placeholder="粘贴第二次 ZeroGPT 结果"
-                                className="h-[92px] resize-none"
-                              />
-                            </div>
-                          </div>
-                          <AiScreenshotInput
-                            label="复检 AI 率截图"
-                            path={selectedTask.final_ai_check?.screenshot_path || ""}
-                            disabled={isBusy}
-                            onImage={(file) => uploadAiScreenshot("final", file)}
-                          />
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("ZeroGPT 复检已确认", () =>
-                                apiPut<TaskRecord>(
-                                  `/api/tasks/${selectedId}/checks/final-ai`,
-                                  {
-                                    score: optionalScore(finalAiScore),
-                                    report: finalAiReport,
-                                  },
-                                ),
-                              )
-                            }
-                            disabled={
-                              isBusy ||
-                              !canAction("confirm_final_ai_check") ||
-                              !humanizedText.trim() ||
-                              (!finalAiScore &&
-                                !finalAiReport.trim() &&
-                                !selectedTask.final_ai_check?.screenshot_path)
-                            }
-                          >
-                            <ShieldCheck />
-                            确认复检完成
-                          </Button>
-                        </WorkflowStep>
-
-                        <WorkflowStep
-                          number="4"
-                          title="恢复并校验超链接"
-                          description="以第一版链接清单为基准；URL 缺失或锚文本被降 AI 改名时，由模型恢复第一版的原始链接名称和 URL。"
-                          done={selectedTask.status === "links_verified" || selectedTask.status === "images_ready" || selectedTask.status === "docx_exported"}
-                        >
-                          <div className="flex flex-wrap items-center gap-2 text-sm">
-                            <Badge variant="outline">
-                              第一版链接 {selectedTask.source_links?.length ?? 0}
-                            </Badge>
-                            {selectedTask.workflow_error && (
-                              <span className="text-destructive">
-                                {selectedTask.workflow_error.message}
-                              </span>
-                            )}
-                          </div>
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("超链接已校验并恢复", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/restore-links`),
-                              )
-                            }
-                            disabled={isBusy || !canAction("restore_links")}
-                          >
-                            <Link2 />
-                            校验并回填链接
-                          </Button>
-                        </WorkflowStep>
-                      </div>
-                    </ScrollArea>
+                    <ArticleReviewStep
+                      task={selectedTask}
+                      config={config}
+                      initialArticle={selectedTask.initial_article || articleText}
+                      initialAiScore={initialAiScore}
+                      initialAiReport={initialAiReport}
+                      finalAiScore={finalAiScore}
+                      finalAiReport={finalAiReport}
+                      humanizedText={humanizedText}
+                      humanizedWords={humanizedWords}
+                      humanizedDirty={humanizedDirty}
+                      humanizedEditRollsBack={humanizedEditRollsBack}
+                      busy={isBusy}
+                      hasActiveJob={Boolean(activeTaskJob)}
+                      canAction={canAction}
+                      onInitialAiScoreChange={setInitialAiScore}
+                      onInitialAiReportChange={setInitialAiReport}
+                      onFinalAiScoreChange={setFinalAiScore}
+                      onFinalAiReportChange={setFinalAiReport}
+                      onHumanizedTextChange={setHumanizedText}
+                      onCopy={(content, label) => {
+                        void copyArticle(content, label).catch((err) =>
+                          setError(errorMessage(err)),
+                        );
+                      }}
+                      onUploadScreenshot={uploadAiScreenshot}
+                      onConfirmInitial={() => {
+                        if (!selectedId) return;
+                        void runAction("ZeroGPT 初检已确认", () =>
+                          apiPut<TaskRecord>(
+                            `/api/tasks/${selectedId}/checks/initial-ai`,
+                            {
+                              revision: selectedTask.revision,
+                              score: optionalScore(initialAiScore),
+                              report: initialAiReport,
+                            },
+                            QUICK_SAVE_TIMEOUT_MS,
+                          ),
+                        );
+                      }}
+                      onHumanize={() =>
+                        void enqueueSingleOperation("humanize", "降 AI 改写")
+                      }
+                      onSaveHumanized={() => {
+                        if (!selectedId) return;
+                        void runAction(
+                          humanizedEditRollsBack
+                            ? "正文修改已保存，后续步骤已回退"
+                            : "外部降 AI 稿已保存",
+                          () =>
+                            apiPut<TaskRecord>(
+                              `/api/tasks/${selectedId}/humanized-article`,
+                              {
+                                revision: selectedTask.revision,
+                                article: humanizedText,
+                              },
+                              QUICK_SAVE_TIMEOUT_MS,
+                            ),
+                        );
+                      }}
+                      onConfirmFinal={() => {
+                        if (!selectedId) return;
+                        void runAction("ZeroGPT 复检已确认", () =>
+                          apiPut<TaskRecord>(
+                            `/api/tasks/${selectedId}/checks/final-ai`,
+                            {
+                              revision: selectedTask.revision,
+                              score: optionalScore(finalAiScore),
+                              report: finalAiReport,
+                            },
+                            QUICK_SAVE_TIMEOUT_MS,
+                          ),
+                        );
+                      }}
+                      onRestoreLinks={() =>
+                        void enqueueSingleOperation("restore_links", "链接恢复")
+                      }
+                    />
                   </TabsContent>
 
                   <TabsContent value="media" className="min-w-0 pt-4">
-                    <ScrollArea className="h-[570px] pr-3">
-                      <div className="grid gap-4">
-                        <WorkflowStep
-                          number="5"
-                          title="选择并准备首图"
-                          description="每篇文章最多 3 张不同图片（包含首图）。首图会转换为 WebP，以安全化文章标题命名，并固定放在第一个 H2 前；重复产品图会自动跳过。"
-                          done={selectedTask.status === "images_ready" || selectedTask.status === "docx_exported"}
-                        >
-                          <Field label="首图路径" value={heroImage} onChange={setHeroImage} />
-                          <div className="flex flex-wrap gap-2">
-                            {products
-                              .filter((product) => product.image_path)
-                              .map((product, index) => (
-                                <Button
-                                  key={`${product.image_path}-${index}`}
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => setHeroImage(product.image_path)}
-                                >
-                                  <ImageIcon />
-                                  使用{product.name || `产品 ${index + 1}`}图片
-                                </Button>
-                              ))}
-                          </div>
-                          <div className="grid gap-2">
-                            <Label htmlFor="hero-upload">或上传首图</Label>
-                            <Input
-                              id="hero-upload"
-                              type="file"
-                              accept="image/*"
-                              onChange={(event) => setHeroUpload(event.target.files?.[0] ?? null)}
-                            />
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              variant="outline"
-                              onClick={() =>
-                                selectedId &&
-                                runAction("首图设置已保存", () =>
-                                  apiPut<TaskRecord>(`/api/tasks/${selectedId}/images`, {
-                                    hero_image: heroImage,
-                                  }),
-                                )
+                    <ArticleMediaStep
+                      task={selectedTask}
+                      heroImage={heroImage}
+                      products={products}
+                      heroUpload={heroUpload}
+                      heroPreviewUrl={heroPreviewUrl}
+                      heroPreviewFailed={heroPreviewFailed}
+                      heroDirty={heroDirty}
+                      busy={isBusy}
+                      hasActiveJob={Boolean(activeTaskJob)}
+                      canAction={canAction}
+                      onHeroChange={(path) => {
+                        setHeroImage(path);
+                        setHeroUpload(null);
+                      }}
+                      onHeroUploadChange={setHeroUpload}
+                      onHeroPreviewError={() => setHeroPreviewFailed(true)}
+                      onSelectBody={selectBodyImage}
+                      onMoveBody={moveBodyImage}
+                      onSaveHero={saveHeroPath}
+                      onUploadHero={() => {
+                        if (!selectedId || !heroUpload) return;
+                        const body = new FormData();
+                        body.append("file", heroUpload);
+                        void runAction(
+                          "首图已上传",
+                          () =>
+                            apiUpload<TaskRecord>(
+                              `/api/tasks/${selectedId}/images/upload?role=hero&revision=${selectedTask.revision ?? 0}`,
+                              body,
+                            ),
+                          undefined,
+                          { key: `task:${selectedId}:media` },
+                        );
+                      }}
+                      onPrepareImages={saveHeroThenPrepare}
+                      onSaveAnchor={(item, candidate) => {
+                        if (!selectedId) return;
+                        const nextImages = (selectedTask.images ?? []).map((image) =>
+                          image.id === item.id
+                            ? {
+                                ...image,
+                                anchor_heading: candidate.anchor_heading,
+                                status: "pending",
+                                error: "",
                               }
-                              disabled={
-                                isBusy ||
-                                !heroImage.trim() ||
-                                !canAction("update_images")
-                              }
-                            >
-                              <Save />
-                              保存首图路径
-                            </Button>
-                            <Button
-                              variant="outline"
-                              onClick={() => {
-                                if (!selectedId || !heroUpload) return;
-                                const body = new FormData();
-                                body.append("file", heroUpload);
-                                void runAction("首图已上传", () =>
-                                  apiUpload<TaskRecord>(
-                                    `/api/tasks/${selectedId}/images/upload?role=hero`,
-                                    body,
-                                  ),
-                                );
-                              }}
-                              disabled={isBusy || !heroUpload || !canAction("update_images")}
-                            >
-                              <Upload />
-                              上传并设为首图
-                            </Button>
-                          </div>
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("图片已转换并排版", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/prepare-images`),
-                              )
-                            }
-                            disabled={
-                              isBusy ||
-                              !heroImage.trim() ||
-                              !canAction("prepare_images")
-                            }
-                          >
-                            <ImageIcon />
-                            转换 WebP 并准备图片
-                          </Button>
-                          <div className="grid gap-2">
-                            {(selectedTask.images ?? []).map((item) => (
-                              <div key={item.id} className="rounded-lg border p-3 text-sm">
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="font-medium">
-                                    {item.role === "hero" ? "首图" : "正文图"}
-                                  </span>
-                                  <Badge variant="outline">{item.marker}</Badge>
-                                </div>
-                                <div className="mt-1 break-all text-xs text-muted-foreground">
-                                  {item.prepared_path}
-                                </div>
-                                {item.status === "needs_anchor" &&
-                                item.anchor_candidates?.length ? (
-                                  <div className="mt-3 grid gap-2">
-                                    <div className="text-xs text-amber-700">
-                                      请选择标题；图片会放在该标题下第一段完整正文的末尾：
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                      {item.anchor_candidates.map((candidate) => (
-                                        <Button
-                                          key={candidate.id}
-                                          size="sm"
-                                          variant="outline"
-                                          onClick={() => {
-                                            if (!selectedId) return;
-                                            const nextImages = (selectedTask.images ?? []).map(
-                                              (image) =>
-                                                image.id === item.id
-                                                  ? {
-                                                      ...image,
-                                                      anchor_heading:
-                                                        candidate.anchor_heading,
-                                                      status: "pending",
-                                                      error: "",
-                                                    }
-                                                  : image,
-                                            );
-                                            void runAction("图片锚点已保存", () =>
-                                              apiPut<TaskRecord>(
-                                                `/api/tasks/${selectedId}/images`,
-                                                {
-                                                  hero_image: heroImage,
-                                                  images: nextImages,
-                                                },
-                                              ),
-                                            );
-                                          }}
-                                        >
-                                          H{candidate.level} {candidate.heading}
-                                        </Button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : null}
-                              </div>
-                            ))}
-                          </div>
-                        </WorkflowStep>
-
-                        <WorkflowStep
-                          number="6"
-                          title="导出最终 Word"
-                          description="仅导出已完成两次人工检测、链接校验和图片准备的版本。"
-                          done={selectedTask.status === "docx_exported"}
-                        >
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("Word 已导出", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/export-docx`),
-                              )
-                            }
-                            disabled={isBusy || !canAction("export_docx")}
-                          >
-                            <Download />
-                            导出 Word
-                          </Button>
-                          {selectedTask.docx_path && (
-                            <div className="break-all text-sm text-muted-foreground">
-                              {selectedTask.docx_path}
-                            </div>
-                          )}
-                        </WorkflowStep>
-
-                        <WorkflowStep
-                          number="7"
-                          title="生成英文 SEO TDK"
-                          description="根据最终正文生成 T、D、K；T 与正文 H1 完全一致，D 最多 150 个字符，K 固定 6 个关键词，并保存为 D.docx。"
-                          done={Boolean(selectedTask.tdk_path)}
-                        >
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("TDK 已生成并保存为 D.docx", () =>
-                                apiPost<TaskRecord>(`/api/tasks/${selectedId}/generate-tdk`),
-                              )
-                            }
-                            disabled={isBusy || !canAction("generate_tdk")}
-                          >
-                            <Sparkles />
-                            生成 TDK 文档
-                          </Button>
-                          {selectedTask.tdk?.title && (
-                            <div className="grid gap-2 rounded-lg border bg-muted/30 p-3 text-sm">
-                              <div>
-                                <span className="font-semibold">T: </span>
-                                {selectedTask.tdk.title}
-                              </div>
-                              <div>
-                                <span className="font-semibold">D: </span>
-                                {selectedTask.tdk.description}
-                                <span className="ml-2 text-xs text-muted-foreground">
-                                  {selectedTask.tdk.description_character_count}/150
-                                </span>
-                              </div>
-                              <div>
-                                <span className="font-semibold">K: </span>
-                                {selectedTask.tdk.keywords.join(", ")}
-                              </div>
-                              <div className="break-all text-xs text-muted-foreground">
-                                {selectedTask.tdk_path}
-                              </div>
-                            </div>
-                          )}
-                        </WorkflowStep>
-
-                        <WorkflowStep
-                          number="8"
-                          title="交付打包"
-                          description="正文 Word、D.docx、全部文章图片和最后一次 AI 检测截图直接放在成品文件夹根目录；初检截图不打包。"
-                          done={Boolean(selectedTask.delivery_package_path)}
-                        >
-                          <Button
-                            onClick={() =>
-                              selectedId &&
-                              runAction("交付成品已打包", () =>
-                                apiPost<TaskRecord>(
-                                  `/api/tasks/${selectedId}/package-delivery`,
-                                ),
-                              )
-                            }
-                            disabled={
-                              isBusy ||
-                              !selectedTask.docx_path ||
-                              !selectedTask.tdk_path ||
-                              !canAction("package_delivery")
-                            }
-                          >
-                            <Package />
-                            生成交付文件夹
-                          </Button>
-                          {selectedTask.delivery_package_path && (
-                            <div className="break-all text-sm text-muted-foreground">
-                              {selectedTask.delivery_package_path}
-                            </div>
-                          )}
-                        </WorkflowStep>
-                      </div>
-                    </ScrollArea>
+                            : image,
+                        );
+                        void runAction("图片锚点已保存", () =>
+                          apiPut<TaskRecord>(
+                            `/api/tasks/${selectedId}/images`,
+                            {
+                              revision: selectedTask.revision,
+                              hero_image: heroImage,
+                              images: nextImages,
+                            },
+                            QUICK_SAVE_TIMEOUT_MS,
+                          ),
+                        );
+                      }}
+                    />
                   </TabsContent>
 
                   <TabsContent value="files" className="min-w-0 pt-4">
-                    <div className="grid gap-3 text-sm">
-                      <FileRow label="任务目录" value={selectedTask.task_dir} />
-                      <FileRow label="Word 文件" value={selectedTask.docx_path || "未导出"} />
-                      <FileRow label="TDK 文档" value={selectedTask.tdk_path || "未生成"} />
-                      <FileRow
-                        label="交付成品"
-                        value={selectedTask.delivery_package_path || "未打包"}
-                      />
-                      <FileRow label="话题库" value={config?.topic_library ?? ""} />
-                      <FileRow label="知识库" value={config?.knowledge_base ?? ""} />
-                      <Separator />
-                      <div className="grid gap-1">
-                        <span className="font-medium">竞品关键词 / 网站</span>
-                        <span className="text-muted-foreground">
-                          {selectedTask.competitor_keyword || "空"}
-                        </span>
-                      </div>
-                      <div className="grid gap-1">
-                        <span className="font-medium">竞品 Blog</span>
-                        <span className="break-all text-muted-foreground">
-                          {selectedTask.competitor_blog || "空"}
-                        </span>
-                      </div>
-                    </div>
+                    <ArticleDeliveryStep
+                      task={selectedTask}
+                      config={config}
+                      busy={isBusy}
+                      hasActiveJob={Boolean(activeTaskJob)}
+                      canAction={canAction}
+                      onEnqueue={(operation, label) =>
+                        void enqueueSingleOperation(operation, label)
+                      }
+                    />
                   </TabsContent>
                 </Tabs>
               )}
@@ -1445,6 +2402,149 @@ export function ArticleWorkbench({ customer }: { customer?: string }) {
         </section>
       </div>
     </main>
+  );
+}
+
+function batchOperationLabel(operation: BatchOperation) {
+  const labels: Record<BatchOperation, string> = {
+    titles: "生成标题",
+    products: "查找产品",
+    outline: "生成大纲",
+    article: "生成正文",
+    rewrite_article: "仅重写正文",
+    humanize: "降 AI 改写",
+    restore_links: "恢复链接",
+    prepare_images: "准备图片",
+    export_docx: "导出 Word",
+    generate_tdk: "生成 TDK",
+    package_delivery: "交付打包",
+  };
+  return labels[operation];
+}
+
+function batchJobStatusLabel(status: BatchJobRecord["status"]) {
+  const labels: Record<BatchJobRecord["status"], string> = {
+    queued: "排队中",
+    running: "生成中",
+    retry_wait: "等待重试",
+    succeeded: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    conflict: "内容已变化",
+  };
+  return labels[status];
+}
+
+function BatchQueuePanel({
+  batches,
+  busy,
+  onCancel,
+  onRetry,
+  onOpenTask,
+}: {
+  batches: BatchRecord[];
+  busy: string;
+  onCancel: (batchId: string) => void;
+  onRetry: (jobId: string) => void;
+  onOpenTask: (taskId: string) => void;
+}) {
+  return (
+    <div className="grid gap-2 border-t pt-3">
+      {batches.slice(0, 2).map((batch) => {
+        const active = batch.status === "queued" || batch.status === "running";
+        const progress = batch.total
+          ? Math.round((batch.completed / batch.total) * 100)
+          : 0;
+        return (
+          <div key={batch.id} className="grid gap-2 rounded-md bg-background p-2 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">{batchOperationLabel(batch.operation)}</span>
+                <Badge variant={active ? "secondary" : "outline"}>
+                  {batch.completed}/{batch.total}
+                </Badge>
+                {batch.status_counts.failed ? (
+                  <span className="text-destructive">失败 {batch.status_counts.failed}</span>
+                ) : null}
+                {batch.status_counts.conflict ? (
+                  <span className="text-amber-700">
+                    内容变化 {batch.status_counts.conflict}
+                  </span>
+                ) : null}
+              </div>
+              {active && (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={Boolean(busy)}
+                  onClick={() => onCancel(batch.id)}
+                >
+                  {busy === batch.id ? <Loader2 className="animate-spin" /> : <X />}
+                  取消批次
+                </Button>
+              )}
+            </div>
+            <Progress value={progress} className="h-1.5" />
+            <details className="group">
+              <summary className="cursor-pointer select-none font-medium text-primary hover:underline">
+                查看本批次 {batch.jobs.length} 篇任务
+              </summary>
+              <div className="mt-2 grid max-h-52 gap-1 overflow-y-auto pr-1">
+                {batch.jobs.map((job) => {
+                  const canRetry = ["failed", "cancelled", "conflict"].includes(
+                    job.status,
+                  );
+                  return (
+                    <div
+                      key={job.id}
+                      className="flex min-w-0 items-start justify-between gap-2 rounded border bg-muted/20 px-2 py-1.5 text-muted-foreground"
+                    >
+                      <div className="min-w-0">
+                        <div>
+                          <span className="font-medium text-foreground">
+                            topic_{String(job.topic_index).padStart(3, "0")}
+                          </span>{" "}
+                          <span>{batchJobStatusLabel(job.status)}</span>
+                        </div>
+                        <div className="line-clamp-1">{job.topic}</div>
+                        {job.error && (
+                          <div className="line-clamp-2 text-destructive">{job.error}</div>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => onOpenTask(job.task_id)}
+                        >
+                          <ExternalLink />
+                          查看任务
+                        </Button>
+                        {canRetry && (
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={Boolean(busy)}
+                            onClick={() => onRetry(job.id)}
+                          >
+                            {busy === job.id ? (
+                              <Loader2 className="animate-spin" />
+                            ) : (
+                              <RefreshCw />
+                            )}
+                            重试
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1458,183 +2558,5 @@ function SummaryCard({ title, value }: { title: string; value: number }) {
         </CardDescription>
       </CardHeader>
     </Card>
-  );
-}
-
-function TaskBrief({ task }: { task: TaskRecord }) {
-  return (
-    <div className="grid gap-2 rounded-lg border bg-muted/30 p-3 text-sm">
-      <div>
-        <span className="font-medium">话题：</span>
-        <span>{task.topic}</span>
-      </div>
-      <div>
-        <span className="font-medium">竞品：</span>
-        <span className="text-muted-foreground">
-          {task.competitor_keyword || "空"}
-        </span>
-      </div>
-      {task.competitor_blog && (
-        <div className="flex items-center gap-1 break-all text-muted-foreground">
-          <ExternalLink className="size-3.5" />
-          {task.competitor_blog}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  inputType = "text",
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  inputType?: "text" | "number";
-}) {
-  return (
-    <div className="grid gap-2">
-      <Label>{label}</Label>
-      <Input
-        type={inputType}
-        min={inputType === "number" ? 0 : undefined}
-        max={inputType === "number" ? 100 : undefined}
-        step={inputType === "number" ? "0.1" : undefined}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </div>
-  );
-}
-
-function WorkflowStep({
-  number,
-  title,
-  description,
-  done,
-  children,
-}: {
-  number: string;
-  title: string;
-  description: string;
-  done: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className="grid gap-3 rounded-lg border p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">
-            {number}
-          </div>
-          <div className="min-w-0">
-            <div className="font-medium">{title}</div>
-            <div className="mt-1 text-sm text-muted-foreground">{description}</div>
-          </div>
-        </div>
-        <Badge variant={done ? "default" : "outline"}>{done ? "已完成" : "待处理"}</Badge>
-      </div>
-      <div className="grid gap-3 pl-0 md:pl-10">{children}</div>
-    </div>
-  );
-}
-
-function AiScreenshotInput({
-  label,
-  path,
-  disabled,
-  onImage,
-}: {
-  label: string;
-  path: string;
-  disabled: boolean;
-  onImage: (file: File) => void;
-}) {
-  return (
-    <div className="grid gap-2">
-      <Label>{label}</Label>
-      <div
-        tabIndex={disabled ? -1 : 0}
-        onPaste={(event) => {
-          if (disabled) return;
-          const item = Array.from(event.clipboardData.items).find((candidate) =>
-            candidate.type.startsWith("image/"),
-          );
-          const blob = item?.getAsFile();
-          if (!blob) return;
-          event.preventDefault();
-          onImage(
-            new File([blob], `${label}-${Date.now()}.png`, {
-              type: blob.type || "image/png",
-            }),
-          );
-        }}
-        className={cn(
-          "rounded-lg border border-dashed bg-muted/20 p-3 text-sm outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/20",
-          disabled && "cursor-not-allowed opacity-60",
-        )}
-      >
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Clipboard className="size-4" />
-          点击此区域后按 Ctrl+V 粘贴截图，或在下方选择图片文件。
-        </div>
-      </div>
-      <Input
-        type="file"
-        accept="image/*"
-        disabled={disabled}
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onImage(file);
-          event.currentTarget.value = "";
-        }}
-      />
-      {path && <div className="break-all text-xs text-muted-foreground">{path}</div>}
-    </div>
-  );
-}
-
-function EditorPanel({
-  value,
-  onChange,
-  placeholder,
-  height,
-  meta,
-  actions,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-  height: string;
-  meta?: ReactNode;
-  actions: ReactNode;
-}) {
-  return (
-    <div className="grid gap-3">
-      <div className="flex flex-wrap gap-2">{actions}</div>
-      {meta}
-      <Textarea
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        wrap="soft"
-        className={cn(
-          "resize-none overflow-y-auto break-words font-mono text-sm leading-6",
-          height,
-        )}
-      />
-    </div>
-  );
-}
-
-function FileRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid gap-1 rounded-lg border p-3">
-      <span className="font-medium">{label}</span>
-      <span className="break-all text-muted-foreground">{value}</span>
-    </div>
   );
 }

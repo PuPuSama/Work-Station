@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable, Iterator
 from typing import Any
 from urllib.error import HTTPError
 from urllib import request
@@ -61,15 +62,15 @@ class LLMClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "Accept": "text/event-stream",
             },
         )
         try:
             with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                data: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+                return extract_stream_text(response)
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"Responses API request failed: HTTP {exc.code} {detail}") from exc
-        return extract_response_text(data)
 
 
 def build_responses_payload(
@@ -87,7 +88,119 @@ def build_responses_payload(
         "reasoning": {"effort": "xhigh"},
         "temperature": temperature,
         "max_output_tokens": max_tokens,
+        "stream": True,
     }
+
+
+def iter_responses_sse_events(
+    stream: Iterable[bytes | str],
+) -> Iterator[dict[str, Any]]:
+    """Parse Responses API server-sent events from an HTTP response stream."""
+
+    event_name = ""
+    data_lines: list[str] = []
+
+    def decode_event() -> dict[str, Any] | None:
+        nonlocal event_name, data_lines
+        raw_data = "\n".join(data_lines).strip()
+        current_event_name = event_name
+        event_name = ""
+        data_lines = []
+        if not raw_data or raw_data == "[DONE]":
+            return None
+        try:
+            event = json.loads(raw_data)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Responses API returned an invalid streaming event.") from exc
+        if not isinstance(event, dict):
+            raise RuntimeError("Responses API returned a non-object streaming event.")
+        if current_event_name and not event.get("type"):
+            event["type"] = current_event_name
+        return event
+
+    for raw_line in stream:
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8")
+        else:
+            line = str(raw_line)
+        line = line.rstrip("\r\n")
+
+        if not line:
+            event = decode_event()
+            if event is not None:
+                yield event
+            continue
+        if line.startswith(":"):
+            continue
+
+        field, separator, value = line.partition(":")
+        if not separator:
+            continue
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event_name = value
+        elif field == "data":
+            data_lines.append(value)
+
+    event = decode_event()
+    if event is not None:
+        yield event
+
+
+def extract_stream_text(stream: Iterable[bytes | str]) -> str:
+    """Collect visible text from a streamed Responses API request."""
+
+    deltas: list[str] = []
+    done_text: list[str] = []
+    completed_text = ""
+
+    for event in iter_responses_sse_events(stream):
+        event_type = str(event.get("type") or "")
+        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            delta = event.get("delta")
+            if isinstance(delta, str):
+                deltas.append(delta)
+            continue
+        if event_type == "response.output_text.done":
+            text = event.get("text")
+            if isinstance(text, str) and text:
+                done_text.append(text)
+            continue
+        if event_type == "response.completed":
+            response_data = event.get("response")
+            if isinstance(response_data, dict):
+                completed_text = extract_response_text(response_data)
+            continue
+        if event_type in {"response.failed", "error"}:
+            raise RuntimeError(
+                f"Responses API stream failed: {_stream_error_detail(event)}"
+            )
+
+    if deltas:
+        return "".join(deltas).strip()
+    if done_text:
+        return "\n".join(part.strip() for part in done_text if part.strip()).strip()
+    return completed_text.strip()
+
+
+def _stream_error_detail(event: dict[str, Any]) -> str:
+    error: Any = event.get("error")
+    response_data = event.get("response")
+    if not isinstance(error, dict) and isinstance(response_data, dict):
+        error = response_data.get("error")
+    if not isinstance(error, dict):
+        error = event
+
+    code = error.get("code")
+    message = error.get("message")
+    if code and message:
+        return f"{code}: {message}"
+    if message:
+        return str(message)
+    if code:
+        return str(code)
+    return "unknown streaming error"
 
 
 def responses_input_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
