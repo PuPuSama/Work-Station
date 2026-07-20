@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ExternalLink,
   FileText,
+  FolderOpen,
   Loader2,
   Package,
   RefreshCw,
@@ -18,6 +19,8 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { BatchOutlineReview } from "@/components/batch-outline-review";
+import { BatchTitleReview } from "@/components/batch-title-review";
 import { ProjectNavigation } from "@/components/project-navigation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +47,7 @@ import {
 import { apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
+  ApiMessage,
   BatchCreateResponse,
   BatchJobRecord,
   BatchOperation,
@@ -201,6 +205,18 @@ function formatTime(value: string) {
     : date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function taskWorkbenchStep(status: WorkflowStatus) {
+  if (status === "new" || status === "titles_ready") return "titles";
+  if (status === "title_selected") return "products";
+  if (status === "outline_ready") return "outline";
+  if (status === "outline_confirmed") return "article";
+  if (["draft_ready", "initial_ai_checked", "humanized_ready", "final_ai_checked"].includes(status)) {
+    return "review";
+  }
+  if (status === "links_verified") return "media";
+  return "files";
+}
+
 export function ProjectBatchCenter({ customer }: { customer: string }) {
   const projectName = customer;
   const taskPath = `/api/tasks?customer=${encodeURIComponent(projectName)}`;
@@ -217,6 +233,9 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
   const [createPending, setCreatePending] = useState<BatchOperation | "">("");
   const [cancelPending, setCancelPending] = useState("");
   const [retryPending, setRetryPending] = useState<Set<string>>(new Set());
+  const [titleReviewOpen, setTitleReviewOpen] = useState(false);
+  const [outlineReviewOpen, setOutlineReviewOpen] = useState(false);
+  const [openFolderPending, setOpenFolderPending] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const batchUpdateKey = useRef("");
@@ -299,6 +318,22 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
     }
     return ids;
   }, [activeBatches]);
+  const pendingTitleTasks = useMemo(
+    () =>
+      tasks.filter(
+        (task) => task.status === "titles_ready" && task.title_candidates.length > 0,
+      ),
+    [tasks],
+  );
+  const pendingOutlineTasks = useMemo(
+    () =>
+      tasks.filter(
+        (task) =>
+          task.status === "outline_ready" &&
+          Boolean((task.outline_draft || task.outline || "").trim()),
+      ),
+    [tasks],
+  );
 
   const filteredTasks = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -397,7 +432,7 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
       const serverRejected = result.rejected.length;
       setMessage(
         result.batch
-          ? `已加入 ${result.batch.total} 篇；本地预检跳过 ${skipped.length} 篇，服务器另跳过 ${serverRejected} 篇。`
+          ? `已加入 ${result.batch.total} 篇；本地预检跳过 ${skipped.length} 篇，服务器另跳过 ${serverRejected} 篇。${operation === "titles" ? "生成完成后可在本页集中审核标题。" : operation === "outline" ? "生成完成后可在本页集中审核并确认大纲。" : ""}`
           : result.rejected.map((item) => item.message).join("；") || "没有任务进入批次。",
       );
     } catch (err) {
@@ -451,6 +486,41 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
     }
   }
 
+  function handleTitleSaved(updated: TaskRecord) {
+    setTasks((current) =>
+      current.map((task) => (task.id === updated.id ? updated : task)),
+    );
+    setError("");
+    setMessage(
+      `topic_${String(updated.topic_index).padStart(3, "0")} 标题已保存。`,
+    );
+  }
+
+  function handleOutlineSaved(updated: TaskRecord) {
+    setTasks((current) =>
+      current.map((task) => (task.id === updated.id ? updated : task)),
+    );
+    setError("");
+    setMessage(
+      `topic_${String(updated.topic_index).padStart(3, "0")} 大纲已保存并确认。`,
+    );
+  }
+
+  async function openTaskFolder(task: TaskRecord) {
+    setOpenFolderPending(task.id);
+    setError("");
+    try {
+      const result = await apiPost<ApiMessage>(
+        `/api/tasks/${encodeURIComponent(task.id)}/open-folder`,
+      );
+      setMessage(result.message || `已打开 topic_${String(task.topic_index).padStart(3, "0")} 文件夹。`);
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    } finally {
+      setOpenFolderPending("");
+    }
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <div className="border-b bg-[color-mix(in_oklch,var(--background),var(--accent)_22%)]">
@@ -464,6 +534,18 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {pendingTitleTasks.length > 0 && (
+                <Button onClick={() => setTitleReviewOpen(true)}>
+                  <CheckCircle2 />
+                  集中选标题（{pendingTitleTasks.length}）
+                </Button>
+              )}
+              {pendingOutlineTasks.length > 0 && (
+                <Button variant="outline" onClick={() => setOutlineReviewOpen(true)}>
+                  <CheckCircle2 />
+                  集中确认大纲（{pendingOutlineTasks.length}）
+                </Button>
+              )}
               <Button
                 variant="outline"
                 onClick={() => void refreshTasks()}
@@ -491,6 +573,44 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
           <SummaryCard title="可执行" value={executable.length} />
           <SummaryCard title="运行批次" value={activeBatches.length} pending={batchesPending} />
         </section>
+
+        {pendingTitleTasks.length > 0 && (
+          <Card className="rounded-lg border-emerald-300 bg-emerald-50/45">
+            <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="font-medium">有 {pendingTitleTasks.length} 篇文章等待人工选标题</div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  可以在同一个窗口连续审核候选标题，保存后自动进入下一篇，不必逐个打开任务。
+                </p>
+              </div>
+              <Button className="shrink-0" onClick={() => setTitleReviewOpen(true)}>
+                <CheckCircle2 />
+                开始集中审核
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {pendingOutlineTasks.length > 0 && (
+          <Card className="rounded-lg border-sky-300 bg-sky-50/45">
+            <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="font-medium">有 {pendingOutlineTasks.length} 篇大纲等待人工确认</div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  在同一个窗口检查或修改大纲，保存并确认后自动进入下一篇。
+                </p>
+              </div>
+              <Button
+                className="shrink-0"
+                variant="outline"
+                onClick={() => setOutlineReviewOpen(true)}
+              >
+                <CheckCircle2 />
+                开始集中审核大纲
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         <Card className="rounded-lg">
           <CardHeader className="border-b">
@@ -599,6 +719,7 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
                     <TableHead>话题 / 标题</TableHead>
                     <TableHead className="w-[140px]">状态</TableHead>
                     <TableHead className="w-[180px]">当前操作</TableHead>
+                    <TableHead className="w-[220px] text-right">快捷入口</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -616,10 +737,22 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
                           />
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
-                          topic_{String(task.topic_index).padStart(3, "0")}
+                          <Link
+                            href={`/projects/${encodeURIComponent(projectName)}/articles/${encodeURIComponent(task.id)}?step=${taskWorkbenchStep(task.status)}`}
+                            target="_blank"
+                            className="font-mono hover:text-primary hover:underline"
+                          >
+                            topic_{String(task.topic_index).padStart(3, "0")}
+                          </Link>
                         </TableCell>
                         <TableCell>
-                          <div className="line-clamp-2 max-w-[680px]">{task.topic}</div>
+                          <Link
+                            href={`/projects/${encodeURIComponent(projectName)}/articles/${encodeURIComponent(task.id)}?step=${taskWorkbenchStep(task.status)}`}
+                            target="_blank"
+                            className="line-clamp-2 max-w-[680px] hover:text-primary hover:underline"
+                          >
+                            {task.topic}
+                          </Link>
                           {task.selected_title && <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{task.selected_title}</div>}
                         </TableCell>
                         <TableCell>
@@ -631,6 +764,37 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
                           ) : (
                             <Badge variant="outline" className="border-emerald-400 text-emerald-800">可执行</Badge>
                           )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => void openTaskFolder(task)}
+                              disabled={openFolderPending === task.id}
+                            >
+                              {openFolderPending === task.id ? (
+                                <Loader2 className="animate-spin" />
+                              ) : (
+                                <FolderOpen />
+                              )}
+                              文件夹
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              nativeButton={false}
+                              render={
+                                <Link
+                                  href={`/projects/${encodeURIComponent(projectName)}/articles/${encodeURIComponent(task.id)}?step=${taskWorkbenchStep(task.status)}`}
+                                  target="_blank"
+                                />
+                              }
+                            >
+                              <ExternalLink />
+                              工作台
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
@@ -668,6 +832,20 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
           />
         </section>
       </div>
+      <BatchTitleReview
+        customer={projectName}
+        tasks={tasks}
+        open={titleReviewOpen}
+        onOpenChange={setTitleReviewOpen}
+        onTaskSaved={handleTitleSaved}
+      />
+      <BatchOutlineReview
+        customer={projectName}
+        tasks={tasks}
+        open={outlineReviewOpen}
+        onOpenChange={setOutlineReviewOpen}
+        onTaskSaved={handleOutlineSaved}
+      />
     </main>
   );
 }
