@@ -2,9 +2,9 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { ArrowRight, Loader2, RefreshCw, Search, Settings2, Sparkles } from "lucide-react";
+import { ArrowRight, Loader2, RefreshCw, Search, Settings2, Sparkles, Upload } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ApiMessage, DashboardSummary, PublicConfig, TaskRecord } from "@/types";
 
@@ -45,6 +45,7 @@ export function ProjectSelector() {
   const [pendingActions, setPendingActions] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   function setPending(key: string, pending: boolean) {
     setPendingActions((current) => {
@@ -151,6 +152,28 @@ export function ProjectSelector() {
     }
   }
 
+  async function uploadTopicFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+    setPending("upload", true);
+    setError("");
+    setMessage("");
+    try {
+      const formData = new FormData();
+      for (const file of files) {
+        formData.append("files", file);
+      }
+      const result = await apiUpload<ApiMessage>("/api/topic-files/upload", formData);
+      await loadData();
+      setMessage(result.message);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPending("upload", false);
+      event.target.value = "";
+    }
+  }
+
   const completion = dashboard?.task_count
     ? Math.round((dashboard.completed_count / dashboard.task_count) * 100)
     : 0;
@@ -174,10 +197,26 @@ export function ProjectSelector() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              multiple
+              className="hidden"
+              onChange={(event) => void uploadTopicFiles(event)}
+            />
+            <Button
+              variant="outline"
+              onClick={() => uploadInputRef.current?.click()}
+              disabled={isPending("upload") || isPending("sync") || isPending("refresh")}
+            >
+              {isPending("upload") ? <Loader2 className="animate-spin" /> : <Upload />}
+              上传 XLSX
+            </Button>
             <Button
               variant="outline"
               onClick={() => void refreshProjects()}
-              disabled={isPending("sync") || isPending("refresh")}
+              disabled={isPending("upload") || isPending("sync") || isPending("refresh")}
             >
               {isPending("refresh") ? (
                 <Loader2 className="animate-spin" />
@@ -188,7 +227,7 @@ export function ProjectSelector() {
             </Button>
             <Button
               onClick={syncTasks}
-              disabled={isPending("sync") || isPending("refresh")}
+              disabled={isPending("upload") || isPending("sync") || isPending("refresh")}
             >
               {isPending("sync") ? <Loader2 className="animate-spin" /> : <Sparkles />}
               同步话题库

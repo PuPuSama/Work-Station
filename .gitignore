@@ -12,3 +12,11 @@ data/*.txt
 *.pyc
 __pycache__/
 .env
+workspace/data/*
+workspace/topic-library/*
+workspace/knowledge/*
+workspace/projects/*
+!workspace/data/.gitkeep
+!workspace/topic-library/.gitkeep
+!workspace/knowledge/.gitkeep
+!workspace/projects/.gitkeep

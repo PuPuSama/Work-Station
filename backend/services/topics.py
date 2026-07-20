@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,34 @@ from storage import now_iso
 TOPIC_HINTS = ("话题", "topic", "title")
 KEYWORD_HINTS = ("关键词", "竞对", "keyword", "competitor")
 BLOG_HINTS = ("url", "blog", "链接")
+
+
+class TopicWorkbookError(ValueError):
+    pass
+
+
+def store_topic_workbook(config: AppConfig, filename: str, content: bytes) -> Path:
+    normalized_name = str(filename or "").replace("\\", "/")
+    safe_name = Path(normalized_name).name.strip()
+    if not safe_name or Path(safe_name).suffix.casefold() != ".xlsx":
+        raise TopicWorkbookError("只支持上传 .xlsx 话题文件。")
+    if not Path(safe_name).stem.strip():
+        raise TopicWorkbookError("XLSX 文件名不能为空。")
+
+    try:
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+        workbook.close()
+    except Exception as exc:
+        raise TopicWorkbookError("上传的文件不是可读取的 XLSX 工作簿。") from exc
+
+    config.topic_library.mkdir(parents=True, exist_ok=True)
+    destination = (config.topic_library / safe_name).resolve()
+    try:
+        destination.relative_to(config.topic_library.resolve())
+    except ValueError as exc:
+        raise TopicWorkbookError("非法的 XLSX 文件名。") from exc
+    destination.write_bytes(content)
+    return destination
 
 
 def normalize_header(value: Any) -> str:

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from zipfile import ZipFile
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 from models import AICheck, ArticleImage, TaskRecord  # noqa: E402
 from services.delivery_package import (  # noqa: E402
     DeliveryPackageError,
+    build_delivery_zip,
     official_website_folder_name,
     package_delivery,
 )
@@ -173,6 +175,49 @@ class DeliveryPackageTests(unittest.TestCase):
             official_website_folder_name("https://www.Example.com/path?q=1"),
             "www.example.com",
         )
+
+    def test_packaged_folder_can_be_downloaded_as_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = task_at(root)
+            for path, content in (
+                (Path(task.docx_path), b"article"),
+                (Path(task.tdk_path), b"tdk"),
+                (Path(task.images[0].prepared_path), b"image"),
+                (Path(task.final_ai_check.screenshot_path), b"final"),
+            ):
+                path.write_bytes(content)
+
+            task.delivery_package_path = str(package_delivery(task))
+            archive = build_delivery_zip(task)
+
+            self.assertEqual(archive.name, "www.example.com-topic_001.zip")
+            with ZipFile(archive) as downloaded:
+                self.assertEqual(
+                    set(downloaded.namelist()),
+                    {"article.docx", "D.docx", "hero.webp", "final-ai-rate.png"},
+                )
+                self.assertEqual(downloaded.read("article.docx"), b"article")
+
+    def test_download_rejects_package_outside_task_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = task_at(root)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "article.docx").write_bytes(b"article")
+            Path(task.task_dir).mkdir(parents=True)
+            task.delivery_package_path = str(outside)
+
+            with self.assertRaisesRegex(DeliveryPackageError, "outside the task directory"):
+                build_delivery_zip(task)
+
+    def test_download_requires_a_generated_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            task = task_at(Path(directory))
+
+            with self.assertRaisesRegex(DeliveryPackageError, "has not been generated"):
+                build_delivery_zip(task)
 
 
 if __name__ == "__main__":

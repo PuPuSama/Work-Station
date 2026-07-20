@@ -74,7 +74,7 @@ from services.article_validation import (
     visible_word_count,
 )
 from services.ai_screenshots import AIScreenshotError, save_ai_rate_screenshot
-from services.delivery_package import DeliveryPackageError, package_delivery
+from services.delivery_package import DeliveryPackageError, build_delivery_zip, package_delivery
 from services.docx_export import export_task_docx
 from services.generator import (
     ArticleGenerationError,
@@ -103,7 +103,7 @@ from services.product_crawler import recommend_products
 from services.tavily import TavilyClient
 from services.tdk import TdkGenerationError, export_tdk_docx, generate_tdk_metadata
 from services.task_files import TaskDirectoryError, open_task_directory
-from services.topics import scan_topic_library
+from services.topics import TopicWorkbookError, scan_topic_library, store_topic_workbook
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -448,6 +448,38 @@ def sync_tasks() -> ApiMessage:
     return ApiMessage(
         message=f"已同步 {task_count} 个长期任务。",
         data={"week_folder": cfg.current_week_folder, "task_count": task_count},
+    )
+
+
+@app.post("/api/topic-files/upload", response_model=ApiMessage)
+def upload_topic_files(files: list[UploadFile] = File(...)) -> ApiMessage:
+    if not files:
+        raise HTTPException(status_code=422, detail="请选择至少一个 XLSX 文件。")
+
+    uploads: list[tuple[str, bytes]] = []
+    for file in files:
+        content = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{file.filename or 'XLSX 文件'} 超过 25 MB。",
+            )
+        uploads.append((file.filename or "", content))
+
+    cfg = config()
+    saved_names: list[str] = []
+    try:
+        for filename, content in uploads:
+            saved_names.append(store_topic_workbook(cfg, filename, content).name)
+    except TopicWorkbookError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    scanned = scan_topic_library(cfg)
+    store().upsert_many(scanned)
+    task_count = len(store().canonical_tasks(cfg.current_week_folder))
+    return ApiMessage(
+        message=f"已上传 {len(saved_names)} 个 XLSX 文件，并同步 {task_count} 个长期任务。",
+        data={"files": saved_names, "task_count": task_count},
     )
 
 
@@ -1802,3 +1834,17 @@ def build_delivery_package(
     request: RevisionedRequest | None = None,
 ) -> TaskRecord:
     return perform_package_delivery(task_id, request or RevisionedRequest())
+
+
+@app.get("/api/tasks/{task_id}/delivery-package/download", response_class=FileResponse)
+def download_delivery_package(task_id: str) -> FileResponse:
+    task = get_task_or_404(task_id)
+    try:
+        archive = build_delivery_zip(task)
+    except DeliveryPackageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return FileResponse(
+        archive,
+        media_type="application/zip",
+        filename=archive.name,
+    )

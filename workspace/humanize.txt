@@ -1,0 +1,1 @@
+Rewrite the supplied article in natural, fluent English while preserving its facts, links, Markdown structure, and intended meaning.

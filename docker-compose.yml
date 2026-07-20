@@ -1,0 +1,44 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: article-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ARTICLE_AGENT_ROOT: /app
+      ARTICLE_AGENT_CONFIG: /app/config.yaml
+    volumes:
+      - ./workspace:/app/workspace
+    networks:
+      - article-network
+      - new-api-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: article-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3012:3000"
+    networks:
+      - article-network
+
+networks:
+  article-network:
+    driver: bridge
+  new-api-network:
+    external: true
+    name: new-api_new-api-network

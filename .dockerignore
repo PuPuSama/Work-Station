@@ -1,0 +1,11 @@
+.git
+.env
+backend/.venv
+frontend/node_modules
+frontend/.next
+workspace
+data
+dist
+packaging/build
+__pycache__
+*.pyc

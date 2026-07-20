@@ -6,6 +6,7 @@ import { FileRow, WorkflowStep } from "@/components/article-workbench-ui";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { apiFileUrl } from "@/lib/api";
 import type { BatchOperation, PublicConfig, TaskRecord } from "@/types";
 
 export function ArticleDeliveryStep({
@@ -103,8 +104,20 @@ export function ArticleDeliveryStep({
             生成交付文件夹
           </Button>
           {task.delivery_package_path && (
-            <div className="break-all text-sm text-muted-foreground">
-              {task.delivery_package_path}
+            <div className="grid gap-2">
+              <Button
+                variant="outline"
+                nativeButton={false}
+                render={
+                  <a href={apiFileUrl(`/api/tasks/${task.id}/delivery-package/download`)} />
+                }
+              >
+                <Download />
+                下载交付包 ZIP
+              </Button>
+              <div className="break-all text-sm text-muted-foreground">
+                {task.delivery_package_path}
+              </div>
             </div>
           )}
         </WorkflowStep>

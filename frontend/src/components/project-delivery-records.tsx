@@ -2,7 +2,7 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { AlertCircle, ExternalLink, FolderOpen, Package, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, Download, ExternalLink, FolderOpen, Package, RefreshCw, Search } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiFileUrl, apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ApiMessage, TaskRecord } from "@/types";
 
@@ -182,6 +182,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
                       <TableCell><div className="flex justify-end gap-1">
                         <Button size="sm" variant="outline" disabled={Boolean(pending[task.id])} onClick={() => void runTaskAction(task, "打开目录", () => apiPost<ApiMessage>(`/api/tasks/${task.id}/open-folder`))}><FolderOpen />目录</Button>
                         {!parts.package && !missing.length && <Button size="sm" disabled={Boolean(pending[task.id])} onClick={() => void runTaskAction(task, "生成交付包", () => apiPost<TaskRecord>(`/api/tasks/${task.id}/package-delivery`))}><Package />打包</Button>}
+                        {parts.package && <Button size="sm" variant="outline" nativeButton={false} render={<a href={apiFileUrl(`/api/tasks/${task.id}/delivery-package/download`)} />}><Download />下载</Button>}
                         <Link href={`${projectPath}/articles/${encodeURIComponent(task.id)}?step=files`} className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 text-sm hover:bg-muted"><ExternalLink className="size-4" />处理</Link>
                       </div></TableCell>
                     </TableRow>;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
+from zipfile import ZIP_DEFLATED, ZipFile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -156,3 +157,46 @@ def package_delivery(task: TaskRecord) -> Path:
     _copy_file(final_screenshot, destination / "final-ai-rate.png")
 
     return destination
+
+
+def build_delivery_zip(task: TaskRecord) -> Path:
+    package_value = str(task.delivery_package_path or "").strip()
+    if not package_value:
+        raise DeliveryPackageError("The delivery package has not been generated yet.")
+    package_path = Path(package_value)
+    if not package_path.is_dir():
+        raise DeliveryPackageError("The delivery package folder is missing. Please package it again.")
+
+    task_root = Path(task.task_dir).resolve()
+    package_root = package_path.resolve()
+    try:
+        package_root.relative_to(task_root)
+    except ValueError as exc:
+        raise DeliveryPackageError("The delivery package folder is outside the task directory.") from exc
+    if package_root == task_root:
+        raise DeliveryPackageError("The task directory itself cannot be downloaded as a delivery package.")
+
+    archive = task_root / f"{package_root.name}-topic_{task.topic_index:03d}.zip"
+    temporary = archive.with_name(f".{archive.name}.tmp")
+    temporary.unlink(missing_ok=True)
+    file_count = 0
+    try:
+        with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=6) as output:
+            for source in sorted(package_root.rglob("*")):
+                if source.is_symlink():
+                    raise DeliveryPackageError("The delivery package cannot contain symbolic links.")
+                if not source.is_file():
+                    continue
+                resolved = source.resolve()
+                try:
+                    relative = resolved.relative_to(package_root)
+                except ValueError as exc:
+                    raise DeliveryPackageError("A delivery file is outside the package folder.") from exc
+                output.write(resolved, arcname=relative.as_posix())
+                file_count += 1
+        if not file_count:
+            raise DeliveryPackageError("The delivery package folder is empty.")
+        temporary.replace(archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return archive
