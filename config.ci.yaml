@@ -1,0 +1,31 @@
+paths:
+  topic_library: workspace/topic-library
+  knowledge_base: workspace/knowledge
+  output_root: workspace/projects
+  data_file: workspace/data/tasks.json
+
+article:
+  language: English
+  title_candidates: 10
+  default_word_count: 1200
+  ai_pass_threshold: 30
+
+prompts:
+  humanize: backend/prompts/humanize_ci.txt
+
+docx_format:
+  font: Times New Roman
+  styles:
+    title_1:
+      size_pt: 22
+    title_2:
+      size_pt: 18
+    title_3:
+      size_pt: 13.5
+    body:
+      size_pt: 12
+
+llm:
+  provider: responses
+  base_url: https://api.openai.com/v1
+  model: gpt-5.6-sol

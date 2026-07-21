@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
+import sys
+from pathlib import Path, PureWindowsPath
 
 from config import AppConfig
 from models import TaskRecord
@@ -28,10 +29,10 @@ def resolve_task_directory(config: AppConfig, task: TaskRecord) -> Path:
 
 def open_task_directory(config: AppConfig, task: TaskRecord) -> Path:
     directory = resolve_task_directory(config, task)
-    if os.name != "nt":
+    if sys.platform != "win32":
         raise TaskDirectoryError("Opening task folders is supported only on Windows.")
 
-    explorer = Path(os.environ.get("WINDIR", r"C:\Windows")) / "explorer.exe"
+    explorer = PureWindowsPath(os.environ.get("WINDIR", r"C:\Windows")) / "explorer.exe"
     try:
         subprocess.Popen(
             [str(explorer), str(directory)],

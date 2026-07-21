@@ -1,0 +1,5 @@
+Rewrite the article so it reads naturally while preserving its meaning, factual claims, headings, links, product names, and primary keyword.
+
+Return only the rewritten Markdown article.
+
+{{ARTICLE}}

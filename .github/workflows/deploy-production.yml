@@ -18,6 +18,11 @@ jobs:
     name: Test and build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      ARTICLE_AGENT_CONFIG: config.ci.yaml
+      LLM_API_KEY: ""
+      OPENAI_API_KEY: ""
+      TAVILY_API_KEY: ""
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

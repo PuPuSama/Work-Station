@@ -190,9 +190,13 @@ class ProjectBrandApiTests(unittest.TestCase):
                 topic_library=root / "topics",
                 knowledge_base=root / "knowledge",
             )
-            TaskStore(cfg).save(
-                [task(task_id="context-api", customer="www.example.com", topic="Example")]
+            context_task = task(
+                task_id="context-api",
+                customer="www.example.com",
+                topic="Example",
             )
+            context_task.task_dir = str(root / "context-api")
+            TaskStore(cfg).save([context_task])
 
             with patch.object(app_module, "config", return_value=cfg):
                 client = TestClient(app_module.app)

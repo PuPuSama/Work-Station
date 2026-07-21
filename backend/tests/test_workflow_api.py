@@ -1315,6 +1315,7 @@ class WorkflowApiTests(unittest.TestCase):
                 patch.object(app_module, "config", return_value=cfg),
                 patch.object(app_module, "generate_raw_article", return_value=ARTICLE),
                 patch.object(app_module, "humanize_article", return_value=ARTICLE),
+                patch.object(app_module, "restore_article_links", return_value=ARTICLE),
                 patch.object(
                     app_module,
                     "generate_tdk_metadata",

@@ -57,7 +57,7 @@ class TaskDirectoryTests(unittest.TestCase):
             task_dir.mkdir()
             cfg = replace(load_config(), output_root=root)
             with (
-                patch.object(task_files.os, "name", "nt"),
+                patch.object(task_files.sys, "platform", "win32"),
                 patch.dict(task_files.os.environ, {"WINDIR": r"C:\Windows"}),
                 patch.object(task_files.subprocess, "Popen") as popen,
             ):
