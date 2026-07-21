@@ -174,6 +174,44 @@ class ProductReferencePromptTests(unittest.TestCase):
 
 class OperatorWritingContextTests(unittest.TestCase):
     @patch("services.generator.collect_customer_context", return_value="File knowledge")
+    def test_complete_outline_prompt_replaces_default_style_but_keeps_hard_rules(self, _context):
+        fake = FakeLLM("## Buyer Question\n\n### One\n\n### Two\n\n## FAQ")
+        task = make_task(topic_notes="Use the maintenance angle.")
+
+        generate_outline(
+            make_config(),
+            task,
+            base_prompt="Organize every section as a risk review.",
+            custom_prompt="Keep headings short.",
+            llm=fake,
+        )
+
+        prompt = fake.calls[0]["messages"][1]["content"]
+        self.assertIn("Organize every section as a risk review.", prompt)
+        self.assertIn("Keep headings short.", prompt)
+        self.assertIn("Every H2 except the final `## FAQ`", prompt)
+        self.assertNotIn("Phrase H2 headings as useful buyer questions", prompt)
+
+    @patch("services.generator.collect_customer_context", return_value="File knowledge")
+    def test_complete_article_prompt_receives_outline_and_brand_link_contract(self, _context):
+        fake = FakeLLM(article_with_body_words(1000))
+        task = make_task(brand_name="Example Industrial")
+
+        generate_raw_article(
+            make_config(),
+            task,
+            base_prompt="Write as a practical field guide.",
+            custom_prompt="Prefer shorter paragraphs.",
+            llm=fake,
+        )
+
+        prompt = fake.calls[0]["messages"][1]["content"]
+        self.assertIn("Write as a practical field guide.", prompt)
+        self.assertIn("## First Section", prompt)
+        self.assertIn("[Example Industrial](https://example.com/)", prompt)
+        self.assertIn("exactly three Q/A pairs", prompt)
+
+    @patch("services.generator.collect_customer_context", return_value="File knowledge")
     def test_outline_prompt_receives_selected_notes_and_custom_instructions(self, _context):
         fake = FakeLLM("## Buyer Question\n\n## FAQ")
         task = make_task(
@@ -513,7 +551,9 @@ class PromptTemplateTests(unittest.TestCase):
         for name in (
             "titles",
             "outline",
+            "outline_custom",
             "article",
+            "article_custom",
             "transition",
             "restore_links",
         ):

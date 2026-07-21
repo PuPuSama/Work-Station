@@ -45,6 +45,12 @@ V2_DEFAULTS: dict[str, Any] = {
     "article_custom_prompt": "",
     "use_outline_custom_prompt": False,
     "use_article_custom_prompt": False,
+    # Existing tasks keep the historical system-template behavior. Newly
+    # created tasks use TaskRecord's project_default model defaults.
+    "outline_prompt_selection": "system",
+    "article_prompt_selection": "system",
+    "last_outline_prompt_snapshot": None,
+    "last_article_prompt_snapshot": None,
     "include_project_introduction": True,
     "include_project_notes": True,
     "include_topic_notes": True,

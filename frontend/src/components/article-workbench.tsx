@@ -221,6 +221,8 @@ function taskSectionText(task: TaskRecord, section: EditableSection) {
         article_custom_prompt: task.article_custom_prompt || "",
         use_outline_custom_prompt: task.use_outline_custom_prompt ?? false,
         use_article_custom_prompt: task.use_article_custom_prompt ?? false,
+        outline_prompt_selection: task.outline_prompt_selection ?? "project_default",
+        article_prompt_selection: task.article_prompt_selection ?? "project_default",
         include_project_introduction: task.include_project_introduction ?? true,
         include_project_notes: task.include_project_notes ?? true,
         include_topic_notes: task.include_topic_notes ?? true,
@@ -357,6 +359,8 @@ export function ArticleWorkbench({
   const [articleCustomPrompt, setArticleCustomPrompt] = useState("");
   const [useOutlineCustomPrompt, setUseOutlineCustomPrompt] = useState(false);
   const [useArticleCustomPrompt, setUseArticleCustomPrompt] = useState(false);
+  const [outlinePromptSelection, setOutlinePromptSelection] = useState("project_default");
+  const [articlePromptSelection, setArticlePromptSelection] = useState("project_default");
   const [includeProjectIntroduction, setIncludeProjectIntroduction] = useState(true);
   const [includeProjectNotes, setIncludeProjectNotes] = useState(true);
   const [includeTopicNotes, setIncludeTopicNotes] = useState(true);
@@ -511,6 +515,8 @@ export function ArticleWorkbench({
       setArticleCustomPrompt(selectedTask?.article_custom_prompt || "");
       setUseOutlineCustomPrompt(selectedTask?.use_outline_custom_prompt ?? false);
       setUseArticleCustomPrompt(selectedTask?.use_article_custom_prompt ?? false);
+      setOutlinePromptSelection(selectedTask?.outline_prompt_selection ?? "project_default");
+      setArticlePromptSelection(selectedTask?.article_prompt_selection ?? "project_default");
       setIncludeProjectIntroduction(selectedTask?.include_project_introduction ?? true);
       setIncludeProjectNotes(selectedTask?.include_project_notes ?? true);
       setIncludeTopicNotes(selectedTask?.include_topic_notes ?? true);
@@ -1021,6 +1027,8 @@ export function ArticleWorkbench({
           article_custom_prompt: articleCustomPrompt,
           use_outline_custom_prompt: useOutlineCustomPrompt,
           use_article_custom_prompt: useArticleCustomPrompt,
+          outline_prompt_selection: outlinePromptSelection,
+          article_prompt_selection: articlePromptSelection,
           include_project_introduction: includeProjectIntroduction,
           include_project_notes: includeProjectNotes,
           include_topic_notes: includeTopicNotes,
@@ -1068,6 +1076,8 @@ export function ArticleWorkbench({
       setArticleCustomPrompt(latest.article_custom_prompt || "");
       setUseOutlineCustomPrompt(latest.use_outline_custom_prompt ?? false);
       setUseArticleCustomPrompt(latest.use_article_custom_prompt ?? false);
+      setOutlinePromptSelection(latest.outline_prompt_selection ?? "project_default");
+      setArticlePromptSelection(latest.article_prompt_selection ?? "project_default");
       setIncludeProjectIntroduction(latest.include_project_introduction ?? true);
       setIncludeProjectNotes(latest.include_project_notes ?? true);
       setIncludeTopicNotes(latest.include_topic_notes ?? true);
@@ -1314,6 +1324,8 @@ export function ArticleWorkbench({
           article_custom_prompt: articleCustomPrompt,
           use_outline_custom_prompt: useOutlineCustomPrompt,
           use_article_custom_prompt: useArticleCustomPrompt,
+          outline_prompt_selection: outlinePromptSelection,
+          article_prompt_selection: articlePromptSelection,
           include_project_introduction: includeProjectIntroduction,
           include_project_notes: includeProjectNotes,
           include_topic_notes: includeTopicNotes,
@@ -1451,6 +1463,8 @@ export function ArticleWorkbench({
         articleCustomPrompt !== (selectedTask.article_custom_prompt || "") ||
         useOutlineCustomPrompt !== (selectedTask.use_outline_custom_prompt ?? false) ||
         useArticleCustomPrompt !== (selectedTask.use_article_custom_prompt ?? false) ||
+        outlinePromptSelection !== (selectedTask.outline_prompt_selection ?? "project_default") ||
+        articlePromptSelection !== (selectedTask.article_prompt_selection ?? "project_default") ||
         includeProjectIntroduction !==
           (selectedTask.include_project_introduction ?? true) ||
         includeProjectNotes !== (selectedTask.include_project_notes ?? true) ||
@@ -2160,6 +2174,10 @@ export function ArticleWorkbench({
 
                       articleCustomPrompt={articleCustomPrompt}
 
+                      outlinePromptSelection={outlinePromptSelection}
+
+                      articlePromptSelection={articlePromptSelection}
+
                       dirty={writingSettingsDirty}
 
                       busy={isBusy}
@@ -2181,6 +2199,10 @@ export function ArticleWorkbench({
                       onUseArticleCustomPromptChange={setUseArticleCustomPrompt}
 
                       onArticleCustomPromptChange={setArticleCustomPrompt}
+
+                      onOutlinePromptSelectionChange={setOutlinePromptSelection}
+
+                      onArticlePromptSelectionChange={setArticlePromptSelection}
 
                       onSave={saveWritingSettings}
 

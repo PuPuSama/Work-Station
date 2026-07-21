@@ -117,6 +117,8 @@ class MigrationUnitTests(unittest.TestCase):
         self.assertEqual(migrated["topic_notes"], "")
         self.assertFalse(migrated["use_outline_custom_prompt"])
         self.assertTrue(migrated["include_project_introduction"])
+        self.assertEqual(migrated["outline_prompt_selection"], "system")
+        self.assertEqual(migrated["article_prompt_selection"], "system")
 
     def test_nested_models_are_validated_on_assignment(self) -> None:
         task = TaskRecord.model_validate(v1_task())

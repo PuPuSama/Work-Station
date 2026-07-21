@@ -96,6 +96,13 @@ export async function apiPut<T>(
   return readJson<T>(response);
 }
 
+export async function apiDelete<T>(path: string): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+    method: "DELETE",
+  });
+  return readJson<T>(response);
+}
+
 export async function apiUpload<T>(path: string, body: FormData): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
     method: "POST",

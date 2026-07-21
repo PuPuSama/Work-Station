@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 STATUS_NEW = "new"
 STATUS_TITLES_READY = "titles_ready"
@@ -144,6 +144,77 @@ class TdkMetadata(WorkflowModel):
     prompt_version: str = "tdk-v1"
 
 
+PromptKind = Literal["outline", "article"]
+
+
+class PromptLibraryItem(WorkflowModel):
+    id: str
+    customer: str
+    name: str
+    kind: PromptKind
+    content: str
+    version: int = 1
+    use_count: int = 0
+    active: bool = True
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class PromptDefaults(WorkflowModel):
+    customer: str
+    default_outline_prompt_id: str = ""
+    default_article_prompt_id: str = ""
+
+
+class ProjectPromptLibrary(WorkflowModel):
+    prompts: list[PromptLibraryItem] = Field(default_factory=list)
+    defaults: PromptDefaults
+
+
+class PromptSnapshot(WorkflowModel):
+    prompt_id: str = ""
+    name: str = "系统默认"
+    kind: PromptKind
+    content: str = ""
+    version: int = 0
+    source: Literal["system", "project_default", "library"] = "system"
+    captured_at: str = ""
+
+
+class PromptCreateRequest(WorkflowModel):
+    name: str = Field(min_length=1, max_length=120)
+    kind: PromptKind
+    content: str = Field(min_length=1, max_length=40000)
+
+
+class PromptUpdateRequest(WorkflowModel):
+    name: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=40000)
+
+
+class PromptActiveUpdateRequest(WorkflowModel):
+    active: bool
+
+
+class PromptDefaultsUpdateRequest(WorkflowModel):
+    default_outline_prompt_id: str = ""
+    default_article_prompt_id: str = ""
+
+
+class PromptPreviewRequest(WorkflowModel):
+    kind: PromptKind
+    selection: str = "project_default"
+    supplemental_prompt: str = Field(default="", max_length=40000)
+    include_project_introduction: bool = True
+    include_project_notes: bool = True
+    include_topic_notes: bool = True
+
+
+class PromptPreview(WorkflowModel):
+    snapshot: PromptSnapshot
+    effective_prompt: str
+
+
 class TaskRecord(WorkflowModel):
     # Storage/workflow metadata.
     schema_version: int = SCHEMA_VERSION
@@ -162,6 +233,10 @@ class TaskRecord(WorkflowModel):
     article_custom_prompt: str = ""
     use_outline_custom_prompt: bool = False
     use_article_custom_prompt: bool = False
+    outline_prompt_selection: str = "project_default"
+    article_prompt_selection: str = "project_default"
+    last_outline_prompt_snapshot: PromptSnapshot | None = None
+    last_article_prompt_snapshot: PromptSnapshot | None = None
     include_project_introduction: bool = True
     include_project_notes: bool = True
     include_topic_notes: bool = True
@@ -257,6 +332,8 @@ class GenerateArticleRequest(RevisionedRequest):
     include_project_introduction: bool | None = None
     include_project_notes: bool | None = None
     include_topic_notes: bool | None = None
+    prompt_selection: str | None = None
+    prompt_snapshot: PromptSnapshot | None = None
 
 
 class GenerateOutlineRequest(RevisionedRequest):
@@ -265,6 +342,8 @@ class GenerateOutlineRequest(RevisionedRequest):
     include_project_introduction: bool | None = None
     include_project_notes: bool | None = None
     include_topic_notes: bool | None = None
+    prompt_selection: str | None = None
+    prompt_snapshot: PromptSnapshot | None = None
 
 
 class AutoProductsRequest(RevisionedRequest):
@@ -286,6 +365,8 @@ class WritingSettingsUpdateRequest(RevisionedRequest):
     article_custom_prompt: str = Field(default="", max_length=40000)
     use_outline_custom_prompt: bool = False
     use_article_custom_prompt: bool = False
+    outline_prompt_selection: str = "project_default"
+    article_prompt_selection: str = "project_default"
     include_project_introduction: bool = True
     include_project_notes: bool = True
     include_topic_notes: bool = True

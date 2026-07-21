@@ -131,15 +131,46 @@ def generate_outline(
     task: TaskRecord,
     *,
     custom_prompt: str = "",
+    base_prompt: str = "",
     include_project_introduction: bool = True,
     include_project_notes: bool = True,
     include_topic_notes: bool = True,
     llm: LLMClient | None = None,
 ) -> str:
-    title = task.selected_title or task.topic
     client = llm or LLMClient(config)
-    prompt = render_prompt(
-        "outline",
+    prompt = build_outline_prompt(
+        config,
+        task,
+        custom_prompt=custom_prompt,
+        base_prompt=base_prompt,
+        include_project_introduction=include_project_introduction,
+        include_project_notes=include_project_notes,
+        include_topic_notes=include_topic_notes,
+    )
+    result = client.chat(
+        [
+            {"role": "system", "content": "You are a B2B content strategist."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.55,
+        max_tokens=1800,
+    )
+    title = task.selected_title or task.topic
+    return strip_llm_code_fence(result) if result else mock_outline(title, task)
+
+
+def build_outline_prompt(
+    config: AppConfig,
+    task: TaskRecord,
+    *,
+    custom_prompt: str = "",
+    base_prompt: str = "",
+    include_project_introduction: bool = True,
+    include_project_notes: bool = True,
+    include_topic_notes: bool = True,
+) -> str:
+    title = task.selected_title or task.topic
+    values = dict(
         TITLE=title,
         CUSTOMER=task.customer,
         TOPIC=task.topic,
@@ -163,15 +194,10 @@ def generate_outline(
         ),
         CUSTOM_INSTRUCTIONS=custom_instruction_value(custom_prompt),
     )
-    result = client.chat(
-        [
-            {"role": "system", "content": "You are a B2B content strategist."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.55,
-        max_tokens=1800,
-    )
-    return strip_llm_code_fence(result) if result else mock_outline(title, task)
+    if base_prompt.strip():
+        values["BASE_PROMPT"] = base_prompt.replace("\r\n", "\n").strip()
+        return render_prompt("outline_custom", **values)
+    return render_prompt("outline", **values)
 
 
 def generate_raw_article(
@@ -180,18 +206,53 @@ def generate_raw_article(
     word_count: int | None = None,
     *,
     custom_prompt: str = "",
+    base_prompt: str = "",
     include_project_introduction: bool = True,
     include_project_notes: bool = True,
     include_topic_notes: bool = True,
     llm: LLMClient | None = None,
 ) -> str:
+    target_words = normalized_article_word_count(word_count, config.default_word_count)
+    client = llm or LLMClient(config)
+    prompt = build_article_prompt(
+        config,
+        task,
+        word_count,
+        custom_prompt=custom_prompt,
+        base_prompt=base_prompt,
+        include_project_introduction=include_project_introduction,
+        include_project_notes=include_project_notes,
+        include_topic_notes=include_topic_notes,
+    )
+    result = client.chat(
+        [
+            {"role": "system", "content": "You are an expert B2B industry copywriter."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.65,
+        max_tokens=article_output_token_limit(target_words),
+    )
+    title = task.selected_title or task.topic
+    outline = task.outline or mock_outline(title, task)
+    return strip_llm_code_fence(result) if result else mock_article(title, task, outline)
+
+
+def build_article_prompt(
+    config: AppConfig,
+    task: TaskRecord,
+    word_count: int | None = None,
+    *,
+    custom_prompt: str = "",
+    base_prompt: str = "",
+    include_project_introduction: bool = True,
+    include_project_notes: bool = True,
+    include_topic_notes: bool = True,
+) -> str:
     title = task.selected_title or task.topic
     outline = task.outline or mock_outline(title, task)
     target_words = normalized_article_word_count(word_count, config.default_word_count)
     minimum_words, _ = article_word_bounds(target_words)
-    client = llm or LLMClient(config)
-    prompt = render_prompt(
-        "article",
+    values = dict(
         TITLE=title,
         MIN_WORDS=minimum_words,
         TARGET_WORDS=target_words,
@@ -220,15 +281,10 @@ def generate_raw_article(
         ),
         CUSTOM_INSTRUCTIONS=custom_instruction_value(custom_prompt),
     )
-    result = client.chat(
-        [
-            {"role": "system", "content": "You are an expert B2B industry copywriter."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.65,
-        max_tokens=article_output_token_limit(target_words),
-    )
-    return strip_llm_code_fence(result) if result else mock_article(title, task, outline)
+    if base_prompt.strip():
+        values["BASE_PROMPT"] = base_prompt.replace("\r\n", "\n").strip()
+        return render_prompt("article_custom", **values)
+    return render_prompt("article", **values)
 
 
 def generation_context_value(value: object, included: bool) -> str:

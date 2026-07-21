@@ -6,12 +6,12 @@ services:
     container_name: article-backend
     restart: unless-stopped
     env_file:
-      - .env
+      - ${ARTICLE_ENV_FILE:-.env}
     environment:
       ARTICLE_AGENT_ROOT: /app
       ARTICLE_AGENT_CONFIG: /app/config.yaml
     volumes:
-      - ./workspace:/app/workspace
+      - ${ARTICLE_WORKSPACE_PATH:-./workspace}:/app/workspace
     networks:
       - article-network
       - new-api-network
@@ -35,6 +35,12 @@ services:
       - "3012:3000"
     networks:
       - article-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
 networks:
   article-network:

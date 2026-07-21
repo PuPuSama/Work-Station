@@ -123,6 +123,47 @@ export type TdkMetadata = {
   prompt_version: string;
 };
 
+export type PromptKind = "outline" | "article";
+
+export type PromptLibraryItem = {
+  id: string;
+  customer: string;
+  name: string;
+  kind: PromptKind;
+  content: string;
+  version: number;
+  use_count: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PromptDefaults = {
+  customer: string;
+  default_outline_prompt_id: string;
+  default_article_prompt_id: string;
+};
+
+export type ProjectPromptLibrary = {
+  prompts: PromptLibraryItem[];
+  defaults: PromptDefaults;
+};
+
+export type PromptSnapshot = {
+  prompt_id: string;
+  name: string;
+  kind: PromptKind;
+  content: string;
+  version: number;
+  source: "system" | "project_default" | "library";
+  captured_at: string;
+};
+
+export type PromptPreview = {
+  snapshot: PromptSnapshot;
+  effective_prompt: string;
+};
+
 export type TaskRecord = {
   schema_version?: number;
   revision?: number;
@@ -138,6 +179,10 @@ export type TaskRecord = {
   article_custom_prompt?: string;
   use_outline_custom_prompt?: boolean;
   use_article_custom_prompt?: boolean;
+  outline_prompt_selection?: string;
+  article_prompt_selection?: string;
+  last_outline_prompt_snapshot?: PromptSnapshot | null;
+  last_article_prompt_snapshot?: PromptSnapshot | null;
   include_project_introduction?: boolean;
   include_project_notes?: boolean;
   include_topic_notes?: boolean;

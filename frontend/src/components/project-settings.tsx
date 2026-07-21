@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ProjectNavigation } from "@/components/project-navigation";
+import { ProjectPromptLibraryCard } from "@/components/project-prompt-library";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -298,6 +299,8 @@ export function ProjectSettings({ customer }: ProjectSettingsProps) {
             </div>
           </CardContent>
         </Card>
+
+        <ProjectPromptLibraryCard customer={customer} />
       </div>
     </main>
   );

@@ -34,6 +34,16 @@ from models import (
     LinkValidation,
     OutlineUpdateRequest,
     ProductsUpdateRequest,
+    ProjectPromptLibrary,
+    PromptActiveUpdateRequest,
+    PromptCreateRequest,
+    PromptDefaults,
+    PromptDefaultsUpdateRequest,
+    PromptLibraryItem,
+    PromptPreview,
+    PromptPreviewRequest,
+    PromptSnapshot,
+    PromptUpdateRequest,
     ProjectBrandUpdateRequest,
     ProjectContextUpdateRequest,
     RevisionedRequest,
@@ -79,6 +89,8 @@ from services.docx_export import export_task_docx
 from services.generator import (
     ArticleGenerationError,
     PromptTemplateError,
+    build_article_prompt,
+    build_outline_prompt,
     build_humanize_prompt,
     ensure_transition_before_first_h2,
     ensure_article_hyperlinks,
@@ -91,6 +103,11 @@ from services.generator import (
     validate_minimum_h3_per_h2,
 )
 from services.llm import LLMClient
+from services.project_prompts import (
+    ProjectPromptRepository,
+    PromptInUseError,
+    PromptLibraryError,
+)
 from services.job_queue import (
     ActiveJobError,
     BatchJobRunner,
@@ -210,6 +227,10 @@ def config():
 
 def store() -> TaskStore:
     return TaskStore(config())
+
+
+def prompt_store() -> ProjectPromptRepository:
+    return ProjectPromptRepository(config().data_file)
 
 
 def batch_queue() -> JobQueue:
@@ -578,6 +599,145 @@ def update_project_context(
     )
 
 
+def require_project(customer: str) -> None:
+    normalized = customer.strip().lower().rstrip("/")
+    if not any(
+        task.customer.strip().lower().rstrip("/") == normalized
+        for task in store().load()
+    ):
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
+
+
+@app.get("/api/projects/{customer}/prompts", response_model=ProjectPromptLibrary)
+def list_project_prompts(customer: str) -> ProjectPromptLibrary:
+    require_project(customer)
+    return prompt_store().list(customer)
+
+
+@app.post("/api/projects/{customer}/prompts", response_model=PromptLibraryItem)
+def create_project_prompt(customer: str, request: PromptCreateRequest) -> PromptLibraryItem:
+    require_project(customer)
+    try:
+        return prompt_store().create(customer, request.name, request.kind, request.content)
+    except PromptLibraryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/projects/{customer}/prompts/{prompt_id}", response_model=PromptLibraryItem)
+def update_project_prompt(
+    customer: str,
+    prompt_id: str,
+    request: PromptUpdateRequest,
+) -> PromptLibraryItem:
+    try:
+        return prompt_store().update(customer, prompt_id, request.name, request.content)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="提示词不存在。") from None
+    except PromptLibraryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put(
+    "/api/projects/{customer}/prompts/{prompt_id}/active",
+    response_model=PromptLibraryItem,
+)
+def update_project_prompt_active(
+    customer: str,
+    prompt_id: str,
+    request: PromptActiveUpdateRequest,
+) -> PromptLibraryItem:
+    try:
+        return prompt_store().set_active(customer, prompt_id, request.active)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="提示词不存在。") from None
+
+
+@app.delete("/api/projects/{customer}/prompts/{prompt_id}", response_model=ApiMessage)
+def delete_project_prompt(customer: str, prompt_id: str) -> ApiMessage:
+    try:
+        item = prompt_store().get(customer, prompt_id)
+        prompt_store().delete(customer, prompt_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="提示词不存在。") from None
+    except PromptInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    reset_count = 0
+    task_store = store()
+    for task in task_store.load():
+        if task.customer.strip().lower().rstrip("/") != customer.strip().lower().rstrip("/"):
+            continue
+        field = (
+            "outline_prompt_selection"
+            if item.kind == "outline"
+            else "article_prompt_selection"
+        )
+        if getattr(task, field) != prompt_id:
+            continue
+        setattr(task, field, "system")
+        task_store.put(task, expected_revision=task.revision)
+        reset_count += 1
+    return ApiMessage(
+        message=(
+            "提示词已彻底删除。"
+            if not reset_count
+            else f"提示词已彻底删除，{reset_count} 篇尚未生成的文章已恢复为系统默认。"
+        )
+    )
+
+
+@app.put("/api/projects/{customer}/prompt-defaults", response_model=PromptDefaults)
+def update_project_prompt_defaults(
+    customer: str,
+    request: PromptDefaultsUpdateRequest,
+) -> PromptDefaults:
+    require_project(customer)
+    try:
+        return prompt_store().set_defaults(
+            customer,
+            request.default_outline_prompt_id,
+            request.default_article_prompt_id,
+        )
+    except KeyError:
+        raise HTTPException(status_code=422, detail="默认提示词不存在或已停用。") from None
+    except PromptLibraryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def resolved_prompt_snapshot(
+    task: TaskRecord,
+    kind: str,
+    selection: str,
+    supplied: PromptSnapshot | None = None,
+) -> PromptSnapshot:
+    if supplied is not None:
+        if supplied.kind != kind:
+            raise HTTPException(status_code=422, detail="提示词快照类型不匹配。")
+        return supplied
+    try:
+        return prompt_store().resolve(task.customer, kind, selection)
+    except PromptLibraryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/tasks/{task_id}/prompt-preview", response_model=PromptPreview)
+def preview_effective_prompt(task_id: str, request: PromptPreviewRequest) -> PromptPreview:
+    task = get_task_or_404(task_id)
+    snapshot = resolved_prompt_snapshot(task, request.kind, request.selection)
+    common = {
+        "custom_prompt": request.supplemental_prompt,
+        "base_prompt": snapshot.content,
+        "include_project_introduction": request.include_project_introduction,
+        "include_project_notes": request.include_project_notes,
+        "include_topic_notes": request.include_topic_notes,
+    }
+    effective = (
+        build_outline_prompt(config(), task, **common)
+        if request.kind == "outline"
+        else build_article_prompt(config(), task, **common)
+    )
+    return PromptPreview(snapshot=snapshot, effective_prompt=effective)
+
+
 @app.put("/api/tasks/{task_id}/writing-settings", response_model=TaskRecord)
 def update_writing_settings(
     task_id: str,
@@ -589,6 +749,8 @@ def update_writing_settings(
     task.article_custom_prompt = request.article_custom_prompt.strip()
     task.use_outline_custom_prompt = request.use_outline_custom_prompt
     task.use_article_custom_prompt = request.use_article_custom_prompt
+    task.outline_prompt_selection = request.outline_prompt_selection.strip() or "project_default"
+    task.article_prompt_selection = request.article_prompt_selection.strip() or "project_default"
     task.include_project_introduction = request.include_project_introduction
     task.include_project_notes = request.include_project_notes
     task.include_topic_notes = request.include_topic_notes
@@ -601,6 +763,8 @@ def update_writing_settings(
             "article_custom_prompt": task.article_custom_prompt,
             "use_outline_custom_prompt": task.use_outline_custom_prompt,
             "use_article_custom_prompt": task.use_article_custom_prompt,
+            "outline_prompt_selection": task.outline_prompt_selection,
+            "article_prompt_selection": task.article_prompt_selection,
             "include_project_introduction": task.include_project_introduction,
             "include_project_notes": task.include_project_notes,
             "include_topic_notes": task.include_topic_notes,
@@ -801,6 +965,13 @@ def apply_generation_options(
         setattr(task, prompt_field, request.custom_prompt.strip())
     if request.use_custom_prompt is not None:
         setattr(task, enabled_field, request.use_custom_prompt)
+    if request.prompt_selection is not None:
+        selection_field = (
+            "outline_prompt_selection"
+            if prompt_field == "outline_custom_prompt"
+            else "article_prompt_selection"
+        )
+        setattr(task, selection_field, request.prompt_selection.strip() or "project_default")
     for field in (
         "include_project_introduction",
         "include_project_notes",
@@ -830,12 +1001,22 @@ def perform_outline_generation(
         prompt_field="outline_custom_prompt",
         enabled_field="use_outline_custom_prompt",
     )
+    snapshot = resolved_prompt_snapshot(
+        task,
+        "outline",
+        task.outline_prompt_selection,
+        request.prompt_snapshot,
+    )
+    if request.prompt_snapshot is None and snapshot.prompt_id:
+        prompt_store().mark_used(task.customer, snapshot.prompt_id)
+    task.last_outline_prompt_snapshot = snapshot
     outline = generate_outline(
         config(),
         task,
         custom_prompt=(
             task.outline_custom_prompt if task.use_outline_custom_prompt else ""
         ),
+        base_prompt=snapshot.content,
         include_project_introduction=task.include_project_introduction,
         include_project_notes=task.include_project_notes,
         include_topic_notes=task.include_topic_notes,
@@ -960,6 +1141,16 @@ def perform_article_generation(
         enabled_field="use_article_custom_prompt",
     )
 
+    snapshot = resolved_prompt_snapshot(
+        task,
+        "article",
+        task.article_prompt_selection,
+        request.prompt_snapshot,
+    )
+    if request.prompt_snapshot is None and snapshot.prompt_id:
+        prompt_store().mark_used(task.customer, snapshot.prompt_id)
+    task.last_article_prompt_snapshot = snapshot
+
     raw_article = generate_raw_article(
         cfg,
         task,
@@ -967,6 +1158,7 @@ def perform_article_generation(
         custom_prompt=(
             task.article_custom_prompt if task.use_article_custom_prompt else ""
         ),
+        base_prompt=snapshot.content,
         include_project_introduction=task.include_project_introduction,
         include_project_notes=task.include_project_notes,
         include_topic_notes=task.include_topic_notes,
@@ -1064,16 +1256,30 @@ def batch_request_snapshot(
         "include_topic_notes": task.include_topic_notes,
     }
     if operation == "outline":
+        snapshot = resolved_prompt_snapshot(
+            task,
+            "outline",
+            task.outline_prompt_selection,
+        )
         return GenerateOutlineRequest(
             **shared,
             custom_prompt=task.outline_custom_prompt,
             use_custom_prompt=task.use_outline_custom_prompt,
+            prompt_selection=task.outline_prompt_selection,
+            prompt_snapshot=snapshot,
         ).model_dump(mode="json", exclude_none=True)
+    snapshot = resolved_prompt_snapshot(
+        task,
+        "article",
+        task.article_prompt_selection,
+    )
     return GenerateArticleRequest(
         **shared,
         word_count=word_count or config().default_word_count,
         custom_prompt=task.article_custom_prompt,
         use_custom_prompt=task.use_article_custom_prompt,
+        prompt_selection=task.article_prompt_selection,
+        prompt_snapshot=snapshot,
     ).model_dump(mode="json", exclude_none=True)
 
 
@@ -1256,6 +1462,11 @@ def create_batch(request: BatchCreateRequest) -> BatchCreateResponse:
         )
     except ActiveJobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    for item in accepted:
+        snapshot = item["request"].get("prompt_snapshot") or {}
+        prompt_id = str(snapshot.get("prompt_id") or "")
+        if prompt_id:
+            prompt_store().mark_used(item["customer"], prompt_id)
     wake_batch_runner()
     return BatchCreateResponse(
         batch=BatchRecord.model_validate(payload),
