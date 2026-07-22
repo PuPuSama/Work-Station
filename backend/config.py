@@ -26,6 +26,18 @@ CONFIG_PATH = Path(
 PROJECT_SCOPE = "全部项目"
 
 
+def _environment_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 def _configured_path(value: object) -> Path:
     path = Path(str(value or "")).expanduser()
     return path.resolve() if path.is_absolute() else (ROOT_DIR / path).resolve()
@@ -52,6 +64,7 @@ class AppConfig:
     llm_provider: str
     llm_base_url: str
     llm_model: str
+    knowledge_agent_enabled: bool
 
     @property
     def current_week_folder(self) -> str:
@@ -79,6 +92,7 @@ def load_config() -> AppConfig:
     docx = raw["docx_format"]
     styles = docx["styles"]
     llm = raw.get("llm", {})
+    features = raw.get("features", {})
     legacy_week = raw.get("week_folder", {})
 
     return AppConfig(
@@ -108,6 +122,10 @@ def load_config() -> AppConfig:
         llm_provider=str(llm.get("provider", "openai_compatible")),
         llm_base_url=str(llm.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
         llm_model=str(llm.get("model", "")),
+        knowledge_agent_enabled=_environment_bool(
+            "KNOWLEDGE_AGENT_ENABLED",
+            bool(features.get("knowledge_agent_enabled", False)),
+        ),
     )
 
 
@@ -145,5 +163,8 @@ def public_config(config: AppConfig) -> dict[str, Any]:
         },
         "integrations": {
             "tavily_ready": bool(os.environ.get("TAVILY_API_KEY", "").strip()),
+        },
+        "features": {
+            "knowledge_agent_enabled": config.knowledge_agent_enabled,
         },
     }
