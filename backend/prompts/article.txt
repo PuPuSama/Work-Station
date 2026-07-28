@@ -6,8 +6,8 @@ Approximate character target: about {{TARGET_CHARACTERS}} English characters inc
 Customer website: {{CUSTOMER}}
 Brand name: {{BRAND_NAME}}
 Customer homepage: {{HOMEPAGE_URL}}
-Article topic: {{TOPIC}}
-Primary keyword: {{PRIMARY_KEYWORD}}
+Article topic (planning context; never paste this full phrase into body copy): {{TOPIC}}
+Suggested core keyword inferred from the topic: {{PRIMARY_KEYWORD}}
 Competitor keyword or source: {{COMPETITOR_KEYWORD}}
 Competitor blog supplied by the operator: {{COMPETITOR_BLOG}}
 
@@ -40,7 +40,7 @@ Follow these rules from the operator's writing workflow:
 3. Keep the finished article between {{MIN_WORDS}} and {{TARGET_WORDS}} visible English words and do not exceed {{TARGET_WORDS}} words. This application will not mechanically truncate the article, so control length while drafting. The approximate character budget is {{TARGET_CHARACTERS}} characters including spaces. If the outline is broad, merge repeated ideas instead of adding filler.
 4. Introduce the customer company naturally within the first 300 words, as an expert would. Link the exact brand name with this Markdown link: `[{{BRAND_NAME}}]({{HOMEPAGE_URL}})`. The homepage URL must be attached to the brand name itself, never to generic anchor text such as "website", "official website", "learn more", "visit us", or a bare domain. Keep the company introduction itself under 300 words.
 5. Outside that necessary introduction, do not repeat the brand name unless it is part of an exact supplied product name or source-locked link anchor.
-6. Preserve the primary keyword exactly where used.
+6. Treat the article topic as an editorial brief, not as an exact-match keyword. Do not copy the full topic phrase verbatim into body paragraphs or headings unless it is identical to the approved H1 or is genuinely natural English in that sentence. Use the shorter suggested core keyword naturally; grammar, readability, and suitable singular/plural forms take priority over exact-match insertion.
 7. Add cohesive prose between every H2 and its H3 subsections. If two H2/H3 ideas repeat in different words, keep the stronger one. Address buyer concerns rather than writing for length.
 8. Keep the logic professional and easy to follow. Prefer a direct sentence when extra prepositions or clauses add no value. Use a neutral third-person voice and natural second-person wording such as you/your when speaking to the buyer. Do not use first-person pronouns or first-person narration: I, me, my, mine, we, us, our, or ours.
 9. Introduce the confirmed products in relevant sections. Preserve product names, models, technical facts, numbers, and URLs. Use descriptive Markdown hyperlinks, not bare URLs.

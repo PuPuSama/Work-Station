@@ -175,6 +175,7 @@ export type TaskRecord = {
   project_introduction?: string;
   project_notes?: string;
   topic_notes?: string;
+  title_generation_instruction?: string;
   outline_custom_prompt?: string;
   article_custom_prompt?: string;
   use_outline_custom_prompt?: boolean;
@@ -187,6 +188,7 @@ export type TaskRecord = {
   include_project_notes?: boolean;
   include_topic_notes?: boolean;
   source_key?: string;
+  source_kind?: string;
   synced_from_task_id?: string;
   synced_from_week?: string;
   topic_index: number;
@@ -203,6 +205,7 @@ export type TaskRecord = {
   raw_draft_article?: string;
   initial_article?: string;
   humanized_article?: string;
+  humanization_skipped?: boolean;
   linked_article?: string;
   final_article?: string;
   article_versions?: ContentVersion[];

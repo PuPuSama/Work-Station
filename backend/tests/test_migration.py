@@ -237,6 +237,51 @@ class TaskStoreMigrationTests(unittest.TestCase):
         self.assertEqual(store.get("task-a").topic, "A changed")
         self.assertEqual(store.get("task-b").topic, "B")
 
+    def test_delete_customer_removes_only_that_projects_tasks(self) -> None:
+        store = TaskStore(self.config)
+        store.save(
+            [
+                TaskRecord.model_validate(
+                    v1_task(id="task-a", customer="a.example.com", topic="A")
+                ),
+                TaskRecord.model_validate(
+                    v1_task(id="task-b", customer="b.example.com", topic="B")
+                ),
+            ]
+        )
+
+        deleted = store.delete_customer("a.example.com")
+
+        self.assertEqual([task.id for task in deleted], ["task-a"])
+        self.assertEqual([task.id for task in store.load()], ["task-b"])
+
+    def test_topic_sync_preserves_manually_created_title_tasks(self) -> None:
+        store = TaskStore(self.config)
+        manual = TaskRecord.model_validate(
+            v1_task(
+                id="manual-task",
+                source_kind="manual",
+                source_key="manual:one",
+                topic="Manual topic",
+            )
+        )
+        scanned = TaskRecord.model_validate(
+            v1_task(
+                id="xlsx-task",
+                source_kind="xlsx",
+                source_key=article_source_key("example.com", "Workbook topic", 1),
+                topic="Workbook topic",
+            )
+        )
+        store.save([manual])
+
+        store.upsert_many([scanned])
+
+        self.assertEqual(
+            {task.id for task in store.load()},
+            {"manual-task", "xlsx-task"},
+        )
+
     def test_concurrent_updates_to_different_tasks_do_not_lose_data(self) -> None:
         store = TaskStore(self.config)
         store.save(

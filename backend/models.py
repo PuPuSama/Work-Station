@@ -229,6 +229,7 @@ class TaskRecord(WorkflowModel):
     project_introduction: str = ""
     project_notes: str = ""
     topic_notes: str = ""
+    title_generation_instruction: str = ""
     outline_custom_prompt: str = ""
     article_custom_prompt: str = ""
     use_outline_custom_prompt: bool = False
@@ -241,6 +242,7 @@ class TaskRecord(WorkflowModel):
     include_project_notes: bool = True
     include_topic_notes: bool = True
     source_key: str = ""
+    source_kind: str = "xlsx"
     synced_from_task_id: str = ""
     synced_from_week: str = ""
     topic_index: int
@@ -261,6 +263,7 @@ class TaskRecord(WorkflowModel):
     raw_draft_article: str = ""
     initial_article: str = ""
     humanized_article: str = ""
+    humanization_skipped: bool = False
     linked_article: str = ""
     final_article: str = ""
     article_versions: list[ArticleVersion] = Field(default_factory=list)
@@ -302,6 +305,11 @@ class RevisionedRequest(WorkflowModel):
 
 class SelectTitleRequest(RevisionedRequest):
     title: str
+
+
+class ManualTitleGenerationRequest(WorkflowModel):
+    topic: str = Field(min_length=1, max_length=500)
+    instruction: str = Field(default="", max_length=4000)
 
 
 class OutlineUpdateRequest(RevisionedRequest):

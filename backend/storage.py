@@ -55,12 +55,14 @@ V2_DEFAULTS: dict[str, Any] = {
     "include_project_notes": True,
     "include_topic_notes": True,
     "source_key": "",
+    "source_kind": "xlsx",
     "synced_from_task_id": "",
     "synced_from_week": "",
     "hero_image": "",
     "raw_draft_article": "",
     "initial_article": "",
     "humanized_article": "",
+    "humanization_skipped": False,
     "linked_article": "",
     "final_article": "",
     "article_versions": [],
@@ -169,6 +171,7 @@ class TaskStore:
         "week_folder",
         "customer",
         "source_key",
+        "source_kind",
         "topic_index",
         "topic",
         "competitor_keyword",
@@ -183,6 +186,7 @@ class TaskStore:
         "project_introduction",
         "project_notes",
         "source_key",
+        "source_kind",
         "topic_index",
         "topic",
         "competitor_keyword",
@@ -365,6 +369,19 @@ class TaskStore:
                 task.model_dump(mode="json") for task in matched
             )
             return len(matched)
+
+    def delete_customer(self, customer: str) -> list[TaskRecord]:
+        normalized = normalized_customer(customer)
+        with _TASK_STORE_LOCK:
+            matched = [
+                task
+                for task in self.load()
+                if normalized_customer(task.customer) == normalized
+            ]
+            if not matched:
+                raise KeyError(customer)
+            self.repository.delete_many(task.id for task in matched)
+            return matched
 
     def _inherit_history(
         self,
@@ -565,6 +582,13 @@ class TaskStore:
             # the one-time backup above.
             incoming_ids = list(dict.fromkeys(task.id for task in incoming))
             tasks = [existing[task_id] for task_id in incoming_ids]
+            tasks.extend(
+                task
+                for task in loaded
+                if task.week_folder == scope
+                and task.source_kind == "manual"
+                and task.id not in incoming_ids
+            )
             self.save(tasks)
             return tasks
 

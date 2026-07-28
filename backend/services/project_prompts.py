@@ -259,3 +259,15 @@ class ProjectPromptRepository:
                 "UPDATE project_prompts SET use_count = use_count + 1 WHERE customer_key = ? AND id = ?",
                 (normalized_customer(customer), prompt_id),
             )
+
+    def delete_customer(self, customer: str) -> None:
+        key = normalized_customer(customer)
+        with self._connection() as connection:
+            connection.execute(
+                "DELETE FROM project_prompt_defaults WHERE customer_key = ?",
+                (key,),
+            )
+            connection.execute(
+                "DELETE FROM project_prompts WHERE customer_key = ?",
+                (key,),
+            )

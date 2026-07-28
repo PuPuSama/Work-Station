@@ -2,8 +2,9 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { AlertCircle, ArrowRight, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, ArrowRight, Loader2, Plus, RefreshCw, Search, Sparkles } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ProjectNavigation } from "@/components/project-navigation";
@@ -18,6 +19,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Table,
   TableBody,
@@ -26,7 +29,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { TaskRecord, WorkflowStatus } from "@/types";
 
@@ -113,12 +116,17 @@ function stepForStatus(status: WorkflowStatus) {
 }
 
 export function ProjectArticleList({ customer }: ProjectArticleListProps) {
+  const router = useRouter();
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [quickView, setQuickView] = useState<QuickView>("all");
   const [status, setStatus] = useState<"all" | WorkflowStatus>("all");
+  const [showDirectTitles, setShowDirectTitles] = useState(false);
+  const [directTopic, setDirectTopic] = useState("");
+  const [directInstruction, setDirectInstruction] = useState("");
+  const [directPending, setDirectPending] = useState(false);
 
   const loadTasks = useCallback(async () => {
     setLoading(true);
@@ -137,6 +145,27 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
+
+  async function createDirectTitles() {
+    if (!directTopic.trim()) return;
+    setDirectPending(true);
+    setError("");
+    try {
+      const task = await apiPost<TaskRecord>(
+        `/api/projects/${encodeURIComponent(customer)}/titles/direct`,
+        {
+          topic: directTopic.trim(),
+          instruction: directInstruction.trim(),
+        },
+      );
+      router.push(
+        `/projects/${encodeURIComponent(customer)}/articles/${encodeURIComponent(task.id)}?step=titles`,
+      );
+    } catch (createError) {
+      setError(errorMessage(createError));
+      setDirectPending(false);
+    }
+  }
 
   const counts = useMemo(
     () => ({
@@ -177,9 +206,18 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
                 先定位需要处理的文章，再进入单篇工作台完成具体操作。
               </p>
             </div>
-            <span className="text-sm text-muted-foreground">
-              显示 {filteredTasks.length} / {tasks.length} 篇
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-muted-foreground">
+                显示 {filteredTasks.length} / {tasks.length} 篇
+              </span>
+              <Button
+                type="button"
+                onClick={() => setShowDirectTitles((current) => !current)}
+              >
+                <Plus />
+                直接生成标题
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -197,6 +235,52 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
               </Button>
             </div>
           </Alert>
+        )}
+
+        {showDirectTitles && (
+          <Card className="rounded-lg">
+            <CardHeader className="border-b">
+              <CardTitle>不使用 XLSX，直接生成 10 个标题</CardTitle>
+              <CardDescription>
+                创建一篇独立文章任务。主题用于后续大纲和正文，补充指令只控制本次标题角度。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="direct-title-topic">文章主题</Label>
+                <Input
+                  id="direct-title-topic"
+                  value={directTopic}
+                  maxLength={500}
+                  disabled={directPending}
+                  placeholder="例如：Roof Ladder Safety for B2B Buyers"
+                  onChange={(event) => setDirectTopic(event.target.value)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="direct-title-instruction">标题生成补充指令（可选）</Label>
+                <Textarea
+                  id="direct-title-instruction"
+                  value={directInstruction}
+                  maxLength={4000}
+                  disabled={directPending}
+                  className="min-h-24 resize-y"
+                  placeholder="例如：面向批发商和承包商，突出选型与采购，避免 How to 开头。"
+                  onChange={(event) => setDirectInstruction(event.target.value)}
+                />
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  onClick={() => void createDirectTitles()}
+                  disabled={directPending || !directTopic.trim()}
+                >
+                  {directPending ? <Loader2 className="animate-spin" /> : <Sparkles />}
+                  {directPending ? "正在生成 10 个标题" : "生成 10 个标题"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">

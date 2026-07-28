@@ -148,6 +148,7 @@ class BatchApiTests(unittest.TestCase):
                     "asset_count": 2,
                     "selected_asset_id": "A01",
                     "detail_page_verified": True,
+                    "image_path": str(root / "output" / "example.com" / "valid" / "product.webp"),
                 }
             )
             with (

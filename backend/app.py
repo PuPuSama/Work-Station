@@ -32,6 +32,7 @@ from models import (
     GenerateOutlineRequest,
     ImagesUpdateRequest,
     LinkValidation,
+    ManualTitleGenerationRequest,
     OutlineUpdateRequest,
     ProductsUpdateRequest,
     ProjectPromptLibrary,
@@ -121,6 +122,7 @@ from services.tavily import TavilyClient
 from services.tdk import TdkGenerationError, export_tdk_docx, generate_tdk_metadata
 from services.task_files import TaskDirectoryError, open_task_directory
 from services.topics import TopicWorkbookError, scan_topic_library, store_topic_workbook
+from services.task_identity import article_source_key, normalized_customer
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -608,6 +610,72 @@ def require_project(customer: str) -> None:
         raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
 
 
+def archive_project_sources(cfg, customer: str, tasks: list[TaskRecord]) -> list[str]:
+    """Move project-owned source/output paths into a recoverable local trash folder."""
+
+    trash_root = cfg.output_root.parent / "project-trash" / uuid4().hex
+    archived: list[str] = []
+    candidates: list[tuple[Path, Path]] = []
+    output_root = cfg.output_root.resolve()
+    for task in tasks:
+        task_path = Path(task.task_dir).resolve()
+        try:
+            relative = task_path.relative_to(output_root)
+        except ValueError:
+            continue
+        if len(relative.parts) >= 2:
+            project_root = output_root / relative.parts[0]
+            candidates.append((project_root, trash_root / "output" / project_root.name))
+
+    topic_root = cfg.topic_library.resolve()
+    for workbook in cfg.topic_library.glob("*.xlsx"):
+        if normalized_customer(workbook.stem) == normalized_customer(customer):
+            candidates.append((workbook.resolve(), trash_root / "topic-library" / workbook.name))
+
+    seen: set[Path] = set()
+    for source, destination in candidates:
+        if source in seen or not source.exists():
+            continue
+        seen.add(source)
+        if source != topic_root:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            archived.append(str(destination))
+    return archived
+
+
+@app.delete("/api/projects/{customer}", response_model=ApiMessage)
+def delete_project(customer: str, confirmation: str) -> ApiMessage:
+    if confirmation.strip() != customer:
+        raise HTTPException(status_code=422, detail="Type the exact project domain to confirm deletion.")
+    task_store = store()
+    tasks = [
+        task
+        for task in task_store.load()
+        if normalized_customer(task.customer) == normalized_customer(customer)
+    ]
+    if not tasks:
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
+    active = batch_queue().active_task_ids(task.id for task in tasks)
+    if active:
+        raise HTTPException(status_code=409, detail="Stop the project's active jobs before deleting it.")
+
+    cfg = config()
+    try:
+        archived = archive_project_sources(cfg, customer, tasks)
+        batch_queue().delete_customer(customer)
+        prompt_store().delete_customer(customer)
+        deleted = task_store.delete_customer(customer)
+    except ActiveJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Project files could not be archived: {exc}") from exc
+    return ApiMessage(
+        message=f"Project deleted. {len(deleted)} article tasks were removed.",
+        data={"customer": customer, "deleted_tasks": len(deleted), "archived_paths": archived},
+    )
+
+
 @app.get("/api/projects/{customer}/prompts", response_model=ProjectPromptLibrary)
 def list_project_prompts(customer: str) -> ProjectPromptLibrary:
     require_project(customer)
@@ -809,6 +877,60 @@ def perform_title_generation(
     return saved
 
 
+@app.post("/api/projects/{customer}/titles/direct", response_model=TaskRecord)
+def create_direct_title_task(
+    customer: str,
+    request: ManualTitleGenerationRequest,
+) -> TaskRecord:
+    require_project(customer)
+    cfg = config()
+    project_tasks = [
+        task
+        for task in store().canonical_tasks(cfg.current_week_folder)
+        if normalized_customer(task.customer) == normalized_customer(customer)
+    ]
+    latest = max(project_tasks, key=lambda task: task.updated_at)
+    topic_index = max((task.topic_index for task in project_tasks), default=0) + 1
+    task_id = uuid4().hex[:12]
+    task_dir = Path(latest.task_dir).parent / f"manual_{task_id}"
+    timestamp = now_iso()
+    task = TaskRecord(
+        id=task_id,
+        week_folder=cfg.current_week_folder,
+        customer=latest.customer,
+        brand_name=latest.brand_name,
+        project_introduction=latest.project_introduction,
+        project_notes=latest.project_notes,
+        source_key=f"manual:{article_source_key(latest.customer, request.topic, topic_index)}",
+        source_kind="manual",
+        topic_index=topic_index,
+        topic=request.topic.strip(),
+        title_generation_instruction=request.instruction.strip(),
+        task_dir=str(task_dir),
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    task.title_candidates = generate_titles(
+        cfg,
+        task,
+        instruction=task.title_generation_instruction,
+    )[:10]
+    task.status = STATUS_TITLES_READY
+    task_dir.mkdir(parents=True, exist_ok=False)
+    saved = store().put(task, expected_revision=0)
+    write_json_artifact(
+        saved,
+        "manual_title_request.json",
+        {"topic": saved.topic, "instruction": saved.title_generation_instruction},
+    )
+    write_text_artifact(
+        saved,
+        "title_candidates.md",
+        "\n".join(f"{index + 1}. {title}" for index, title in enumerate(saved.title_candidates)),
+    )
+    return saved
+
+
 @app.post("/api/tasks/{task_id}/titles", response_model=TaskRecord)
 def create_titles(
     task_id: str,
@@ -874,6 +996,7 @@ def perform_auto_products(
                 request.limit,
                 tavily_client=TavilyClient(timeout=15),
                 download_images=False,
+                candidate_pool_limit=request.limit + 3,
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Auto product discovery failed: {exc}") from exc
@@ -884,14 +1007,31 @@ def perform_auto_products(
             )
         raise_if_batch_cancelled(cancelled)
         try:
-            task.products = enrich_product_assets(
+            enriched = enrich_product_assets(
                 cfg,
                 task,
                 discovered,
                 llm=LLMClient(cfg, timeout_seconds=60),
+                stop_after_selected=request.limit,
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Official product asset crawl failed: {exc}") from exc
+        selected = [
+            product
+            for product in enriched
+            if product.asset_status == "selected"
+            and product.detail_page_verified
+            and product.image_path.strip()
+        ][: request.limit]
+        if not selected:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "No verified official product detail pages with safe images were found; "
+                    "existing products were kept."
+                ),
+            )
+        task.products = selected
         raise_if_batch_cancelled(cancelled)
         invalidate_downstream(task, "products")
         saved = save_task(task, request.revision)
@@ -1599,6 +1739,28 @@ def confirm_initial_ai(task_id: str, request: AICheckUpdateRequest) -> TaskRecor
     task.zero_gpt_report = request.report
     if request.confirmed:
         advance(task, STATUS_INITIAL_AI_CHECKED)
+        threshold = float(config().ai_pass_threshold)
+        if request.score is not None and request.score < threshold:
+            task.humanized_article = task.initial_article
+            task.humanized_article_word_count = task.initial_article_word_count
+            task.humanized_article_hash = task.initial_article_hash
+            task.humanization_skipped = True
+            task.article = task.initial_article
+            task.final_ai_check = AICheck(
+                confirmed=True,
+                score=request.score,
+                report=(
+                    f"Initial AI rate {request.score:g}% was below the {threshold:g}% threshold; "
+                    "humanization and the second AI check were skipped."
+                ),
+                screenshot_path=task.initial_ai_check.screenshot_path,
+                confirmed_at=task.initial_ai_check.confirmed_at,
+                article_hash=task.initial_article_hash,
+            )
+            advance(task, STATUS_HUMANIZED_READY)
+            advance(task, STATUS_FINAL_AI_CHECKED)
+            write_text_artifact(task, "04_humanized_candidate.md", task.initial_article)
+            write_json_artifact(task, "05_zerogpt_after.json", task.final_ai_check.model_dump())
     write_json_artifact(task, "03_zerogpt_before.json", task.initial_ai_check.model_dump())
     return save_task(task, request.revision)
 
@@ -1678,6 +1840,7 @@ def perform_humanize(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     raise_if_batch_cancelled(cancelled)
     task.humanized_article = humanized
+    task.humanization_skipped = False
     task.humanized_article_word_count = visible_word_count(humanized)
     task.humanized_article_hash = content_hash(humanized)
     task.article = humanized
@@ -1736,6 +1899,7 @@ def update_humanized_article(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     task.humanized_article = candidate
+    task.humanization_skipped = False
     task.humanized_article_word_count = visible_word_count(candidate)
     task.humanized_article_hash = content_hash(candidate)
     task.article = candidate

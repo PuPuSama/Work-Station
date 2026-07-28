@@ -148,6 +148,35 @@ class JobQueue:
             ).fetchall()
         return {str(row["task_id"]) for row in rows}
 
+    def delete_customer(self, customer: str) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                """SELECT 1 FROM jobs
+                   WHERE customer = ? AND status IN ('queued', 'running', 'retry_wait')
+                   LIMIT 1""",
+                (customer,),
+            ).fetchone()
+            if active:
+                raise ActiveJobError(f"project:{customer}")
+            batch_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM batches WHERE customer = ?",
+                    (customer,),
+                ).fetchall()
+            ]
+            if batch_ids:
+                placeholders = ",".join("?" for _ in batch_ids)
+                connection.execute(
+                    f"DELETE FROM jobs WHERE batch_id IN ({placeholders})",
+                    batch_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM batches WHERE id IN ({placeholders})",
+                    batch_ids,
+                )
+
     def create_batch(
         self,
         operation: str,

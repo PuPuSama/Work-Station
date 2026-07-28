@@ -83,6 +83,18 @@ class ProjectPromptRepositoryTests(unittest.TestCase):
         self.repository.delete("example.com", created.id)
         self.assertEqual(self.repository.list("example.com").prompts, [])
 
+    def test_project_prompt_data_can_be_deleted_with_project(self) -> None:
+        created = self.repository.create(
+            "example.com", "Project article", "article", "Write direct prose."
+        )
+        self.repository.set_defaults("example.com", "", created.id)
+
+        self.repository.delete_customer("example.com")
+
+        library = self.repository.list("example.com")
+        self.assertEqual(library.prompts, [])
+        self.assertEqual(library.defaults.default_article_prompt_id, "")
+
     def test_outline_generation_captures_selected_project_prompt_snapshot(self) -> None:
         data_path = Path(self.temporary.name) / "workflow-tasks.json"
         config = SimpleNamespace(data_file=data_path)

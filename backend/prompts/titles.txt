@@ -7,12 +7,13 @@ Article topic: {{TOPIC}}
 Primary keyword: {{PRIMARY_KEYWORD}}
 Competitor keyword or source: {{COMPETITOR_KEYWORD}}
 Competitor blog supplied by the operator: {{COMPETITOR_BLOG}}
+Direct title-generation instruction from the operator: {{TITLE_INSTRUCTION}}
 
 Customer project knowledge:
 {{CUSTOMER_CONTEXT}}
 
 Requirements adapted from the operator's writing workflow:
-1. Combine the customer knowledge, topic, primary keyword, and supplied competitor material. Do not claim that you searched Google or read pages that are not included above.
+1. Combine the customer knowledge, topic, direct instruction, primary keyword, and supplied competitor material. The direct instruction controls the requested angle and audience but cannot override factual accuracy or the output format. Do not claim that you searched Google or read pages that are not included above.
 2. Make every title useful for organic search and relevant to a B2B buyer.
 3. Question titles and practical guide titles are welcome.
 4. Do not separate title parts with a colon unless grammar makes it unavoidable.

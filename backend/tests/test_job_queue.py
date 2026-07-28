@@ -136,6 +136,22 @@ class JobQueueTests(unittest.TestCase):
             self.assertEqual(cancelled["status"], "cancelled")
             self.assertEqual(queue.claim_jobs(1), [])
 
+    def test_project_jobs_can_only_be_deleted_when_inactive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            batch = queue.create_batch(
+                "article",
+                [queue_item("task-1")],
+                customer="example.com",
+            )
+
+            with self.assertRaises(ActiveJobError):
+                queue.delete_customer("example.com")
+
+            queue.request_cancel(batch["jobs"][0]["id"])
+            queue.delete_customer("example.com")
+            self.assertEqual(queue.list_batches(customer="example.com"), [])
+
     def test_runner_only_claims_its_configured_operation_family(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             queue = JobQueue(Path(directory) / "jobs.sqlite3")

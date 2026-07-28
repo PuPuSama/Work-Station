@@ -8,7 +8,9 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  Trash2,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ProjectNavigation } from "@/components/project-navigation";
@@ -27,7 +29,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { apiGet, apiPut } from "@/lib/api";
+import { apiDelete, apiGet, apiPut } from "@/lib/api";
 import type { ApiMessage, TaskRecord } from "@/types";
 
 type ProjectSettingsProps = {
@@ -56,6 +58,7 @@ function SectionFeedback({ feedback }: { feedback: Feedback }) {
 }
 
 export function ProjectSettings({ customer }: ProjectSettingsProps) {
+  const router = useRouter();
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -69,6 +72,9 @@ export function ProjectSettings({ customer }: ProjectSettingsProps) {
   const [contextPending, setContextPending] = useState(false);
   const [brandFeedback, setBrandFeedback] = useState<Feedback>(null);
   const [contextFeedback, setContextFeedback] = useState<Feedback>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteFeedback, setDeleteFeedback] = useState<Feedback>(null);
 
   const loadProject = useCallback(async () => {
     setLoading(true);
@@ -153,6 +159,21 @@ export function ProjectSettings({ customer }: ProjectSettingsProps) {
       setContextFeedback({ kind: "error", message: errorMessage(error) });
     } finally {
       setContextPending(false);
+    }
+  }
+
+  async function deleteProject() {
+    setDeletePending(true);
+    setDeleteFeedback(null);
+    try {
+      await apiDelete<ApiMessage>(
+        `/api/projects/${encodeURIComponent(customer)}?confirmation=${encodeURIComponent(deleteConfirmation)}`,
+      );
+      router.push("/");
+      router.refresh();
+    } catch (error) {
+      setDeleteFeedback({ kind: "error", message: errorMessage(error) });
+      setDeletePending(false);
     }
   }
 
@@ -301,6 +322,44 @@ export function ProjectSettings({ customer }: ProjectSettingsProps) {
         </Card>
 
         <ProjectPromptLibraryCard customer={customer} />
+
+        <Card className="rounded-lg border-destructive/40">
+          <CardHeader className="border-b">
+            <CardTitle className="text-destructive">删除项目</CardTitle>
+            <CardDescription>
+              删除任务、提示词和批次记录。项目目录与对应 XLSX 会移入本机回收目录，避免误删后无法恢复。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="delete-project-confirmation">
+                输入项目域名 <span className="font-mono">{customer}</span> 进行确认
+              </Label>
+              <Input
+                id="delete-project-confirmation"
+                value={deleteConfirmation}
+                disabled={deletePending}
+                onChange={(event) => {
+                  setDeleteConfirmation(event.target.value);
+                  setDeleteFeedback(null);
+                }}
+                placeholder={customer}
+              />
+            </div>
+            <SectionFeedback feedback={deleteFeedback} />
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => void deleteProject()}
+                disabled={deletePending || deleteConfirmation !== customer}
+              >
+                {deletePending ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                {deletePending ? "正在删除项目" : "删除项目"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     </main>
   );
