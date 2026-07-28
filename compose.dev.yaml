@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg17-bookworm
+    environment:
+      POSTGRES_DB: ${ARTICLE_DB_NAME:-article_agent}
+      POSTGRES_USER: ${ARTICLE_DB_USER:-article_agent}
+      POSTGRES_PASSWORD: ${ARTICLE_DB_PASSWORD:-article_agent}
+    ports:
+      - "127.0.0.1:${ARTICLE_DB_PORT:-55433}:5432"
+    volumes:
+      - article_agent_pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  article_agent_pgvector_data:
