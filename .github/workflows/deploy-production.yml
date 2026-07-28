@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: article-production
+  group: article-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -18,8 +21,23 @@ jobs:
     name: Test and build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.5-pg17-bookworm
+        env:
+          POSTGRES_DB: article_agent
+          POSTGRES_USER: article_agent
+          POSTGRES_PASSWORD: article_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U article_agent -d article_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       ARTICLE_AGENT_CONFIG: config.ci.yaml
+      ARTICLE_AGENT_DATABASE_URL: postgresql+psycopg://article_agent:article_agent@127.0.0.1:5432/article_agent
       LLM_API_KEY: ""
       OPENAI_API_KEY: ""
       TAVILY_API_KEY: ""
@@ -38,6 +56,11 @@ jobs:
 
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements-dev.txt
+
+      - name: Upgrade knowledge database
+        run: |
+          python -m alembic -c backend/alembic.ini upgrade head
+          python -m alembic -c backend/alembic.ini upgrade head
 
       - name: Run backend tests
         run: python -m unittest discover -s backend/tests -q
@@ -64,7 +87,7 @@ jobs:
   deploy:
     name: Deploy /root/article
     needs: quality
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
