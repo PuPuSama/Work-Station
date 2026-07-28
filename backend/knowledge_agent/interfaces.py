@@ -3,33 +3,77 @@ from __future__ import annotations
 from typing import Protocol, Sequence, runtime_checkable
 
 from .contracts import (
+    ChunkEmbedding,
     DiscoveryRequest,
+    EmbeddingBatch,
     EvidencePack,
     EvidencePackRequest,
     KnowledgeChunk,
+    KnowledgeProject,
+    KnowledgeSource,
     ResearchRequest,
     ResearchResult,
     RetrievalHit,
     RetrievalQuery,
+    SourceSnapshot,
     SourceCandidate,
 )
 
 
 @runtime_checkable
 class KnowledgeRepository(Protocol):
-    """Persistence boundary for project-scoped knowledge and evidence."""
+    """Persistence boundary for project-scoped knowledge."""
 
-    def upsert_chunks(self, project_id: str, chunks: Sequence[KnowledgeChunk]) -> None: ...
+    def upsert_project(self, project: KnowledgeProject) -> None: ...
+
+    def upsert_source(self, source: KnowledgeSource) -> None: ...
+
+    def store_snapshot(
+        self,
+        project_id: str,
+        snapshot: SourceSnapshot,
+        chunks: Sequence[KnowledgeChunk],
+    ) -> None: ...
+
+    def store_embeddings(
+        self, project_id: str, embeddings: Sequence[ChunkEmbedding]
+    ) -> None: ...
+
+    def activate_snapshot(
+        self,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+        embedding_model: str,
+    ) -> None: ...
 
     def get_chunks(
         self, project_id: str, chunk_ids: Sequence[str]
     ) -> Sequence[KnowledgeChunk]: ...
+
+
+@runtime_checkable
+class EvidencePackRepository(Protocol):
+    """Persistence boundary for evidence packs introduced in M3."""
 
     def save_evidence_pack(self, evidence_pack: EvidencePack) -> None: ...
 
     def get_evidence_pack(
         self, project_id: str, evidence_pack_id: str
     ) -> EvidencePack | None: ...
+
+
+@runtime_checkable
+class EmbeddingProvider(Protocol):
+    """Provider-neutral, synchronous embedding boundary."""
+
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def dimensions(self) -> int: ...
+
+    def embed(self, texts: Sequence[str]) -> EmbeddingBatch: ...
 
 
 @runtime_checkable

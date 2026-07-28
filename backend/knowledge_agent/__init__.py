@@ -1,37 +1,91 @@
 """Stable boundaries for the optional knowledge and research agent."""
 
 from .contracts import (
+    EMBEDDING_DIMENSIONS,
+    ChunkEmbedding,
     DiscoveryRequest,
+    EmbeddingBatch,
     EvidencePack,
     EvidencePackRequest,
     KnowledgeChunk,
+    KnowledgeProject,
+    KnowledgeSource,
     ResearchRequest,
     ResearchResult,
     RetrievalHit,
     RetrievalQuery,
+    SourceSnapshot,
     SourceCandidate,
+    Vector,
+    require_project_scope,
 )
+from .embedding import (
+    EmbeddingProviderError,
+    EmbeddingResponseError,
+    OpenAICompatibleEmbeddingProvider,
+)
+from .database import create_knowledge_engine
 from .interfaces import (
+    EmbeddingProvider,
     EvidencePackBuilder,
+    EvidencePackRepository,
     KnowledgeRepository,
     KnowledgeRetriever,
     ResearchOrchestrator,
     SourceDiscovery,
 )
+from .settings import (
+    DEFAULT_EMBEDDING_MODEL,
+    KnowledgeAgentConfigurationError,
+    KnowledgeAgentSettings,
+    load_knowledge_agent_settings,
+)
+from .repository import (
+    KnowledgeConflictError,
+    KnowledgeRecordNotFound,
+    KnowledgeRepositoryError,
+    PostgresKnowledgeRepository,
+    SnapshotActivationError,
+)
+from .retriever import PgVectorKnowledgeRetriever
 
 __all__ = [
+    "DEFAULT_EMBEDDING_MODEL",
     "DiscoveryRequest",
+    "EMBEDDING_DIMENSIONS",
+    "ChunkEmbedding",
+    "EmbeddingBatch",
+    "EmbeddingProvider",
+    "EmbeddingProviderError",
+    "EmbeddingResponseError",
     "EvidencePack",
     "EvidencePackBuilder",
+    "EvidencePackRepository",
     "EvidencePackRequest",
+    "KnowledgeAgentConfigurationError",
+    "KnowledgeAgentSettings",
     "KnowledgeChunk",
+    "KnowledgeConflictError",
+    "KnowledgeProject",
+    "KnowledgeRecordNotFound",
     "KnowledgeRepository",
+    "KnowledgeRepositoryError",
     "KnowledgeRetriever",
+    "KnowledgeSource",
+    "OpenAICompatibleEmbeddingProvider",
+    "PgVectorKnowledgeRetriever",
+    "PostgresKnowledgeRepository",
     "ResearchOrchestrator",
     "ResearchRequest",
     "ResearchResult",
     "RetrievalHit",
     "RetrievalQuery",
+    "SourceSnapshot",
     "SourceCandidate",
     "SourceDiscovery",
+    "SnapshotActivationError",
+    "Vector",
+    "create_knowledge_engine",
+    "load_knowledge_agent_settings",
+    "require_project_scope",
 ]
