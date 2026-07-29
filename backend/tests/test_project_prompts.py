@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,71 @@ class ProjectPromptRepositoryTests(unittest.TestCase):
             self.repository.resolve("example.com", "article", created.id).source,
             "system",
         )
+
+    def test_review_prompt_can_be_project_default(self) -> None:
+        created = self.repository.create(
+            "example.com",
+            "SEO quality review",
+            "review",
+            "Score the article and return a complete revision.",
+        )
+
+        defaults = self.repository.set_defaults("example.com", "", "", created.id)
+        snapshot = self.repository.resolve("example.com", "review", "project_default")
+
+        self.assertEqual(defaults.default_review_prompt_id, created.id)
+        self.assertEqual(snapshot.prompt_id, created.id)
+        self.assertEqual(snapshot.kind, "review")
+
+    def test_legacy_prompt_table_is_migrated_to_support_review_kind(self) -> None:
+        legacy_path = Path(self.temporary.name) / "legacy.json"
+        database_path = legacy_path.with_suffix(".sqlite3")
+        connection = sqlite3.connect(database_path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE project_prompts (
+                    id TEXT PRIMARY KEY,
+                    customer_key TEXT NOT NULL,
+                    customer TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('outline', 'article')),
+                    content TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE project_prompt_defaults (
+                    customer_key TEXT PRIMARY KEY,
+                    customer TEXT NOT NULL,
+                    default_outline_prompt_id TEXT NOT NULL DEFAULT '',
+                    default_article_prompt_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO project_prompts(
+                    id, customer_key, customer, name, kind, content, created_at, updated_at
+                ) VALUES (
+                    'old', 'example.com', 'example.com', 'Old article', 'article',
+                    'Keep this prompt.', '2026-07-01', '2026-07-01'
+                );
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = ProjectPromptRepository(legacy_path)
+        review = migrated.create(
+            "example.com",
+            "Review",
+            "review",
+            "Review this article.",
+        )
+
+        self.assertEqual(migrated.get("example.com", "old").content, "Keep this prompt.")
+        self.assertEqual(review.kind, "review")
+        self.assertEqual(migrated.list("example.com").defaults.default_review_prompt_id, "")
 
     def test_unused_prompt_can_be_deleted(self) -> None:
         created = self.repository.create(

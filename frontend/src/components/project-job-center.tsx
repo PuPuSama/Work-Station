@@ -28,6 +28,7 @@ function operationLabel(operation: BatchOperation) {
     outline: "生成大纲",
     article: "生成正文",
     rewrite_article: "重写正文",
+    seo_review: "SEO 质量复检",
     humanize: "降 AI 改写",
     restore_links: "恢复链接",
     prepare_images: "准备图片",
@@ -55,7 +56,11 @@ function operationStep(operation: BatchOperation) {
   if (operation === "titles") return "titles";
   if (operation === "products") return "products";
   if (operation === "outline") return "outline";
-  if (operation === "article" || operation === "rewrite_article") return "article";
+  if (
+    operation === "article" ||
+    operation === "rewrite_article" ||
+    operation === "seo_review"
+  ) return "article";
   if (operation === "humanize" || operation === "restore_links") return "review";
   if (operation === "prepare_images") return "media";
   return "files";

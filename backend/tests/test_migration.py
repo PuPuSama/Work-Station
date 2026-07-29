@@ -119,6 +119,47 @@ class MigrationUnitTests(unittest.TestCase):
         self.assertTrue(migrated["include_project_introduction"])
         self.assertEqual(migrated["outline_prompt_selection"], "system")
         self.assertEqual(migrated["article_prompt_selection"], "system")
+        self.assertEqual(migrated["seo_review_prompt_selection"], "system")
+        self.assertEqual(migrated["seo_primary_keyword"], "")
+        self.assertEqual(migrated["seo_long_tail_keywords"], [])
+        self.assertEqual(migrated["seo_reviews"], [])
+
+    def test_schema_v5_whole_article_review_becomes_legacy_structure_group(self) -> None:
+        source = "# Title\n\nIntro.\n\n## Section\n\n### A\n\nOne.\n\n### B\n\nTwo.\n\n## FAQ"
+        revised = source.replace("One.", "One revised.")
+        migrated, changed = migrate_task_payload(
+            v1_task(
+                schema_version=5,
+                seo_reviews=[
+                    {
+                        "id": "old-review",
+                        "source_article": source,
+                        "source_article_hash": "source-hash",
+                        "source_revision": 1,
+                        "score": 80,
+                        "dimensions": [],
+                        "publish_ready": False,
+                        "publish_recommendation": "Revise.",
+                        "report": "Report.",
+                        "revised_article": revised,
+                        "revised_article_hash": "revised-hash",
+                        "prompt_snapshot": {
+                            "kind": "review",
+                            "source": "system",
+                        },
+                        "created_at": "2026-07-29T00:00:00",
+                    }
+                ],
+            )
+        )
+
+        self.assertTrue(changed)
+        task = TaskRecord.model_validate(migrated)
+        review = task.seo_reviews[0]
+        self.assertEqual(review.status, "open")
+        self.assertEqual(len(review.changes), 1)
+        self.assertEqual(review.changes[0].operation, "structure")
+        self.assertEqual(review.changes[0].model_proposed_text, revised)
 
     def test_nested_models_are_validated_on_assignment(self) -> None:
         task = TaskRecord.model_validate(v1_task())

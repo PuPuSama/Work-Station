@@ -48,6 +48,7 @@ const EMPTY_LIBRARY: ProjectPromptLibrary = {
     customer: "",
     default_outline_prompt_id: "",
     default_article_prompt_id: "",
+    default_review_prompt_id: "",
   },
 };
 
@@ -62,6 +63,7 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
   const [content, setContent] = useState("");
   const [outlineDefault, setOutlineDefault] = useState("");
   const [articleDefault, setArticleDefault] = useState("");
+  const [reviewDefault, setReviewDefault] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -73,6 +75,7 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
       setLibrary(next);
       setOutlineDefault(next.defaults.default_outline_prompt_id);
       setArticleDefault(next.defaults.default_article_prompt_id);
+      setReviewDefault(next.defaults.default_review_prompt_id);
     } catch (error) {
       setFeedback({ kind: "error", message: errorMessage(error) });
     } finally {
@@ -92,9 +95,14 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
     () => library.prompts.filter((prompt) => prompt.kind === "article" && prompt.active),
     [library.prompts],
   );
+  const reviewPrompts = useMemo(
+    () => library.prompts.filter((prompt) => prompt.kind === "review" && prompt.active),
+    [library.prompts],
+  );
   const defaultsDirty =
     outlineDefault !== library.defaults.default_outline_prompt_id ||
-    articleDefault !== library.defaults.default_article_prompt_id;
+    articleDefault !== library.defaults.default_article_prompt_id ||
+    reviewDefault !== library.defaults.default_review_prompt_id;
 
   function resetEditor() {
     setEditingId("");
@@ -147,6 +155,7 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
         {
           default_outline_prompt_id: outlineDefault,
           default_article_prompt_id: articleDefault,
+          default_review_prompt_id: reviewDefault,
         },
       );
       await load();
@@ -217,7 +226,7 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
       <CardHeader className="border-b">
         <CardTitle>项目提示词库</CardTitle>
         <CardDescription>
-          分别管理完整的大纲和正文提示词。系统会自动注入文章资料，并始终保留事实、结构和链接硬约束。
+          分别管理完整的大纲、正文和 SEO 质量复检提示词。系统会自动注入文章资料，并始终保留事实、结构和链接硬约束。
         </CardDescription>
         <CardAction>
           <Badge variant="outline">{library.prompts.length} 份</Badge>
@@ -232,7 +241,7 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
           </Alert>
         )}
 
-        <div className="grid gap-4 rounded-lg border p-4 md:grid-cols-2">
+        <div className="grid gap-4 rounded-lg border p-4 md:grid-cols-3">
           <div className="grid gap-2">
             <Label htmlFor="default-outline-prompt">默认大纲提示词</Label>
             <select
@@ -259,7 +268,20 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
               {articlePrompts.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.name}</option>)}
             </select>
           </div>
-          <div className="flex justify-end md:col-span-2">
+          <div className="grid gap-2">
+            <Label htmlFor="default-review-prompt">默认复检提示词</Label>
+            <select
+              id="default-review-prompt"
+              className="h-9 rounded-md border bg-background px-3 text-sm"
+              value={reviewDefault}
+              disabled={loading || Boolean(busy)}
+              onChange={(event) => setReviewDefault(event.target.value)}
+            >
+              <option value="">系统默认 SEO 质量复检</option>
+              {reviewPrompts.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.name}</option>)}
+            </select>
+          </div>
+          <div className="flex justify-end md:col-span-3">
             <Button onClick={() => void saveDefaults()} disabled={!defaultsDirty || Boolean(busy)}>
               {busy === "defaults" ? <Loader2 className="animate-spin" /> : <Save />}
               保存项目默认值
@@ -288,6 +310,7 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
               >
                 <option value="outline">大纲提示词</option>
                 <option value="article">正文提示词</option>
+                <option value="review">复检提示词</option>
               </select>
             </div>
           </div>
@@ -320,7 +343,9 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{prompt.name}</span>
-                  <Badge variant="outline">{prompt.kind === "outline" ? "大纲" : "正文"}</Badge>
+                  <Badge variant="outline">
+                    {prompt.kind === "outline" ? "大纲" : prompt.kind === "article" ? "正文" : "复检"}
+                  </Badge>
                   <Badge variant={prompt.active ? "secondary" : "outline"}>{prompt.active ? "使用中" : "已停用"}</Badge>
                   <span className="text-xs text-muted-foreground">v{prompt.version} · 已生成 {prompt.use_count} 次</span>
                 </div>

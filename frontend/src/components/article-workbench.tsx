@@ -23,6 +23,10 @@ import { ArticleDeliveryStep } from "@/components/article-delivery-step";
 import { ArticleReviewStep } from "@/components/article-review-step";
 import { ArticleMediaStep } from "@/components/article-media-step";
 import { ArticleDraftStep } from "@/components/article-draft-step";
+import type {
+  SeoReviewChangeDecision,
+  SeoReviewSettings,
+} from "@/components/article-seo-review-panel";
 import { ArticleOutlineStep } from "@/components/article-outline-step";
 import { ArticleProductsStep } from "@/components/article-products-step";
 import { ArticleTitleStep } from "@/components/article-title-step";
@@ -63,6 +67,7 @@ import type {
   DashboardSummary,
   Product,
   PublicConfig,
+  SeoReviewPreview,
   TaskRecord,
   WorkflowStatus,
 } from "@/types";
@@ -928,6 +933,215 @@ export function ArticleWorkbench({
     void enqueueSingleOperation(
       hasGeneratedFirstVersion ? "rewrite_article" : "article",
       hasGeneratedFirstVersion ? "正文重写" : "正文生成",
+    );
+  }
+
+  function seoReviewSettingsChanged(settings: SeoReviewSettings) {
+    if (!selectedTask) return false;
+    return (
+      settings.primaryKeyword !== (selectedTask.seo_primary_keyword || "") ||
+      settings.promptSelection !==
+        (selectedTask.seo_review_prompt_selection || "project_default") ||
+      settings.longTailKeywords.join("\n") !==
+        (selectedTask.seo_long_tail_keywords || []).join("\n")
+    );
+  }
+
+  function saveSeoReviewSettings(settings: SeoReviewSettings) {
+    if (!selectedTask) return;
+    void runAction(
+      "SEO 复检设置已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-review-settings`,
+          {
+            revision: selectedTask.revision,
+            primary_keyword: settings.primaryKeyword,
+            long_tail_keywords: settings.longTailKeywords,
+            prompt_selection: settings.promptSelection,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      undefined,
+      { key: `task:${selectedTask.id}:seo-review-settings` },
+    );
+  }
+
+  async function queueSeoReview(task: TaskRecord) {
+    setBatchBusy("single:seo_review");
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiPost<BatchCreateResponse>("/api/batches", {
+        operation: "seo_review",
+        task_ids: [task.id],
+      });
+      if (!result.batch) {
+        setError(
+          result.rejected.map((item) => item.message).join("；") ||
+            "SEO 质量复检未能加入后台队列。",
+        );
+        return;
+      }
+      setMessage("SEO 质量复检已加入后台队列，可以继续处理其他文章。");
+      await refreshBatches();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBatchBusy("");
+    }
+  }
+
+  function startSeoReview(settings: SeoReviewSettings) {
+    if (!selectedTask) return;
+    if (articleDirty) {
+      setError("正文有未保存修改，请先保存第一版，再执行 SEO 质量复检。");
+      return;
+    }
+    if (!selectedTask.initial_article?.trim()) {
+      setError("请先生成并保存第一版正文。");
+      return;
+    }
+    if (!seoReviewSettingsChanged(settings)) {
+      void queueSeoReview(selectedTask);
+      return;
+    }
+    void runAction(
+      "SEO 复检设置已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-review-settings`,
+          {
+            revision: selectedTask.revision,
+            primary_keyword: settings.primaryKeyword,
+            long_tail_keywords: settings.longTailKeywords,
+            prompt_selection: settings.promptSelection,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      (saved) => {
+        void queueSeoReview(saved);
+      },
+      { key: `task:${selectedTask.id}:seo-review-settings` },
+    );
+  }
+
+  async function runSeoReviewRequest<T>(
+    key: string,
+    successMessage: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    setPendingActions((current) => ({
+      ...current,
+      [`task:${selectedTask?.id || "unselected"}:${key}`]: successMessage,
+    }));
+    setError("");
+    setMessage("");
+    try {
+      const result = await action();
+      if (isTaskRecordResult(result)) {
+        setTasks((current) =>
+          current.map((task) => (task.id === result.id ? result : task)),
+        );
+        setSelectedTask((current) =>
+          current?.id === result.id ? result : current,
+        );
+      }
+      setMessage(successMessage);
+      return result;
+    } catch (error) {
+      setError(errorMessage(error));
+      throw error;
+    } finally {
+      setPendingActions((current) => {
+        const next = { ...current };
+        delete next[`task:${selectedTask?.id || "unselected"}:${key}`];
+        return next;
+      });
+    }
+  }
+
+  async function updateSeoReviewChange(
+    reviewId: string,
+    changeId: string,
+    reviewedText: string,
+    decision: SeoReviewChangeDecision,
+    confirmRisks: boolean,
+    revision?: number,
+  ): Promise<TaskRecord> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    return runSeoReviewRequest(
+      `seo-review-${reviewId}-${changeId}`,
+      "复检修改决定已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/changes/${changeId}`,
+          {
+            revision: revision ?? selectedTask.revision,
+            decision,
+            reviewed_text: reviewedText,
+            confirm_risks: confirmRisks,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+  }
+
+  async function previewSeoReview(reviewId: string): Promise<SeoReviewPreview> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    return runSeoReviewRequest(
+      `seo-review-${reviewId}-preview`,
+      "完整正文预览已生成并通过结构校验",
+      () =>
+        apiPost<SeoReviewPreview>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/preview`,
+          { revision: selectedTask.revision },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+  }
+
+  async function applySeoReview(
+    reviewId: string,
+    previewHash: string,
+    confirmPending: boolean,
+  ): Promise<TaskRecord> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    const result = await runSeoReviewRequest(
+      `seo-review-${reviewId}-apply`,
+      "已接受的修改已生成新的第一版正文",
+      () =>
+        apiPost<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/apply`,
+          {
+            revision: selectedTask.revision,
+            preview_hash: previewHash,
+            confirm_pending: confirmPending,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+    setArticleText(result.initial_article || result.article);
+    return result;
+  }
+
+  async function completeSeoReview(
+    reviewId: string,
+    confirmPending: boolean,
+  ): Promise<TaskRecord> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    return runSeoReviewRequest(
+      `seo-review-${reviewId}-complete`,
+      "复检审核已完成，正文保持不变",
+      () =>
+        apiPost<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/complete`,
+          {
+            revision: selectedTask.revision,
+            confirm_pending: confirmPending,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
     );
   }
 
@@ -2238,7 +2452,7 @@ export function ArticleWorkbench({
                       articleWords={articleWords}
                       hasGeneratedFirstVersion={hasGeneratedFirstVersion}
                       articleDirty={articleDirty}
-                      busy={isBusy}
+                      busy={isBusy || Boolean(batchBusy)}
                       hasActiveJob={Boolean(activeTaskJob)}
                       canAction={canAction}
                       onArticleChange={setArticleText}
@@ -2257,6 +2471,12 @@ export function ArticleWorkbench({
                         );
                       }}
                       onRestore={restoreVersion}
+                      onSaveSeoReviewSettings={saveSeoReviewSettings}
+                      onStartSeoReview={startSeoReview}
+                      onUpdateSeoReviewChange={updateSeoReviewChange}
+                      onPreviewSeoReview={previewSeoReview}
+                      onApplySeoReview={applySeoReview}
+                      onCompleteSeoReview={completeSeoReview}
                     />
                   </TabsContent>
 
@@ -2434,6 +2654,7 @@ function batchOperationLabel(operation: BatchOperation) {
     outline: "生成大纲",
     article: "生成正文",
     rewrite_article: "仅重写正文",
+    seo_review: "SEO 质量复检",
     humanize: "降 AI 改写",
     restore_links: "恢复链接",
     prepare_images: "准备图片",

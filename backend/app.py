@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+import re
 from threading import Lock
 from typing import Callable
 from uuid import uuid4
@@ -49,6 +50,13 @@ from models import (
     ProjectContextUpdateRequest,
     RevisionedRequest,
     SelectTitleRequest,
+    SeoReviewRequest,
+    SeoReviewChangeUpdateRequest,
+    SeoReviewFinalizeRequest,
+    SeoReviewPreview,
+    SeoReviewPreviewRequest,
+    SeoReviewRun,
+    SeoReviewSettingsUpdateRequest,
     SourceLink,
     STATUS_DOCX_EXPORTED,
     STATUS_DRAFT_READY,
@@ -108,6 +116,15 @@ from services.project_prompts import (
     ProjectPromptRepository,
     PromptInUseError,
     PromptLibraryError,
+)
+from services.seo_review import (
+    SeoReviewError,
+    build_review_candidate,
+    build_seo_review_prompt,
+    effective_review_prompt_snapshot,
+    generate_seo_review,
+    normalized_keywords,
+    update_review_change,
 )
 from services.job_queue import (
     ActiveJobError,
@@ -177,6 +194,7 @@ async def app_lifespan(application: FastAPI):
             "outline",
             "article",
             "rewrite_article",
+            "seo_review",
             "humanize",
             "restore_links",
             "generate_tdk",
@@ -737,7 +755,11 @@ def delete_project_prompt(customer: str, prompt_id: str) -> ApiMessage:
         field = (
             "outline_prompt_selection"
             if item.kind == "outline"
-            else "article_prompt_selection"
+            else (
+                "article_prompt_selection"
+                if item.kind == "article"
+                else "seo_review_prompt_selection"
+            )
         )
         if getattr(task, field) != prompt_id:
             continue
@@ -764,6 +786,7 @@ def update_project_prompt_defaults(
             customer,
             request.default_outline_prompt_id,
             request.default_article_prompt_id,
+            request.default_review_prompt_id,
         )
     except KeyError:
         raise HTTPException(status_code=422, detail="默认提示词不存在或已停用。") from None
@@ -798,11 +821,22 @@ def preview_effective_prompt(task_id: str, request: PromptPreviewRequest) -> Pro
         "include_project_notes": request.include_project_notes,
         "include_topic_notes": request.include_topic_notes,
     }
-    effective = (
-        build_outline_prompt(config(), task, **common)
-        if request.kind == "outline"
-        else build_article_prompt(config(), task, **common)
-    )
+    if request.kind == "outline":
+        effective = build_outline_prompt(config(), task, **common)
+    elif request.kind == "article":
+        effective = build_article_prompt(config(), task, **common)
+    else:
+        article = task.initial_article or task.article
+        if not article.strip():
+            raise HTTPException(status_code=409, detail="请先保存第一版正文，再预览复检提示词。")
+        effective, snapshot = build_seo_review_prompt(
+            config(),
+            task,
+            article,
+            prompt_snapshot=snapshot,
+            primary_keyword=task.seo_primary_keyword,
+            long_tail_keywords=task.seo_long_tail_keywords,
+        )
     return PromptPreview(snapshot=snapshot, effective_prompt=effective)
 
 
@@ -839,6 +873,35 @@ def update_writing_settings(
         },
     )
     return save_task(task, request.revision)
+
+
+@app.put("/api/tasks/{task_id}/seo-review-settings", response_model=TaskRecord)
+def update_seo_review_settings(
+    task_id: str,
+    request: SeoReviewSettingsUpdateRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    selection = request.prompt_selection.strip() or "project_default"
+    resolved_prompt_snapshot(task, "review", selection)
+    keywords = normalized_keywords(request.long_tail_keywords)
+    if any(len(keyword) > 240 for keyword in keywords):
+        raise HTTPException(status_code=422, detail="每个长尾关键词最多 240 个字符。")
+    task.seo_primary_keyword = re.sub(
+        r"\s+", " ", request.primary_keyword
+    ).strip()
+    task.seo_long_tail_keywords = keywords
+    task.seo_review_prompt_selection = selection
+    saved = save_task(task, request.revision)
+    write_json_artifact(
+        saved,
+        "seo_review_settings.json",
+        {
+            "primary_keyword": saved.seo_primary_keyword,
+            "long_tail_keywords": saved.seo_long_tail_keywords,
+            "prompt_selection": saved.seo_review_prompt_selection,
+        },
+    )
+    return saved
 
 
 @app.post("/api/tasks/{task_id}/rewrite-from-scratch", response_model=TaskRecord)
@@ -1377,6 +1440,21 @@ def batch_request_snapshot(
             mode="json",
             exclude_none=True,
         )
+    if operation == "seo_review":
+        snapshot = effective_review_prompt_snapshot(
+            resolved_prompt_snapshot(
+                task,
+                "review",
+                task.seo_review_prompt_selection,
+            )
+        )
+        return SeoReviewRequest(
+            revision=task.revision,
+            primary_keyword=task.seo_primary_keyword,
+            long_tail_keywords=task.seo_long_tail_keywords,
+            prompt_selection=task.seo_review_prompt_selection,
+            prompt_snapshot=snapshot,
+        ).model_dump(mode="json", exclude_none=True)
     if operation in {
         "humanize",
         "restore_links",
@@ -1439,6 +1517,10 @@ def batch_preflight_issue(task: TaskRecord, operation: str) -> str:
         if ACTION_GENERATE_OUTLINE not in actions:
             return f"当前状态“{task.status}”不能生成大纲。"
         return ""
+    if operation == "seo_review":
+        if not task.initial_article.strip():
+            return "请先保存第一版正文，再执行 SEO 质量复检。"
+        return ""
     action_by_operation = {
         "humanize": ACTION_HUMANIZE_ARTICLE,
         "restore_links": ACTION_RESTORE_LINKS,
@@ -1499,6 +1581,13 @@ def _execute_batch_job(
         elif job["operation"] == "outline":
             request = GenerateOutlineRequest.model_validate(job["request"])
             saved = perform_outline_generation(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "seo_review":
+            request = SeoReviewRequest.model_validate(job["request"])
+            saved = perform_seo_review(
                 task_id,
                 request,
                 cancelled=cancelled,
@@ -1678,15 +1767,12 @@ def retry_batch_job(job_id: str) -> BatchJobRecord:
     return BatchJobRecord.model_validate(result)
 
 
-@app.put("/api/tasks/{task_id}/article", response_model=TaskRecord)
-def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
-    task = get_task_or_404(task_id)
-    require_action(task, ACTION_UPDATE_ARTICLE)
+def validated_initial_article(article: str, task: TaskRecord) -> str:
     try:
         # PUT is a deterministic persistence endpoint.  Generation may repair
         # a missing transition with the LLM, but saving pasted/edited text must
         # never trigger a model call or silently rewrite prose.
-        initial = ensure_article_hyperlinks(request.article, task)
+        initial = ensure_article_hyperlinks(article, task)
         validate_article_layout(initial)
         validate_minimum_h3_per_h2(initial)
         if not has_intro_transition(initial):
@@ -1699,6 +1785,15 @@ def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
         PromptTemplateError,
     ) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return initial
+
+
+def replace_initial_article(
+    task: TaskRecord,
+    initial: str,
+    *,
+    source_kind: str,
+) -> None:
     task.initial_article = initial
     task.initial_article_word_count = visible_word_count(initial)
     task.initial_article_hash = content_hash(initial)
@@ -1706,16 +1801,302 @@ def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
     invalidate_downstream(task, "initial_article")
     task.source_links = source_links(initial)
     task.transition_added = has_intro_transition(initial)
-    task.article_versions.append(version_record("initial", initial, "manual_edit"))
+    task.article_versions.append(version_record("initial", initial, source_kind))
+
+
+def write_initial_article_artifacts(task: TaskRecord) -> None:
+    write_text_artifact(task, "02_initial_article.md", task.initial_article)
+    write_json_artifact(
+        task,
+        "02_initial_links.json",
+        [link.model_dump() for link in task.source_links],
+    )
+
+
+@app.put("/api/tasks/{task_id}/article", response_model=TaskRecord)
+def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    require_action(task, ACTION_UPDATE_ARTICLE)
+    initial = validated_initial_article(request.article, task)
+    replace_initial_article(task, initial, source_kind="manual_edit")
     # Revision validation happens in save_task.  Only publish artifacts after
     # it succeeds so a stale editor cannot overwrite the accepted version.
     saved = save_task(task, request.revision)
-    write_text_artifact(saved, "02_initial_article.md", saved.initial_article)
-    write_json_artifact(
-        saved,
-        "02_initial_links.json",
-        [link.model_dump() for link in saved.source_links],
+    write_initial_article_artifacts(saved)
+    return saved
+
+
+def perform_seo_review(
+    task_id: str,
+    request: SeoReviewRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    article = task.initial_article.strip()
+    if not article:
+        raise HTTPException(
+            status_code=409,
+            detail="请先保存第一版正文，再执行 SEO 质量复检。",
+        )
+    snapshot = resolved_prompt_snapshot(
+        task,
+        "review",
+        request.prompt_selection,
+        request.prompt_snapshot,
     )
+    snapshot = effective_review_prompt_snapshot(snapshot)
+    if cancelled and cancelled():
+        raise JobCancelled("SEO review cancelled before model request.")
+    try:
+        generated = generate_seo_review(
+            config(),
+            task,
+            article,
+            prompt_snapshot=snapshot,
+            primary_keyword=request.primary_keyword,
+            long_tail_keywords=request.long_tail_keywords,
+        )
+    except (SeoReviewError, ArticleStructureError, PromptTemplateError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if cancelled and cancelled():
+        raise JobCancelled("SEO review cancelled before saving the result.")
+
+    review_id = uuid4().hex[:12]
+    keywords = normalized_keywords(request.long_tail_keywords)
+    run = SeoReviewRun(
+        id=review_id,
+        source_article=article,
+        source_article_hash=content_hash(article),
+        source_revision=task.revision,
+        score=generated.score,
+        dimensions=generated.dimensions,
+        publish_ready=generated.publish_ready,
+        publish_recommendation=generated.publish_recommendation,
+        report=generated.report,
+        changes=generated.changes,
+        prompt_snapshot=generated.prompt_snapshot,
+        primary_keyword=re.sub(r"\s+", " ", request.primary_keyword).strip(),
+        long_tail_keywords=keywords,
+        created_at=now_iso(),
+    )
+    task.seo_primary_keyword = run.primary_keyword
+    task.seo_long_tail_keywords = keywords
+    task.seo_review_prompt_selection = (
+        request.prompt_selection.strip() or "project_default"
+    )
+    task.seo_reviews.append(run)
+    saved = save_task(task, request.revision)
+    write_seo_review_artifacts(saved, review_id)
+    return saved
+
+
+def seo_review_entry(
+    task: TaskRecord,
+    review_id: str,
+) -> tuple[int, SeoReviewRun]:
+    for index, review in enumerate(task.seo_reviews):
+        if review.id == review_id:
+            return index, review
+    raise HTTPException(status_code=404, detail="找不到指定的 SEO 复检记录。")
+
+
+def ensure_review_editable(task: TaskRecord, review: SeoReviewRun) -> None:
+    if review.status != "open":
+        raise HTTPException(status_code=409, detail="该复检记录已经锁定，不能继续修改。")
+    if content_hash(task.initial_article.strip()) != review.source_article_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="当前第一版正文已经变化，这份旧 Diff 只能查看，请针对新正文重新复检。",
+        )
+
+
+def seo_review_operator() -> str:
+    return str(getattr(config(), "week_owner", "") or "").strip() or "本地操作员"
+
+
+def write_seo_review_artifacts(task: TaskRecord, review_id: str) -> None:
+    index, review = seo_review_entry(task, review_id)
+    artifact_root = f"seo-reviews/{index + 1:03d}-{review_id}"
+    write_text_artifact(task, f"{artifact_root}-report.md", review.report)
+    write_json_artifact(task, f"{artifact_root}.json", review.model_dump(mode="json"))
+
+
+def build_validated_review_preview(
+    task: TaskRecord,
+    review: SeoReviewRun,
+) -> SeoReviewPreview:
+    try:
+        candidate, change_ids = build_review_candidate(review)
+    except (SeoReviewError, ArticleStructureError, PromptTemplateError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    candidate = validated_initial_article(candidate, task)
+    return SeoReviewPreview(
+        review_id=review.id,
+        article=candidate,
+        article_hash=content_hash(candidate),
+        accepted_change_ids=change_ids,
+        pending_count=sum(change.decision == "pending" for change in review.changes),
+        rejected_count=sum(change.decision == "rejected" for change in review.changes),
+        invalid_count=sum(not change.applicable for change in review.changes),
+        structure_valid=True,
+    )
+
+
+@app.put(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/changes/{change_id}",
+    response_model=TaskRecord,
+)
+def update_seo_review_change(
+    task_id: str,
+    review_id: str,
+    change_id: str,
+    request: SeoReviewChangeUpdateRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    review_index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    change_index = next(
+        (
+            index
+            for index, change in enumerate(review.changes)
+            if change.id == change_id
+        ),
+        -1,
+    )
+    if change_index < 0:
+        raise HTTPException(status_code=404, detail="找不到指定的复检修改块。")
+    timestamp = now_iso()
+    try:
+        updated = update_review_change(
+            review.changes[change_index],
+            reviewed_text=request.reviewed_text,
+            decision=request.decision,
+            brand_name=task.brand_name,
+            product_names=[product.name for product in task.products if product.name],
+            confirm_risks=request.confirm_risks,
+            decided_at=timestamp,
+            decided_by=seo_review_operator(),
+        )
+    except SeoReviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    review.changes[change_index] = updated
+    task.seo_reviews[review_index] = review
+    saved = save_task(task, request.revision)
+    write_seo_review_artifacts(saved, review_id)
+    return saved
+
+
+@app.post(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/preview",
+    response_model=SeoReviewPreview,
+)
+def preview_seo_review_changes(
+    task_id: str,
+    review_id: str,
+    request: SeoReviewPreviewRequest,
+) -> SeoReviewPreview:
+    task = get_task_or_404(task_id)
+    _index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    if request.revision is not None and request.revision != task.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Task {task.id} revision conflict: expected "
+                f"{request.revision}, current {task.revision}."
+            ),
+        )
+    return build_validated_review_preview(task, review)
+
+
+@app.post(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/apply",
+    response_model=TaskRecord,
+)
+def apply_seo_review_changes(
+    task_id: str,
+    review_id: str,
+    request: SeoReviewFinalizeRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    require_action(task, ACTION_UPDATE_ARTICLE)
+    review_index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    accepted_count = sum(
+        change.decision == "accepted" for change in review.changes
+    )
+    if not accepted_count:
+        raise HTTPException(
+            status_code=422,
+            detail="当前没有已接受的修改，请使用“完成审核，不修改正文”。",
+        )
+    pending_count = sum(change.decision == "pending" for change in review.changes)
+    if pending_count and not request.confirm_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="仍有未处理修改块，必须确认将其按“未处理”状态锁定。",
+        )
+    preview = build_validated_review_preview(task, review)
+    if not request.preview_hash or request.preview_hash != preview.article_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="完整正文预览已经失效，请重新预览后再应用。",
+        )
+
+    timestamp = now_iso()
+    review.status = "applied"
+    review.finalized_at = timestamp
+    review.finalized_by = seo_review_operator()
+    review.applied_article_hash = preview.article_hash
+    review.applied_revision = task.revision + 1
+    task.seo_reviews[review_index] = review
+    replace_initial_article(
+        task,
+        preview.article,
+        source_kind=f"seo_review:{review_id}",
+    )
+    saved = save_task(task, request.revision)
+    write_initial_article_artifacts(saved)
+    write_seo_review_artifacts(saved, review_id)
+    write_text_artifact(
+        saved,
+        f"seo-reviews/{review_index + 1:03d}-{review_id}-applied.md",
+        saved.initial_article,
+    )
+    return saved
+
+
+@app.post(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/complete",
+    response_model=TaskRecord,
+)
+def complete_seo_review_without_changes(
+    task_id: str,
+    review_id: str,
+    request: SeoReviewFinalizeRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    review_index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    if any(change.decision == "accepted" for change in review.changes):
+        raise HTTPException(
+            status_code=422,
+            detail="仍有已接受的修改；请先改为拒绝或暂不处理，再选择不修改正文完成审核。",
+        )
+    pending_count = sum(change.decision == "pending" for change in review.changes)
+    if pending_count and not request.confirm_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="仍有未处理修改块，必须确认将其按“未处理”状态锁定。",
+        )
+    timestamp = now_iso()
+    review.status = "completed"
+    review.finalized_at = timestamp
+    review.finalized_by = seo_review_operator()
+    task.seo_reviews[review_index] = review
+    saved = save_task(task, request.revision)
+    write_seo_review_artifacts(saved, review_id)
     return saved
 
 

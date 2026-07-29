@@ -33,6 +33,57 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest() if content else ""
 
 
+def _migrate_seo_review_records(records: object) -> list[dict[str, Any]]:
+    if not isinstance(records, list):
+        return []
+    migrated: list[dict[str, Any]] = []
+    for index, raw_record in enumerate(records):
+        if not isinstance(raw_record, Mapping):
+            continue
+        record = copy.deepcopy(dict(raw_record))
+        record.setdefault("status", "open")
+        record.setdefault("finalized_at", "")
+        record.setdefault("finalized_by", "")
+        record.setdefault("applied_article_hash", "")
+        record.setdefault("applied_revision", None)
+        source = str(record.get("source_article") or "").strip()
+        if source:
+            record["source_article"] = source
+            record["source_article_hash"] = content_hash(source)
+        if "changes" not in record:
+            revised = str(record.get("revised_article") or "").strip()
+            changes: list[dict[str, Any]] = []
+            if source and revised and source != revised:
+                changes.append(
+                    {
+                        "id": f"legacy-{index + 1:03d}",
+                        "operation": "structure",
+                        "dimension_key": "legacy",
+                        "title": "旧版完整修改稿",
+                        "rationale": "由旧版整篇修改稿迁移而来，作为一个整体修改组审核。",
+                        "target_text": source,
+                        "model_proposed_text": revised,
+                        "reviewed_text": revised,
+                        "source_start": 0,
+                        "source_end": len(source),
+                        "hard_problem": False,
+                        "applicable": True,
+                        "validation_errors": [],
+                        "risks": [],
+                        "decision": "pending",
+                        "decided_at": "",
+                        "decided_by": "",
+                        "risk_confirmed": False,
+                        "risk_confirmed_at": "",
+                        "updated_at": "",
+                        "raw_payload": None,
+                    }
+                )
+            record["changes"] = changes
+        migrated.append(record)
+    return migrated
+
+
 V2_DEFAULTS: dict[str, Any] = {
     "revision": 0,
     "workflow_error": None,
@@ -49,6 +100,7 @@ V2_DEFAULTS: dict[str, Any] = {
     # created tasks use TaskRecord's project_default model defaults.
     "outline_prompt_selection": "system",
     "article_prompt_selection": "system",
+    "seo_review_prompt_selection": "system",
     "last_outline_prompt_snapshot": None,
     "last_article_prompt_snapshot": None,
     "include_project_introduction": True,
@@ -66,6 +118,9 @@ V2_DEFAULTS: dict[str, Any] = {
     "linked_article": "",
     "final_article": "",
     "article_versions": [],
+    "seo_primary_keyword": "",
+    "seo_long_tail_keywords": [],
+    "seo_reviews": [],
     "raw_draft_word_count": 0,
     "raw_draft_hash": "",
     "initial_article_word_count": 0,
@@ -143,6 +198,9 @@ def migrate_v1_to_v2(payload: Mapping[str, Any]) -> dict[str, Any]:
         initial_check.setdefault("article_hash", "")
         migrated["initial_ai_check"] = initial_check
 
+    migrated["seo_reviews"] = _migrate_seo_review_records(
+        migrated.get("seo_reviews")
+    )
     migrated["schema_version"] = SCHEMA_VERSION
     return migrated
 

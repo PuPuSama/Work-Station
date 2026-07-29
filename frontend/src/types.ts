@@ -123,7 +123,7 @@ export type TdkMetadata = {
   prompt_version: string;
 };
 
-export type PromptKind = "outline" | "article";
+export type PromptKind = "outline" | "article" | "review";
 
 export type PromptLibraryItem = {
   id: string;
@@ -142,6 +142,7 @@ export type PromptDefaults = {
   customer: string;
   default_outline_prompt_id: string;
   default_article_prompt_id: string;
+  default_review_prompt_id: string;
 };
 
 export type ProjectPromptLibrary = {
@@ -164,6 +165,81 @@ export type PromptPreview = {
   effective_prompt: string;
 };
 
+export type SeoReviewDimension = {
+  key: string;
+  name: string;
+  score: number;
+  target_score: number;
+  main_issue: string;
+  needs_revision: boolean;
+};
+
+export type SeoReviewRisk = {
+  kind: "number" | "url" | "brand" | "product";
+  label: string;
+  before: string;
+  after: string;
+  message: string;
+};
+
+export type SeoReviewChange = {
+  id: string;
+  operation: "replace" | "insert_after" | "delete" | "structure";
+  dimension_key: string;
+  title: string;
+  rationale: string;
+  target_text: string;
+  model_proposed_text: string;
+  reviewed_text: string;
+  source_start: number;
+  source_end: number;
+  hard_problem: boolean;
+  applicable: boolean;
+  validation_errors: string[];
+  risks: SeoReviewRisk[];
+  decision: "pending" | "accepted" | "rejected";
+  decided_at: string;
+  decided_by: string;
+  risk_confirmed: boolean;
+  risk_confirmed_at: string;
+  updated_at: string;
+};
+
+export type SeoReviewRun = {
+  id: string;
+  source_article: string;
+  source_article_hash: string;
+  source_revision: number;
+  score: number;
+  dimensions: SeoReviewDimension[];
+  publish_ready: boolean;
+  publish_recommendation: string;
+  report: string;
+  changes: SeoReviewChange[];
+  status: "open" | "applied" | "completed";
+  finalized_at: string;
+  finalized_by: string;
+  applied_article_hash: string;
+  applied_revision: number | null;
+  revised_article?: string;
+  revised_article_hash?: string;
+  prompt_snapshot: PromptSnapshot;
+  primary_keyword: string;
+  long_tail_keywords: string[];
+  created_at: string;
+};
+
+export type SeoReviewPreview = {
+  review_id: string;
+  article: string;
+  article_hash: string;
+  accepted_change_ids: string[];
+  pending_count: number;
+  rejected_count: number;
+  invalid_count: number;
+  structure_valid: boolean;
+};
+
 export type TaskRecord = {
   schema_version?: number;
   revision?: number;
@@ -182,6 +258,7 @@ export type TaskRecord = {
   use_article_custom_prompt?: boolean;
   outline_prompt_selection?: string;
   article_prompt_selection?: string;
+  seo_review_prompt_selection?: string;
   last_outline_prompt_snapshot?: PromptSnapshot | null;
   last_article_prompt_snapshot?: PromptSnapshot | null;
   include_project_introduction?: boolean;
@@ -209,11 +286,19 @@ export type TaskRecord = {
   linked_article?: string;
   final_article?: string;
   article_versions?: ContentVersion[];
+  seo_primary_keyword?: string;
+  seo_long_tail_keywords?: string[];
+  seo_reviews?: SeoReviewRun[];
   raw_draft_word_count?: number;
+  raw_draft_hash?: string;
   initial_article_word_count?: number;
+  initial_article_hash?: string;
   humanized_article_word_count?: number;
+  humanized_article_hash?: string;
   linked_article_word_count?: number;
+  linked_article_hash?: string;
   final_article_word_count?: number;
+  final_article_hash?: string;
   compression?: CompressionRecord;
   initial_ai_check?: AiCheckRecord;
   final_ai_check?: AiCheckRecord;
@@ -285,6 +370,7 @@ export type BatchOperation =
   | "outline"
   | "article"
   | "rewrite_article"
+  | "seo_review"
   | "humanize"
   | "restore_links"
   | "prepare_images"
