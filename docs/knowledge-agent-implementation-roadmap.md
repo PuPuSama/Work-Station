@@ -91,7 +91,7 @@
 
 验收：不仅能展示“聊天”，还能展示准确率、证据覆盖、检查点恢复、人工中断和费用边界。
 
-实施状态（2026-07-30）：
+实施状态（2026-07-31）：
 
 - 已完成统一 Retrieval/Evidence Improvement 指标、20 条 qewitfastener JSONL、
   Basic Hybrid Runner、LightRAG HTTP Candidate Provider 和 PostgreSQL 二次发布门；
@@ -117,6 +117,9 @@
 - 已实现统一权限矩阵、PostgreSQL 事实查询和事务内 Audit Writer；
 - 已实现不携带 Role 的签名 Actor Session，以及授权/撤销/审计同事务的
   ProjectMembership Service；
+- 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
+  写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
+  Org Admin 的全会话撤销服务递增版本并与安全 Audit 同事务，但成员管理 HTTP/UI 尚未接入；
 - 已实现项目级 PostgreSQL Task Repository、SQLite Task 摘要校验导入、
   Revision CAS 和带 SKIP LOCKED/Worker Lease 的 PostgreSQL Job Queue；
 - 已实现 Active Job 排空门和 SQLite Terminal Job 历史迁移，按稳定 ID、

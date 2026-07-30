@@ -25,6 +25,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.access_control import ActorIdentity  # noqa: E402
+from services.external_identity import ResolvedExternalActor  # noqa: E402
 from services.oidc_identity import (  # noqa: E402
     OidcConfigurationError,
     OidcDiscoveryDocument,
@@ -170,7 +171,7 @@ class FakeOidcProvider:
 
 
 class FakeIdentityRepository:
-    def __init__(self, actor: ActorIdentity | None) -> None:
+    def __init__(self, actor: ResolvedExternalActor | None) -> None:
         self.actor = actor
         self.identities = []
 
@@ -509,7 +510,10 @@ class OidcLoginHttpTests(unittest.TestCase):
         http_client = httpx.Client(transport=fake.transport())
         codec = ServerActorSessionCodec(b"c" * 32)
         identities = FakeIdentityRepository(
-            ActorIdentity("org-a", "user-a")
+            ResolvedExternalActor(
+                ActorIdentity("org-a", "user-a"),
+                session_version=1,
+            )
         )
         service = OidcLoginService.create(
             settings=settings(),
@@ -538,6 +542,11 @@ class OidcLoginHttpTests(unittest.TestCase):
             ServerRequestSecurity(
                 codec=codec,
                 access=object(),  # type: ignore[arg-type]
+                sessions=type(
+                    "AlwaysCurrentSessions",
+                    (),
+                    {"is_current": lambda self, session: True},
+                )(),
             )
         )
         client = TestClient(

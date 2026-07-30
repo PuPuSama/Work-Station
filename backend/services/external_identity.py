@@ -57,11 +57,27 @@ class VerifiedExternalIdentity:
         object.__setattr__(self, "subject", _subject(self.subject))
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedExternalActor:
+    """Active local Actor plus the session epoch bound into a new cookie."""
+
+    actor: ActorIdentity
+    session_version: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.session_version, bool)
+            or not isinstance(self.session_version, int)
+            or self.session_version <= 0
+        ):
+            raise ValueError("session_version must be greater than zero")
+
+
 class ExternalIdentityRepository(Protocol):
     def resolve(
         self,
         identity: VerifiedExternalIdentity,
-    ) -> ActorIdentity | None: ...
+    ) -> ResolvedExternalActor | None: ...
 
 
 class PostgresExternalIdentityRepository:
@@ -73,12 +89,13 @@ class PostgresExternalIdentityRepository:
     def resolve(
         self,
         identity: VerifiedExternalIdentity,
-    ) -> ActorIdentity | None:
+    ) -> ResolvedExternalActor | None:
         with self._engine.connect() as connection:
             row = connection.execute(
                 sa.select(
                     external_identities.c.organization_id,
                     external_identities.c.user_id,
+                    workspace_users.c.session_version,
                 )
                 .select_from(
                     external_identities.join(
@@ -105,9 +122,12 @@ class PostgresExternalIdentityRepository:
             ).mappings().one_or_none()
         if row is None:
             return None
-        return ActorIdentity(
-            organization_id=str(row["organization_id"]),
-            user_id=str(row["user_id"]),
+        return ResolvedExternalActor(
+            actor=ActorIdentity(
+                organization_id=str(row["organization_id"]),
+                user_id=str(row["user_id"]),
+            ),
+            session_version=int(row["session_version"]),
         )
 
 
@@ -133,12 +153,16 @@ class ExternalActorSessionService:
         *,
         max_age: int,
     ) -> str:
-        actor = self._identities.resolve(identity)
-        if actor is None:
+        resolved = self._identities.resolve(identity)
+        if resolved is None:
             raise ExternalIdentityNotAuthorized(
                 "external identity is not authorized"
             )
-        return self._codec.create(actor, max_age=max_age)
+        return self._codec.create(
+            resolved.actor,
+            session_version=resolved.session_version,
+            max_age=max_age,
+        )
 
 
 __all__ = [
@@ -146,5 +170,6 @@ __all__ = [
     "ExternalIdentityNotAuthorized",
     "ExternalIdentityRepository",
     "PostgresExternalIdentityRepository",
+    "ResolvedExternalActor",
     "VerifiedExternalIdentity",
 ]

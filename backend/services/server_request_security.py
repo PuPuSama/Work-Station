@@ -8,6 +8,7 @@ from services.access_control import (
     ProjectAccessService,
     ProjectPermission,
 )
+from services.actor_sessions import ActorSessionVersionReader
 from services.server_auth import (
     ServerActorSessionCodec,
     ServerActorSessionError,
@@ -289,17 +290,28 @@ class ServerRequestSecurity:
         *,
         codec: ServerActorSessionCodec,
         access: ProjectAccessService,
+        sessions: ActorSessionVersionReader,
     ) -> None:
         self._codec = codec
         self._access = access
+        self._sessions = sessions
 
     def authenticate(self, token: str) -> ActorIdentity:
         try:
-            return self._codec.parse(token)
+            session = self._codec.parse_session(token)
         except ServerActorSessionError as exc:
             raise ServerRequestUnauthenticated(
                 "authentication required"
             ) from exc
+        try:
+            current = self._sessions.is_current(session)
+        except Exception as exc:
+            raise ServerRequestUnauthenticated(
+                "authentication required"
+            ) from exc
+        if not current:
+            raise ServerRequestUnauthenticated("authentication required")
+        return session.actor
 
     def authorize_project(
         self,

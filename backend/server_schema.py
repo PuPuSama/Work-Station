@@ -69,6 +69,12 @@ workspace_users = sa.Table(
         server_default=sa.text("'member'"),
     ),
     sa.Column(
+        "session_version",
+        sa.BigInteger(),
+        nullable=False,
+        server_default=sa.text("1"),
+    ),
+    sa.Column(
         "created_at",
         sa.DateTime(timezone=True),
         nullable=False,
@@ -91,6 +97,10 @@ workspace_users = sa.Table(
     sa.CheckConstraint(
         "organization_role IN ('org_admin', 'member')",
         name="ck_workspace_users_organization_role",
+    ),
+    sa.CheckConstraint(
+        "session_version > 0",
+        name="ck_workspace_users_session_version",
     ),
     sa.ForeignKeyConstraint(
         ["organization_id"],

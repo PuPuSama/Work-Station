@@ -26,6 +26,7 @@ from services.external_identity import (  # noqa: E402
     ExternalActorSessionService,
     ExternalIdentityNotAuthorized,
     PostgresExternalIdentityRepository,
+    ResolvedExternalActor,
     VerifiedExternalIdentity,
 )
 from services.external_identity_provisioning import (  # noqa: E402
@@ -77,7 +78,10 @@ class ExternalIdentityUnitTests(unittest.TestCase):
         )
         service = ExternalActorSessionService(
             identities=FakeIdentityRepository(
-                ActorIdentity("org-a", "user-a")
+                ResolvedExternalActor(
+                    ActorIdentity("org-a", "user-a"),
+                    session_version=7,
+                )
             ),
             codec=codec,
         )
@@ -87,6 +91,7 @@ class ExternalIdentityUnitTests(unittest.TestCase):
             codec.parse(token),
             ActorIdentity("org-a", "user-a"),
         )
+        self.assertEqual(codec.parse_session(token).session_version, 7)
         self.assertNotIn("external-subject", token)
         self.assertNotIn("role", token)
 
@@ -193,7 +198,10 @@ class ExternalIdentityPostgresTests(unittest.TestCase):
 
         self.assertEqual(
             repository.resolve(identity),
-            ActorIdentity(self.org_a, self.user_a),
+            ResolvedExternalActor(
+                ActorIdentity(self.org_a, self.user_a),
+                session_version=1,
+            ),
         )
         self.assertIsNone(
             repository.resolve(

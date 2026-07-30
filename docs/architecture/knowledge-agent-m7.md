@@ -120,6 +120,12 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `requested_by_user_id`；旧 SQLite 历史迁移时允许为空；
 - Alembic `20260730_0012` 增加项目级 `object_orphan_observations`，只保存对象
   Fingerprint、大小和连续观察时间；
+- Alembic `20260731_0013` 为每个 Workspace User 增加正整数 `session_version`；
+  新 Actor Cookie 固定携带签发时版本，每次 Server 请求在项目授权前重新读取 Active
+  Organization/User 与当前版本；
+- 新增 `PostgresActorSessionRevocationService`：只允许当前 Organization 的 Active
+  Org Admin 递增目标 User 版本，并与 `workspace_user.sessions.revoked` Audit 同事务；
+  审计失败同时回滚版本。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -144,7 +150,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
 - 不猜测或内置 Auth0、Keycloak、Entra ID 等具体供应商；正式 Provider 注册、生产
   Redirect URI、租户策略和 Conformance 冒烟仍需部署环境确认；
-- 尚未实现 Actor Session 撤销/version；已签发的短期 Session 仍到期失效；
+- 尚未提供 Actor Session 撤销的 HTTP/UI 管理入口；版本校验与事务服务已经实现；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
@@ -330,8 +336,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/migrations/versions/20260730_0008_multitenant_access.py` | Schema 唯一迁移准源 | 无虚构组织回填、可升降级、审计 Trigger |
 | `backend/services/access_control.py` | Actor、权限契约、纯策略和 PostgreSQL 事实查询 | 不信任客户端 Role、统一拒绝、未绑定项目 fail closed |
 | `backend/services/audit_log.py` | 业务事务内追加审计事件 | 调用方事务、稳定 Event ID、无更新/删除接口 |
-| `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、独立 Secret、默认不开启 |
-| `backend/services/external_identity.py` | 已验证外部身份到本地 Actor 的解析与 Session Exchange | 不接受原始 Token、不信任外部 Role、禁用/暂停/撤销立即失效 |
+| `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、携带正整数 Session Version、独立 Secret、默认不开启 |
+| `backend/services/actor_sessions.py` | 数据库 Session Version 校验与全会话撤销服务 | 每请求校验 Active Org/User、Org Admin、版本递增与 Audit 同事务 |
+| `backend/services/external_identity.py` | 已验证外部身份到本地 Actor 的解析与 Session Exchange | 不接受原始 Token、不信任外部 Role、签发绑定数据库 Session Version |
 | `backend/services/external_identity_provisioning.py` | External Identity Link/Revoke | Org Admin、Subject 哈希审计目标、业务写入与审计同事务 |
 | `backend/services/oidc_identity.py` | OIDC 配置、Discovery/JWKS、Code Exchange 和 ID Token 验证 | 固定 RS256、精确 Issuer/Audience、Nonce/时间门禁、未知 Kid 刷新、错误不泄露 Secret |
 | `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
@@ -341,7 +348,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/server-project-selector.tsx` | Server 可访问项目入口 | 只渲染 `/api/projects` 的 SQL-scoped 结果、显示有效角色、直达已迁移 Delivery |
 | `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口，不启动 Local Job Center 或设置导航 |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
-| `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先认证再查数据库 Role、项目规范化、未迁移路由 fail closed |
+| `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
@@ -356,6 +363,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | Enqueue 原子性、可信 Requester、两阶段授权、只抓 Active 官网、不改 Task、聚合停机报告 |
 | `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
 | `backend/migrations/versions/20260730_0012_object_orphan_observations.py` | Orphan 连续观察 Schema 准源 | Project 复合 FK、指纹重置、Eligibility 索引 |
+| `backend/migrations/versions/20260731_0013_actor_session_version.py` | Actor Session Version Schema 准源 | 现有 User 默认版本 1、正整数 CHECK、可升降级 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/server_cutover_report.py` | SQLite/PG Task 与 Job 只读双读报告 | 只读连接、同一 Scope、顺序/ID/摘要、正文不出报告 |
 | `backend/knowledge_agent/m7_cutover_report.py` | C3 冻结窗口比对 CLI | ready 为 0、差异为 2、数据库 URL 只读环境注入 |
@@ -428,8 +436,8 @@ OIDC Discovery 精确匹配配置 Issuer
   -> RS256 JWKS 签名与 Issuer/Audience/exp/iat/nonce 验证
   -> VerifiedExternalIdentity(issuer, subject)
   -> PostgresExternalIdentityRepository
-  -> ActorIdentity(organization_id, user_id)
-  -> ServerActorSessionCodec
+  -> ResolvedExternalActor(ActorIdentity, session_version)
+  -> ServerActorSessionCodec(v2, organization_id, user_id, session_version)
 ```
 
 `OidcProviderClient` 缓存 Discovery/JWKS；遇到未知 `kid` 时只强制刷新一次，以覆盖
@@ -448,7 +456,16 @@ Provider 返回 `error`、缺失 Code/State 或超长参数时，Callback 不回
 `ExternalActorSessionService` 不接收原始 Bearer Token，也不解析 Email、Group 或 Role；
 这些外部 Claims 不能直接变成权限。Mapping、Organization 和 Workspace User 必须同时
 Active。撤销 Mapping、禁用 User 或暂停 Organization 后，下一次 Exchange 立即失败；
-现有短期 Actor Session 仍按其原有效期处理，直到后续实现 Session Revocation/Version。
+每个已签发 Cookie 还固定绑定 `workspace_users.session_version`。`ServerRequestSecurity`
+先验证 HMAC、格式和时间，再查询 Active Organization/User 与当前版本；版本不匹配、
+User Disabled、Organization Suspended 或数据库校验故障都返回统一 401，且不会进入
+Project 权限查询。
+
+`PostgresActorSessionRevocationService` 锁定 Active Org Admin 与目标 User，递增版本并在
+同一个 PostgreSQL 事务追加 `workspace_user.sessions.revoked`。跨 Organization、非 Admin、
+目标不存在统一拒绝；Audit 失败回滚版本且不回显底层异常。当前只提供可组合服务层，
+尚未接成员管理 HTTP/UI。Token 格式从 v1 升为 v2；新代码有意拒绝旧 Cookie，所以首次
+部署必须在无流量窗口完成旧实例排空并要求重新登录。
 
 Identity Link/Revoke 只允许当前 Organization 的 Active `org_admin`，并与
 append-only Audit Event 同事务。审计 `target_id` 使用 `issuer + subject` 的 SHA-256，
@@ -456,7 +473,7 @@ Details 只保留 Issuer 和目标本地 User，不写入原始 Subject。
 
 OIDC/JWKS、Callback、State/Nonce、PKCE 和登录 UI 已实现，因此代码能力
 `trusted_identity_source=true`。仍未完成的是具体生产 Provider 注册与 Conformance
-冒烟、Client Secret 托管/轮换证据和 Actor Session 撤销/version；Preflight 会实时探测
+冒烟、Client Secret 托管/轮换证据，以及 Session 撤销管理入口；Preflight 会实时探测
 Discovery/JWKS，任一环境证据缺失时整体仍为 no-go。
 
 请求授权链为：
@@ -1023,3 +1040,10 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     Key、URI 或供应商错误正文？
 29. 产品重新发现 Enqueue 是否仍把可撤权授权、Task Revision、Job/Batch 和安全 Audit
     放在同一事务，并在 Audit 失败时不留下可执行 Job？
+30. 服务停机是否仍停止新 Claim，并把无用户取消请求的协作退出释放为 `queued`，而不是
+    伪造 `cancelled`？
+31. Job 终态是否仍与安全 Audit 同事务，未排空报告是否仍阻止 Lifespan 提前释放 Engine？
+32. Actor Cookie 是否仍绑定数据库 Session Version，并在任何 Project 查询前校验 Active
+    Organization/User 与版本？
+33. 全会话撤销是否仍要求 Active Org Admin、锁定同 Organization 目标，并与
+    `workspace_user.sessions.revoked` Audit 同事务？

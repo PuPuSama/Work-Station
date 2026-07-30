@@ -75,10 +75,11 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260730_0012`；
+- `alembic_version = 20260731_0013`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
+- `workspace_users.session_version` 非空且大于 0；
 - 复合租户外键仍存在；
 - Audit Event 更新和删除仍被 Trigger 拒绝；
 - Task/Job 迁移工具的数量、状态分布和内容 SHA-256 摘要一致；
@@ -160,6 +161,29 @@ Snapshot Asset 与 Task `*_asset_id` 三类引用都在当前 Schema 中。
 5. 从 Secret Manager 撤销旧版本。
 
 在实现双 Key 验签前，不做无感轮换承诺。
+
+### Actor Session Version 与全会话撤销
+
+`20260731_0013` 增加 `workspace_users.session_version`，新 Cookie 格式 v2 固定携带签发
+版本。每次 Server 请求先验签，再读取 Active Organization/User 与当前版本；不匹配统一
+返回 401，不进入 Project 权限查询。
+
+首次发布必须按以下顺序：
+
+1. 在流量关闭时先执行 `alembic upgrade head`；
+2. 停止并排空全部旧应用实例；
+3. 一次性启动新版本并确认数据库版本校验可用；
+4. 再开放流量，并公告所有旧 v1 Cookie 需要重新登录。
+
+旧实例不认识 v2 Cookie，新实例也有意拒绝 v1 Cookie；不得在新旧实例同时接收用户流量时
+开始签发 v2。当前全会话撤销只有
+`PostgresActorSessionRevocationService` 服务边界，尚无成员管理 HTTP/UI，不能把代码
+服务描述成运维自助入口。
+
+撤销动作必须由同 Organization 的 Active Org Admin 发起，并验证版本递增与
+`workspace_user.sessions.revoked` Audit 同事务。跨组织目标、非 Admin、目标不存在或
+Audit 故障都必须失败；Audit 失败后旧版本必须仍有效，错误输出不得包含数据库或供应商
+正文。
 
 ### OIDC Provider 与 Client Secret
 

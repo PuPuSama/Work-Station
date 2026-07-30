@@ -170,6 +170,7 @@ from services.access_control import (
     PostgresProjectAccessRepository,
     ProjectAccessService,
 )
+from services.actor_sessions import PostgresActorSessionRepository
 from services.external_identity import (
     ExternalIdentityNotAuthorized,
     PostgresExternalIdentityRepository,
@@ -337,9 +338,11 @@ async def app_lifespan(application: FastAPI):
         server_access = ProjectAccessService(
             PostgresProjectAccessRepository(server_engine)
         )
+        server_actor_sessions = PostgresActorSessionRepository(server_engine)
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
             access=server_access,
+            sessions=server_actor_sessions,
         )
         oidc_settings = OidcProviderSettings.from_environment()
         if oidc_settings is not None:

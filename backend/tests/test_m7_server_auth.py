@@ -43,8 +43,14 @@ class ServerActorSessionTests(unittest.TestCase):
         codec = ServerActorSessionCodec(SECRET)
         actor = ActorIdentity("org-a", "user-a")
 
-        token = codec.create(actor, now=1_000, max_age=600)
+        token = codec.create(
+            actor,
+            session_version=7,
+            now=1_000,
+            max_age=600,
+        )
         parsed = codec.parse(token, now=1_599)
+        session = codec.parse_session(token, now=1_599)
         encoded_payload = token.split(".", 1)[0]
         payload = json.loads(
             base64.urlsafe_b64decode(
@@ -53,8 +59,11 @@ class ServerActorSessionTests(unittest.TestCase):
         )
 
         self.assertEqual(parsed, actor)
+        self.assertEqual(payload["v"], 2)
         self.assertEqual(payload["org"], "org-a")
         self.assertEqual(payload["sub"], "user-a")
+        self.assertEqual(payload["sv"], 7)
+        self.assertEqual(session.session_version, 7)
         self.assertNotIn("role", payload)
         self.assertNotIn("permissions", payload)
 
@@ -93,6 +102,14 @@ class ServerActorSessionTests(unittest.TestCase):
                 ActorIdentity("org-a", "user-a"),
                 now=1_000,
                 max_age=MAX_SERVER_SESSION_SECONDS + 1,
+            )
+        with self.assertRaisesRegex(
+            ServerActorSessionError,
+            "version",
+        ):
+            ServerActorSessionCodec(SECRET).create(
+                ActorIdentity("org-a", "user-a"),
+                session_version=0,
             )
         with self.assertRaisesRegex(
             ServerActorSessionError,

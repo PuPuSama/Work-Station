@@ -15,7 +15,7 @@ from services.access_control import ActorIdentity
 SERVER_AUTH_COOKIE_NAME = "article_agent_actor_session"
 DEFAULT_SERVER_SESSION_SECONDS = 12 * 60 * 60
 MAX_SERVER_SESSION_SECONDS = 24 * 60 * 60
-_TOKEN_VERSION = 1
+_TOKEN_VERSION = 2
 
 
 class ServerActorSessionError(ValueError):
@@ -52,6 +52,16 @@ def _base64url_decode(value: str) -> bytes:
         raise ServerActorSessionError("invalid actor session") from exc
 
 
+@dataclass(frozen=True, slots=True)
+class ServerActorSession:
+    """Verified cookie claims before the database version check."""
+
+    actor: ActorIdentity
+    session_version: int
+    issued_at: int
+    expires_at: int
+
+
 @dataclass(frozen=True)
 class ServerActorSessionCodec:
     """Sign minimal Actor identity; roles are deliberately absent."""
@@ -75,14 +85,22 @@ class ServerActorSessionCodec:
         self,
         actor: ActorIdentity,
         *,
+        session_version: int = 1,
         now: int | None = None,
         max_age: int = DEFAULT_SERVER_SESSION_SECONDS,
     ) -> str:
         if max_age <= 0 or max_age > self.max_session_seconds:
             raise ServerActorSessionError("actor session lifetime is invalid")
+        if (
+            isinstance(session_version, bool)
+            or not isinstance(session_version, int)
+            or session_version <= 0
+        ):
+            raise ServerActorSessionError("actor session version is invalid")
         issued_at = int(time.time() if now is None else now)
         payload = {
             "v": _TOKEN_VERSION,
+            "sv": session_version,
             "org": actor.organization_id,
             "sub": actor.user_id,
             "iat": issued_at,
@@ -111,6 +129,14 @@ class ServerActorSessionCodec:
         *,
         now: int | None = None,
     ) -> ActorIdentity:
+        return self.parse_session(token, now=now).actor
+
+    def parse_session(
+        self,
+        token: str,
+        *,
+        now: int | None = None,
+    ) -> ServerActorSession:
         try:
             encoded_payload, supplied_signature = token.split(".", 1)
         except (AttributeError, ValueError) as exc:
@@ -130,9 +156,12 @@ class ServerActorSessionCodec:
             payload = json.loads(_base64url_decode(encoded_payload))
             if not isinstance(payload, dict):
                 raise TypeError
-            if set(payload) != {"v", "org", "sub", "iat", "exp"}:
+            if set(payload) != {"v", "sv", "org", "sub", "iat", "exp"}:
+                raise TypeError
+            if type(payload["sv"]) is not int:
                 raise TypeError
             version = int(payload["v"])
+            session_version = int(payload["sv"])
             issued_at = int(payload["iat"])
             expires_at = int(payload["exp"])
             actor = ActorIdentity(
@@ -145,13 +174,19 @@ class ServerActorSessionCodec:
         current_time = int(time.time() if now is None else now)
         if (
             version != _TOKEN_VERSION
+            or session_version <= 0
             or issued_at > current_time + 60
             or expires_at <= current_time
             or expires_at <= issued_at
             or expires_at - issued_at > self.max_session_seconds
         ):
             raise ServerActorSessionError("invalid actor session")
-        return actor
+        return ServerActorSession(
+            actor=actor,
+            session_version=session_version,
+            issued_at=issued_at,
+            expires_at=expires_at,
+        )
 
 
 def load_server_actor_session_codec(
@@ -170,6 +205,7 @@ __all__ = [
     "DEFAULT_SERVER_SESSION_SECONDS",
     "MAX_SERVER_SESSION_SECONDS",
     "SERVER_AUTH_COOKIE_NAME",
+    "ServerActorSession",
     "ServerActorSessionCodec",
     "ServerActorSessionError",
     "load_server_actor_session_codec",

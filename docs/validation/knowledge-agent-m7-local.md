@@ -1,6 +1,6 @@
 # Knowledge Agent M7 持续实施本地验证记录
 
-- 日期：2026-07-30
+- 日期：2026-07-31
 - 分支：`feature/knowledge-agent-m7`
 - 基线：`cc4bbf2 feat: add M6 retrieval evaluation framework`
 - 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL、私有对象存储与 append-only 审计底座
@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260730_0012`
+- Alembic Head：`20260731_0013`
 
 ## 已通过验证
 
@@ -103,6 +103,17 @@ Object Orphan Observation 迁移新增后执行：
 
 结果为 `20260730_0012 (head)`；空库升级与降级往返在最终回归前再次验证。
 
+Actor Session Version 迁移新增后执行：
+
+```powershell
+.\.venv\Scripts\alembic.exe downgrade 20260730_0012
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe current
+```
+
+结果为 `20260731_0013 (head)`；降级、升级和重复升级均成功。
+
 ### Task/Job PostgreSQL 定向测试
 
 ```powershell
@@ -144,7 +155,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 548 tests；
+- 554 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -205,7 +216,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 26 tests，使用确定性内存图片和真实 PostgreSQL，不调用外部图片或模型服务；
+- 27 tests，使用确定性内存图片和真实 PostgreSQL，不调用外部图片或模型服务；
 - Hero 使用请求中的项目 Asset ID；产品图只能来自 Task 当前
   `Product.selected_asset_id`，客户端不能替换为任意项目图片；
 - 源对象读取再次要求 `article.edit`，并验证 Bucket、Organization/Project Key、
@@ -236,7 +247,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 27 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
+- 28 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
 - `article.deliver` 在路由、私有 WebP 读取、DOCX 写入和专用下载签名前重新检查；
 - Task 图片 Asset 的对象 Key、大小、哈希、类型、数据库/Task/实际尺寸全部复核；
 - 现有 Word 排版器新增内存 WebP/字节输出边界，本地文件导出测试保持通过；
@@ -261,7 +272,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 31 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
+- 32 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
 - Local `export_tdk_docx()` 与 Server `build_tdk_docx_bytes()` 复用同一排版核心；
 - Server 要求已有 `docx_asset_id`，从当前文章生成并验证 Title、Description 和六个
   Keyword，不接受客户端 TDK、Prompt、Asset ID、对象 URI 或输出路径；
@@ -289,7 +300,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 76 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
+- 77 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
 - `article.review` 与 `article.deliver` 分离：Reviewer 可上传、确认、查看 Review
   Screenshot，但不能导出文章 DOCX/TDK；
 - 截图在内存执行大小、像素、解码和 EXIF 门禁，并重编码为无元数据 PNG；
@@ -320,7 +331,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 62 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
+- 63 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
 - `article.deliver` 在路由、全部私有对象读取、ZIP 上传和专用下载签名前重新检查；
 - 打包只接受当前 Task 的文章 DOCX、TDK DOCX、Prepared WebP 和终审 Screenshot
   身份，不接受客户端 Asset ID、对象 URI、路径、文件名或文件字节；
@@ -445,7 +456,7 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - OIDC 配置不完整或实时 Discovery/JWKS 探测失败时 Preflight 单独 fail closed；
 - `object_download_reauthorizes` 已由真实 HTTP 路由与签名前二次授权支撑为 true，
   不再只是未接线的底层 Service；
-- Alembic 不是 `20260730_0012` 时阻止发布；
+- Alembic 不是 `20260731_0013` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
 - 数据库 URL、Embedding Key、OIDC Client Secret、Token、S3 Key/Secret 和供应商
   错误正文不进入公开报告。
@@ -478,6 +489,31 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 登录页 Server Mode 只显示组织身份按钮，本地模式保留密码，状态失败不降级；
 - 具体生产 Provider 的真实 Redirect 注册与 Conformance 冒烟尚未执行。
 
+### Actor Session Version 与全会话撤销
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_actor_sessions `
+  tests.test_m7_server_auth `
+  tests.test_m7_external_identity `
+  tests.test_m7_server_request_security `
+  tests.test_m7_oidc_identity -q
+```
+
+结果：
+
+- 37 tests，使用真实 PostgreSQL 和确定性 OIDC/Session 依赖；
+- v2 Cookie 只保存 Organization/User、时间和正整数 Session Version，不保存 Role、
+  Permission、Email、Group 或外部 Token；
+- 当前版本 Cookie 可用；Org Admin 递增版本后旧 Cookie 立即失效，新版本 Cookie 可用；
+- User Disabled、Organization Suspended、版本不匹配或版本读取故障统一为 401，并在
+  Project 权限查询前停止；
+- 跨 Organization、普通 Member 和不存在目标的全会话撤销统一拒绝；
+- Session Version 更新与真实 PostgreSQL Audit 在同一事务可见；事务回滚后二者均消失；
+- 注入 Audit 故障会回滚版本，公开异常不包含底层 Secret 正文；
+- 数据库 CHECK 拒绝零或负数 Session Version。
+
 ### Server Request Security 与 Knowledge Router
 
 ```powershell
@@ -490,7 +526,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 17 tests；
+- 18 tests；
 - Actor Cookie 篡改/缺失统一为未认证；
 - Project 按官网域名规则规范化后才查询 PostgreSQL 权限事实；
 - Viewer 可通过 Knowledge GET，但不能发布来源；
@@ -551,14 +587,14 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 17 tests；
+- 18 tests；
 - 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
 - Project Directory 只返回 Actor 在当前 Organization 可见的 Active Project 和
   Effective Role；普通 Team Member 不会看到同 Team Project；
 - Project A 的列表只返回 Project A 的 PostgreSQL Task；
 - 用 Project A 路径请求 Project B Task 返回 404，不跨 Scope 查找；
-- 归档 Project 从 Directory 消失且 Task 路由返回 403；禁用 User 的 Directory
-  请求返回 403；
+- 归档 Project 从 Directory 消失且 Task 路由返回 403；禁用 User 的 Cookie 在
+  Session Version/Active User 门返回 401；
 - 私有资产下载同时验证 Actor、Project、数据库 Asset Scope、Bucket 和对象 Key
   的 Organization/Project 前缀；
 - 正常资产只返回 30–3600 秒的签名 URL；缺失资产、伪造为另一 Organization Key 的
@@ -621,7 +657,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Mapping Revoked、User Disabled、Organization Suspended 均不能解析 Actor；
 - Link/Revoke 只有 Active Org Admin 可执行，且与 Audit Event 同事务；
 - 审计目标使用 Subject 哈希，审计 Details 不保存原始 Subject；
-- Preflight Head 已更新为 `20260730_0012`。
+- Preflight Head 已更新为 `20260731_0013`。
 
 ## 诊断记录
 
@@ -634,7 +670,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 ## 当前未验证或未接入
 
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
-  已接入；具体生产 Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
+  已接入；Session Version 校验与 Org Admin 撤销事务服务已完成，但成员管理 HTTP/UI、
+  具体生产 Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备

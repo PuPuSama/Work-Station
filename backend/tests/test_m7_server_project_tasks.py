@@ -834,7 +834,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     client.get("/api/projects").status_code,
-                    403,
+                    401,
                 )
 
     def test_server_task_api_is_not_added_to_local_mode(self) -> None:

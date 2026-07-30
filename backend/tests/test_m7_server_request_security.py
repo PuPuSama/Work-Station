@@ -44,6 +44,16 @@ class FakeAccessRepository:
         return self.facts
 
 
+class FakeSessionVersions:
+    def __init__(self, current: bool = True):
+        self.current = current
+        self.calls = []
+
+    def is_current(self, session):
+        self.calls.append(session)
+        return self.current
+
+
 class ServerRequestSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.codec = ServerActorSessionCodec(b"s" * 32)
@@ -59,6 +69,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
         security = ServerRequestSecurity(
             codec=self.codec,
             access=ProjectAccessService(repository),
+            sessions=FakeSessionVersions(),
         )
         authorized = security.authorize_project(
             token=self.codec.create(self.actor),
@@ -78,6 +89,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
         security = ServerRequestSecurity(
             codec=self.codec,
             access=ProjectAccessService(repository),
+            sessions=FakeSessionVersions(),
         )
         with self.assertRaisesRegex(
             ServerRequestUnauthenticated,
@@ -97,6 +109,33 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 project="other.example",
                 permission="project.view",
             )
+
+    def test_stale_session_is_rejected_before_project_access(self) -> None:
+        repository = FakeAccessRepository(
+            ProjectAccessFacts(
+                organization_role="member",
+                project_role="viewer",
+            )
+        )
+        versions = FakeSessionVersions(current=False)
+        security = ServerRequestSecurity(
+            codec=self.codec,
+            access=ProjectAccessService(repository),
+            sessions=versions,
+        )
+
+        with self.assertRaisesRegex(
+            ServerRequestUnauthenticated,
+            "^authentication required$",
+        ):
+            security.authorize_project(
+                token=self.codec.create(self.actor),
+                project="example.com",
+                permission="project.view",
+            )
+
+        self.assertEqual(repository.calls, [])
+        self.assertEqual(len(versions.calls), 1)
 
     def test_knowledge_routes_have_explicit_conservative_permissions(self) -> None:
         cases = {
@@ -400,6 +439,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
         security = ServerRequestSecurity(
             codec=self.codec,
             access=ProjectAccessService(repository),
+            sessions=FakeSessionVersions(),
         )
         previous_mode = getattr(
             app_module.app.state,
