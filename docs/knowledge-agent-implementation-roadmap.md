@@ -17,7 +17,7 @@
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
 | M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
-| M7 | 进行中：M7-A/B/C1 权限、会话、Task/Job PG 底座完成 | `docs/architecture/knowledge-agent-m7.md` |
+| M7 | 进行中：M7-A/B/C1-C2 权限、会话、Task/Job PG 与历史迁移完成 | `docs/architecture/knowledge-agent-m7.md` |
 
 ## M0：基线与接口边界
 
@@ -119,11 +119,13 @@
   ProjectMembership Service；
 - 已实现项目级 PostgreSQL Task Repository、SQLite Task 摘要校验导入、
   Revision CAS 和带 SKIP LOCKED/Worker Lease 的 PostgreSQL Job Queue；
+- 已实现 Active Job 排空门和 SQLite Terminal Job 历史迁移，按稳定 ID、
+  状态分布与内容摘要复核；
 - 已验证跨组织拒绝、禁用用户、旧项目 fail-closed、复合外键、审计不可修改和
   Alembic 往返升级；
 - 当前单密码 Cookie 不具备 User Identity，正式身份来源也尚未确定，因此尚未把
   RBAC 接入 `app.py`；
-- 后续按“正式身份映射与 API 授权覆盖 -> Job 历史迁移与服务器单写切换
+- 后续按“正式身份映射与 API 授权覆盖 -> 服务器单写切换
   -> 对象存储与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。

@@ -623,6 +623,23 @@ class JobQueue:
                 result.append(self._batch_dict(batch, jobs))
         return result
 
+    def export_batches(self) -> list[dict[str, Any]]:
+        """Return every batch for a controlled one-time server migration."""
+
+        with self._connect() as connection:
+            batches = connection.execute(
+                "SELECT * FROM batches ORDER BY created_at, id"
+            ).fetchall()
+            result = []
+            for batch in batches:
+                jobs = connection.execute(
+                    "SELECT * FROM jobs WHERE batch_id = ? "
+                    "ORDER BY created_at, topic_index, id",
+                    (batch["id"],),
+                ).fetchall()
+                result.append(self._batch_dict(batch, jobs))
+        return result
+
     @staticmethod
     def _touch_batch(connection: sqlite3.Connection, job_id: str, now: str) -> None:
         connection.execute(

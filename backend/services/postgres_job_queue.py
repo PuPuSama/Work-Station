@@ -43,6 +43,22 @@ def _epoch(value: object) -> float:
     return 0.0
 
 
+def _timestamp(value: object, *, fallback: datetime | None = None) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (float, int)):
+        parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    elif str(value or "").strip():
+        parsed = datetime.fromisoformat(str(value).strip())
+    elif fallback is not None:
+        parsed = fallback
+    else:
+        raise ValueError("timestamp is required")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class PostgresJobQueue:
     """Project-scoped PostgreSQL queue with SKIP LOCKED worker leases."""
 
@@ -725,6 +741,160 @@ class PostgresJobQueue:
                 ).mappings().all()
                 result.append(self._batch_dict(batch, jobs))
         return result
+
+    def export_batches(self) -> list[dict[str, Any]]:
+        with self._engine.connect() as connection:
+            batches = connection.execute(
+                sa.select(job_batches)
+                .where(*self._batch_scope())
+                .order_by(job_batches.c.created_at, job_batches.c.batch_id)
+            ).mappings().all()
+            result: list[dict[str, Any]] = []
+            for batch in batches:
+                jobs = connection.execute(
+                    sa.select(background_jobs)
+                    .where(
+                        *self._job_scope(),
+                        background_jobs.c.batch_id == batch["batch_id"],
+                    )
+                    .order_by(
+                        background_jobs.c.created_at,
+                        background_jobs.c.topic_index,
+                        background_jobs.c.job_id,
+                    )
+                ).mappings().all()
+                result.append(self._batch_dict(batch, jobs))
+        return result
+
+    def import_terminal_batches(
+        self,
+        batches: Iterable[Mapping[str, Any]],
+    ) -> None:
+        """Import drained SQLite history while preserving stable identities."""
+
+        payloads = [dict(batch) for batch in batches]
+        active = next(
+            (
+                str(job.get("id") or "")
+                for batch in payloads
+                for job in batch.get("jobs", [])
+                if str(job.get("status") or "") in ACTIVE_JOB_STATUSES
+            ),
+            None,
+        )
+        if active is not None:
+            raise ValueError(
+                "active SQLite jobs must be drained before migration"
+            )
+        current = _now()
+        with self._engine.begin() as connection:
+            target_exists = connection.execute(
+                sa.select(job_batches.c.batch_id)
+                .where(*self._batch_scope())
+                .limit(1)
+            ).scalar_one_or_none()
+            if target_exists is not None:
+                raise ValueError(
+                    "PostgreSQL job target must be empty before import"
+                )
+            for batch in payloads:
+                batch_id = _required_text(
+                    str(batch.get("id") or ""),
+                    "batch id",
+                )
+                jobs = [dict(job) for job in batch.get("jobs", [])]
+                created_at = _timestamp(
+                    batch.get("created_at"),
+                    fallback=current,
+                )
+                updated_at = _timestamp(
+                    batch.get("updated_at"),
+                    fallback=created_at,
+                )
+                connection.execute(
+                    job_batches.insert().values(
+                        organization_id=self.organization_id,
+                        project_id=self.project_id,
+                        batch_id=batch_id,
+                        operation=_required_text(
+                            str(batch.get("operation") or ""),
+                            "operation",
+                        ),
+                        customer=str(batch.get("customer") or ""),
+                        created_at=created_at,
+                        updated_at=updated_at,
+                    )
+                )
+                if not jobs:
+                    continue
+                connection.execute(
+                    background_jobs.insert(),
+                    tuple(
+                        {
+                            "organization_id": self.organization_id,
+                            "project_id": self.project_id,
+                            "job_id": _required_text(
+                                str(job.get("id") or ""),
+                                "job id",
+                            ),
+                            "batch_id": batch_id,
+                            "task_id": _required_text(
+                                str(job.get("task_id") or ""),
+                                "task_id",
+                            ),
+                            "customer": str(job.get("customer") or ""),
+                            "topic_index": int(job.get("topic_index") or 0),
+                            "topic": str(job.get("topic") or ""),
+                            "operation": _required_text(
+                                str(job.get("operation") or ""),
+                                "operation",
+                            ),
+                            "status": str(job.get("status") or ""),
+                            "request": dict(job.get("request") or {}),
+                            "source_revision": int(
+                                job.get("source_revision") or 0
+                            ),
+                            "result_revision": (
+                                int(job["result_revision"])
+                                if job.get("result_revision") is not None
+                                else None
+                            ),
+                            "attempts": int(job.get("attempts") or 0),
+                            "max_attempts": int(
+                                job.get("max_attempts") or 4
+                            ),
+                            "available_at": _timestamp(
+                                job.get("available_at"),
+                                fallback=created_at,
+                            ),
+                            "cancel_requested": bool(
+                                job.get("cancel_requested")
+                            ),
+                            "error": str(job.get("error") or "")[:4000],
+                            "worker_id": None,
+                            "lease_expires_at": None,
+                            "created_at": _timestamp(
+                                job.get("created_at"),
+                                fallback=created_at,
+                            ),
+                            "started_at": (
+                                _timestamp(job["started_at"])
+                                if str(job.get("started_at") or "").strip()
+                                else None
+                            ),
+                            "finished_at": (
+                                _timestamp(job["finished_at"])
+                                if str(job.get("finished_at") or "").strip()
+                                else None
+                            ),
+                            "updated_at": _timestamp(
+                                job.get("updated_at"),
+                                fallback=updated_at,
+                            ),
+                        }
+                        for job in jobs
+                    ),
+                )
 
     def _touch_batch(
         self,

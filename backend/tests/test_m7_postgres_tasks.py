@@ -35,7 +35,11 @@ from server_schema import (  # noqa: E402
 )
 from services.postgres_task_repository import PostgresTaskRepository  # noqa: E402
 from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
-from services.job_queue import ActiveJobError  # noqa: E402
+from services.job_queue import ActiveJobError, JobQueue  # noqa: E402
+from services.job_queue_migration import (  # noqa: E402
+    JobQueueMigrationConflict,
+    migrate_terminal_job_history,
+)
 from services.task_repository import SQLiteTaskRepository  # noqa: E402
 from services.task_store_migration import (  # noqa: E402
     TaskStoreMigrationConflict,
@@ -628,6 +632,113 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         self.assertCountEqual(outcomes, (True, False))
         self.assertEqual(stored["revision"], 1)  # type: ignore[index]
         self.assertIn(stored["topic"], {"Writer A", "Writer B"})  # type: ignore[index]
+
+    def test_terminal_sqlite_job_history_import_is_drained_and_verified(
+        self,
+    ) -> None:
+        self.repository_a.replace_all(
+            (
+                self._record("history-task-1", topic_index=1),
+                self._record("history-task-2", topic_index=2),
+            )
+        )
+        target = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = JobQueue(Path(directory) / "jobs.sqlite3")
+            succeeded_batch = source.create_batch(
+                "outline",
+                [
+                    {
+                        "task_id": "history-task-1",
+                        "source_revision": 0,
+                        "request": {"kind": "history"},
+                    }
+                ],
+            )
+            succeeded_job = source.claim_jobs(1)[0]
+            source.mark_succeeded(succeeded_job["id"], 1)
+            cancelled_batch = source.create_batch(
+                "article",
+                [
+                    {
+                        "task_id": "history-task-2",
+                        "source_revision": 2,
+                    }
+                ],
+            )
+            source.cancel_batch(cancelled_batch["id"])
+
+            first = migrate_terminal_job_history(source, target)
+            repeated = migrate_terminal_job_history(source, target)
+
+        self.assertTrue(first.imported)
+        self.assertEqual(first.source.batch_count, 2)
+        self.assertEqual(first.source.job_count, 2)
+        self.assertEqual(
+            first.source.status_counts,
+            {"cancelled": 1, "succeeded": 1},
+        )
+        self.assertEqual(first.source, first.target_after)
+        self.assertTrue(repeated.already_matched)
+        self.assertEqual(
+            target.get_batch(succeeded_batch["id"])["status"],
+            "succeeded",
+        )
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                background_jobs.update()
+                .where(
+                    background_jobs.c.organization_id == self.organization_id,
+                    background_jobs.c.project_id == self.project_a,
+                    background_jobs.c.job_id == succeeded_job["id"],
+                )
+                .values(error="divergent history")
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            source = JobQueue(Path(directory) / "jobs.sqlite3")
+            source_batch = source.create_batch(
+                "outline",
+                [
+                    {
+                        "task_id": "history-task-1",
+                        "source_revision": 0,
+                        "request": {"kind": "history"},
+                    }
+                ],
+            )
+            source_job = source.claim_jobs(1)[0]
+            source.mark_succeeded(source_job["id"], 1)
+            # Stable IDs are part of the proof. This separately constructed
+            # history must never be treated as the already-imported source.
+            self.assertNotEqual(source_batch["id"], succeeded_batch["id"])
+            with self.assertRaisesRegex(
+                JobQueueMigrationConflict,
+                "differs from SQLite history",
+            ):
+                migrate_terminal_job_history(source, target)
+
+    def test_active_sqlite_job_blocks_history_cutover(self) -> None:
+        target = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = JobQueue(Path(directory) / "jobs.sqlite3")
+            source.create_batch(
+                "outline",
+                [{"task_id": "still-active", "source_revision": 0}],
+            )
+            with self.assertRaisesRegex(
+                JobQueueMigrationConflict,
+                "still contains active jobs",
+            ):
+                migrate_terminal_job_history(source, target)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 3. 再让 API、检索、对象下载与 Worker 强制执行 RBAC；
 4. 验证服务器端闭环后，才收缩 SQLite 正式写入路径和临时兼容层。
 
-## 2. 当前完成范围：M7-A / M7-B / M7-C1
+## 2. 当前完成范围：M7-A / M7-B / M7-C1-C2
 
 本阶段已实现：
 
@@ -34,6 +34,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - PostgreSQL Revision compare-and-swap，避免多进程丢更新；
 - 使用部分唯一索引、`FOR UPDATE SKIP LOCKED` 和 Worker Lease 的
   `PostgresJobQueue`。
+- Active Job 排空门禁和 SQLite Terminal Job 历史迁移；
+- Batch/Job 稳定 ID、数量、状态分布和内容 SHA-256 摘要复核。
 
 当前明确未做：
 
@@ -45,7 +47,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不接前端成员管理；
 - 不接 S3、生产部署或密钥服务。
 
-因此，M7-A/B/C1 是可验证的服务器持久层，不代表多人服务器版已经上线。
+因此，M7-A/B/C1-C2 是可验证的服务器持久层，不代表多人服务器版已经上线。
 
 ## 3. 为什么使用 `project_ownership`
 
@@ -187,6 +189,7 @@ with engine.begin() as connection:
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
+| `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/task_repository.py` | 本地/服务器 Task Repository Protocol 与 SQLite 实现 | 本地模式保持可用 |
 | `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
@@ -208,22 +211,22 @@ with engine.begin() as connection:
 
 ### M7-C：Task/Job PostgreSQL 准源
 
-当前 C1 已完成：
+当前 C1-C2 已完成：
 
 1. PostgreSQL Task、Batch、Job 表及项目复合外键；
 2. Task JSONB 兼容 Repository；
 3. SQLite Task -> PostgreSQL 一次性导入、数量和 SHA-256 摘要校验；
 4. Task Revision compare-and-swap；
 5. Job 活跃唯一索引、并发 Claim、Worker Lease 和状态变更。
+6. SQLite 全量 Batch 导出和 Active Job 排空门；
+7. Terminal Job 历史导入，保留 Batch/Job ID 并验证数量、状态分布和内容摘要。
 
-后续 C2 顺序：
+后续 C3 顺序：
 
-1. 增加 SQLite Job 历史导出；切换前要求所有活跃 Job 排空或显式取消；
-2. 迁移 Terminal Job 历史并生成数量/状态摘要，Running Job 不跨系统续跑；
-3. 先做只读双读比对，仍由旧路径写入；
-4. 正式身份和项目路由覆盖后，切换服务器模式为 PostgreSQL 单写；
-5. 观察并验证后移除服务器 SQLite 写入；
-6. 本地模式继续保留 SQLite，不做双向同步。
+1. 先做只读双读比对，仍由旧路径写入；
+2. 正式身份和项目路由覆盖后，切换服务器模式为 PostgreSQL 单写；
+3. 观察并验证后移除服务器 SQLite 写入；
+4. 本地模式继续保留 SQLite，不做双向同步。
 
 所有 Task/Job 必须带 `organization_id + project_id`，Worker Claim 不能跨组织；幂等键和状态机语义必须与现有实现逐项对照。
 

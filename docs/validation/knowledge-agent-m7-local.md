@@ -1,4 +1,4 @@
-# Knowledge Agent M7-A/B/C1 本地验证记录
+# Knowledge Agent M7-A/B/C1-C2 本地验证记录
 
 - 日期：2026-07-30
 - 分支：`feature/knowledge-agent-m7`
@@ -79,7 +79,7 @@ Task/Job 迁移新增后，再在四张新表均为 0 行时执行：
 
 结果：
 
-- 11 tests；
+- 13 tests；
 - 同 Task ID 跨 Project 隔离；
 - JSON 扩展字段、顺序和 `TaskStore` Revision 语义保留；
 - SQLite Task 导入数量与 SHA-256 摘要复核，差异目标不覆盖；
@@ -87,6 +87,8 @@ Task/Job 迁移新增后，再在四张新表均为 0 行时执行：
 - 两个 Worker 的并发 Claim 结果不重叠；
 - 过期 Lease 可接管，旧 Worker 不能写回结果；
 - Retry、Conflict、Cancel 和 Batch 汇总契约通过；
+- Active SQLite Job 会阻止切换；
+- Terminal Batch/Job 保留稳定 ID，并复核数量、状态分布和内容摘要；
 - Task/Job 复合外键、Lease CHECK 和活跃 Job 部分唯一索引通过。
 
 ### 完整后端回归
@@ -100,7 +102,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 443 tests；
+- 445 tests；
 - 全部通过；
 - 1 skipped；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -118,7 +120,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 - 已有 Actor Session Codec，但正式身份来源与登录签发入口尚未接入；
 - RBAC 尚未接入 FastAPI 路由、Knowledge Retriever、对象下载或 Worker；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
-- SQLite Terminal Job 历史导入和切换双读报告尚未实现；
+- SQLite Terminal Job 历史导入已实现；切换双读报告和 `app.py` 单写切换尚未实现；
 - S3 对象存储、备份恢复和部署门禁尚未实现；
 - 本阶段未修改前端，因此没有新增 M7 前端验收项。
 
