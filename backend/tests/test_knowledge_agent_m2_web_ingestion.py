@@ -89,6 +89,11 @@ class OfficialWebIngestionIntegrationTests(unittest.TestCase):
         self.temp_directory = tempfile.TemporaryDirectory()
         with self.engine.begin() as connection:
             for table in (
+                "evidence_links",
+                "evidence_pack_hits",
+                "evidence_packs",
+                "retrieval_scopes",
+                "retrieval_plans",
                 "knowledge_product_asset_evidence",
                 "knowledge_product_source_evidence",
                 "knowledge_products",
@@ -99,11 +104,18 @@ class OfficialWebIngestionIntegrationTests(unittest.TestCase):
                 "knowledge_sources",
                 "projects",
             ):
-                connection.execute(sa.text(f"DELETE FROM {table}"))
+                connection.execute(
+                    sa.text(f"DELETE FROM {table} WHERE project_id = 'example.com'")
+                )
 
     def tearDown(self) -> None:
         with self.engine.begin() as connection:
             for table in (
+                "evidence_links",
+                "evidence_pack_hits",
+                "evidence_packs",
+                "retrieval_scopes",
+                "retrieval_plans",
                 "knowledge_product_asset_evidence",
                 "knowledge_product_source_evidence",
                 "knowledge_products",
@@ -114,7 +126,9 @@ class OfficialWebIngestionIntegrationTests(unittest.TestCase):
                 "knowledge_sources",
                 "projects",
             ):
-                connection.execute(sa.text(f"DELETE FROM {table}"))
+                connection.execute(
+                    sa.text(f"DELETE FROM {table} WHERE project_id = 'example.com'")
+                )
         self.temp_directory.cleanup()
 
     def _service(self) -> WordPressProductSyncService:
@@ -247,19 +261,29 @@ class OfficialWebIngestionIntegrationTests(unittest.TestCase):
                 sa.select(
                     knowledge_sources.c.source_kind,
                     knowledge_sources.c.status,
-                ).order_by(knowledge_sources.c.source_kind)
+                )
+                .where(knowledge_sources.c.project_id == "example.com")
+                .order_by(knowledge_sources.c.source_kind)
             ).all()
             source_evidence_count = connection.execute(
-                sa.select(sa.func.count()).select_from(
-                    knowledge_product_source_evidence
+                sa.select(sa.func.count())
+                .select_from(knowledge_product_source_evidence)
+                .where(
+                    knowledge_product_source_evidence.c.project_id
+                    == "example.com"
                 )
             ).scalar_one()
             asset_link_count = connection.execute(
-                sa.select(sa.func.count()).select_from(snapshot_assets)
+                sa.select(sa.func.count())
+                .select_from(snapshot_assets)
+                .where(snapshot_assets.c.project_id == "example.com")
             ).scalar_one()
             product_asset_count = connection.execute(
-                sa.select(sa.func.count()).select_from(
-                    knowledge_product_asset_evidence
+                sa.select(sa.func.count())
+                .select_from(knowledge_product_asset_evidence)
+                .where(
+                    knowledge_product_asset_evidence.c.project_id
+                    == "example.com"
                 )
             ).scalar_one()
         self.assertEqual(

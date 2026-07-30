@@ -120,19 +120,28 @@ class KnowledgeAssetRepositoryTests(unittest.TestCase):
 
     def setUp(self) -> None:
         with self.engine.begin() as connection:
-            connection.execute(
-                sa.text("DELETE FROM knowledge_product_asset_evidence")
-            )
-            connection.execute(
-                sa.text("DELETE FROM knowledge_product_source_evidence")
-            )
-            connection.execute(sa.text("DELETE FROM knowledge_products"))
-            connection.execute(sa.text("DELETE FROM snapshot_assets"))
-            connection.execute(sa.text("DELETE FROM knowledge_assets"))
-            connection.execute(sa.text("DELETE FROM knowledge_chunks"))
-            connection.execute(sa.text("DELETE FROM source_snapshots"))
-            connection.execute(sa.text("DELETE FROM knowledge_sources"))
-            connection.execute(sa.text("DELETE FROM projects"))
+            for table in (
+                "evidence_links",
+                "evidence_pack_hits",
+                "evidence_packs",
+                "retrieval_scopes",
+                "retrieval_plans",
+                "knowledge_product_asset_evidence",
+                "knowledge_product_source_evidence",
+                "knowledge_products",
+                "snapshot_assets",
+                "knowledge_assets",
+                "knowledge_chunks",
+                "source_snapshots",
+                "knowledge_sources",
+                "projects",
+            ):
+                connection.execute(
+                    sa.text(
+                        f"DELETE FROM {table} "
+                        "WHERE project_id IN ('project-a', 'project-b')"
+                    )
+                )
         self.knowledge_repository = PostgresKnowledgeRepository(self.engine)
         self.asset_repository = PostgresKnowledgeAssetRepository(self.engine)
         for project_id in ("project-a", "project-b"):
@@ -178,19 +187,28 @@ class KnowledgeAssetRepositoryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         with self.engine.begin() as connection:
-            connection.execute(
-                sa.text("DELETE FROM knowledge_product_asset_evidence")
-            )
-            connection.execute(
-                sa.text("DELETE FROM knowledge_product_source_evidence")
-            )
-            connection.execute(sa.text("DELETE FROM knowledge_products"))
-            connection.execute(sa.text("DELETE FROM snapshot_assets"))
-            connection.execute(sa.text("DELETE FROM knowledge_assets"))
-            connection.execute(sa.text("DELETE FROM knowledge_chunks"))
-            connection.execute(sa.text("DELETE FROM source_snapshots"))
-            connection.execute(sa.text("DELETE FROM knowledge_sources"))
-            connection.execute(sa.text("DELETE FROM projects"))
+            for table in (
+                "evidence_links",
+                "evidence_pack_hits",
+                "evidence_packs",
+                "retrieval_scopes",
+                "retrieval_plans",
+                "knowledge_product_asset_evidence",
+                "knowledge_product_source_evidence",
+                "knowledge_products",
+                "snapshot_assets",
+                "knowledge_assets",
+                "knowledge_chunks",
+                "source_snapshots",
+                "knowledge_sources",
+                "projects",
+            ):
+                connection.execute(
+                    sa.text(
+                        f"DELETE FROM {table} "
+                        "WHERE project_id IN ('project-a', 'project-b')"
+                    )
+                )
 
     def test_content_hash_deduplicates_and_snapshot_link_is_idempotent(self) -> None:
         first = self.asset_repository.put_asset(asset())

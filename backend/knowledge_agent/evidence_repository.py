@@ -107,8 +107,19 @@ def _plan_signature(plan: RetrievalPlan) -> tuple[object, ...]:
         plan.outline_version,
         plan.max_gap_fill_rounds,
         dict(plan.metadata),
-        plan.created_at,
         tuple(plan.scopes),
+    )
+
+
+def _pack_signature(pack: EvidencePack) -> tuple[object, ...]:
+    return (
+        pack.evidence_pack_id,
+        pack.request,
+        pack.hits,
+        pack.sufficiency,
+        pack.gap_reasons,
+        pack.hard_fact_chunk_ids,
+        pack.public_citation_urls,
     )
 
 
@@ -245,7 +256,7 @@ class PostgresEvidencePackRepository:
                     evidence_pack.evidence_pack_id,
                 )
                 if existing is not None:
-                    if existing != evidence_pack:
+                    if _pack_signature(existing) != _pack_signature(evidence_pack):
                         raise EvidenceConflictError(
                             "evidence pack identity already has different content"
                         )

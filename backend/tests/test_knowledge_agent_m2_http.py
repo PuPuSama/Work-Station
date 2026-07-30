@@ -145,6 +145,11 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         with self.runtime.engine.begin() as connection:
             for table in (
+                "evidence_links",
+                "evidence_pack_hits",
+                "evidence_packs",
+                "retrieval_scopes",
+                "retrieval_plans",
                 "knowledge_product_asset_evidence",
                 "knowledge_product_source_evidence",
                 "knowledge_products",
@@ -155,7 +160,10 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
                 "knowledge_sources",
                 "projects",
             ):
-                connection.execute(sa.text(f"DELETE FROM {table}"))
+                connection.execute(
+                    sa.text(f"DELETE FROM {table} WHERE project_id = :project_id"),
+                    {"project_id": "example.com"},
+                )
 
     def tearDown(self) -> None:
         self.setUp()
@@ -273,6 +281,118 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
             library["sources"][0]["current_snapshot_id"],
             uploaded["snapshot_id"],
         )
+
+    def test_m3_plan_pack_link_and_coverage_flow(self) -> None:
+        uploaded = self.client.post(
+            "/api/knowledge/example.com/sources/upload",
+            files={"file": ("private-spec.docx", docx_bytes())},
+            data={"trust_tier": "hard_fact"},
+        ).json()
+        source_id = uploaded["source_id"]
+        self.client.put(
+            f"/api/knowledge/example.com/sources/{source_id}/review",
+            json={
+                "source_kind": "private_file",
+                "trust_tier": "hard_fact",
+                "decision": "approve",
+                "reason": "Verified product specification.",
+            },
+        )
+        published = self.client.post(
+            f"/api/knowledge/example.com/sources/{source_id}/publish"
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+
+        plan_payload = {
+            "retrieval_plan_id": "plan-article-1-v1",
+            "article_id": "article-1",
+            "outline_version": 1,
+            "scopes": [
+                {
+                    "scope_id": "scope-product-facts",
+                    "ordinal": 0,
+                    "scope_type": "product_fact",
+                    "scope_key": "materials",
+                    "title": "Product materials",
+                    "query_variants": ["carbon steel wood screw material"],
+                    "minimum_hits": 1,
+                    "minimum_distinct_sources": 1,
+                    "require_hard_fact": True,
+                }
+            ],
+        }
+        created_plan = self.client.post(
+            "/api/knowledge/example.com/retrieval-plans",
+            json=plan_payload,
+        )
+        self.assertEqual(created_plan.status_code, 201, created_plan.text)
+        repeated_plan = self.client.post(
+            "/api/knowledge/example.com/retrieval-plans",
+            json=plan_payload,
+        )
+        self.assertEqual(repeated_plan.status_code, 201, repeated_plan.text)
+
+        pack_url = (
+            "/api/knowledge/example.com/retrieval-plans/"
+            "plan-article-1-v1/scopes/scope-product-facts/evidence-packs"
+        )
+        built_pack = self.client.post(pack_url, json={"limit": 5})
+        self.assertEqual(built_pack.status_code, 201, built_pack.text)
+        pack = built_pack.json()
+        self.assertEqual(pack["sufficiency"], "sufficient")
+        self.assertGreaterEqual(len(pack["hits"]), 1)
+        self.assertEqual(
+            pack["hits"][0]["provenance"]["snapshot_id"],
+            uploaded["snapshot_id"],
+        )
+        repeated_pack = self.client.post(pack_url, json={"limit": 5})
+        self.assertEqual(repeated_pack.status_code, 201, repeated_pack.text)
+        self.assertEqual(
+            repeated_pack.json()["evidence_pack_id"],
+            pack["evidence_pack_id"],
+        )
+
+        paragraph_hash = "a" * 64
+        link_response = self.client.post(
+            "/api/knowledge/example.com/evidence-links",
+            json={
+                "evidence_link_id": "link-article-1-p1",
+                "article_id": "article-1",
+                "paragraph_id": "p1",
+                "paragraph_hash": paragraph_hash,
+                "chunk_id": pack["hits"][0]["chunk_id"],
+                "visible_words": 12,
+            },
+        )
+        self.assertEqual(link_response.status_code, 201, link_response.text)
+
+        coverage = self.client.post(
+            "/api/knowledge/example.com/articles/article-1/knowledge-coverage",
+            json={
+                "paragraphs": [
+                    {
+                        "paragraph_id": "p1",
+                        "paragraph_hash": paragraph_hash,
+                        "visible_words": 12,
+                    }
+                ],
+                "hard_fact_sentences": [],
+            },
+        )
+        self.assertEqual(coverage.status_code, 200, coverage.text)
+        self.assertEqual(coverage.json()["paragraph_coverage"], 1.0)
+        self.assertEqual(coverage.json()["hard_fact_coverage"], 1.0)
+
+        stale = self.client.post(
+            "/api/knowledge/example.com/articles/article-1/"
+            "evidence-links/review-stale",
+            json={
+                "paragraph_id": "p1",
+                "current_paragraph_hash": "b" * 64,
+            },
+        )
+        self.assertEqual(stale.status_code, 200, stale.text)
+        self.assertEqual(stale.json()["marked_needs_review"], 1)
 
 
 if __name__ == "__main__":

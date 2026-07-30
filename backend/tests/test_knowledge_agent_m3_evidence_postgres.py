@@ -6,7 +6,7 @@ import sys
 import unittest
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -253,12 +253,17 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
             article_id=plan.article_id,
             outline_version=plan.outline_version,
         )
-        pack = DefaultEvidencePackBuilder(
+        builder = DefaultEvidencePackBuilder(
             minimum_hits=1,
             require_hard_fact=True,
-        ).build(request, (retrieval_hit,))
+        )
+        pack = builder.build(request, (retrieval_hit,))
         self.packs.save_evidence_pack(pack)
-        self.packs.save_evidence_pack(pack)
+        rebuilt = replace(
+            builder.build(request, (retrieval_hit,)),
+            created_at=pack.created_at + timedelta(seconds=1),
+        )
+        self.packs.save_evidence_pack(rebuilt)
 
         self.assertEqual(
             self.packs.get_evidence_pack(project_id, pack.evidence_pack_id),

@@ -1,6 +1,6 @@
 # Knowledge Agent M3：证据计划、证据包与覆盖率结构记录
 
-> 状态：核心后端已实现，API 和前端视图待接入
+> 状态：核心后端、API 和章节证据视图已实现
 > 迁移：`20260730_0005`
 > 代码入口：`knowledge_agent.contracts`、`knowledge_agent.evidence`、
 > `knowledge_agent.evidence_repository`
@@ -130,9 +130,42 @@ Link 到 Chunk 均使用项目级复合外键，不能把另一个客户的对�
 6. hard-fact 仍要求句子级 Link 和 `hard_fact` 信任层。
 7. 所有读取和写入仍以 `project_id` 为第一层边界。
 
-## 8. 尚未完成
+## 8. HTTP 与前端接入
 
-- 后端 HTTP：创建/读取 Plan、执行 Scope 检索、保存/读取 Pack、保存 Link、查询覆盖率。
-- 前端：按 Scope 查看充分度、命中来源和排序解释；分别显示两个覆盖率。
+`knowledge_agent.http` 提供下列 M3 边界：
+
+| 接口职责 | 路径 |
+|---|---|
+| 创建/读取不可变 RetrievalPlan | `POST /{project}/retrieval-plans`、`GET /{project}/retrieval-plans/{id}` |
+| 执行一个 Scope 的查询变体并固化 Pack | `POST /{project}/retrieval-plans/{id}/scopes/{scope_id}/evidence-packs` |
+| 按项目读取 Pack | `GET /{project}/evidence-packs/{id}` |
+| 保存、列出 EvidenceLink | `POST /{project}/evidence-links`、`GET /{project}/articles/{article_id}/evidence-links` |
+| 计算两种覆盖率 | `POST /{project}/articles/{article_id}/knowledge-coverage` |
+| 正文哈希变化后失效旧 Link | `POST /{project}/articles/{article_id}/evidence-links/review-stale` |
+
+Runtime 只有在独立 Embedding Provider 已配置时才创建
+`BasicHybridRetriever`。未配置时，知识库浏览仍可用，Scope 检索明确返回 503，
+不会回退到正文生成使用的 `LLM_*`。
+
+同一 Scope 的多个查询变体分别执行项目级混合检索，再按 `chunk_id` 去重，保留最高
+分数并记录 `matched_query_variants`。最终结果按分数降序、`chunk_id` 同分稳定排序，
+然后交给确定性的 Evidence Pack Builder。
+
+前端 `project-evidence-workbench.tsx` 是知识库页面中的 M3 试运行入口。它允许运营人员
+指定文章、大纲版本、Scope 类型和问题，随后展示：
+
+- `sufficient / weak / missing`；
+- 缺口原因；
+- 命中 Chunk 和来源快照；
+- hard-fact / reference-material 信任层；
+- 向量与全文排名；
+- 可公开引用的 Canonical URL。
+
+该界面不直接改写正文，也不把检索命中自动视为正文已使用证据。正文编辑器后续接入
+EvidenceLink 时，才显示真实的段落支持率和硬事实句子覆盖率。
+
+## 9. 尚未完成
+
+- 正文编辑器：从具体段落/句子创建 EvidenceLink，并同时显示两个覆盖率。
 - M4：LangGraph 有界补查、检查点和人工中断。
 - 自然语言相关性校验：M3 目前保证链接结构合法，不声称自动证明文本语义正确。

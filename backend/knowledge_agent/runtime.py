@@ -11,6 +11,12 @@ from .catalog import PostgresProductCatalogRepository
 from .database import create_knowledge_engine
 from .ingestion import PrivateDocumentIngestionService
 from .interfaces import EmbeddingProvider
+from .evidence_repository import (
+    PostgresEvidenceLinkRepository,
+    PostgresEvidencePackRepository,
+    PostgresRetrievalPlanRepository,
+)
+from .hybrid_retriever import BasicHybridRetriever
 from .library import PostgresKnowledgeLibrary
 from .publication import KnowledgePublicationService
 from .repository import PostgresKnowledgeRepository
@@ -35,6 +41,10 @@ class KnowledgeAgentRuntime:
     wordpress_sync: WordPressProductSyncService
     publication: KnowledgePublicationService | None
     embedding_provider: EmbeddingProvider | None
+    hybrid_retriever: BasicHybridRetriever | None
+    retrieval_plan_repository: PostgresRetrievalPlanRepository
+    evidence_pack_repository: PostgresEvidencePackRepository
+    evidence_link_repository: PostgresEvidenceLinkRepository
 
     def close(self) -> None:
         close_provider = getattr(self.embedding_provider, "close", None)
@@ -55,6 +65,9 @@ def create_knowledge_runtime(
     artifact_store = LocalKnowledgeArtifactStore(artifact_root)
     library = PostgresKnowledgeLibrary(engine)
     catalog_repository = PostgresProductCatalogRepository(engine)
+    retrieval_plan_repository = PostgresRetrievalPlanRepository(engine)
+    evidence_pack_repository = PostgresEvidencePackRepository(engine)
+    evidence_link_repository = PostgresEvidenceLinkRepository(engine)
     official_site_fetcher = SafeOfficialSiteFetcher()
     web_page_ingestion = OfficialWebPageIngestionService(
         repository=repository,
@@ -91,4 +104,12 @@ def create_knowledge_runtime(
             )
         ),
         embedding_provider=embedding_provider,
+        hybrid_retriever=(
+            None
+            if embedding_provider is None
+            else BasicHybridRetriever(engine, embedding_provider)
+        ),
+        retrieval_plan_repository=retrieval_plan_repository,
+        evidence_pack_repository=evidence_pack_repository,
+        evidence_link_repository=evidence_link_repository,
     )

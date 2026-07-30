@@ -1,4 +1,5 @@
 import { ProjectKnowledgeLibrary } from "@/components/project-knowledge-library";
+import { ProjectEvidenceWorkbench } from "@/components/project-evidence-workbench";
 
 type ProjectKnowledgePageProps = {
   params: Promise<{
@@ -10,7 +11,11 @@ export default async function ProjectKnowledgePage({
   params,
 }: ProjectKnowledgePageProps) {
   const { customer } = await params;
+  const decodedCustomer = decodeURIComponent(customer);
   return (
-    <ProjectKnowledgeLibrary customer={decodeURIComponent(customer)} />
+    <>
+      <ProjectKnowledgeLibrary customer={decodedCustomer} />
+      <ProjectEvidenceWorkbench customer={decodedCustomer} />
+    </>
   );
 }

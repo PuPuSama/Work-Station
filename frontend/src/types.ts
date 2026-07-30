@@ -408,6 +408,68 @@ export type KnowledgeLibrary = {
   products: KnowledgeProductSummary[];
 };
 
+export type KnowledgeRetrievalScope = {
+  project_id: string;
+  retrieval_plan_id: string;
+  scope_id: string;
+  ordinal: number;
+  scope_type: "introduction" | "h2_section" | "product_fact" | "faq";
+  scope_key: string;
+  title: string;
+  query_variants: string[];
+  filters: Record<string, unknown>;
+  minimum_hits: number;
+  minimum_distinct_sources: number;
+  require_hard_fact: boolean;
+  metadata: Record<string, unknown>;
+};
+
+export type KnowledgeRetrievalPlan = {
+  project_id: string;
+  retrieval_plan_id: string;
+  article_id: string;
+  outline_version: number;
+  max_gap_fill_rounds: number;
+  scopes: KnowledgeRetrievalScope[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type KnowledgeEvidenceHit = {
+  chunk_id: string;
+  text: string;
+  heading_path: string[];
+  score: number;
+  provenance: {
+    source_id: string;
+    snapshot_id: string;
+    display_name: string;
+    source_kind: string;
+    trust_tier: string;
+    public_source: boolean;
+    canonical_url: string | null;
+    fetched_at: string | null;
+  } | null;
+  explanation: Record<string, unknown>;
+};
+
+export type KnowledgeEvidencePack = {
+  project_id: string;
+  evidence_pack_id: string;
+  retrieval_plan_id: string;
+  scope_id: string;
+  article_id: string;
+  outline_version: number;
+  scope_type: string;
+  scope_key: string;
+  sufficiency: "sufficient" | "weak" | "missing";
+  gap_reasons: string[];
+  hard_fact_chunk_ids: string[];
+  public_citation_urls: string[];
+  hits: KnowledgeEvidenceHit[];
+  created_at: string;
+};
+
 export type KnowledgeUploadResult = {
   project_id: string;
   source_id: string;

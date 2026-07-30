@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import PurePath
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import quote
@@ -23,8 +24,21 @@ from .catalog import (
     KnowledgeProduct,
     ProductCatalogRepositoryError,
 )
-from .contracts import KnowledgeProject
-from .contracts import KnowledgeSource
+from .contracts import (
+    EvidenceLink,
+    EvidencePack,
+    HardFactSentenceTarget,
+    KnowledgeProject,
+    KnowledgeSource,
+    ParagraphEvidenceTarget,
+    RetrievalHit,
+    RetrievalPlan,
+    RetrievalQuery,
+    RetrievalScope,
+)
+from .evidence import DefaultEvidencePackBuilder, calculate_knowledge_coverage
+from .evidence_repository import EvidenceRepositoryError
+from .hybrid_retriever import HybridRetrievalConfigurationError
 from .ingestion import DocumentInput, DocumentParserError
 from .embedding import EmbeddingProviderError
 from .library import KnowledgeSourceSummary
@@ -177,6 +191,145 @@ class WordPressSyncResponse(KnowledgeApiModel):
     warnings: list[str]
 
 
+class RetrievalScopeInput(KnowledgeApiModel):
+    scope_id: str = Field(min_length=1, max_length=200)
+    ordinal: int = Field(ge=0)
+    scope_type: Literal["introduction", "h2_section", "product_fact", "faq"]
+    scope_key: str = Field(min_length=1, max_length=500)
+    title: str = Field(min_length=1, max_length=500)
+    query_variants: list[str] = Field(min_length=1, max_length=20)
+    filters: dict[str, object] = Field(default_factory=dict)
+    minimum_hits: int = Field(default=2, ge=1, le=50)
+    minimum_distinct_sources: int = Field(default=1, ge=1, le=20)
+    require_hard_fact: bool = False
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class RetrievalPlanCreateRequest(KnowledgeApiModel):
+    retrieval_plan_id: str = Field(min_length=1, max_length=200)
+    article_id: str = Field(min_length=1, max_length=200)
+    outline_version: int = Field(ge=1)
+    max_gap_fill_rounds: int = Field(default=2, ge=0, le=2)
+    scopes: list[RetrievalScopeInput] = Field(min_length=1, max_length=100)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class RetrievalScopeResponse(RetrievalScopeInput):
+    project_id: str
+    retrieval_plan_id: str
+
+
+class RetrievalPlanResponse(KnowledgeApiModel):
+    project_id: str
+    retrieval_plan_id: str
+    article_id: str
+    outline_version: int
+    max_gap_fill_rounds: int
+    scopes: list[RetrievalScopeResponse]
+    metadata: dict[str, object]
+    created_at: str
+
+
+class EvidencePackBuildRequest(KnowledgeApiModel):
+    limit: int = Field(default=8, ge=1, le=50)
+
+
+class EvidenceProvenanceResponse(KnowledgeApiModel):
+    source_id: str
+    snapshot_id: str
+    display_name: str
+    source_kind: str
+    trust_tier: str
+    public_source: bool
+    canonical_url: str | None
+    fetched_at: str | None
+
+
+class EvidenceHitResponse(KnowledgeApiModel):
+    chunk_id: str
+    text: str
+    heading_path: list[str]
+    score: float
+    provenance: EvidenceProvenanceResponse | None
+    explanation: dict[str, object]
+
+
+class EvidencePackResponse(KnowledgeApiModel):
+    project_id: str
+    evidence_pack_id: str
+    retrieval_plan_id: str
+    scope_id: str
+    article_id: str
+    outline_version: int
+    scope_type: str
+    scope_key: str
+    sufficiency: str
+    gap_reasons: list[str]
+    hard_fact_chunk_ids: list[str]
+    public_citation_urls: list[str]
+    hits: list[EvidenceHitResponse]
+    created_at: str
+
+
+class EvidenceLinkWriteRequest(KnowledgeApiModel):
+    evidence_link_id: str = Field(min_length=1, max_length=200)
+    article_id: str = Field(min_length=1, max_length=200)
+    paragraph_id: str = Field(min_length=1, max_length=200)
+    paragraph_hash: str = Field(min_length=64, max_length=64)
+    chunk_id: str = Field(min_length=1, max_length=500)
+    support_scope: Literal["paragraph", "sentence"] = "paragraph"
+    claim_type: Literal["reference", "hard_fact"] = "reference"
+    support_type: Literal["direct", "paraphrase", "contextual"] = "paraphrase"
+    sentence_id: str | None = Field(default=None, max_length=200)
+    visible_words: int = Field(default=0, ge=0)
+    public_citation_url: str | None = Field(default=None, max_length=4096)
+    validation_status: Literal["valid", "needs_review", "invalid"] = "valid"
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class EvidenceLinkResponse(EvidenceLinkWriteRequest):
+    project_id: str
+
+
+class ParagraphCoverageInput(KnowledgeApiModel):
+    paragraph_id: str = Field(min_length=1, max_length=200)
+    paragraph_hash: str = Field(min_length=64, max_length=64)
+    visible_words: int = Field(ge=0)
+    eligible: bool = True
+
+
+class HardFactCoverageInput(KnowledgeApiModel):
+    paragraph_id: str = Field(min_length=1, max_length=200)
+    sentence_id: str = Field(min_length=1, max_length=200)
+    paragraph_hash: str = Field(min_length=64, max_length=64)
+
+
+class KnowledgeCoverageRequest(KnowledgeApiModel):
+    paragraphs: list[ParagraphCoverageInput]
+    hard_fact_sentences: list[HardFactCoverageInput] = Field(default_factory=list)
+
+
+class KnowledgeCoverageResponse(KnowledgeApiModel):
+    article_id: str
+    eligible_paragraphs: int
+    supported_paragraphs: int
+    paragraph_coverage: float
+    hard_fact_sentences: int
+    supported_hard_fact_sentences: int
+    hard_fact_coverage: float
+
+
+class ParagraphHashReviewRequest(KnowledgeApiModel):
+    paragraph_id: str = Field(min_length=1, max_length=200)
+    current_paragraph_hash: str = Field(min_length=64, max_length=64)
+
+
+class ParagraphHashReviewResponse(KnowledgeApiModel):
+    article_id: str
+    paragraph_id: str
+    marked_needs_review: int
+
+
 def _runtime(request: Request) -> KnowledgeAgentRuntime:
     runtime = getattr(request.app.state, "knowledge_agent_runtime", None)
     if runtime is None:
@@ -258,6 +411,119 @@ def _synced_page_response(item) -> WordPressSyncedPageResponse:
         asset_count=len(item.assets),
         warnings=list(item.warnings),
     )
+
+
+def _plan_response(plan: RetrievalPlan) -> RetrievalPlanResponse:
+    return RetrievalPlanResponse(
+        project_id=plan.project_id,
+        retrieval_plan_id=plan.retrieval_plan_id,
+        article_id=plan.article_id,
+        outline_version=plan.outline_version,
+        max_gap_fill_rounds=plan.max_gap_fill_rounds,
+        metadata=dict(plan.metadata),
+        created_at=plan.created_at.isoformat(),
+        scopes=[
+            RetrievalScopeResponse(
+                project_id=scope.project_id,
+                retrieval_plan_id=scope.retrieval_plan_id,
+                scope_id=scope.scope_id,
+                ordinal=scope.ordinal,
+                scope_type=scope.scope_type,
+                scope_key=scope.scope_key,
+                title=scope.title,
+                query_variants=list(scope.query_variants),
+                filters=dict(scope.filters),
+                minimum_hits=scope.minimum_hits,
+                minimum_distinct_sources=scope.minimum_distinct_sources,
+                require_hard_fact=scope.require_hard_fact,
+                metadata=dict(scope.metadata),
+            )
+            for scope in plan.scopes
+        ],
+    )
+
+
+def _pack_response(pack: EvidencePack) -> EvidencePackResponse:
+    request = pack.request
+    if request.retrieval_plan_id is None or request.scope_id is None:
+        raise ValueError("persisted evidence pack is missing plan scope identity")
+    return EvidencePackResponse(
+        project_id=pack.project_id,
+        evidence_pack_id=pack.evidence_pack_id,
+        retrieval_plan_id=request.retrieval_plan_id,
+        scope_id=request.scope_id,
+        article_id=request.article_id,
+        outline_version=request.outline_version,
+        scope_type=request.scope_type,
+        scope_key=request.scope_key,
+        sufficiency=pack.sufficiency,
+        gap_reasons=list(pack.gap_reasons),
+        hard_fact_chunk_ids=list(pack.hard_fact_chunk_ids),
+        public_citation_urls=list(pack.public_citation_urls),
+        created_at=pack.created_at.isoformat(),
+        hits=[
+            EvidenceHitResponse(
+                chunk_id=hit.chunk.chunk_id,
+                text=hit.chunk.text,
+                heading_path=list(hit.chunk.heading_path),
+                score=hit.score,
+                provenance=(
+                    None
+                    if hit.provenance is None
+                    else EvidenceProvenanceResponse(
+                        source_id=hit.provenance.source_id,
+                        snapshot_id=hit.provenance.snapshot_id,
+                        display_name=hit.provenance.display_name,
+                        source_kind=hit.provenance.source_kind,
+                        trust_tier=hit.provenance.trust_tier,
+                        public_source=hit.provenance.public_source,
+                        canonical_url=hit.provenance.canonical_url,
+                        fetched_at=(
+                            None
+                            if hit.provenance.fetched_at is None
+                            else hit.provenance.fetched_at.isoformat()
+                        ),
+                    )
+                ),
+                explanation=dict(hit.explanation),
+            )
+            for hit in pack.hits
+        ],
+    )
+
+
+def _link_response(link: EvidenceLink) -> EvidenceLinkResponse:
+    return EvidenceLinkResponse(
+        project_id=link.project_id,
+        evidence_link_id=link.evidence_link_id,
+        article_id=link.article_id,
+        paragraph_id=link.paragraph_id,
+        sentence_id=link.sentence_id,
+        paragraph_hash=link.paragraph_hash,
+        chunk_id=link.chunk_id,
+        support_scope=link.support_scope,
+        claim_type=link.claim_type,
+        support_type=link.support_type,
+        visible_words=link.visible_words,
+        public_citation_url=link.public_citation_url,
+        validation_status=link.validation_status,
+        metadata=dict(link.metadata),
+    )
+
+
+def _runtime_retrieval_filters(scope: RetrievalScope) -> dict[str, object]:
+    filters = dict(scope.filters)
+    fetched_after = filters.get("fetched_after")
+    if isinstance(fetched_after, str):
+        try:
+            filters["fetched_after"] = datetime.fromisoformat(
+                fetched_after.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "fetched_after must be an ISO-8601 timezone-aware datetime"
+            ) from exc
+    return filters
 
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge-agent"])
@@ -358,6 +624,323 @@ def read_knowledge_library(project: str, request: Request) -> KnowledgeLibraryRe
         asset_count=summary.asset_count,
         sources=[_source_response(item) for item in sources],
         products=[_product_response(item) for item in products],
+    )
+
+
+@router.post(
+    "/{project}/retrieval-plans",
+    response_model=RetrievalPlanResponse,
+    status_code=201,
+)
+def create_retrieval_plan(
+    project: str,
+    payload: RetrievalPlanCreateRequest,
+    request: Request,
+) -> RetrievalPlanResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    plan = RetrievalPlan(
+        project_id=project_id,
+        retrieval_plan_id=payload.retrieval_plan_id,
+        article_id=payload.article_id,
+        outline_version=payload.outline_version,
+        scopes=tuple(
+            RetrievalScope(
+                project_id=project_id,
+                retrieval_plan_id=payload.retrieval_plan_id,
+                scope_id=scope.scope_id,
+                ordinal=scope.ordinal,
+                scope_type=scope.scope_type,
+                scope_key=scope.scope_key,
+                title=scope.title,
+                query_variants=tuple(scope.query_variants),
+                filters=scope.filters,
+                minimum_hits=scope.minimum_hits,
+                minimum_distinct_sources=scope.minimum_distinct_sources,
+                require_hard_fact=scope.require_hard_fact,
+                metadata=scope.metadata,
+            )
+            for scope in payload.scopes
+        ),
+        max_gap_fill_rounds=payload.max_gap_fill_rounds,
+        metadata=payload.metadata,
+    )
+    try:
+        runtime.retrieval_plan_repository.save_retrieval_plan(plan)
+    except (ValueError, EvidenceRepositoryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    persisted = runtime.retrieval_plan_repository.get_retrieval_plan(
+        project_id,
+        plan.retrieval_plan_id,
+    )
+    if persisted is None:
+        raise HTTPException(status_code=500, detail="Retrieval plan was not persisted.")
+    return _plan_response(persisted)
+
+
+@router.get(
+    "/{project}/retrieval-plans/{retrieval_plan_id}",
+    response_model=RetrievalPlanResponse,
+)
+def read_retrieval_plan(
+    project: str,
+    retrieval_plan_id: str,
+    request: Request,
+) -> RetrievalPlanResponse:
+    runtime = _runtime(request)
+    plan = runtime.retrieval_plan_repository.get_retrieval_plan(
+        _project_id(project),
+        retrieval_plan_id,
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
+    return _plan_response(plan)
+
+
+@router.post(
+    "/{project}/retrieval-plans/{retrieval_plan_id}/scopes/"
+    "{scope_id}/evidence-packs",
+    response_model=EvidencePackResponse,
+    status_code=201,
+)
+def build_scope_evidence_pack(
+    project: str,
+    retrieval_plan_id: str,
+    scope_id: str,
+    payload: EvidencePackBuildRequest,
+    request: Request,
+) -> EvidencePackResponse:
+    runtime = _runtime(request)
+    if runtime.hybrid_retriever is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding Provider is not configured.",
+        )
+    project_id = _project_id(project)
+    plan = runtime.retrieval_plan_repository.get_retrieval_plan(
+        project_id,
+        retrieval_plan_id,
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
+    scope = next((item for item in plan.scopes if item.scope_id == scope_id), None)
+    if scope is None:
+        raise HTTPException(status_code=404, detail="Retrieval scope was not found.")
+
+    try:
+        filters = _runtime_retrieval_filters(scope)
+        candidates: dict[str, tuple[RetrievalHit, list[str]]] = {}
+        for query_text in scope.query_variants:
+            for hit in runtime.hybrid_retriever.retrieve(
+                RetrievalQuery(
+                    project_id=project_id,
+                    text=query_text,
+                    limit=payload.limit,
+                    filters=filters,
+                )
+            ):
+                existing = candidates.get(hit.chunk.chunk_id)
+                if existing is None:
+                    candidates[hit.chunk.chunk_id] = (hit, [query_text])
+                else:
+                    best, matched_queries = existing
+                    if query_text not in matched_queries:
+                        matched_queries.append(query_text)
+                    if hit.score > best.score:
+                        candidates[hit.chunk.chunk_id] = (hit, matched_queries)
+
+        merged_hits = tuple(
+            replace(
+                hit,
+                explanation={
+                    **dict(hit.explanation),
+                    "matched_query_variants": list(matched_queries),
+                },
+            )
+            for hit, matched_queries in sorted(
+                candidates.values(),
+                key=lambda item: (-item[0].score, item[0].chunk.chunk_id),
+            )[: payload.limit]
+        )
+        pack = DefaultEvidencePackBuilder(
+            minimum_hits=scope.minimum_hits,
+            minimum_distinct_sources=scope.minimum_distinct_sources,
+            require_hard_fact=scope.require_hard_fact,
+        ).build(
+            scope.evidence_request(
+                article_id=plan.article_id,
+                outline_version=plan.outline_version,
+            ),
+            merged_hits,
+        )
+        runtime.evidence_pack_repository.save_evidence_pack(pack)
+    except EmbeddingProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (
+        ValueError,
+        HybridRetrievalConfigurationError,
+    ) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except EvidenceRepositoryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    persisted = runtime.evidence_pack_repository.get_evidence_pack(
+        project_id,
+        pack.evidence_pack_id,
+    )
+    if persisted is None:
+        raise HTTPException(status_code=500, detail="Evidence pack was not persisted.")
+    return _pack_response(persisted)
+
+
+@router.get(
+    "/{project}/evidence-packs/{evidence_pack_id}",
+    response_model=EvidencePackResponse,
+)
+def read_evidence_pack(
+    project: str,
+    evidence_pack_id: str,
+    request: Request,
+) -> EvidencePackResponse:
+    runtime = _runtime(request)
+    pack = runtime.evidence_pack_repository.get_evidence_pack(
+        _project_id(project),
+        evidence_pack_id,
+    )
+    if pack is None:
+        raise HTTPException(status_code=404, detail="Evidence pack was not found.")
+    return _pack_response(pack)
+
+
+@router.post(
+    "/{project}/evidence-links",
+    response_model=EvidenceLinkResponse,
+    status_code=201,
+)
+def create_evidence_link(
+    project: str,
+    payload: EvidenceLinkWriteRequest,
+    request: Request,
+) -> EvidenceLinkResponse:
+    runtime = _runtime(request)
+    try:
+        link = EvidenceLink(
+            project_id=_project_id(project),
+            evidence_link_id=payload.evidence_link_id,
+            article_id=payload.article_id,
+            paragraph_id=payload.paragraph_id,
+            sentence_id=payload.sentence_id,
+            paragraph_hash=payload.paragraph_hash,
+            chunk_id=payload.chunk_id,
+            support_scope=payload.support_scope,
+            claim_type=payload.claim_type,
+            support_type=payload.support_type,
+            visible_words=payload.visible_words,
+            public_citation_url=payload.public_citation_url,
+            validation_status=payload.validation_status,
+            metadata=payload.metadata,
+        )
+        runtime.evidence_link_repository.save_evidence_link(link)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except EvidenceRepositoryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _link_response(link)
+
+
+@router.get(
+    "/{project}/articles/{article_id}/evidence-links",
+    response_model=list[EvidenceLinkResponse],
+)
+def list_article_evidence_links(
+    project: str,
+    article_id: str,
+    request: Request,
+) -> list[EvidenceLinkResponse]:
+    runtime = _runtime(request)
+    links = runtime.evidence_link_repository.list_evidence_links(
+        _project_id(project),
+        article_id,
+    )
+    return [_link_response(link) for link in links]
+
+
+@router.post(
+    "/{project}/articles/{article_id}/knowledge-coverage",
+    response_model=KnowledgeCoverageResponse,
+)
+def calculate_article_knowledge_coverage(
+    project: str,
+    article_id: str,
+    payload: KnowledgeCoverageRequest,
+    request: Request,
+) -> KnowledgeCoverageResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    links = runtime.evidence_link_repository.list_evidence_links(
+        project_id,
+        article_id,
+    )
+    try:
+        report = calculate_knowledge_coverage(
+            project_id=project_id,
+            article_id=article_id,
+            paragraphs=tuple(
+                ParagraphEvidenceTarget(
+                    paragraph_id=item.paragraph_id,
+                    paragraph_hash=item.paragraph_hash,
+                    visible_words=item.visible_words,
+                    eligible=item.eligible,
+                )
+                for item in payload.paragraphs
+            ),
+            hard_fact_sentences=tuple(
+                HardFactSentenceTarget(
+                    paragraph_id=item.paragraph_id,
+                    sentence_id=item.sentence_id,
+                    paragraph_hash=item.paragraph_hash,
+                )
+                for item in payload.hard_fact_sentences
+            ),
+            links=links,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return KnowledgeCoverageResponse(
+        article_id=article_id,
+        eligible_paragraphs=report.eligible_paragraphs,
+        supported_paragraphs=report.supported_paragraphs,
+        paragraph_coverage=report.paragraph_coverage,
+        hard_fact_sentences=report.hard_fact_sentences,
+        supported_hard_fact_sentences=report.supported_hard_fact_sentences,
+        hard_fact_coverage=report.hard_fact_coverage,
+    )
+
+
+@router.post(
+    "/{project}/articles/{article_id}/evidence-links/review-stale",
+    response_model=ParagraphHashReviewResponse,
+)
+def mark_stale_paragraph_evidence(
+    project: str,
+    article_id: str,
+    payload: ParagraphHashReviewRequest,
+    request: Request,
+) -> ParagraphHashReviewResponse:
+    runtime = _runtime(request)
+    try:
+        changed = runtime.evidence_link_repository.mark_paragraph_links_for_review(
+            _project_id(project),
+            article_id,
+            payload.paragraph_id,
+            payload.current_paragraph_hash.lower(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ParagraphHashReviewResponse(
+        article_id=article_id,
+        paragraph_id=payload.paragraph_id,
+        marked_needs_review=changed,
     )
 
 
