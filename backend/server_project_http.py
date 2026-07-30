@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
@@ -21,6 +21,10 @@ from services.project_directory import (
 )
 from services.server_auth import SERVER_AUTH_COOKIE_NAME, server_mode_enabled
 from services.server_project_tasks import ServerProjectTaskStoreFactory
+from services.server_product_selection import (
+    ConfirmedProductSelectionError,
+    PostgresConfirmedProductSelection,
+)
 from services.server_request_security import (
     AuthorizedProjectRequest,
     ServerRequestForbidden,
@@ -30,8 +34,10 @@ from services.server_request_security import (
 from storage import RevisionConflictError
 from workflow.state_machine import (
     ACTION_REWRITE_FROM_SCRATCH,
+    ACTION_UPDATE_PRODUCTS,
     WorkflowActionNotAllowed,
     ensure_action_allowed,
+    invalidate_downstream,
     reset_for_full_rewrite,
 )
 
@@ -40,6 +46,25 @@ class ProjectAssetDownload(BaseModel):
     asset_id: str
     url: str
     expires_seconds: int
+
+
+class ConfirmedProductsUpdateRequest(BaseModel):
+    """Select catalog identities, never caller-supplied product facts or URLs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    product_ids: list[str] = Field(min_length=1, max_length=3)
+
+    @field_validator("product_ids")
+    @classmethod
+    def validate_product_ids(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("product ids must not be empty")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("product ids must be unique")
+        return normalized
 
 
 def require_server_project_access(
@@ -174,6 +199,22 @@ def _knowledge_object_service(
             detail="Server project object storage is not available.",
         )
     return service
+
+
+def _confirmed_product_selection(
+    request: Request,
+) -> PostgresConfirmedProductSelection:
+    selection = getattr(
+        request.app.state,
+        "server_confirmed_product_selection",
+        None,
+    )
+    if not isinstance(selection, PostgresConfirmedProductSelection):
+        raise HTTPException(
+            status_code=503,
+            detail="Server product selection is not available.",
+        )
+    return selection
 
 
 def _require_project_permission(
@@ -371,7 +412,64 @@ def rewrite_project_task_from_scratch(
         ) from exc
 
 
+@router.put(
+    "/{project}/tasks/{task_id}/products",
+    response_model=TaskRecord,
+)
+def replace_project_task_products(
+    project: str,
+    task_id: str,
+    payload: ConfirmedProductsUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_UPDATE_PRODUCTS)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    try:
+        products = _confirmed_product_selection(request).select(
+            authorized.project_id,
+            payload.product_ids,
+        )
+    except ConfirmedProductSelectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    task.products = list(products)
+    invalidate_downstream(task, "products")
+    try:
+        return store.put(
+            task,
+            expected_revision=payload.revision,
+        )
+    except RevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+
 __all__ = [
+    "ConfirmedProductsUpdateRequest",
     "ProjectAssetDownload",
     "require_server_actor",
     "require_server_project_access",

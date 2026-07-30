@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 492 tests；
+- 493 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -273,7 +273,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 9 tests；
+- 10 tests；
 - 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
 - Project Directory 只返回 Actor 在当前 Organization 可见的 Active Project 和
   Effective Role；普通 Team Member 不会看到同 Team Project；
@@ -286,9 +286,17 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 正常资产只返回 30–3600 秒的签名 URL；缺失资产、伪造为另一 Organization Key 的
   URI 返回 404，跨项目请求返回 403；
 - 旧 `/api/tasks` 在 Server Mode 继续返回 503；
-- 除“完全重写”外，尚未迁移的 POST/PUT 写方法不进入 Server Project Task 白名单；
-- “完全重写”是当前唯一开放的 Task 写方法；Viewer 返回 403，Editor 成功后 PostgreSQL
-  Revision 从 0 增至 1，重复提交旧 Revision 返回 409；
+- 除“完全重写”和“选择已确认产品”外，尚未迁移的 POST/PUT 写方法不进入 Server
+  Project Task 白名单；
+- “完全重写”要求 `article.edit`；Viewer 返回 403，Editor 成功后 PostgreSQL Revision
+  从 0 增至 1，重复提交旧 Revision 返回 409；
+- 产品替换请求只接受 Revision 和 1–3 个 Product ID，额外的客户端产品字段返回 422；
+- 另一 Project 的产品、未确认产品或没有 Published Current Snapshot 主详情证据的产品
+  不可选择；成功投影保留正式名称、Canonical URL、事实、规格与稳定 `asset_id`；
+- 即使可变 `knowledge_products` 行被模拟成未审核刷新内容，Task 仍只读取当前已发布
+  Evidence 的 `selection_projection v1`，不会带入刷新后的名称、URL 或事实；
+- Task 不保存 S3 URI、源站图片 URL 或本地图片路径；重复 Product ID 返回 422，旧
+  Revision 返回 409；
 - Local Mode 不增加这组服务器专用 API；
 - 使用不存在的本地数据目录启动并读取后，该目录仍不存在，证明没有 SQLite/JSON 回退。
 
@@ -326,8 +334,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 已有 Actor Session Codec 和供应商无关 Identity Mapping，但具体 IdP Token 验证与
   登录签发入口尚未接入；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
-  旧路由和 Worker 尚未接入；新的项目级 PostgreSQL Task API 已支持读取和“完全重写”，
-  但不代表其余旧路由或完整写路径已经迁移；
+  旧路由和 Worker 尚未接入；新的项目级 PostgreSQL Task API 已支持读取、“完全重写”
+  和“从正式目录选择已确认产品”，但不代表其余旧路由或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；

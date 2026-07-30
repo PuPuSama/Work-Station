@@ -499,7 +499,26 @@ class OfficialWebPageIngestionService:
                 relation="primary_detail",
                 confidence=page.confidence,
                 reason="deterministic classifier identified an official product detail page",
-                metadata={"classification_reasons": list(page.reasons)},
+                metadata={
+                    "classification_reasons": list(page.reasons),
+                    "selection_projection": {
+                        "schema_version": 1,
+                        "name": product.name,
+                        "canonical_url": product.canonical_url,
+                        "description": product.metadata.get(
+                            "description",
+                            "",
+                        ),
+                        "reference_facts": product.metadata.get(
+                            "main_content_facts",
+                            [],
+                        ),
+                        "specification_tables": product.metadata.get(
+                            "specification_tables",
+                            [],
+                        ),
+                    },
+                },
             )
         )
         if parsed is None or self._max_product_images == 0:

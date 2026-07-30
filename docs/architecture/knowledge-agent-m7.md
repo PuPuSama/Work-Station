@@ -60,6 +60,12 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `POST /api/projects/{project}/tasks/{task_id}/rewrite-from-scratch`：
   `article.edit`、Project Scope 与 Revision CAS 全部通过后才清空下游派生状态，不写
   本地 Artifact；
+- 新增第二个 PostgreSQL-only Task 写操作
+  `PUT /api/projects/{project}/tasks/{task_id}/products`：请求只接收 Revision 和
+  1–3 个 Product ID；服务端从同 Project 的正式产品目录投影已确认、且有 Published
+  Current Snapshot 主详情证据的产品，再用 Revision CAS 替换 Task 产品快照；
+- Server 产品投影不接受客户端上传的名称、URL、事实或图片地址；图片只复制稳定
+  `asset_id`，不复制对象 URI、源站 URL 或本地路径；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
   Object Service 在签名前再次读取 `project.view`，核对数据库 URI 的 Bucket 与
   Organization/Project Key 前缀，并签发最长一小时的临时 URL；
@@ -369,9 +375,9 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 
 本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
-项目级 PostgreSQL Task 列表/单条读取和不依赖 Artifact 的“完全重写”已经接线，但其余
-Article 写入、Batch 和 Worker 尚未接线。因此不能用一个全局“默认项目”强行切换
-PostgreSQL，也不能把“一个确定性写操作已接线”描述成“服务器单写已完成”，或把
+项目级 PostgreSQL Task 列表/单条读取和不依赖 Artifact 的“完全重写”“选择已确认产品”
+已经接线，但其余 Article 写入、Batch 和 Worker 尚未接线。因此不能用一个全局“默认项目”
+强行切换 PostgreSQL，也不能把“两个确定性写操作已接线”描述成“服务器单写已完成”，或把
 “已停止旧 Worker”描述成“新 Worker 已就绪”。
 
 Worker 授权组件已完成但尚未进入 Server Mode Lifespan：新 Job 可在数据库中保存
@@ -386,6 +392,39 @@ API 强制写入 Requester 且 Lifespan 启动 PostgreSQL Runner 后，才能把
 PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化
 同进程内不同项目的兼容操作，后续重构可改成 Repository 原子命令，但必须保留 Revision
 CAS、扩展字段和项目 Scope。
+
+Server 产品选择采用“身份输入、服务端投影”接口，而不是复用旧
+`ProductsUpdateRequest`：
+
+```text
+PUT /api/projects/{project}/tasks/{task_id}/products
+body: { revision, product_ids[1..3] }
+  -> project.view + article.edit
+  -> 固定 Project 的 PostgreSQL Task
+  -> knowledge_products.status = confirmed
+  -> primary_detail evidence 属于 Published Source 的 Current Snapshot
+  -> 读取该不可变 Evidence 的 selection_projection v1
+  -> 只读取同一 Source/Snapshot 的当前图片证据
+  -> 投影为 Task Product snapshot
+  -> invalidate_downstream("products")
+  -> Task Revision CAS
+```
+
+这样可防止客户端把伪造的产品 URL、规格或图片地址直接写入服务器 Task。Task 中仍保存
+一次选择时的产品事实快照，保证后续生成可复现；产品目录继续是候选身份和证据准源。
+若产品目录后来更新，不会静默改写已经生成中的 Task，必须由操作者再次提交新 Revision
+显式选择。
+
+`knowledge_products.metadata` 是可刷新的目录投影，刷新抓取时可能先于人工发布更新，
+因此 Server Task 明确不从该字段复制产品事实。新抓取会在不可变
+`ProductSourceEvidence.metadata.selection_projection` 中保存版本化名称、Canonical URL、
+简介、事实和规格；只有该 Evidence 正好属于 Published Source 的 Current Snapshot 才能
+选择。旧 Evidence 没有 `selection_projection v1` 时 fail closed，必须重新抓取并审核，
+不能回退到可变目录 Metadata。图片也只从同一个 Source/Snapshot 的
+`knowledge_product_asset_evidence` 中选择。
+
+该操作目前还没有事务内 Audit Event，因此它仍属于 M7 迁移切片，不足以把
+全部项目写路由或 `postgres_task_single_write` 标为完成。
 
 ### M7-D：对象存储与部署
 
@@ -416,9 +455,13 @@ organizations/{organization_id}/projects/{project_id}/...
 2. `snapshot_assets` 保留图片出现在哪个网页快照、顺序、源 URL、alt、caption；
 3. `knowledge_product_asset_evidence` 记录它与产品的 `primary/gallery/...` 证据关系。
 
-文章或前端只保存 `asset_id`/证据选择。正式 Server Mode 下载路由已经接线：真正展示时
-先在路由校验 `project.view`，对象服务在签名前再校验一次，并签发最长一小时的临时下载
-URL。上传要求
+文章或前端只保存 `asset_id`/证据选择。Server 产品替换接口会按
+`primary -> hero -> gallery -> detail -> candidate`、置信度降序和 `asset_id`
+稳定顺序选出与产品选择投影相同的 Published Current Snapshot 首张图片，并把当前证据中的去重图片数保存为
+`asset_count`；没有图片时保留产品但标记 `asset_status=missing`，不伪造占位 URL。
+
+正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
+在签名前再校验一次，并签发最长一小时的临时下载 URL。上传要求
 `knowledge.edit`。S3 Key 和数据库查询同时锁定 Organization/Project，任一层
 Scope 不一致都拒绝。
 
@@ -472,3 +515,6 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 12. 是否有迁移、回滚、跨组织攻击和旧项目 fail-closed 自动测试？
 13. 产品图片是否仍拆分为不可变对象、快照出现证据和产品关系，而非退化成可覆盖 URL？
 14. S3 供应商或 SDK 替换后，M2 Parser/Ingester 是否仍只依赖 ArtifactStore 契约？
+15. Server 产品替换是否仍只接受 Product ID，并只投影 Confirmed + Published Current
+    Snapshot 证据，而不信任客户端产品字段？
+16. Task 是否只保存 `asset_id`，且图片展示仍通过重新授权的短期下载 URL？

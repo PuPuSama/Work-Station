@@ -154,6 +154,22 @@ KMS Key 轮换遵循供应商策略；先验证旧对象仍可解密。不得把
 3600 秒；同时使用另一 Project 的 Actor 和一条错误 Organization Key 前缀的测试资产，
 分别确认 403 与 404。不要把签名 URL 写入长期发布证据或普通日志。
 
+产品替换冒烟必须通过
+`PUT /api/projects/{project}/tasks/{task_id}/products`，请求只包含当前 Task Revision
+和 1–3 个 Product ID。至少验证：
+
+- 候选产品已经重新抓取并审核，当前 Primary Detail Evidence 含
+  `selection_projection.schema_version=1`；旧 Evidence 不允许回退读取可变目录 Metadata；
+- Viewer 返回 403，Editor 可提交；
+- 未确认产品、另一 Project 产品、没有 Published Current Snapshot 主详情证据的产品
+  返回同类不可选择错误；
+- 成功响应只保存正式目录事实和 `selected_asset_id`，不含对象 URI、源站图片 URL 或
+  本地路径；
+- 模拟未发布刷新修改 `knowledge_products.metadata` 后，Task 仍只得到已发布快照的
+  Evidence Projection；
+- 重复提交旧 Revision 返回 409；
+- 图片展示继续单独调用授权下载路由，不能把签名 URL 回写 Task。
+
 回滚原则：
 
 - 代码回滚优先，数据库迁移只在确认新表没有新业务数据时降级；

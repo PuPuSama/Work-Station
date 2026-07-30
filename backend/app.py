@@ -174,6 +174,9 @@ from services.server_request_security import (
     server_http_route_available,
 )
 from services.server_project_tasks import ServerProjectTaskStoreFactory
+from services.server_product_selection import (
+    PostgresConfirmedProductSelection,
+)
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -263,12 +266,18 @@ async def app_lifespan(application: FastAPI):
         "server_project_object_service",
         None,
     )
+    previous_server_confirmed_product_selection = getattr(
+        application.state,
+        "server_confirmed_product_selection",
+        None,
+    )
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_directory = None
     application.state.server_project_object_service = None
+    application.state.server_confirmed_product_selection = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -296,6 +305,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_directory = (
             PostgresProjectDirectory(server_engine)
+        )
+        application.state.server_confirmed_product_selection = (
+            PostgresConfirmedProductSelection(server_engine)
         )
         if os.environ.get(
             "ARTICLE_AGENT_OBJECT_STORE_BUCKET",
@@ -365,6 +377,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_object_service = (
                 previous_server_project_object_service
+            )
+            application.state.server_confirmed_product_selection = (
+                previous_server_confirmed_product_selection
             )
         return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
@@ -545,6 +560,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_object_service = (
             previous_server_project_object_service
+        )
+        application.state.server_confirmed_product_selection = (
+            previous_server_confirmed_product_selection
         )
 
 

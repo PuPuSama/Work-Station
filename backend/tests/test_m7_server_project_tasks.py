@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import uuid
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,7 +27,16 @@ from knowledge_agent.assets import (  # noqa: E402
 from knowledge_agent.object_storage import (  # noqa: E402
     ProjectKnowledgeObjectService,
 )
-from knowledge_agent.schema import knowledge_assets, projects  # noqa: E402
+from knowledge_agent.schema import (  # noqa: E402
+    knowledge_assets,
+    knowledge_product_asset_evidence,
+    knowledge_product_source_evidence,
+    knowledge_products,
+    knowledge_sources,
+    projects,
+    snapshot_assets,
+    source_snapshots,
+)
 from models import TaskRecord  # noqa: E402
 from server_schema import (  # noqa: E402
     article_tasks,
@@ -99,6 +109,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         self.task_b = f"{prefix}-task-b"
         self.asset_a = f"{prefix}-asset-a"
         self.bad_asset = f"{prefix}-bad-asset"
+        self.product_a = f"{prefix}-product-a"
+        self.product_b = f"{prefix}-product-b"
+        self.inbox_product = f"{prefix}-inbox-product"
+        self.unpublished_product = f"{prefix}-unpublished-product"
         with self.engine.begin() as connection:
             connection.execute(
                 organizations.insert(),
@@ -213,8 +227,50 @@ class ServerProjectTaskApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         with self.engine.begin() as connection:
             connection.execute(
+                knowledge_product_asset_evidence.delete().where(
+                    knowledge_product_asset_evidence.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
+                knowledge_product_source_evidence.delete().where(
+                    knowledge_product_source_evidence.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
+                knowledge_products.delete().where(
+                    knowledge_products.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
+                snapshot_assets.delete().where(
+                    snapshot_assets.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
                 knowledge_assets.delete().where(
                     knowledge_assets.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
+                source_snapshots.delete().where(
+                    source_snapshots.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
+                knowledge_sources.delete().where(
+                    knowledge_sources.c.project_id.in_(
                         (self.project_a, self.project_b)
                     )
                 )
@@ -289,10 +345,137 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             customer=project_id,
             topic_index=topic_index,
             topic=f"Topic {topic_index}",
+            status="title_selected",
+            selected_title=f"Selected topic {topic_index}",
             task_dir=f"/server/{task_id}",
             created_at="2026-07-30T00:00:00+00:00",
             updated_at="2026-07-30T00:00:00+00:00",
         ).model_dump(mode="json")
+
+    def _store_selectable_product(
+        self,
+        *,
+        project_id: str,
+        product_id: str,
+        asset_id: str | None = None,
+        status: str = "confirmed",
+        source_status: str = "published",
+    ) -> None:
+        source_id = f"{product_id}-source"
+        snapshot_id = f"{product_id}-snapshot"
+        canonical_url = f"https://{project_id}/products/{product_id}"
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.insert().values(
+                    project_id=project_id,
+                    source_id=source_id,
+                    display_name=f"{product_id} source",
+                    source_kind="product_detail",
+                    trust_tier="hard_fact",
+                    status=source_status,
+                    public_source=True,
+                    canonical_url=canonical_url,
+                    current_snapshot_id=snapshot_id,
+                )
+            )
+            connection.execute(
+                source_snapshots.insert().values(
+                    project_id=project_id,
+                    snapshot_id=snapshot_id,
+                    source_id=source_id,
+                    content_hash=hashlib.sha256(
+                        product_id.encode("utf-8")
+                    ).hexdigest(),
+                    parser_name="m7-test",
+                    parser_version="1",
+                    fetched_at=datetime.now(timezone.utc),
+                )
+            )
+            connection.execute(
+                knowledge_products.insert().values(
+                    project_id=project_id,
+                    product_id=product_id,
+                    name=f"Product {product_id}",
+                    status=status,
+                    canonical_url=canonical_url,
+                    category_path=["Fasteners", "Anchors"],
+                    metadata={
+                        "description": "Published product description.",
+                        "main_content_facts": [
+                            "Fact one.",
+                            "Fact two.",
+                        ],
+                        "specification_tables": [
+                            {
+                                "headers": ["Property", "Value"],
+                                "rows": [
+                                    ["Material", "316 stainless steel"],
+                                    ["Length", "50 mm"],
+                                ],
+                            }
+                        ],
+                    },
+                )
+            )
+            connection.execute(
+                knowledge_product_source_evidence.insert().values(
+                    project_id=project_id,
+                    product_id=product_id,
+                    source_id=source_id,
+                    snapshot_id=snapshot_id,
+                    relation="primary_detail",
+                    confidence=0.99,
+                    reason="M7 server selection test evidence",
+                    metadata={
+                        "selection_projection": {
+                            "schema_version": 1,
+                            "name": f"Product {product_id}",
+                            "canonical_url": canonical_url,
+                            "description": "Published product description.",
+                            "reference_facts": [
+                                "Fact one.",
+                                "Fact two.",
+                            ],
+                            "specification_tables": [
+                                {
+                                    "headers": ["Property", "Value"],
+                                    "rows": [
+                                        [
+                                            "Material",
+                                            "316 stainless steel",
+                                        ],
+                                        ["Length", "50 mm"],
+                                    ],
+                                }
+                            ],
+                        }
+                    },
+                )
+            )
+            if asset_id is not None:
+                connection.execute(
+                    snapshot_assets.insert().values(
+                        project_id=project_id,
+                        source_id=source_id,
+                        snapshot_id=snapshot_id,
+                        asset_id=asset_id,
+                        evidence_kind="gallery",
+                        ordinal=0,
+                        source_url=f"{canonical_url}/image.webp",
+                    )
+                )
+                connection.execute(
+                    knowledge_product_asset_evidence.insert().values(
+                        project_id=project_id,
+                        product_id=product_id,
+                        source_id=source_id,
+                        snapshot_id=snapshot_id,
+                        asset_id=asset_id,
+                        role="primary",
+                        confidence=0.95,
+                        reason="Official product gallery primary image",
+                    )
+                )
 
     def test_server_task_reads_are_authorized_and_project_scoped(
         self,
@@ -545,8 +728,226 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ).status_code,
                 404,
             )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/products",
+                    json={
+                        "revision": 0,
+                        "product_ids": [self.product_a],
+                    },
+                ).status_code,
+                404,
+            )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
+
+    def test_server_replaces_products_only_from_confirmed_project_catalog(
+        self,
+    ) -> None:
+        import app as app_module
+
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.product_a,
+            asset_id=self.asset_a,
+        )
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.inbox_product,
+            status="inbox",
+        )
+        self._store_selectable_product(
+            project_id=self.project_b,
+            product_id=self.product_b,
+        )
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.unpublished_product,
+            source_status="needs_review",
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_products.update()
+                .where(
+                    knowledge_products.c.project_id == self.project_a,
+                    knowledge_products.c.product_id == self.product_a,
+                )
+                .values(
+                    name="Unreviewed replacement name",
+                    canonical_url="https://unreviewed.invalid/product",
+                    metadata={
+                        "description": "Unreviewed replacement description.",
+                        "main_content_facts": ["Unreviewed fact."],
+                    },
+                )
+            )
+        codec = ServerActorSessionCodec(b"p" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "p" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/products"
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [self.product_a],
+                        },
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [self.product_b],
+                        },
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [self.unpublished_product],
+                        },
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [self.inbox_product],
+                        },
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [
+                                self.product_a,
+                                self.product_a,
+                            ],
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [self.product_a],
+                            "products": [
+                                {
+                                    "product_id": self.product_a,
+                                    "canonical_url": "https://attacker.invalid",
+                                }
+                            ],
+                        },
+                    ).status_code,
+                    422,
+                )
+
+                response = client.put(
+                    path,
+                    json={
+                        "revision": 0,
+                        "product_ids": [self.product_a],
+                    },
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                saved = response.json()
+                self.assertEqual(saved["revision"], 1)
+                self.assertEqual(
+                    [item["product_id"] for item in saved["products"]],
+                    [self.product_a],
+                )
+                product = saved["products"][0]
+                self.assertEqual(
+                    product["name"],
+                    f"Product {self.product_a}",
+                )
+                self.assertEqual(
+                    product["canonical_url"],
+                    f"https://{self.project_a}/products/{self.product_a}",
+                )
+                self.assertEqual(
+                    product["description"],
+                    "Published product description.",
+                )
+                self.assertEqual(product["selected_asset_id"], self.asset_a)
+                self.assertEqual(product["image_path"], "")
+                self.assertEqual(product["asset_count"], 1)
+                self.assertEqual(
+                    product["reference_facts"],
+                    ["Fact one.", "Fact two."],
+                )
+                self.assertEqual(
+                    product["specifications"],
+                    {
+                        "Material": "316 stainless steel",
+                        "Length": "50 mm",
+                    },
+                )
+                self.assertNotIn("artifact_uri", product)
+                self.assertNotIn("source_url", product)
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "product_ids": [self.product_a],
+                        },
+                    ).status_code,
+                    409,
+                )
+                self.assertFalse(local_state.exists())
 
 
 if __name__ == "__main__":
