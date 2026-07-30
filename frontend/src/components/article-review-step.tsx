@@ -142,6 +142,15 @@ export function ArticleReviewStep({
           description={`可在完成初检后调用本地提示词，也可以直接粘贴外部已经降 AI 的正文并保存。提示词：${config?.prompts?.humanize ?? "D:\\article\\降ai提示词-未测试效果版.txt"}`}
           done={Boolean(task.humanized_article)}
         >
+          {task.humanization_skipped && (
+            <Alert className="border-emerald-600/30 bg-emerald-50">
+              <ShieldCheck />
+              <AlertTitle>首次正文已经达标</AlertTitle>
+              <AlertDescription>
+                初检 AI 率低于项目阈值，系统已沿用第一版正文，并自动跳过降 AI 改写和第二次检测。
+              </AlertDescription>
+            </Alert>
+          )}
           <div className="text-xs text-muted-foreground">
             当前候选稿：{humanizedWords} 词；不设最大词数，不会自动压缩。
           </div>

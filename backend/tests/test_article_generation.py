@@ -30,9 +30,12 @@ from services.generator import (  # noqa: E402
     generate_outline,
     generate_raw_article,
     humanize_article,
+    keyword_from_topic,
     load_prompt_template,
+    primary_keyword,
     products_for_prompt,
     restore_article_links,
+    sanitize_outline_keyword_directives,
     validate_minimum_h3_per_h2,
 )
 from models import Product  # noqa: E402
@@ -173,6 +176,69 @@ class ProductReferencePromptTests(unittest.TestCase):
 
 
 class OperatorWritingContextTests(unittest.TestCase):
+    def test_topic_title_is_reduced_to_core_keyword_instead_of_used_verbatim(self):
+        task = make_task(
+            topic="Roof Ladders - What You Need to Know",
+            competitor_keyword="",
+        )
+
+        self.assertEqual(primary_keyword(task), "Roof Ladders")
+        self.assertEqual(
+            keyword_from_topic("How to Choose the Right Roof Ladder for Your Business"),
+            "Roof Ladder",
+        )
+
+    @patch("services.generator.collect_customer_context", return_value="File knowledge")
+    def test_article_prompt_marks_topic_as_context_not_exact_keyword(self, _context):
+        fake = FakeLLM(article_with_body_words(1000))
+        task = make_task(
+            topic="Roof Ladders - What You Need to Know",
+            competitor_keyword="",
+        )
+
+        generate_raw_article(make_config(), task, llm=fake)
+
+        prompt = fake.calls[0]["messages"][1]["content"]
+        self.assertIn("Suggested core keyword inferred from the topic: Roof Ladders", prompt)
+        self.assertIn("Do not copy the full topic phrase verbatim", prompt)
+        self.assertNotIn(
+            "Primary keyword: Roof Ladders - What You Need to Know",
+            prompt,
+        )
+
+    @patch("services.generator.collect_customer_context", return_value="File knowledge")
+    def test_direct_title_instruction_is_included_in_title_prompt(self, _context):
+        fake = FakeLLM("\n".join(f"{index}. Title {index}" for index in range(1, 11)))
+        task = make_task(title_generation_instruction="Avoid titles beginning with How to.")
+
+        from services.generator import generate_titles
+
+        titles = generate_titles(make_config(), task, llm=fake)
+
+        prompt = fake.calls[0]["messages"][1]["content"]
+        self.assertIn("Avoid titles beginning with How to.", prompt)
+        self.assertEqual(len(titles), 10)
+
+    def test_legacy_outline_exact_topic_keyword_directive_is_neutralized(self):
+        task = make_task(
+            topic="Roof Ladders - What You Need to Know",
+            competitor_keyword="",
+        )
+        outline = """# Roof Ladder Selection Guide
+
+> **Primary keyword:** Use “Roof Ladders - What You Need to Know” naturally in the opening and once in the body.
+
+## Compare Roof Requirements
+### Access Conditions
+### Product Evidence
+"""
+
+        sanitized = sanitize_outline_keyword_directives(outline, task)
+
+        self.assertIn("**Core subject:** Roof Ladders.", sanitized)
+        self.assertNotIn("once in the body", sanitized)
+        self.assertIn("## Compare Roof Requirements", sanitized)
+
     @patch("services.generator.collect_customer_context", return_value="File knowledge")
     def test_complete_outline_prompt_replaces_default_style_but_keeps_hard_rules(self, _context):
         fake = FakeLLM("## Buyer Question\n\n### One\n\n### Two\n\n## FAQ")

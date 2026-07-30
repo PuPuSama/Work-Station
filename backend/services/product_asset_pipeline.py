@@ -72,11 +72,14 @@ def enrich_product_assets(
     products: Sequence[Product],
     *,
     llm: object | None = None,
+    stop_after_selected: int | None = None,
 ) -> list[Product]:
     """Build evidence bundles and select one verified image per product.
 
     Network failures and malformed external pages are isolated to the affected
-    product. The returned list always has the same order and length as the input.
+    product. By default, the returned list has the same order and length as the
+    input. Candidate mode may stop once ``stop_after_selected`` safe assets have
+    been selected.
     ``llm`` is optional: ``select_product_image`` owns a deterministic fallback.
     """
 
@@ -86,6 +89,12 @@ def enrich_product_assets(
     selected_sha256: set[str] = set()
     selected_perceptual_hashes: list[int] = []
     enriched: list[Product] = []
+    selected_count = 0
+    selected_target = (
+        max(1, int(stop_after_selected))
+        if stop_after_selected is not None
+        else None
+    )
     for index, original in enumerate(products, start=1):
         product = _coerce_product(original)
         product_id = _unique_product_id(product, index, used_product_ids)
@@ -155,6 +164,10 @@ def enrich_product_assets(
                 selected_perceptual_hashes=selected_perceptual_hashes,
             )
         enriched.append(refreshed)
+        if refreshed.asset_status == "selected":
+            selected_count += 1
+            if selected_target is not None and selected_count >= selected_target:
+                break
     return enriched
 
 

@@ -311,6 +311,71 @@ class ProductPageClassificationTests(unittest.TestCase):
             ["/product/steel-folding-stool-ladder/"],
         )
 
+    def test_fallback_listing_members_still_exclude_navigation_and_service_pages(self) -> None:
+        parser = crawler.parse_html(
+            """
+            <nav><a href="/services/">Services</a></nav>
+            <main>
+              <a href="/product/ladder-a/">Ladder A</a>
+              <a href="/product/ladder-b/">Ladder B</a>
+            </main>
+            <footer><a href="/contact-us/">Contact</a></footer>
+            """
+        )
+
+        links = crawler.listing_member_links(parser)
+
+        self.assertEqual(
+            [link["href"] for link in links],
+            ["/product/ladder-a/", "/product/ladder-b/"],
+        )
+
+    def test_services_page_is_not_a_product_detail_fallback(self) -> None:
+        parser = crawler.parse_html(
+            """
+            <html><head>
+              <title>Professional Ladder Services</title>
+              <meta name="description" content="Expert ladder services with business, design, inspection, and after-sales teams.">
+              <meta property="og:image" content="https://www.example.com/media/team.jpg">
+            </head><body><main>
+              <h1>service</h1>
+              <p>Our business and design teams provide professional support to industrial buyers throughout every project.</p>
+              <img src="/media/team.jpg" width="620" height="340">
+            </main></body></html>
+            """
+        )
+
+        self.assertFalse(
+            crawler.is_product_detail_page(
+                "https://www.example.com/services/",
+                parser,
+                ["roof ladder"],
+            )
+        )
+
+    def test_root_level_editorial_article_is_not_a_product_detail_fallback(self) -> None:
+        parser = crawler.parse_html(
+            """
+            <html><head>
+              <title>How to Choose a Roof Ladder</title>
+              <meta property="og:type" content="article">
+              <meta name="description" content="A detailed guide to choosing and using roof ladders safely for maintenance projects.">
+              <meta property="og:image" content="https://www.example.com/media/roof-guide.jpg">
+            </head><body><main>
+              <h1>How to Choose a Roof Ladder</h1>
+              <p>This detailed article compares ladder placement, access, storage, and safety considerations for buyers.</p>
+            </main></body></html>
+            """
+        )
+
+        self.assertFalse(
+            crawler.is_product_detail_page(
+                "https://www.example.com/how-to-choose-a-roof-ladder/",
+                parser,
+                ["roof ladder"],
+            )
+        )
+
     def test_product_index_expands_listing_container_to_detail_links(self) -> None:
         index_url = "https://www.example.com/products/"
         category_url = "https://www.example.com/pet-molds/"
@@ -603,6 +668,23 @@ class ProductRecommendationDeduplicationTests(unittest.TestCase):
             )
             self.assertEqual(len(list((Path(temporary) / "images").glob("*"))), 3)
             self.assertIn("duplicate-image-bytes", candidates[1].debug)
+
+    def test_internal_candidate_pool_can_return_reserves_without_changing_public_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = task_at(Path(temporary))
+            candidates = self.candidates([""] * 5)
+            with (
+                patch.object(crawler, "collect_candidates", return_value=candidates),
+                patch.object(crawler, "enrich_candidate", side_effect=verified),
+            ):
+                products = crawler.recommend_products(
+                    object(),
+                    task,
+                    limit=3,
+                    candidate_pool_limit=5,
+                )
+
+            self.assertEqual(len(products), 5)
 
     def test_slow_discovery_keeps_a_separate_detail_validation_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

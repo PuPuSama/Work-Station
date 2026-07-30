@@ -2,13 +2,14 @@
 set -Eeuo pipefail
 
 target_commit="${1:?target commit is required}"
-repository="/root/article"
-release_root="/root/.cache/article-agent-deploy"
+repository="/home/ubuntu/Work-Station"
+release_root="/home/ubuntu/.cache/article-agent-deploy"
 release_directory="$release_root/$target_commit"
 workspace="$repository/workspace"
 environment_file="$repository/.env"
 compose_project="article"
 replacement_started=0
+docker_command=(sudo -n env "ARTICLE_WORKSPACE_PATH=$workspace" "ARTICLE_ENV_FILE=$environment_file" docker)
 
 export ARTICLE_WORKSPACE_PATH="$workspace"
 export ARTICLE_ENV_FILE="$environment_file"
@@ -28,8 +29,8 @@ rollback() {
   if [[ "$replacement_started" == "1" ]]; then
     echo "Rebuilding and restoring the previously checked-out release." >&2
     cd "$repository"
-    docker compose -p "$compose_project" build
-    docker compose -p "$compose_project" up \
+    "${docker_command[@]}" compose -p "$compose_project" build
+    "${docker_command[@]}" compose -p "$compose_project" up \
       -d \
       --remove-orphans \
       --wait \
@@ -40,13 +41,13 @@ rollback() {
 }
 trap rollback ERR
 
-for command in git docker python3; do
+for command in git docker python3 sudo; do
   command -v "$command" >/dev/null || {
     echo "Required command is missing: $command" >&2
     exit 1
   }
 done
-docker compose version >/dev/null
+"${docker_command[@]}" compose version >/dev/null
 
 cd "$repository"
 test -f docker-compose.yml
@@ -58,7 +59,6 @@ test -d "$workspace" || {
   echo "Missing persistent workspace: $workspace" >&2
   exit 1
 }
-docker network inspect new-api_new-api-network >/dev/null
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Server checkout has tracked local changes; refusing to overwrite them." >&2
@@ -72,13 +72,13 @@ current_commit="$(git rev-parse HEAD)"
 
 if [[ "$current_commit" == "$target_commit" ]]; then
   echo "Commit $target_commit is already checked out; verifying the deployment."
-  docker compose -p "$compose_project" up \
+  "${docker_command[@]}" compose -p "$compose_project" up \
     -d \
     --build \
     --remove-orphans \
     --wait \
     --wait-timeout 180
-  docker compose -p "$compose_project" ps
+  "${docker_command[@]}" compose -p "$compose_project" ps
   exit 0
 fi
 
@@ -103,10 +103,10 @@ python3 \
   "$workspace/backups/deploy-$timestamp-$current_commit"
 
 cd "$release_directory"
-docker compose -p "$compose_project" config --quiet
-docker compose -p "$compose_project" build --pull
+"${docker_command[@]}" compose -p "$compose_project" config --quiet
+"${docker_command[@]}" compose -p "$compose_project" build --pull
 replacement_started=1
-docker compose -p "$compose_project" up \
+"${docker_command[@]}" compose -p "$compose_project" up \
   -d \
   --remove-orphans \
   --wait \
@@ -117,5 +117,5 @@ git merge --ff-only "$target_commit"
 replacement_started=0
 trap - ERR
 cleanup_release || echo "Warning: release worktree cleanup failed." >&2
-docker compose -p "$compose_project" ps
+"${docker_command[@]}" compose -p "$compose_project" ps
 echo "Successfully deployed $target_commit."

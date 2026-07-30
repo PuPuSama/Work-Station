@@ -33,6 +33,57 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest() if content else ""
 
 
+def _migrate_seo_review_records(records: object) -> list[dict[str, Any]]:
+    if not isinstance(records, list):
+        return []
+    migrated: list[dict[str, Any]] = []
+    for index, raw_record in enumerate(records):
+        if not isinstance(raw_record, Mapping):
+            continue
+        record = copy.deepcopy(dict(raw_record))
+        record.setdefault("status", "open")
+        record.setdefault("finalized_at", "")
+        record.setdefault("finalized_by", "")
+        record.setdefault("applied_article_hash", "")
+        record.setdefault("applied_revision", None)
+        source = str(record.get("source_article") or "").strip()
+        if source:
+            record["source_article"] = source
+            record["source_article_hash"] = content_hash(source)
+        if "changes" not in record:
+            revised = str(record.get("revised_article") or "").strip()
+            changes: list[dict[str, Any]] = []
+            if source and revised and source != revised:
+                changes.append(
+                    {
+                        "id": f"legacy-{index + 1:03d}",
+                        "operation": "structure",
+                        "dimension_key": "legacy",
+                        "title": "旧版完整修改稿",
+                        "rationale": "由旧版整篇修改稿迁移而来，作为一个整体修改组审核。",
+                        "target_text": source,
+                        "model_proposed_text": revised,
+                        "reviewed_text": revised,
+                        "source_start": 0,
+                        "source_end": len(source),
+                        "hard_problem": False,
+                        "applicable": True,
+                        "validation_errors": [],
+                        "risks": [],
+                        "decision": "pending",
+                        "decided_at": "",
+                        "decided_by": "",
+                        "risk_confirmed": False,
+                        "risk_confirmed_at": "",
+                        "updated_at": "",
+                        "raw_payload": None,
+                    }
+                )
+            record["changes"] = changes
+        migrated.append(record)
+    return migrated
+
+
 V2_DEFAULTS: dict[str, Any] = {
     "revision": 0,
     "workflow_error": None,
@@ -49,21 +100,27 @@ V2_DEFAULTS: dict[str, Any] = {
     # created tasks use TaskRecord's project_default model defaults.
     "outline_prompt_selection": "system",
     "article_prompt_selection": "system",
+    "seo_review_prompt_selection": "system",
     "last_outline_prompt_snapshot": None,
     "last_article_prompt_snapshot": None,
     "include_project_introduction": True,
     "include_project_notes": True,
     "include_topic_notes": True,
     "source_key": "",
+    "source_kind": "xlsx",
     "synced_from_task_id": "",
     "synced_from_week": "",
     "hero_image": "",
     "raw_draft_article": "",
     "initial_article": "",
     "humanized_article": "",
+    "humanization_skipped": False,
     "linked_article": "",
     "final_article": "",
     "article_versions": [],
+    "seo_primary_keyword": "",
+    "seo_long_tail_keywords": [],
+    "seo_reviews": [],
     "raw_draft_word_count": 0,
     "raw_draft_hash": "",
     "initial_article_word_count": 0,
@@ -141,6 +198,9 @@ def migrate_v1_to_v2(payload: Mapping[str, Any]) -> dict[str, Any]:
         initial_check.setdefault("article_hash", "")
         migrated["initial_ai_check"] = initial_check
 
+    migrated["seo_reviews"] = _migrate_seo_review_records(
+        migrated.get("seo_reviews")
+    )
     migrated["schema_version"] = SCHEMA_VERSION
     return migrated
 
@@ -169,6 +229,7 @@ class TaskStore:
         "week_folder",
         "customer",
         "source_key",
+        "source_kind",
         "topic_index",
         "topic",
         "competitor_keyword",
@@ -183,6 +244,7 @@ class TaskStore:
         "project_introduction",
         "project_notes",
         "source_key",
+        "source_kind",
         "topic_index",
         "topic",
         "competitor_keyword",
@@ -365,6 +427,102 @@ class TaskStore:
                 task.model_dump(mode="json") for task in matched
             )
             return len(matched)
+
+    def rename_customer(
+        self,
+        customer: str,
+        new_customer: str,
+        *,
+        path_replacements: Iterable[tuple[Path, Path]] = (),
+    ) -> tuple[list[TaskRecord], dict[str, str]]:
+        """Rename one project while preserving workflow history and file references."""
+
+        current_key = normalized_customer(customer)
+        new_key = normalized_customer(new_customer)
+        replacements = list(path_replacements)
+        with _TASK_STORE_LOCK:
+            tasks = self.load()
+            matched = [
+                task
+                for task in tasks
+                if normalized_customer(task.customer) == current_key
+            ]
+            if not matched:
+                raise KeyError(customer)
+            matched_ids = {task.id for task in matched}
+            if current_key != new_key and any(
+                normalized_customer(task.customer) == new_key
+                for task in tasks
+                if task.id not in matched_ids
+            ):
+                raise ValueError(f"Project already exists: {new_customer}")
+
+            updated_at = now_iso()
+            id_mapping: dict[str, str] = {}
+            renamed: list[TaskRecord] = []
+            for task in matched:
+                payload: Any = task.model_dump(mode="json")
+                for source, destination in replacements:
+                    payload = self._remap_history_paths(
+                        payload,
+                        source,
+                        destination,
+                    )
+                candidate = TaskRecord.model_validate(payload)
+                old_id = candidate.id
+                candidate.customer = new_customer
+                candidate.source_key = (
+                    f"manual:{article_source_key(new_customer, candidate.topic, candidate.topic_index)}"
+                    if candidate.source_kind == "manual"
+                    else article_source_key(
+                        new_customer,
+                        candidate.topic,
+                        candidate.topic_index,
+                    )
+                )
+                if candidate.source_kind != "manual":
+                    candidate.id = candidate.source_key[:12]
+                id_mapping[old_id] = candidate.id
+                candidate.revision += 1
+                candidate.updated_at = updated_at
+                renamed.append(candidate)
+
+            new_ids = [task.id for task in renamed]
+            if len(new_ids) != len(set(new_ids)):
+                raise ValueError("The new domain would create duplicate task identifiers.")
+            existing_ids = {task.id for task in tasks if task.id not in matched_ids}
+            collision = existing_ids.intersection(new_ids)
+            if collision:
+                raise ValueError(
+                    f"The new domain conflicts with existing task: {sorted(collision)[0]}"
+                )
+
+            for task in renamed:
+                if task.synced_from_task_id in id_mapping:
+                    task.synced_from_task_id = id_mapping[task.synced_from_task_id]
+
+            renamed_by_old_id = {
+                old.id: new for old, new in zip(matched, renamed, strict=True)
+            }
+            next_tasks = [
+                renamed_by_old_id.get(task.id, task)
+                for task in tasks
+            ]
+            self._write_records(next_tasks)
+            return renamed, id_mapping
+
+    def delete_customer(self, customer: str) -> list[TaskRecord]:
+        normalized = normalized_customer(customer)
+        with _TASK_STORE_LOCK:
+            matched = [
+                task
+                for task in self.load()
+                if normalized_customer(task.customer) == normalized
+            ]
+            if not matched:
+                raise KeyError(customer)
+            self.repository.delete_many(task.id for task in matched)
+            return matched
 
     def _inherit_history(
         self,
@@ -565,6 +723,13 @@ class TaskStore:
             # the one-time backup above.
             incoming_ids = list(dict.fromkeys(task.id for task in incoming))
             tasks = [existing[task_id] for task_id in incoming_ids]
+            tasks.extend(
+                task
+                for task in loaded
+                if task.week_folder == scope
+                and task.source_kind == "manual"
+                and task.id not in incoming_ids
+            )
             self.save(tasks)
             return tasks
 

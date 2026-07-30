@@ -100,7 +100,11 @@ def parse_numbered_list(text: str, limit: int) -> list[str]:
 
 
 def generate_titles(
-    config: AppConfig, task: TaskRecord, *, llm: LLMClient | None = None
+    config: AppConfig,
+    task: TaskRecord,
+    *,
+    instruction: str = "",
+    llm: LLMClient | None = None,
 ) -> list[str]:
     client = llm or LLMClient(config)
     title_count = int(getattr(config, "title_candidates", 10) or 10)
@@ -112,6 +116,10 @@ def generate_titles(
         PRIMARY_KEYWORD=primary_keyword(task),
         COMPETITOR_KEYWORD=task.competitor_keyword or "Not supplied",
         COMPETITOR_BLOG=task.competitor_blog or "Not supplied",
+        TITLE_INSTRUCTION=(
+            str(instruction or getattr(task, "title_generation_instruction", "")).strip()
+            or "Not supplied"
+        ),
         CUSTOMER_CONTEXT=collect_customer_context(config, task.customer),
     )
     result = client.chat(
@@ -249,7 +257,10 @@ def build_article_prompt(
     include_topic_notes: bool = True,
 ) -> str:
     title = task.selected_title or task.topic
-    outline = task.outline or mock_outline(title, task)
+    outline = sanitize_outline_keyword_directives(
+        task.outline or mock_outline(title, task),
+        task,
+    )
     target_words = normalized_article_word_count(word_count, config.default_word_count)
     minimum_words, _ = article_word_bounds(target_words)
     values = dict(
@@ -297,6 +308,27 @@ def generation_context_value(value: object, included: bool) -> str:
 def custom_instruction_value(value: object) -> str:
     cleaned = str(value or "").replace("\r\n", "\n").strip()
     return cleaned or "[No additional custom instructions.]"
+
+
+def sanitize_outline_keyword_directives(outline: str, task: TaskRecord) -> str:
+    """Neutralize legacy outline notes which promoted the full topic as an exact keyword."""
+
+    topic = re.sub(r"\s+", " ", str(task.topic or "")).strip()
+    keyword = primary_keyword(task)
+    if not topic or keyword.casefold() == topic.casefold():
+        return outline
+
+    sanitized: list[str] = []
+    for line in str(outline or "").splitlines():
+        if "primary keyword" in line.casefold() and topic.casefold() in line.casefold():
+            quote_prefix = "> " if line.lstrip().startswith(">") else ""
+            sanitized.append(
+                f"{quote_prefix}**Core subject:** {keyword}. Use it only where natural; "
+                "the article topic is not an exact-match keyword."
+            )
+            continue
+        sanitized.append(line)
+    return "\n".join(sanitized)
 
 
 def generate_article(
@@ -774,7 +806,45 @@ def primary_keyword(task: TaskRecord) -> str:
     candidate = task.competitor_keyword.strip()
     if candidate and not re.match(r"^https?://", candidate, flags=re.IGNORECASE):
         return candidate
-    return task.topic
+    return keyword_from_topic(task.topic)
+
+
+def keyword_from_topic(topic: str) -> str:
+    """Derive a compact subject phrase without treating a topic title as an exact keyword."""
+
+    cleaned = re.sub(r"\s+", " ", str(topic or "")).strip(" .?!:;|-–—")
+    if not cleaned:
+        return "Not supplied"
+
+    # Topic libraries commonly store an SEO subject followed by an editorial
+    # angle, for example "Roof Ladders - What You Need to Know". The angle is
+    # planning context, not a phrase which should be pasted into body copy.
+    subject = re.split(r"\s+(?:[-–—|])\s+|:\s+", cleaned, maxsplit=1)[0].strip()
+    subject = re.sub(
+        r"^(?:how to|ways to)\s+(?:choose|select|buy|source|find|compare|use)\s+(?:the right\s+)?",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    subject = re.sub(
+        r"^(?:a|an|the)?\s*(?:(?:complete|practical|ultimate|b2b)\s+)*(?:buying\s+)?guide\s+to\s+",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    subject = re.sub(
+        r"^(?:what should (?:buyers|you) know about|what (?:you|buyers) need to know about)\s+",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    subject = re.sub(
+        r"\s+(?:buying guide|what (?:you|buyers) need to know|for (?:your )?business|explained)$",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    ).strip(" .?!:;|-–—")
+    return subject or cleaned
 
 
 def mock_titles(task: TaskRecord, count: int) -> list[str]:
@@ -797,9 +867,10 @@ def mock_titles(task: TaskRecord, count: int) -> list[str]:
 
 
 def mock_outline(title: str, task: TaskRecord) -> str:
+    keyword = primary_keyword(task)
     return f"""# {title}
 
-## What Should Buyers Know About {task.topic}?
+## What Should Buyers Know About {keyword}?
 ### Core Use Cases
 ### Important Specifications
 ### Quality and Compliance Factors
@@ -827,11 +898,12 @@ def mock_outline(title: str, task: TaskRecord) -> str:
 
 def mock_article(title: str, task: TaskRecord, outline: str) -> str:
     product_lines = products_for_prompt(task.products)
+    keyword = primary_keyword(task)
     return f"""# {title}
 
-For B2B buyers, {task.topic} affects product fit, lead time, operating cost, and long-term supplier reliability. This guide shows you what to compare before requesting a quote or committing to an order.
+For B2B buyers, {keyword} affects product fit, lead time, operating cost, and long-term supplier reliability. This guide shows you what to compare before requesting a quote or committing to an order.
 
-## What Should Buyers Know About {task.topic}?
+## What Should Buyers Know About {keyword}?
 
 Start by defining the real application. Review the working environment, required specifications, expected order volume, and quality requirements before comparing offers.
 
@@ -882,7 +954,7 @@ Compare each confirmed option against the application, specification, order volu
 
 ### Final Evaluation
 
-Choosing {task.topic} becomes easier when requirements are clear and supplier claims are checked against confirmed product information. Use that evidence to narrow the options and decide the next sourcing step.
+Choosing {keyword} becomes easier when requirements are clear and supplier claims are checked against confirmed product information. Use that evidence to narrow the options and decide the next sourcing step.
 
 ### Practical Next Step
 

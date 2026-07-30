@@ -51,6 +51,15 @@ class ProjectPromptRepository:
 
     def _initialize_schema(self) -> None:
         with self._connection() as connection:
+            prompt_table = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'project_prompts'"
+            ).fetchone()
+            table_sql = str(prompt_table["sql"] or "") if prompt_table else ""
+            if prompt_table and "'review'" not in table_sql:
+                connection.execute("DROP INDEX IF EXISTS idx_project_prompts_customer")
+                connection.execute(
+                    "ALTER TABLE project_prompts RENAME TO project_prompts_before_review"
+                )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS project_prompts (
@@ -58,7 +67,7 @@ class ProjectPromptRepository:
                     customer_key TEXT NOT NULL,
                     customer TEXT NOT NULL,
                     name TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK(kind IN ('outline', 'article')),
+                    kind TEXT NOT NULL CHECK(kind IN ('outline', 'article', 'review')),
                     content TEXT NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
                     use_count INTEGER NOT NULL DEFAULT 0,
@@ -73,10 +82,34 @@ class ProjectPromptRepository:
                     customer_key TEXT PRIMARY KEY,
                     customer TEXT NOT NULL,
                     default_outline_prompt_id TEXT NOT NULL DEFAULT '',
-                    default_article_prompt_id TEXT NOT NULL DEFAULT ''
+                    default_article_prompt_id TEXT NOT NULL DEFAULT '',
+                    default_review_prompt_id TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
+            if prompt_table and "'review'" not in table_sql:
+                connection.execute(
+                    """INSERT INTO project_prompts(
+                           id, customer_key, customer, name, kind, content,
+                           version, use_count, active, created_at, updated_at
+                       )
+                       SELECT id, customer_key, customer, name, kind, content,
+                              version, use_count, active, created_at, updated_at
+                       FROM project_prompts_before_review"""
+                )
+                connection.execute("DROP TABLE project_prompts_before_review")
+
+            default_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(project_prompt_defaults)"
+                ).fetchall()
+            }
+            if "default_review_prompt_id" not in default_columns:
+                connection.execute(
+                    "ALTER TABLE project_prompt_defaults "
+                    "ADD COLUMN default_review_prompt_id TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def _item(row: sqlite3.Row) -> PromptLibraryItem:
@@ -109,6 +142,7 @@ class ProjectPromptRepository:
             customer=customer,
             default_outline_prompt_id=(default_row["default_outline_prompt_id"] if default_row else ""),
             default_article_prompt_id=(default_row["default_article_prompt_id"] if default_row else ""),
+            default_review_prompt_id=(default_row["default_review_prompt_id"] if default_row else ""),
         )
         return ProjectPromptLibrary(
             prompts=[self._item(row) for row in rows],
@@ -175,7 +209,11 @@ class ProjectPromptRepository:
                 (int(active), now_iso(), normalized_customer(customer), prompt_id),
             )
             if not active:
-                field = "default_outline_prompt_id" if item.kind == "outline" else "default_article_prompt_id"
+                field = {
+                    "outline": "default_outline_prompt_id",
+                    "article": "default_article_prompt_id",
+                    "review": "default_review_prompt_id",
+                }[item.kind]
                 connection.execute(
                     f"UPDATE project_prompt_defaults SET {field} = '' WHERE customer_key = ? AND {field} = ?",
                     (normalized_customer(customer), prompt_id),
@@ -194,29 +232,43 @@ class ProjectPromptRepository:
             connection.execute(
                 """UPDATE project_prompt_defaults
                    SET default_outline_prompt_id = CASE WHEN default_outline_prompt_id = ? THEN '' ELSE default_outline_prompt_id END,
-                       default_article_prompt_id = CASE WHEN default_article_prompt_id = ? THEN '' ELSE default_article_prompt_id END
+                       default_article_prompt_id = CASE WHEN default_article_prompt_id = ? THEN '' ELSE default_article_prompt_id END,
+                       default_review_prompt_id = CASE WHEN default_review_prompt_id = ? THEN '' ELSE default_review_prompt_id END
                    WHERE customer_key = ?""",
-                (prompt_id, prompt_id, normalized_customer(customer)),
+                (prompt_id, prompt_id, prompt_id, normalized_customer(customer)),
             )
 
-    def set_defaults(self, customer: str, outline_id: str, article_id: str) -> PromptDefaults:
-        for prompt_id, kind in ((outline_id, "outline"), (article_id, "article")):
+    def set_defaults(
+        self,
+        customer: str,
+        outline_id: str,
+        article_id: str,
+        review_id: str = "",
+    ) -> PromptDefaults:
+        for prompt_id, kind in (
+            (outline_id, "outline"),
+            (article_id, "article"),
+            (review_id, "review"),
+        ):
             if not prompt_id:
                 continue
             item = self.get(customer, prompt_id, active_only=True)
             if item.kind != kind:
-                raise PromptLibraryError(f"{item.name} 不是{ '大纲' if kind == 'outline' else '正文' }提示词。")
+                label = {"outline": "大纲", "article": "正文", "review": "复检"}[kind]
+                raise PromptLibraryError(f"{item.name} 不是{label}提示词。")
         key = normalized_customer(customer)
         with self._connection() as connection:
             connection.execute(
                 """INSERT INTO project_prompt_defaults(
-                    customer_key, customer, default_outline_prompt_id, default_article_prompt_id
-                ) VALUES (?, ?, ?, ?)
+                    customer_key, customer, default_outline_prompt_id,
+                    default_article_prompt_id, default_review_prompt_id
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(customer_key) DO UPDATE SET
                     customer = excluded.customer,
                     default_outline_prompt_id = excluded.default_outline_prompt_id,
-                    default_article_prompt_id = excluded.default_article_prompt_id""",
-                (key, customer, outline_id, article_id),
+                    default_article_prompt_id = excluded.default_article_prompt_id,
+                    default_review_prompt_id = excluded.default_review_prompt_id""",
+                (key, customer, outline_id, article_id, review_id),
             )
         return self.list(customer).defaults
 
@@ -227,11 +279,11 @@ class ProjectPromptRepository:
             return PromptSnapshot(kind=kind, source="system", captured_at=now_iso())
         if not prompt_id or selection == "project_default":
             defaults = self.list(customer).defaults
-            prompt_id = (
-                defaults.default_outline_prompt_id
-                if kind == "outline"
-                else defaults.default_article_prompt_id
-            )
+            prompt_id = {
+                "outline": defaults.default_outline_prompt_id,
+                "article": defaults.default_article_prompt_id,
+                "review": defaults.default_review_prompt_id,
+            }[kind]
             source = "project_default"
         if not prompt_id:
             return PromptSnapshot(kind=kind, source="system", captured_at=now_iso())
@@ -258,4 +310,46 @@ class ProjectPromptRepository:
             connection.execute(
                 "UPDATE project_prompts SET use_count = use_count + 1 WHERE customer_key = ? AND id = ?",
                 (normalized_customer(customer), prompt_id),
+            )
+
+    def rename_customer(self, customer: str, new_customer: str) -> None:
+        current_key = normalized_customer(customer)
+        new_key = normalized_customer(new_customer)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if current_key != new_key:
+                conflict = connection.execute(
+                    """SELECT 1 FROM project_prompts WHERE customer_key = ?
+                       UNION ALL
+                       SELECT 1 FROM project_prompt_defaults WHERE customer_key = ?
+                       LIMIT 1""",
+                    (new_key, new_key),
+                ).fetchone()
+                if conflict:
+                    raise PromptLibraryError(
+                        f"Project prompts already exist for {new_customer}."
+                    )
+            connection.execute(
+                """UPDATE project_prompts
+                   SET customer_key = ?, customer = ?
+                   WHERE customer_key = ?""",
+                (new_key, new_customer, current_key),
+            )
+            connection.execute(
+                """UPDATE project_prompt_defaults
+                   SET customer_key = ?, customer = ?
+                   WHERE customer_key = ?""",
+                (new_key, new_customer, current_key),
+            )
+
+    def delete_customer(self, customer: str) -> None:
+        key = normalized_customer(customer)
+        with self._connection() as connection:
+            connection.execute(
+                "DELETE FROM project_prompt_defaults WHERE customer_key = ?",
+                (key,),
+            )
+            connection.execute(
+                "DELETE FROM project_prompts WHERE customer_key = ?",
+                (key,),
             )

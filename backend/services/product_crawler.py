@@ -179,8 +179,6 @@ PRODUCT_PATH_HINTS = (
     "products",
     "solution",
     "solutions",
-    "service",
-    "services",
     "mould",
     "mold",
     "machine",
@@ -191,6 +189,18 @@ PRODUCT_PATH_HINTS = (
     "belt",
     "fastener",
 )
+NON_PRODUCT_PATH_SEGMENTS = {
+    "about",
+    "about-us",
+    "contact",
+    "contact-us",
+    "faq",
+    "faqs",
+    "our-team",
+    "service",
+    "services",
+    "team",
+}
 PRODUCT_INDEX_PATHS = (
     "/products/",
     "/product/",
@@ -441,10 +451,17 @@ def recommend_products(
     *,
     tavily_client: TavilyClient | None = None,
     download_images: bool = True,
+    candidate_pool_limit: int | None = None,
 ) -> list[Product]:
     # Product recommendations feed the article image workflow, whose public
     # contract allows at most three automatic recommendations.
     limit = max(1, min(int(limit), 3))
+    result_limit = limit
+    if candidate_pool_limit is not None:
+        result_limit = max(
+            limit,
+            min(int(candidate_pool_limit), MAX_ENRICH_CANDIDATES),
+        )
     base_url = site_base_url(task.customer)
     terms = search_terms(task)
     candidates: list[CrawlCandidate] = []
@@ -515,7 +532,7 @@ def recommend_products(
     seen_image_urls: set[str] = set()
     seen_image_hashes: set[str] = set()
     for candidate in candidates:
-        if len(products) >= limit:
+        if len(products) >= result_limit:
             break
         normalized_product_url = normalize_url(candidate.url)
         if not normalized_product_url or normalized_product_url in seen_product_urls:
@@ -551,7 +568,7 @@ def recommend_products(
             fallback_products.append(product)
 
     for product in fallback_products:
-        if len(products) >= limit:
+        if len(products) >= result_limit:
             break
         products.append(product)
 
@@ -675,7 +692,11 @@ def category_relevance_score(candidate: CrawlCandidate, terms: list[str]) -> int
 
 def link_has_excluded_listing_context(link: dict[str, str]) -> bool:
     context = link.get("_context", "").casefold()
-    return any(hint in context for hint in LISTING_EXCLUDED_CONTEXT_HINTS)
+    context_tokens = set(re.findall(r"[a-z0-9_-]+", context))
+    return bool(
+        context_tokens.intersection({"footer", "header", "nav"})
+        or any(hint in context for hint in LISTING_EXCLUDED_CONTEXT_HINTS)
+    )
 
 
 def link_has_product_listing_context(link: dict[str, str]) -> bool:
@@ -689,7 +710,10 @@ def listing_member_links(parser: SimpleHTMLParser) -> list[dict[str, str]]:
     allowed = [
         link
         for link in parser.links
-        if link.get("href") and not link_has_excluded_listing_context(link)
+        if link.get("href")
+        and not link_has_excluded_listing_context(link)
+        and not looks_like_non_product_page(link["href"])
+        and not looks_like_blog(link["href"])
     ]
     scoped = [link for link in allowed if link_has_product_listing_context(link)]
     return scoped or allowed
@@ -1597,7 +1621,12 @@ def is_product_detail_page(
 ) -> bool:
     """Require strong product evidence, with a conservative generic fallback."""
 
-    if not page_url or looks_like_blog(page_url) or is_product_listing_page(page_url, parser, terms):
+    if (
+        not page_url
+        or looks_like_non_product_page(page_url)
+        or looks_like_blog(page_url)
+        or is_product_listing_page(page_url, parser, terms)
+    ):
         return False
 
     schema_types = json_ld_types(parser)
@@ -1608,6 +1637,10 @@ def is_product_detail_page(
         or _has_class_hint(parser.body_class_tokens, DETAIL_CLASS_HINTS)
     ):
         return True
+    if og_type == "article" or schema_types.intersection(
+        {"article", "blogposting", "newsarticle"}
+    ):
+        return False
 
     # Custom B2B sites sometimes publish product pages as ordinary WordPress
     # pages. Accept that shape only when the page is relevant, substantive and
@@ -1859,6 +1892,8 @@ def is_relevant_product_url(url: str, terms: list[str]) -> bool:
     if (
         is_known_listing_url(url)
         or is_pagination_url(url)
+        or looks_like_non_product_page(url)
+        or looks_like_blog(url)
         or any(part in path for part in ("/author/", "/wp-content/"))
     ):
         return False
@@ -1973,7 +2008,25 @@ def numeric(value: str) -> int:
 
 def looks_like_blog(url: str) -> bool:
     path = parse.urlparse(url).path.lower()
-    return any(part in path for part in ("/blog/", "/news/", "/article/", "/articles/"))
+    if any(part in path for part in ("/blog/", "/news/", "/article/", "/articles/")):
+        return True
+    segments = [segment for segment in path.strip("/").split("/") if segment]
+    if len(segments) != 1:
+        return False
+    slug = segments[0]
+    return bool(
+        re.match(r"^(?:how|why|what|when|where|which|can|should)-", slug)
+        or re.search(r"(?:^|-)(?:guide|ideas|mistakes|tips)(?:-|$)", slug)
+    )
+
+
+def looks_like_non_product_page(url: str) -> bool:
+    path_segments = {
+        segment.casefold()
+        for segment in parse.unquote(parse.urlparse(url).path).strip("/").split("/")
+        if segment
+    }
+    return bool(path_segments.intersection(NON_PRODUCT_PATH_SEGMENTS))
 
 
 def looks_like_question(value: str) -> bool:

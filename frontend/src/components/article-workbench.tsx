@@ -6,7 +6,6 @@ import {
   ArrowLeft,
   ExternalLink,
   FileText,
-  FolderOpen,
   Loader2,
   Package,
   RefreshCw,
@@ -18,11 +17,16 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { ProjectNavigation } from "@/components/project-navigation";
 import { ArticleDeliveryStep } from "@/components/article-delivery-step";
+import { ArticleContextPanel } from "@/components/article-context-panel";
+import { ArticleWorkflowNavigation } from "@/components/article-workflow-navigation";
 import { ArticleReviewStep } from "@/components/article-review-step";
 import { ArticleMediaStep } from "@/components/article-media-step";
 import { ArticleDraftStep } from "@/components/article-draft-step";
+import type {
+  SeoReviewChangeDecision,
+  SeoReviewSettings,
+} from "@/components/article-seo-review-panel";
 import { ArticleOutlineStep } from "@/components/article-outline-step";
 import { ArticleProductsStep } from "@/components/article-products-step";
 import { ArticleTitleStep } from "@/components/article-title-step";
@@ -63,6 +67,7 @@ import type {
   DashboardSummary,
   Product,
   PublicConfig,
+  SeoReviewPreview,
   TaskRecord,
   WorkflowStatus,
 } from "@/types";
@@ -931,6 +936,215 @@ export function ArticleWorkbench({
     );
   }
 
+  function seoReviewSettingsChanged(settings: SeoReviewSettings) {
+    if (!selectedTask) return false;
+    return (
+      settings.primaryKeyword !== (selectedTask.seo_primary_keyword || "") ||
+      settings.promptSelection !==
+        (selectedTask.seo_review_prompt_selection || "project_default") ||
+      settings.longTailKeywords.join("\n") !==
+        (selectedTask.seo_long_tail_keywords || []).join("\n")
+    );
+  }
+
+  function saveSeoReviewSettings(settings: SeoReviewSettings) {
+    if (!selectedTask) return;
+    void runAction(
+      "SEO 复检设置已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-review-settings`,
+          {
+            revision: selectedTask.revision,
+            primary_keyword: settings.primaryKeyword,
+            long_tail_keywords: settings.longTailKeywords,
+            prompt_selection: settings.promptSelection,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      undefined,
+      { key: `task:${selectedTask.id}:seo-review-settings` },
+    );
+  }
+
+  async function queueSeoReview(task: TaskRecord) {
+    setBatchBusy("single:seo_review");
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiPost<BatchCreateResponse>("/api/batches", {
+        operation: "seo_review",
+        task_ids: [task.id],
+      });
+      if (!result.batch) {
+        setError(
+          result.rejected.map((item) => item.message).join("；") ||
+            "SEO 质量复检未能加入后台队列。",
+        );
+        return;
+      }
+      setMessage("SEO 质量复检已加入后台队列，可以继续处理其他文章。");
+      await refreshBatches();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBatchBusy("");
+    }
+  }
+
+  function startSeoReview(settings: SeoReviewSettings) {
+    if (!selectedTask) return;
+    if (articleDirty) {
+      setError("正文有未保存修改，请先保存第一版，再执行 SEO 质量复检。");
+      return;
+    }
+    if (!selectedTask.initial_article?.trim()) {
+      setError("请先生成并保存第一版正文。");
+      return;
+    }
+    if (!seoReviewSettingsChanged(settings)) {
+      void queueSeoReview(selectedTask);
+      return;
+    }
+    void runAction(
+      "SEO 复检设置已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-review-settings`,
+          {
+            revision: selectedTask.revision,
+            primary_keyword: settings.primaryKeyword,
+            long_tail_keywords: settings.longTailKeywords,
+            prompt_selection: settings.promptSelection,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+      (saved) => {
+        void queueSeoReview(saved);
+      },
+      { key: `task:${selectedTask.id}:seo-review-settings` },
+    );
+  }
+
+  async function runSeoReviewRequest<T>(
+    key: string,
+    successMessage: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    setPendingActions((current) => ({
+      ...current,
+      [`task:${selectedTask?.id || "unselected"}:${key}`]: successMessage,
+    }));
+    setError("");
+    setMessage("");
+    try {
+      const result = await action();
+      if (isTaskRecordResult(result)) {
+        setTasks((current) =>
+          current.map((task) => (task.id === result.id ? result : task)),
+        );
+        setSelectedTask((current) =>
+          current?.id === result.id ? result : current,
+        );
+      }
+      setMessage(successMessage);
+      return result;
+    } catch (error) {
+      setError(errorMessage(error));
+      throw error;
+    } finally {
+      setPendingActions((current) => {
+        const next = { ...current };
+        delete next[`task:${selectedTask?.id || "unselected"}:${key}`];
+        return next;
+      });
+    }
+  }
+
+  async function updateSeoReviewChange(
+    reviewId: string,
+    changeId: string,
+    reviewedText: string,
+    decision: SeoReviewChangeDecision,
+    confirmRisks: boolean,
+    revision?: number,
+  ): Promise<TaskRecord> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    return runSeoReviewRequest(
+      `seo-review-${reviewId}-${changeId}`,
+      "复检修改决定已保存",
+      () =>
+        apiPut<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/changes/${changeId}`,
+          {
+            revision: revision ?? selectedTask.revision,
+            decision,
+            reviewed_text: reviewedText,
+            confirm_risks: confirmRisks,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+  }
+
+  async function previewSeoReview(reviewId: string): Promise<SeoReviewPreview> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    return runSeoReviewRequest(
+      `seo-review-${reviewId}-preview`,
+      "完整正文预览已生成并通过结构校验",
+      () =>
+        apiPost<SeoReviewPreview>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/preview`,
+          { revision: selectedTask.revision },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+  }
+
+  async function applySeoReview(
+    reviewId: string,
+    previewHash: string,
+    confirmPending: boolean,
+  ): Promise<TaskRecord> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    const result = await runSeoReviewRequest(
+      `seo-review-${reviewId}-apply`,
+      "已接受的修改已生成新的第一版正文",
+      () =>
+        apiPost<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/apply`,
+          {
+            revision: selectedTask.revision,
+            preview_hash: previewHash,
+            confirm_pending: confirmPending,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+    setArticleText(result.initial_article || result.article);
+    return result;
+  }
+
+  async function completeSeoReview(
+    reviewId: string,
+    confirmPending: boolean,
+  ): Promise<TaskRecord> {
+    if (!selectedTask) throw new Error("当前没有选中的文章。");
+    return runSeoReviewRequest(
+      `seo-review-${reviewId}-complete`,
+      "复检审核已完成，正文保持不变",
+      () =>
+        apiPost<TaskRecord>(
+          `/api/tasks/${selectedTask.id}/seo-reviews/${reviewId}/complete`,
+          {
+            revision: selectedTask.revision,
+            confirm_pending: confirmPending,
+          },
+          QUICK_SAVE_TIMEOUT_MS,
+        ),
+    );
+  }
+
   function generateOrRegenerateOutline() {
     if (!selectedId || !selectedTask) return;
     if (writingSettingsDirty) {
@@ -1516,6 +1730,15 @@ export function ArticleWorkbench({
     WORKBENCH_TABS.find((tab) => tab.value === suggestedTab)?.label || "标题";
   const activeStage =
     WORKFLOW_STAGES.find((stage) => stage.tabs.includes(activeTab)) ?? WORKFLOW_STAGES[0];
+  const suggestedStageIndex = Math.max(
+    0,
+    WORKFLOW_STAGES.findIndex((stage) => stage.tabs.includes(suggestedTab)),
+  );
+  const busyTabs = new Set(
+    WORKBENCH_TABS.filter((tab) => sectionPending(tab.value)).map(
+      (tab) => tab.value,
+    ),
+  );
   const outlineHasDownstream = Boolean(
     selectedTask && STATUS_PHASE[selectedTask.status] > STATUS_PHASE.outline_confirmed,
   );
@@ -1570,11 +1793,8 @@ export function ArticleWorkbench({
         onAdoptServer={adoptServerConflict}
         onKeepLocal={keepLocalConflict}
       />
-      <div className="border-b bg-[color-mix(in_oklch,var(--background),var(--accent)_22%)]">
+      <div className="border-b bg-card">
         <div className="mx-auto max-w-[1500px] px-5 py-5">
-          {projectName && focusMode && (
-            <ProjectNavigation customer={projectName} className="mb-4" />
-          )}
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -1684,7 +1904,7 @@ export function ArticleWorkbench({
           )}
         >
           {!focusMode && <Card className="min-w-0 rounded-lg">
-            <CardHeader className="border-b">
+            <CardHeader className="border-b max-sm:grid-cols-1! max-sm:gap-3">
               <CardTitle>任务队列</CardTitle>
               <CardDescription>
                 {filteredTasks.length} / {tasks.length}
@@ -1869,8 +2089,11 @@ export function ArticleWorkbench({
             </CardContent>
           </Card>}
 
-          <Card id="task-workbench" className="min-w-0 rounded-lg scroll-mt-4">
-            <CardHeader className="border-b">
+          <Card
+            id="task-workbench"
+            className="min-w-0 scroll-mt-4 gap-0 overflow-visible py-0"
+          >
+            <CardHeader className="border-b px-4 py-4">
               <CardTitle>文章工作台</CardTitle>
               <CardDescription>
                 {selectedTask
@@ -1880,7 +2103,7 @@ export function ArticleWorkbench({
                   : "未选择任务"}
               </CardDescription>
               {selectedTask && (
-                <CardAction className="flex items-center gap-2">
+                <CardAction className="flex items-center gap-2 max-sm:col-start-1 max-sm:row-start-3 max-sm:flex-wrap max-sm:justify-self-start">
                   {selectedTask.status !== "new" && (
                     <Button
                       size="sm"
@@ -1896,29 +2119,15 @@ export function ArticleWorkbench({
                       完全重写
                     </Button>
                   )}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      selectedId &&
-                      runAction("当前项目目录已打开", () =>
-                        apiPost<ApiMessage>(`/api/tasks/${selectedId}/open-folder`),
-                      )
-                    }
-                    disabled={Boolean(appPending) || Boolean(sectionPending("files"))}
-                  >
-                    <FolderOpen />
-                    打开项目目录
-                  </Button>
                   <Badge variant={statusVariant(selectedTask.status)}>
                     {statusLabel(selectedTask.status)}
                   </Badge>
                 </CardAction>
               )}
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-0">
               {!selectedTask ? (
-                <div className="flex h-[610px] items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
+                <div className="m-4 flex h-[610px] items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
                   {focusMode ? "找不到指定文章，请返回文章列表重新进入。" : "同步话题库后选择一行"}
                 </div>
               ) : (
@@ -1927,32 +2136,38 @@ export function ArticleWorkbench({
                   onValueChange={(value) => selectTab(value as WorkbenchTab)}
                   className="h-full min-w-0"
                 >
-                  <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1 sm:grid-cols-5">
-                    {WORKFLOW_STAGES.map((stage) => {
-                      const stageBusy = stage.tabs.some((tab) => sectionPending(tab));
-                      const stageDirty = stage.tabs.some((tab) => dirtyTabs.has(tab));
-                      return (
-                        <Button
-                          key={stage.value}
-                          type="button"
-                          size="sm"
-                          variant={activeStage.value === stage.value ? "default" : "ghost"}
-                          className="gap-2"
-                          onClick={() => selectTab(stage.tabs[0])}
-                        >
-                          <span className="text-[10px] opacity-70">{stage.step}</span>
-                          {stage.label}
-                          {stageBusy && <Loader2 className="size-3 animate-spin" />}
-                          {stageDirty && (
-                            <span className="size-1.5 rounded-full bg-amber-500" />
-                          )}
-                        </Button>
-                      );
-                    })}
+                  <div className="border-b p-3 lg:hidden">
+                    <ArticleWorkflowNavigation
+                      stages={WORKFLOW_STAGES}
+                      activeStage={activeStage.value}
+                      progressStageIndex={suggestedStageIndex}
+                      busyTabs={busyTabs}
+                      dirtyTabs={dirtyTabs}
+                      onSelect={(tab) => selectTab(tab as WorkbenchTab)}
+                    />
                   </div>
 
+                  <div className="grid min-w-0 lg:grid-cols-[224px_minmax(0,1fr)] xl:grid-cols-[224px_minmax(0,1fr)_272px]">
+                    <aside className="hidden border-r bg-muted/15 lg:block">
+                      <div className="sticky top-14">
+                        <ArticleWorkflowNavigation
+                          stages={WORKFLOW_STAGES}
+                          activeStage={activeStage.value}
+                          progressStageIndex={suggestedStageIndex}
+                          busyTabs={busyTabs}
+                          dirtyTabs={dirtyTabs}
+                          onSelect={(tab) => selectTab(tab as WorkbenchTab)}
+                        />
+                      </div>
+                    </aside>
+
+                    <div className="min-w-0 p-4 xl:p-5">
+
                   {activeStage.tabs.length > 1 && (
-                    <div className="mt-2 flex flex-wrap gap-2 border-b pb-2">
+                    <div className="flex flex-wrap items-center gap-1.5 border-b pb-3">
+                      <span className="mr-1 text-xs font-medium text-muted-foreground">
+                        当前阶段
+                      </span>
                       {activeStage.tabs.map((tabValue) => {
                         const tab = WORKBENCH_TABS.find((item) => item.value === tabValue);
                         if (!tab) return null;
@@ -1962,6 +2177,7 @@ export function ArticleWorkbench({
                             type="button"
                             size="sm"
                             variant={activeTab === tab.value ? "secondary" : "ghost"}
+                            className="rounded-full"
                             onClick={() => selectTab(tab.value)}
                           >
                             {tab.label}
@@ -1977,7 +2193,7 @@ export function ArticleWorkbench({
                     </div>
                   )}
 
-                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-sm">
+                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-sm xl:hidden">
                     <span className="text-muted-foreground">建议下一步：</span>
                     <Button
                       size="xs"
@@ -2238,7 +2454,7 @@ export function ArticleWorkbench({
                       articleWords={articleWords}
                       hasGeneratedFirstVersion={hasGeneratedFirstVersion}
                       articleDirty={articleDirty}
-                      busy={isBusy}
+                      busy={isBusy || Boolean(batchBusy)}
                       hasActiveJob={Boolean(activeTaskJob)}
                       canAction={canAction}
                       onArticleChange={setArticleText}
@@ -2257,6 +2473,12 @@ export function ArticleWorkbench({
                         );
                       }}
                       onRestore={restoreVersion}
+                      onSaveSeoReviewSettings={saveSeoReviewSettings}
+                      onStartSeoReview={startSeoReview}
+                      onUpdateSeoReviewChange={updateSeoReviewChange}
+                      onPreviewSeoReview={previewSeoReview}
+                      onApplySeoReview={applySeoReview}
+                      onCompleteSeoReview={completeSeoReview}
                     />
                   </TabsContent>
 
@@ -2417,6 +2639,26 @@ export function ArticleWorkbench({
                       }
                     />
                   </TabsContent>
+                    </div>
+
+                    <aside className="hidden border-l bg-muted/10 xl:block">
+                      <div className="sticky top-14">
+                        <ArticleContextPanel
+                          task={selectedTask}
+                          statusLabel={statusLabel(selectedTask.status)}
+                          suggestedTabLabel={suggestedTabLabel}
+                          unsavedSections={unsavedSections}
+                          busyLabel={
+                            activeTaskJob
+                              ? `${batchOperationLabel(activeTaskJob.operation)} · ${batchJobStatusLabel(activeTaskJob.status)}`
+                              : busy || undefined
+                          }
+                          articleWordCount={englishWordCount(articleText)}
+                          onSuggestedStep={() => selectTab(suggestedTab)}
+                        />
+                      </div>
+                    </aside>
+                  </div>
                 </Tabs>
               )}
             </CardContent>
@@ -2434,6 +2676,7 @@ function batchOperationLabel(operation: BatchOperation) {
     outline: "生成大纲",
     article: "生成正文",
     rewrite_article: "仅重写正文",
+    seo_review: "SEO 质量复检",
     humanize: "降 AI 改写",
     restore_links: "恢复链接",
     prepare_images: "准备图片",

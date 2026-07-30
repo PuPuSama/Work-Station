@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import unittest
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -26,19 +27,23 @@ class FakeStreamingResponse(BytesIO):
 
 
 class ResponsesPayloadTests(unittest.TestCase):
-    def test_every_request_uses_xhigh_reasoning_effort(self) -> None:
+    def test_request_uses_selected_reasoning_effort(self) -> None:
         payload = build_responses_payload(
             model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "Write an outline."}],
-            temperature=0.3,
             max_tokens=800,
+            reasoning_effort="medium",
         )
-        self.assertEqual(payload["reasoning"], {"effort": "xhigh"})
+        self.assertEqual(payload["reasoning"], {"effort": "medium"})
         self.assertEqual(payload["model"], "gpt-5.6-sol")
+        self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
 
     def test_default_model_is_gpt_5_6_sol(self) -> None:
         self.assertEqual(load_config().llm_model, "gpt-5.6-sol")
+
+    def test_default_reasoning_effort_is_xhigh(self) -> None:
+        self.assertEqual(load_config().llm_reasoning_effort, "xhigh")
 
 
 class ResponsesStreamTests(unittest.TestCase):
@@ -65,8 +70,43 @@ class ResponsesStreamTests(unittest.TestCase):
         payload = json.loads(sent_request.data.decode("utf-8"))
         self.assertEqual(result, "Streamed text")
         self.assertEqual(payload["model"], "gpt-5.6-sol")
+        self.assertEqual(payload["reasoning"], {"effort": "xhigh"})
+        self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
         self.assertEqual(sent_request.get_header("Accept"), "text/event-stream")
+
+    def test_saved_runtime_selection_overrides_environment_model(self) -> None:
+        response = FakeStreamingResponse(
+            (
+                "event: response.output_text.delta\n"
+                'data: {"type":"response.output_text.delta","delta":"Done"}\n\n'
+            ).encode("utf-8")
+        )
+        selected = replace(
+            load_config(),
+            llm_model="gpt-5.6-terra",
+            llm_reasoning_effort="medium",
+            llm_runtime_override=True,
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LLM_API_KEY": "test-key",
+                    "LLM_MODEL": "gpt-5.6-sol",
+                    "LLM_REASONING_EFFORT": "xhigh",
+                },
+            ),
+            patch("services.llm.request.urlopen", return_value=response) as urlopen,
+        ):
+            result = LLMClient(selected).chat(
+                [{"role": "user", "content": "Write."}]
+            )
+
+        payload = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(result, "Done")
+        self.assertEqual(payload["model"], "gpt-5.6-terra")
+        self.assertEqual(payload["reasoning"], {"effort": "medium"})
 
     def test_collects_output_text_delta_events(self) -> None:
         stream = BytesIO(

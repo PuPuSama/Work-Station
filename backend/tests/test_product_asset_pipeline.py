@@ -339,6 +339,41 @@ class ProductAssetPipelineTests(unittest.TestCase):
             self.assertEqual(result.selected_asset_id, "")
             opener.assert_not_called()
 
+    def test_candidate_mode_continues_after_failure_and_stops_after_target_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task, config = task_and_config(root)
+            products = [
+                Product(name=f"Candidate {index}", url=f"https://www.example.com/product/{index}/")
+                for index in range(1, 6)
+            ]
+            statuses = iter(("no_valid_assets", "selected", "selected", "selected", "selected"))
+
+            def enrich(_task_dir, _task, product, **kwargs):
+                status = next(statuses)
+                return product.model_copy(
+                    update={
+                        "product_id": kwargs["product_id"],
+                        "asset_status": status,
+                        "detail_page_verified": True,
+                        "image_path": f"{product.name}.webp" if status == "selected" else "",
+                    }
+                )
+
+            with patch.object(pipeline, "_enrich_one_product", side_effect=enrich) as mocked:
+                results = pipeline.enrich_product_assets(
+                    config,
+                    task,
+                    products,
+                    stop_after_selected=3,
+                )
+
+            self.assertEqual(mocked.call_count, 4)
+            self.assertEqual(
+                [item.name for item in results if item.asset_status == "selected"],
+                ["Candidate 2", "Candidate 3", "Candidate 4"],
+            )
+
     def test_global_budget_skips_later_products(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

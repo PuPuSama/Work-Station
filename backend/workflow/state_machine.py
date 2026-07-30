@@ -317,6 +317,7 @@ def _clear_links_and_images(task: TaskRecord) -> None:
 
 def _clear_humanized_and_after(task: TaskRecord) -> None:
     task.humanized_article = ""
+    task.humanization_skipped = False
     task.humanized_article_word_count = 0
     task.humanized_article_hash = ""
     task.final_ai_check = AICheck()
@@ -437,6 +438,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
             else STATUS_DRAFT_READY
         )
     elif stage in {"humanized", "humanized_article"}:
+        task.humanization_skipped = False
         task.final_ai_check = AICheck()
         _clear_links_and_images(task)
         task.article = task.humanized_article

@@ -119,6 +119,47 @@ class MigrationUnitTests(unittest.TestCase):
         self.assertTrue(migrated["include_project_introduction"])
         self.assertEqual(migrated["outline_prompt_selection"], "system")
         self.assertEqual(migrated["article_prompt_selection"], "system")
+        self.assertEqual(migrated["seo_review_prompt_selection"], "system")
+        self.assertEqual(migrated["seo_primary_keyword"], "")
+        self.assertEqual(migrated["seo_long_tail_keywords"], [])
+        self.assertEqual(migrated["seo_reviews"], [])
+
+    def test_schema_v5_whole_article_review_becomes_legacy_structure_group(self) -> None:
+        source = "# Title\n\nIntro.\n\n## Section\n\n### A\n\nOne.\n\n### B\n\nTwo.\n\n## FAQ"
+        revised = source.replace("One.", "One revised.")
+        migrated, changed = migrate_task_payload(
+            v1_task(
+                schema_version=5,
+                seo_reviews=[
+                    {
+                        "id": "old-review",
+                        "source_article": source,
+                        "source_article_hash": "source-hash",
+                        "source_revision": 1,
+                        "score": 80,
+                        "dimensions": [],
+                        "publish_ready": False,
+                        "publish_recommendation": "Revise.",
+                        "report": "Report.",
+                        "revised_article": revised,
+                        "revised_article_hash": "revised-hash",
+                        "prompt_snapshot": {
+                            "kind": "review",
+                            "source": "system",
+                        },
+                        "created_at": "2026-07-29T00:00:00",
+                    }
+                ],
+            )
+        )
+
+        self.assertTrue(changed)
+        task = TaskRecord.model_validate(migrated)
+        review = task.seo_reviews[0]
+        self.assertEqual(review.status, "open")
+        self.assertEqual(len(review.changes), 1)
+        self.assertEqual(review.changes[0].operation, "structure")
+        self.assertEqual(review.changes[0].model_proposed_text, revised)
 
     def test_nested_models_are_validated_on_assignment(self) -> None:
         task = TaskRecord.model_validate(v1_task())
@@ -236,6 +277,51 @@ class TaskStoreMigrationTests(unittest.TestCase):
         replace_all.assert_not_called()
         self.assertEqual(store.get("task-a").topic, "A changed")
         self.assertEqual(store.get("task-b").topic, "B")
+
+    def test_delete_customer_removes_only_that_projects_tasks(self) -> None:
+        store = TaskStore(self.config)
+        store.save(
+            [
+                TaskRecord.model_validate(
+                    v1_task(id="task-a", customer="a.example.com", topic="A")
+                ),
+                TaskRecord.model_validate(
+                    v1_task(id="task-b", customer="b.example.com", topic="B")
+                ),
+            ]
+        )
+
+        deleted = store.delete_customer("a.example.com")
+
+        self.assertEqual([task.id for task in deleted], ["task-a"])
+        self.assertEqual([task.id for task in store.load()], ["task-b"])
+
+    def test_topic_sync_preserves_manually_created_title_tasks(self) -> None:
+        store = TaskStore(self.config)
+        manual = TaskRecord.model_validate(
+            v1_task(
+                id="manual-task",
+                source_kind="manual",
+                source_key="manual:one",
+                topic="Manual topic",
+            )
+        )
+        scanned = TaskRecord.model_validate(
+            v1_task(
+                id="xlsx-task",
+                source_kind="xlsx",
+                source_key=article_source_key("example.com", "Workbook topic", 1),
+                topic="Workbook topic",
+            )
+        )
+        store.save([manual])
+
+        store.upsert_many([scanned])
+
+        self.assertEqual(
+            {task.id for task in store.load()},
+            {"manual-task", "xlsx-task"},
+        )
 
     def test_concurrent_updates_to_different_tasks_do_not_lose_data(self) -> None:
         store = TaskStore(self.config)

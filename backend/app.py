@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
+import os
 from pathlib import Path
+import re
 from threading import Lock
 from typing import Callable
+from urllib import parse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
 
@@ -18,6 +22,7 @@ from models import (
     AICheck,
     AICheckUpdateRequest,
     ApiMessage,
+    AuthLoginRequest,
     ArticleImage,
     ArticleUpdateRequest,
     ArticleVersion,
@@ -32,6 +37,8 @@ from models import (
     GenerateOutlineRequest,
     ImagesUpdateRequest,
     LinkValidation,
+    LlmSettingsUpdateRequest,
+    ManualTitleGenerationRequest,
     OutlineUpdateRequest,
     ProductsUpdateRequest,
     ProjectPromptLibrary,
@@ -46,8 +53,16 @@ from models import (
     PromptUpdateRequest,
     ProjectBrandUpdateRequest,
     ProjectContextUpdateRequest,
+    ProjectDomainUpdateRequest,
     RevisionedRequest,
     SelectTitleRequest,
+    SeoReviewRequest,
+    SeoReviewChangeUpdateRequest,
+    SeoReviewFinalizeRequest,
+    SeoReviewPreview,
+    SeoReviewPreviewRequest,
+    SeoReviewRun,
+    SeoReviewSettingsUpdateRequest,
     SourceLink,
     STATUS_DOCX_EXPORTED,
     STATUS_DRAFT_READY,
@@ -108,6 +123,24 @@ from services.project_prompts import (
     PromptInUseError,
     PromptLibraryError,
 )
+from services.auth import (
+    AUTH_COOKIE_NAME,
+    DEFAULT_SESSION_SECONDS,
+    authentication_enabled,
+    create_session_token,
+    password_matches,
+    valid_session_token,
+)
+from services.llm_settings import LlmSettingsRepository
+from services.seo_review import (
+    SeoReviewError,
+    build_review_candidate,
+    build_seo_review_prompt,
+    effective_review_prompt_snapshot,
+    generate_seo_review,
+    normalized_keywords,
+    update_review_change,
+)
 from services.job_queue import (
     ActiveJobError,
     BatchJobRunner,
@@ -119,8 +152,8 @@ from services.product_asset_pipeline import enrich_product_assets
 from services.product_crawler import recommend_products
 from services.tavily import TavilyClient
 from services.tdk import TdkGenerationError, export_tdk_docx, generate_tdk_metadata
-from services.task_files import TaskDirectoryError, open_task_directory
 from services.topics import TopicWorkbookError, scan_topic_library, store_topic_workbook
+from services.task_identity import article_source_key, normalized_customer
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -175,6 +208,7 @@ async def app_lifespan(application: FastAPI):
             "outline",
             "article",
             "rewrite_article",
+            "seo_review",
             "humanize",
             "restore_links",
             "generate_tdk",
@@ -216,13 +250,155 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_AUTH_PUBLIC_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/status",
+    "/api/health",
+}
+
+
+@app.middleware("http")
+async def require_application_password(request: Request, call_next):
+    if (
+        not authentication_enabled()
+        or request.method == "OPTIONS"
+        or request.url.path in _AUTH_PUBLIC_PATHS
+    ):
+        return await call_next(request)
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    if valid_session_token(token):
+        return await call_next(request)
+
+    response = JSONResponse(
+        status_code=401,
+        content={"detail": "Authentication required."},
+    )
+    origin = request.headers.get("origin", "")
+    if origin in {"http://localhost:3000", "http://127.0.0.1:3000"}:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
+def auth_cookie_secure(request: Request) -> bool:
+    configured = os.environ.get("APP_COOKIE_SECURE", "").strip().lower()
+    if configured in {"1", "true", "yes", "on"}:
+        return True
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    return request.url.scheme == "https" or forwarded_proto.split(",", 1)[0].strip() == "https"
+
+
+@app.get("/api/auth/status", response_model=ApiMessage)
+def auth_status(request: Request) -> ApiMessage:
+    enabled = authentication_enabled()
+    authenticated = not enabled or valid_session_token(
+        request.cookies.get(AUTH_COOKIE_NAME, "")
+    )
+    return ApiMessage(
+        message="Authentication status.",
+        data={"enabled": enabled, "authenticated": authenticated},
+    )
+
+
+@app.post("/api/auth/login", response_model=ApiMessage)
+def auth_login(request: Request, payload: AuthLoginRequest):
+    if not authentication_enabled():
+        return ApiMessage(
+            message="Password protection is not configured.",
+            data={"enabled": False, "authenticated": True},
+        )
+    if not password_matches(payload.password):
+        raise HTTPException(status_code=401, detail="密码错误。")
+    response = JSONResponse(
+        content={
+            "message": "登录成功。",
+            "data": {"enabled": True, "authenticated": True},
+        }
+    )
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=create_session_token(),
+        max_age=DEFAULT_SESSION_SECONDS,
+        httponly=True,
+        secure=auth_cookie_secure(request),
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout", response_model=ApiMessage)
+def auth_logout() -> JSONResponse:
+    response = JSONResponse(
+        content={
+            "message": "已退出登录。",
+            "data": {
+                "enabled": authentication_enabled(),
+                "authenticated": False,
+            },
+        }
+    )
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return response
+
+
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 _PRODUCT_PROCESSING_GUARD = Lock()
 _PRODUCT_PROCESSING_TASKS: set[str] = set()
 
 
+def available_with_current(
+    current: str,
+    configured: tuple[str, ...],
+) -> tuple[str, ...]:
+    if not current or current in configured:
+        return configured
+    return (current, *configured)
+
+
 def config():
-    return load_config()
+    base = load_config()
+    environment_model = os.environ.get("LLM_MODEL", "").strip()
+    environment_reasoning_effort = os.environ.get(
+        "LLM_REASONING_EFFORT",
+        "",
+    ).strip()
+    environment_base_url = os.environ.get("LLM_BASE_URL", "").strip()
+    if environment_model or environment_reasoning_effort or environment_base_url:
+        base = replace(
+            base,
+            llm_model=environment_model or base.llm_model,
+            llm_reasoning_effort=(
+                environment_reasoning_effort or base.llm_reasoning_effort
+            ),
+            llm_base_url=(environment_base_url or base.llm_base_url).rstrip("/"),
+            llm_available_models=available_with_current(
+                environment_model or base.llm_model,
+                base.llm_available_models,
+            ),
+            llm_available_reasoning_efforts=available_with_current(
+                environment_reasoning_effort or base.llm_reasoning_effort,
+                base.llm_available_reasoning_efforts,
+            ),
+        )
+    saved = LlmSettingsRepository(base.data_file).get()
+    if saved is None:
+        return base
+    return replace(
+        base,
+        llm_model=saved.model,
+        llm_reasoning_effort=saved.reasoning_effort,
+        llm_available_models=available_with_current(
+            saved.model,
+            base.llm_available_models,
+        ),
+        llm_available_reasoning_efforts=available_with_current(
+            saved.reasoning_effort,
+            base.llm_available_reasoning_efforts,
+        ),
+        llm_runtime_override=True,
+    )
 
 
 def store() -> TaskStore:
@@ -443,6 +619,28 @@ def read_config() -> dict:
     return public_config(config())
 
 
+@app.put("/api/settings/llm")
+def update_llm_settings(request: LlmSettingsUpdateRequest) -> dict:
+    base = load_config()
+    model = request.model.strip()
+    reasoning_effort = request.reasoning_effort.strip()
+    if model not in base.llm_available_models:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected model is not available.",
+        )
+    if reasoning_effort not in base.llm_available_reasoning_efforts:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected reasoning effort is not available.",
+        )
+    LlmSettingsRepository(base.data_file).save(
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    return public_config(config())
+
+
 @app.get("/api/dashboard", response_model=DashboardSummary)
 def dashboard() -> DashboardSummary:
     cfg = config()
@@ -520,19 +718,6 @@ def read_task(task_id: str) -> TaskRecord:
     return expose_task(get_task_or_404(task_id))
 
 
-@app.post("/api/tasks/{task_id}/open-folder", response_model=ApiMessage)
-def open_task_folder(task_id: str) -> ApiMessage:
-    task = get_task_or_404(task_id)
-    try:
-        directory = open_task_directory(config(), task)
-    except TaskDirectoryError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ApiMessage(
-        message="Task directory opened.",
-        data={"path": str(directory)},
-    )
-
-
 def append_version(task: TaskRecord, kind: str, content: str, source_kind: str = "") -> None:
     """Append a changed snapshot without duplicating the latest entry."""
 
@@ -608,6 +793,273 @@ def require_project(customer: str) -> None:
         raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
 
 
+def normalized_project_domain(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("Project domain is required.")
+    parsed = parse.urlparse(raw if "://" in raw else f"https://{raw}")
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Project domain must use HTTP or HTTPS.")
+    if parsed.username or parsed.password:
+        raise ValueError("Project domain cannot contain credentials.")
+    try:
+        if parsed.port is not None:
+            raise ValueError("Project domain cannot contain a port.")
+    except ValueError as exc:
+        raise ValueError("Project domain contains an invalid port.") from exc
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("Enter only the domain, without a path, query, or fragment.")
+    hostname = (parsed.hostname or "").strip(".")
+    if not hostname:
+        raise ValueError("Project domain is invalid.")
+    try:
+        domain = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("Project domain contains invalid characters.") from exc
+    if len(domain) > 253 or "." not in domain:
+        raise ValueError("Project domain must be a complete website domain.")
+    labels = domain.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or re.fullmatch(r"[a-z0-9-]+", label) is None
+        for label in labels
+    ):
+        raise ValueError("Project domain contains an invalid domain label.")
+    return domain
+
+
+def project_rename_moves(
+    cfg,
+    customer: str,
+    new_customer: str,
+    tasks: list[TaskRecord],
+) -> list[tuple[Path, Path]]:
+    """Resolve project-owned directories/files before mutating any state."""
+
+    candidates: list[tuple[Path, Path]] = []
+    output_root = cfg.output_root.resolve()
+    project_roots: set[Path] = set()
+    for task in tasks:
+        task_path = Path(task.task_dir).resolve()
+        try:
+            relative = task_path.relative_to(output_root)
+        except ValueError:
+            continue
+        if len(relative.parts) >= 2:
+            project_roots.add(output_root / relative.parts[0])
+    if len(project_roots) > 1:
+        raise ValueError("Project tasks span multiple output directories; migration was stopped.")
+    for project_root in project_roots:
+        candidates.append((project_root, output_root / new_customer))
+
+    workbooks = [
+        workbook.resolve()
+        for workbook in cfg.topic_library.glob("*.xlsx")
+        if normalized_customer(workbook.stem) == normalized_customer(customer)
+    ]
+    if len(workbooks) > 1:
+        raise ValueError("Multiple topic workbooks match this project; migration was stopped.")
+    if workbooks:
+        candidates.append(
+            (workbooks[0], cfg.topic_library.resolve() / f"{new_customer}.xlsx")
+        )
+
+    if cfg.knowledge_base.exists():
+        knowledge_directories = [
+            directory.resolve()
+            for directory in cfg.knowledge_base.iterdir()
+            if directory.is_dir()
+            and normalized_customer(directory.name) == normalized_customer(customer)
+        ]
+        if len(knowledge_directories) > 1:
+            raise ValueError("Multiple knowledge folders match this project; migration was stopped.")
+        if knowledge_directories:
+            candidates.append(
+                (knowledge_directories[0], cfg.knowledge_base.resolve() / new_customer)
+            )
+
+    moves: list[tuple[Path, Path]] = []
+    for source, destination in candidates:
+        if not source.exists():
+            continue
+        if os.path.normcase(str(source)) == os.path.normcase(str(destination)):
+            continue
+        if destination.exists():
+            raise FileExistsError(f"Target path already exists: {destination}")
+        moves.append((source, destination))
+    return moves
+
+
+@app.put("/api/projects/{customer}/domain", response_model=ApiMessage)
+def update_project_domain(
+    customer: str,
+    request: ProjectDomainUpdateRequest,
+) -> ApiMessage:
+    try:
+        new_customer = normalized_project_domain(request.new_domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    task_store = store()
+    tasks = [
+        task
+        for task in task_store.load()
+        if normalized_customer(task.customer) == normalized_customer(customer)
+    ]
+    if not tasks:
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
+    if normalized_customer(customer) != normalized_customer(new_customer) and any(
+        normalized_customer(task.customer) == normalized_customer(new_customer)
+        for task in task_store.load()
+        if task.id not in {project_task.id for project_task in tasks}
+    ):
+        raise HTTPException(status_code=409, detail=f"Project already exists: {new_customer}")
+    active = batch_queue().active_task_ids(task.id for task in tasks)
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Wait for or cancel the project's active jobs before changing its domain.",
+        )
+
+    cfg = config()
+    try:
+        moves = project_rename_moves(cfg, customer, new_customer, tasks)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    moved: list[tuple[Path, Path]] = []
+    renamed_tasks: list[TaskRecord] = []
+    id_mapping: dict[str, str] = {}
+    prompts_renamed = False
+    queue_renamed = False
+    try:
+        for source, destination in moves:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            moved.append((destination, source))
+
+        renamed_tasks, id_mapping = task_store.rename_customer(
+            customer,
+            new_customer,
+            path_replacements=moves,
+        )
+        prompt_store().rename_customer(customer, new_customer)
+        prompts_renamed = True
+        batch_queue().rename_customer(customer, new_customer, id_mapping)
+        queue_renamed = True
+    except Exception as exc:
+        if queue_renamed:
+            batch_queue().rename_customer(
+                new_customer,
+                customer,
+                {new_id: old_id for old_id, new_id in id_mapping.items()},
+            )
+        if prompts_renamed:
+            prompt_store().rename_customer(new_customer, customer)
+        if renamed_tasks:
+            task_store.rename_customer(
+                new_customer,
+                customer,
+                path_replacements=[
+                    (destination, source)
+                    for source, destination in moves
+                ],
+            )
+        for source, destination in reversed(moved):
+            if source.exists() and not destination.exists():
+                source.replace(destination)
+        status_code = 409 if isinstance(exc, (FileExistsError, PromptLibraryError)) else 500
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"Project domain could not be changed: {exc}",
+        ) from exc
+
+    return ApiMessage(
+        message=(
+            f"项目域名已从 {customer} 更新为 {new_customer}。"
+            "任务、提示词、批次和项目目录已迁移；已生成正文中的旧链接未自动改写。"
+        ),
+        data={
+            "old_domain": customer,
+            "new_domain": new_customer,
+            "updated_tasks": len(renamed_tasks),
+            "task_id_mapping": id_mapping,
+            "moved_paths": [str(destination) for _, destination in moves],
+        },
+    )
+
+
+def archive_project_sources(cfg, customer: str, tasks: list[TaskRecord]) -> list[str]:
+    """Move project-owned source/output paths into a recoverable local trash folder."""
+
+    trash_root = cfg.output_root.parent / "project-trash" / uuid4().hex
+    archived: list[str] = []
+    candidates: list[tuple[Path, Path]] = []
+    output_root = cfg.output_root.resolve()
+    for task in tasks:
+        task_path = Path(task.task_dir).resolve()
+        try:
+            relative = task_path.relative_to(output_root)
+        except ValueError:
+            continue
+        if len(relative.parts) >= 2:
+            project_root = output_root / relative.parts[0]
+            candidates.append((project_root, trash_root / "output" / project_root.name))
+
+    topic_root = cfg.topic_library.resolve()
+    for workbook in cfg.topic_library.glob("*.xlsx"):
+        if normalized_customer(workbook.stem) == normalized_customer(customer):
+            candidates.append((workbook.resolve(), trash_root / "topic-library" / workbook.name))
+
+    seen: set[Path] = set()
+    for source, destination in candidates:
+        if source in seen or not source.exists():
+            continue
+        seen.add(source)
+        if source != topic_root:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            archived.append(str(destination))
+    return archived
+
+
+@app.delete("/api/projects/{customer}", response_model=ApiMessage)
+def delete_project(customer: str, confirmation: str) -> ApiMessage:
+    if confirmation.strip() != customer:
+        raise HTTPException(status_code=422, detail="Type the exact project domain to confirm deletion.")
+    task_store = store()
+    tasks = [
+        task
+        for task in task_store.load()
+        if normalized_customer(task.customer) == normalized_customer(customer)
+    ]
+    if not tasks:
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
+    active = batch_queue().active_task_ids(task.id for task in tasks)
+    if active:
+        raise HTTPException(status_code=409, detail="Stop the project's active jobs before deleting it.")
+
+    cfg = config()
+    try:
+        archived = archive_project_sources(cfg, customer, tasks)
+        batch_queue().delete_customer(customer)
+        prompt_store().delete_customer(customer)
+        deleted = task_store.delete_customer(customer)
+    except ActiveJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Project files could not be archived: {exc}") from exc
+    return ApiMessage(
+        message=f"Project deleted. {len(deleted)} article tasks were removed.",
+        data={"customer": customer, "deleted_tasks": len(deleted), "archived_paths": archived},
+    )
+
+
 @app.get("/api/projects/{customer}/prompts", response_model=ProjectPromptLibrary)
 def list_project_prompts(customer: str) -> ProjectPromptLibrary:
     require_project(customer)
@@ -669,7 +1121,11 @@ def delete_project_prompt(customer: str, prompt_id: str) -> ApiMessage:
         field = (
             "outline_prompt_selection"
             if item.kind == "outline"
-            else "article_prompt_selection"
+            else (
+                "article_prompt_selection"
+                if item.kind == "article"
+                else "seo_review_prompt_selection"
+            )
         )
         if getattr(task, field) != prompt_id:
             continue
@@ -696,6 +1152,7 @@ def update_project_prompt_defaults(
             customer,
             request.default_outline_prompt_id,
             request.default_article_prompt_id,
+            request.default_review_prompt_id,
         )
     except KeyError:
         raise HTTPException(status_code=422, detail="默认提示词不存在或已停用。") from None
@@ -730,11 +1187,22 @@ def preview_effective_prompt(task_id: str, request: PromptPreviewRequest) -> Pro
         "include_project_notes": request.include_project_notes,
         "include_topic_notes": request.include_topic_notes,
     }
-    effective = (
-        build_outline_prompt(config(), task, **common)
-        if request.kind == "outline"
-        else build_article_prompt(config(), task, **common)
-    )
+    if request.kind == "outline":
+        effective = build_outline_prompt(config(), task, **common)
+    elif request.kind == "article":
+        effective = build_article_prompt(config(), task, **common)
+    else:
+        article = task.initial_article or task.article
+        if not article.strip():
+            raise HTTPException(status_code=409, detail="请先保存第一版正文，再预览复检提示词。")
+        effective, snapshot = build_seo_review_prompt(
+            config(),
+            task,
+            article,
+            prompt_snapshot=snapshot,
+            primary_keyword=task.seo_primary_keyword,
+            long_tail_keywords=task.seo_long_tail_keywords,
+        )
     return PromptPreview(snapshot=snapshot, effective_prompt=effective)
 
 
@@ -773,6 +1241,35 @@ def update_writing_settings(
     return save_task(task, request.revision)
 
 
+@app.put("/api/tasks/{task_id}/seo-review-settings", response_model=TaskRecord)
+def update_seo_review_settings(
+    task_id: str,
+    request: SeoReviewSettingsUpdateRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    selection = request.prompt_selection.strip() or "project_default"
+    resolved_prompt_snapshot(task, "review", selection)
+    keywords = normalized_keywords(request.long_tail_keywords)
+    if any(len(keyword) > 240 for keyword in keywords):
+        raise HTTPException(status_code=422, detail="每个长尾关键词最多 240 个字符。")
+    task.seo_primary_keyword = re.sub(
+        r"\s+", " ", request.primary_keyword
+    ).strip()
+    task.seo_long_tail_keywords = keywords
+    task.seo_review_prompt_selection = selection
+    saved = save_task(task, request.revision)
+    write_json_artifact(
+        saved,
+        "seo_review_settings.json",
+        {
+            "primary_keyword": saved.seo_primary_keyword,
+            "long_tail_keywords": saved.seo_long_tail_keywords,
+            "prompt_selection": saved.seo_review_prompt_selection,
+        },
+    )
+    return saved
+
+
 @app.post("/api/tasks/{task_id}/rewrite-from-scratch", response_model=TaskRecord)
 def rewrite_task_from_scratch(
     task_id: str,
@@ -805,6 +1302,60 @@ def perform_title_generation(
             f"{index + 1}. {title}"
             for index, title in enumerate(saved.title_candidates)
         ),
+    )
+    return saved
+
+
+@app.post("/api/projects/{customer}/titles/direct", response_model=TaskRecord)
+def create_direct_title_task(
+    customer: str,
+    request: ManualTitleGenerationRequest,
+) -> TaskRecord:
+    require_project(customer)
+    cfg = config()
+    project_tasks = [
+        task
+        for task in store().canonical_tasks(cfg.current_week_folder)
+        if normalized_customer(task.customer) == normalized_customer(customer)
+    ]
+    latest = max(project_tasks, key=lambda task: task.updated_at)
+    topic_index = max((task.topic_index for task in project_tasks), default=0) + 1
+    task_id = uuid4().hex[:12]
+    task_dir = Path(latest.task_dir).parent / f"manual_{task_id}"
+    timestamp = now_iso()
+    task = TaskRecord(
+        id=task_id,
+        week_folder=cfg.current_week_folder,
+        customer=latest.customer,
+        brand_name=latest.brand_name,
+        project_introduction=latest.project_introduction,
+        project_notes=latest.project_notes,
+        source_key=f"manual:{article_source_key(latest.customer, request.topic, topic_index)}",
+        source_kind="manual",
+        topic_index=topic_index,
+        topic=request.topic.strip(),
+        title_generation_instruction=request.instruction.strip(),
+        task_dir=str(task_dir),
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    task.title_candidates = generate_titles(
+        cfg,
+        task,
+        instruction=task.title_generation_instruction,
+    )[:10]
+    task.status = STATUS_TITLES_READY
+    task_dir.mkdir(parents=True, exist_ok=False)
+    saved = store().put(task, expected_revision=0)
+    write_json_artifact(
+        saved,
+        "manual_title_request.json",
+        {"topic": saved.topic, "instruction": saved.title_generation_instruction},
+    )
+    write_text_artifact(
+        saved,
+        "title_candidates.md",
+        "\n".join(f"{index + 1}. {title}" for index, title in enumerate(saved.title_candidates)),
     )
     return saved
 
@@ -874,6 +1425,7 @@ def perform_auto_products(
                 request.limit,
                 tavily_client=TavilyClient(timeout=15),
                 download_images=False,
+                candidate_pool_limit=request.limit + 3,
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Auto product discovery failed: {exc}") from exc
@@ -884,14 +1436,31 @@ def perform_auto_products(
             )
         raise_if_batch_cancelled(cancelled)
         try:
-            task.products = enrich_product_assets(
+            enriched = enrich_product_assets(
                 cfg,
                 task,
                 discovered,
                 llm=LLMClient(cfg, timeout_seconds=60),
+                stop_after_selected=request.limit,
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Official product asset crawl failed: {exc}") from exc
+        selected = [
+            product
+            for product in enriched
+            if product.asset_status == "selected"
+            and product.detail_page_verified
+            and product.image_path.strip()
+        ][: request.limit]
+        if not selected:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "No verified official product detail pages with safe images were found; "
+                    "existing products were kept."
+                ),
+            )
+        task.products = selected
         raise_if_batch_cancelled(cancelled)
         invalidate_downstream(task, "products")
         saved = save_task(task, request.revision)
@@ -1237,6 +1806,21 @@ def batch_request_snapshot(
             mode="json",
             exclude_none=True,
         )
+    if operation == "seo_review":
+        snapshot = effective_review_prompt_snapshot(
+            resolved_prompt_snapshot(
+                task,
+                "review",
+                task.seo_review_prompt_selection,
+            )
+        )
+        return SeoReviewRequest(
+            revision=task.revision,
+            primary_keyword=task.seo_primary_keyword,
+            long_tail_keywords=task.seo_long_tail_keywords,
+            prompt_selection=task.seo_review_prompt_selection,
+            prompt_snapshot=snapshot,
+        ).model_dump(mode="json", exclude_none=True)
     if operation in {
         "humanize",
         "restore_links",
@@ -1299,6 +1883,10 @@ def batch_preflight_issue(task: TaskRecord, operation: str) -> str:
         if ACTION_GENERATE_OUTLINE not in actions:
             return f"当前状态“{task.status}”不能生成大纲。"
         return ""
+    if operation == "seo_review":
+        if not task.initial_article.strip():
+            return "请先保存第一版正文，再执行 SEO 质量复检。"
+        return ""
     action_by_operation = {
         "humanize": ACTION_HUMANIZE_ARTICLE,
         "restore_links": ACTION_RESTORE_LINKS,
@@ -1359,6 +1947,13 @@ def _execute_batch_job(
         elif job["operation"] == "outline":
             request = GenerateOutlineRequest.model_validate(job["request"])
             saved = perform_outline_generation(
+                task_id,
+                request,
+                cancelled=cancelled,
+            )
+        elif job["operation"] == "seo_review":
+            request = SeoReviewRequest.model_validate(job["request"])
+            saved = perform_seo_review(
                 task_id,
                 request,
                 cancelled=cancelled,
@@ -1538,15 +2133,12 @@ def retry_batch_job(job_id: str) -> BatchJobRecord:
     return BatchJobRecord.model_validate(result)
 
 
-@app.put("/api/tasks/{task_id}/article", response_model=TaskRecord)
-def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
-    task = get_task_or_404(task_id)
-    require_action(task, ACTION_UPDATE_ARTICLE)
+def validated_initial_article(article: str, task: TaskRecord) -> str:
     try:
         # PUT is a deterministic persistence endpoint.  Generation may repair
         # a missing transition with the LLM, but saving pasted/edited text must
         # never trigger a model call or silently rewrite prose.
-        initial = ensure_article_hyperlinks(request.article, task)
+        initial = ensure_article_hyperlinks(article, task)
         validate_article_layout(initial)
         validate_minimum_h3_per_h2(initial)
         if not has_intro_transition(initial):
@@ -1559,6 +2151,15 @@ def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
         PromptTemplateError,
     ) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return initial
+
+
+def replace_initial_article(
+    task: TaskRecord,
+    initial: str,
+    *,
+    source_kind: str,
+) -> None:
     task.initial_article = initial
     task.initial_article_word_count = visible_word_count(initial)
     task.initial_article_hash = content_hash(initial)
@@ -1566,16 +2167,302 @@ def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
     invalidate_downstream(task, "initial_article")
     task.source_links = source_links(initial)
     task.transition_added = has_intro_transition(initial)
-    task.article_versions.append(version_record("initial", initial, "manual_edit"))
+    task.article_versions.append(version_record("initial", initial, source_kind))
+
+
+def write_initial_article_artifacts(task: TaskRecord) -> None:
+    write_text_artifact(task, "02_initial_article.md", task.initial_article)
+    write_json_artifact(
+        task,
+        "02_initial_links.json",
+        [link.model_dump() for link in task.source_links],
+    )
+
+
+@app.put("/api/tasks/{task_id}/article", response_model=TaskRecord)
+def update_article(task_id: str, request: ArticleUpdateRequest) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    require_action(task, ACTION_UPDATE_ARTICLE)
+    initial = validated_initial_article(request.article, task)
+    replace_initial_article(task, initial, source_kind="manual_edit")
     # Revision validation happens in save_task.  Only publish artifacts after
     # it succeeds so a stale editor cannot overwrite the accepted version.
     saved = save_task(task, request.revision)
-    write_text_artifact(saved, "02_initial_article.md", saved.initial_article)
-    write_json_artifact(
-        saved,
-        "02_initial_links.json",
-        [link.model_dump() for link in saved.source_links],
+    write_initial_article_artifacts(saved)
+    return saved
+
+
+def perform_seo_review(
+    task_id: str,
+    request: SeoReviewRequest,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    article = task.initial_article.strip()
+    if not article:
+        raise HTTPException(
+            status_code=409,
+            detail="请先保存第一版正文，再执行 SEO 质量复检。",
+        )
+    snapshot = resolved_prompt_snapshot(
+        task,
+        "review",
+        request.prompt_selection,
+        request.prompt_snapshot,
     )
+    snapshot = effective_review_prompt_snapshot(snapshot)
+    if cancelled and cancelled():
+        raise JobCancelled("SEO review cancelled before model request.")
+    try:
+        generated = generate_seo_review(
+            config(),
+            task,
+            article,
+            prompt_snapshot=snapshot,
+            primary_keyword=request.primary_keyword,
+            long_tail_keywords=request.long_tail_keywords,
+        )
+    except (SeoReviewError, ArticleStructureError, PromptTemplateError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if cancelled and cancelled():
+        raise JobCancelled("SEO review cancelled before saving the result.")
+
+    review_id = uuid4().hex[:12]
+    keywords = normalized_keywords(request.long_tail_keywords)
+    run = SeoReviewRun(
+        id=review_id,
+        source_article=article,
+        source_article_hash=content_hash(article),
+        source_revision=task.revision,
+        score=generated.score,
+        dimensions=generated.dimensions,
+        publish_ready=generated.publish_ready,
+        publish_recommendation=generated.publish_recommendation,
+        report=generated.report,
+        changes=generated.changes,
+        prompt_snapshot=generated.prompt_snapshot,
+        primary_keyword=re.sub(r"\s+", " ", request.primary_keyword).strip(),
+        long_tail_keywords=keywords,
+        created_at=now_iso(),
+    )
+    task.seo_primary_keyword = run.primary_keyword
+    task.seo_long_tail_keywords = keywords
+    task.seo_review_prompt_selection = (
+        request.prompt_selection.strip() or "project_default"
+    )
+    task.seo_reviews.append(run)
+    saved = save_task(task, request.revision)
+    write_seo_review_artifacts(saved, review_id)
+    return saved
+
+
+def seo_review_entry(
+    task: TaskRecord,
+    review_id: str,
+) -> tuple[int, SeoReviewRun]:
+    for index, review in enumerate(task.seo_reviews):
+        if review.id == review_id:
+            return index, review
+    raise HTTPException(status_code=404, detail="找不到指定的 SEO 复检记录。")
+
+
+def ensure_review_editable(task: TaskRecord, review: SeoReviewRun) -> None:
+    if review.status != "open":
+        raise HTTPException(status_code=409, detail="该复检记录已经锁定，不能继续修改。")
+    if content_hash(task.initial_article.strip()) != review.source_article_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="当前第一版正文已经变化，这份旧 Diff 只能查看，请针对新正文重新复检。",
+        )
+
+
+def seo_review_operator() -> str:
+    return str(getattr(config(), "week_owner", "") or "").strip() or "本地操作员"
+
+
+def write_seo_review_artifacts(task: TaskRecord, review_id: str) -> None:
+    index, review = seo_review_entry(task, review_id)
+    artifact_root = f"seo-reviews/{index + 1:03d}-{review_id}"
+    write_text_artifact(task, f"{artifact_root}-report.md", review.report)
+    write_json_artifact(task, f"{artifact_root}.json", review.model_dump(mode="json"))
+
+
+def build_validated_review_preview(
+    task: TaskRecord,
+    review: SeoReviewRun,
+) -> SeoReviewPreview:
+    try:
+        candidate, change_ids = build_review_candidate(review)
+    except (SeoReviewError, ArticleStructureError, PromptTemplateError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    candidate = validated_initial_article(candidate, task)
+    return SeoReviewPreview(
+        review_id=review.id,
+        article=candidate,
+        article_hash=content_hash(candidate),
+        accepted_change_ids=change_ids,
+        pending_count=sum(change.decision == "pending" for change in review.changes),
+        rejected_count=sum(change.decision == "rejected" for change in review.changes),
+        invalid_count=sum(not change.applicable for change in review.changes),
+        structure_valid=True,
+    )
+
+
+@app.put(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/changes/{change_id}",
+    response_model=TaskRecord,
+)
+def update_seo_review_change(
+    task_id: str,
+    review_id: str,
+    change_id: str,
+    request: SeoReviewChangeUpdateRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    review_index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    change_index = next(
+        (
+            index
+            for index, change in enumerate(review.changes)
+            if change.id == change_id
+        ),
+        -1,
+    )
+    if change_index < 0:
+        raise HTTPException(status_code=404, detail="找不到指定的复检修改块。")
+    timestamp = now_iso()
+    try:
+        updated = update_review_change(
+            review.changes[change_index],
+            reviewed_text=request.reviewed_text,
+            decision=request.decision,
+            brand_name=task.brand_name,
+            product_names=[product.name for product in task.products if product.name],
+            confirm_risks=request.confirm_risks,
+            decided_at=timestamp,
+            decided_by=seo_review_operator(),
+        )
+    except SeoReviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    review.changes[change_index] = updated
+    task.seo_reviews[review_index] = review
+    saved = save_task(task, request.revision)
+    write_seo_review_artifacts(saved, review_id)
+    return saved
+
+
+@app.post(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/preview",
+    response_model=SeoReviewPreview,
+)
+def preview_seo_review_changes(
+    task_id: str,
+    review_id: str,
+    request: SeoReviewPreviewRequest,
+) -> SeoReviewPreview:
+    task = get_task_or_404(task_id)
+    _index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    if request.revision is not None and request.revision != task.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Task {task.id} revision conflict: expected "
+                f"{request.revision}, current {task.revision}."
+            ),
+        )
+    return build_validated_review_preview(task, review)
+
+
+@app.post(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/apply",
+    response_model=TaskRecord,
+)
+def apply_seo_review_changes(
+    task_id: str,
+    review_id: str,
+    request: SeoReviewFinalizeRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    require_action(task, ACTION_UPDATE_ARTICLE)
+    review_index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    accepted_count = sum(
+        change.decision == "accepted" for change in review.changes
+    )
+    if not accepted_count:
+        raise HTTPException(
+            status_code=422,
+            detail="当前没有已接受的修改，请使用“完成审核，不修改正文”。",
+        )
+    pending_count = sum(change.decision == "pending" for change in review.changes)
+    if pending_count and not request.confirm_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="仍有未处理修改块，必须确认将其按“未处理”状态锁定。",
+        )
+    preview = build_validated_review_preview(task, review)
+    if not request.preview_hash or request.preview_hash != preview.article_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="完整正文预览已经失效，请重新预览后再应用。",
+        )
+
+    timestamp = now_iso()
+    review.status = "applied"
+    review.finalized_at = timestamp
+    review.finalized_by = seo_review_operator()
+    review.applied_article_hash = preview.article_hash
+    review.applied_revision = task.revision + 1
+    task.seo_reviews[review_index] = review
+    replace_initial_article(
+        task,
+        preview.article,
+        source_kind=f"seo_review:{review_id}",
+    )
+    saved = save_task(task, request.revision)
+    write_initial_article_artifacts(saved)
+    write_seo_review_artifacts(saved, review_id)
+    write_text_artifact(
+        saved,
+        f"seo-reviews/{review_index + 1:03d}-{review_id}-applied.md",
+        saved.initial_article,
+    )
+    return saved
+
+
+@app.post(
+    "/api/tasks/{task_id}/seo-reviews/{review_id}/complete",
+    response_model=TaskRecord,
+)
+def complete_seo_review_without_changes(
+    task_id: str,
+    review_id: str,
+    request: SeoReviewFinalizeRequest,
+) -> TaskRecord:
+    task = get_task_or_404(task_id)
+    review_index, review = seo_review_entry(task, review_id)
+    ensure_review_editable(task, review)
+    if any(change.decision == "accepted" for change in review.changes):
+        raise HTTPException(
+            status_code=422,
+            detail="仍有已接受的修改；请先改为拒绝或暂不处理，再选择不修改正文完成审核。",
+        )
+    pending_count = sum(change.decision == "pending" for change in review.changes)
+    if pending_count and not request.confirm_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="仍有未处理修改块，必须确认将其按“未处理”状态锁定。",
+        )
+    timestamp = now_iso()
+    review.status = "completed"
+    review.finalized_at = timestamp
+    review.finalized_by = seo_review_operator()
+    task.seo_reviews[review_index] = review
+    saved = save_task(task, request.revision)
+    write_seo_review_artifacts(saved, review_id)
     return saved
 
 
@@ -1599,6 +2486,28 @@ def confirm_initial_ai(task_id: str, request: AICheckUpdateRequest) -> TaskRecor
     task.zero_gpt_report = request.report
     if request.confirmed:
         advance(task, STATUS_INITIAL_AI_CHECKED)
+        threshold = float(config().ai_pass_threshold)
+        if request.score is not None and request.score < threshold:
+            task.humanized_article = task.initial_article
+            task.humanized_article_word_count = task.initial_article_word_count
+            task.humanized_article_hash = task.initial_article_hash
+            task.humanization_skipped = True
+            task.article = task.initial_article
+            task.final_ai_check = AICheck(
+                confirmed=True,
+                score=request.score,
+                report=(
+                    f"Initial AI rate {request.score:g}% was below the {threshold:g}% threshold; "
+                    "humanization and the second AI check were skipped."
+                ),
+                screenshot_path=task.initial_ai_check.screenshot_path,
+                confirmed_at=task.initial_ai_check.confirmed_at,
+                article_hash=task.initial_article_hash,
+            )
+            advance(task, STATUS_HUMANIZED_READY)
+            advance(task, STATUS_FINAL_AI_CHECKED)
+            write_text_artifact(task, "04_humanized_candidate.md", task.initial_article)
+            write_json_artifact(task, "05_zerogpt_after.json", task.final_ai_check.model_dump())
     write_json_artifact(task, "03_zerogpt_before.json", task.initial_ai_check.model_dump())
     return save_task(task, request.revision)
 
@@ -1678,6 +2587,7 @@ def perform_humanize(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     raise_if_batch_cancelled(cancelled)
     task.humanized_article = humanized
+    task.humanization_skipped = False
     task.humanized_article_word_count = visible_word_count(humanized)
     task.humanized_article_hash = content_hash(humanized)
     task.article = humanized
@@ -1736,6 +2646,7 @@ def update_humanized_article(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     task.humanized_article = candidate
+    task.humanization_skipped = False
     task.humanized_article_word_count = visible_word_count(candidate)
     task.humanized_article_hash = content_hash(candidate)
     task.article = candidate

@@ -199,3 +199,16 @@ class SQLiteTaskRepository:
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """
             )
+
+    def delete_many(self, task_ids: Iterable[str]) -> int:
+        values = list(dict.fromkeys(str(task_id) for task_id in task_ids if task_id))
+        if not values:
+            return 0
+        placeholders = ",".join("?" for _ in values)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"DELETE FROM task_records WHERE id IN ({placeholders})",
+                values,
+            )
+        return int(cursor.rowcount)

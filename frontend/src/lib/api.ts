@@ -22,6 +22,14 @@ export function apiFileUrl(path: string): string {
 async function readJson<T>(response: Response): Promise<T> {
   const text = await response.text();
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      typeof window !== "undefined" &&
+      window.location.pathname !== "/login"
+    ) {
+      const next = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+    }
     let detail: unknown = text;
     if (text) {
       try {
@@ -52,7 +60,11 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, {
+      credentials: "include",
+      ...options,
+      signal: controller.signal,
+    });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);

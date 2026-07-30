@@ -1,8 +1,8 @@
 paths:
-  topic_library: "D:\\article\\话题库"
-  knowledge_base: "D:\\article\\Knowledge"
-  output_root: "D:\\article"
-  data_file: "D:\\article\\article-agent\\data\\tasks.json"
+  topic_library: "workspace/topic-library"
+  knowledge_base: "../Knowledge"
+  output_root: "workspace/projects"
+  data_file: "data/tasks.json"
 
 article:
   language: "English"
@@ -29,6 +29,15 @@ llm:
   provider: "responses"
   base_url: "https://api.openai.com/v1"
   model: "gpt-5.6-sol"
+  reasoning_effort: "xhigh"
+  available_models:
+    - "gpt-5.6-sol"
+    - "gpt-5.6-terra"
+  available_reasoning_efforts:
+    - "low"
+    - "medium"
+    - "high"
+    - "xhigh"
 
 features:
   knowledge_agent_enabled: false

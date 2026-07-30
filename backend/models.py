@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 STATUS_NEW = "new"
 STATUS_TITLES_READY = "titles_ready"
@@ -144,7 +144,7 @@ class TdkMetadata(WorkflowModel):
     prompt_version: str = "tdk-v1"
 
 
-PromptKind = Literal["outline", "article"]
+PromptKind = Literal["outline", "article", "review"]
 
 
 class PromptLibraryItem(WorkflowModel):
@@ -164,6 +164,7 @@ class PromptDefaults(WorkflowModel):
     customer: str
     default_outline_prompt_id: str = ""
     default_article_prompt_id: str = ""
+    default_review_prompt_id: str = ""
 
 
 class ProjectPromptLibrary(WorkflowModel):
@@ -199,6 +200,7 @@ class PromptActiveUpdateRequest(WorkflowModel):
 class PromptDefaultsUpdateRequest(WorkflowModel):
     default_outline_prompt_id: str = ""
     default_article_prompt_id: str = ""
+    default_review_prompt_id: str = ""
 
 
 class PromptPreviewRequest(WorkflowModel):
@@ -215,6 +217,78 @@ class PromptPreview(WorkflowModel):
     effective_prompt: str
 
 
+class SeoReviewDimension(WorkflowModel):
+    key: str
+    name: str
+    score: float = Field(ge=0, le=10)
+    target_score: float = Field(ge=0, le=10)
+    main_issue: str = ""
+    needs_revision: bool = False
+
+
+SeoReviewChangeOperation = Literal["replace", "insert_after", "delete", "structure"]
+SeoReviewChangeDecision = Literal["pending", "accepted", "rejected"]
+SeoReviewRunStatus = Literal["open", "applied", "completed"]
+
+
+class SeoReviewRisk(WorkflowModel):
+    kind: Literal["number", "url", "brand", "product"]
+    label: str
+    before: str = ""
+    after: str = ""
+    message: str = ""
+
+
+class SeoReviewChange(WorkflowModel):
+    id: str
+    operation: SeoReviewChangeOperation
+    dimension_key: str = ""
+    title: str
+    rationale: str = ""
+    target_text: str = ""
+    model_proposed_text: str = ""
+    reviewed_text: str = ""
+    source_start: int = -1
+    source_end: int = -1
+    hard_problem: bool = False
+    applicable: bool = True
+    validation_errors: list[str] = Field(default_factory=list)
+    risks: list[SeoReviewRisk] = Field(default_factory=list)
+    decision: SeoReviewChangeDecision = "pending"
+    decided_at: str = ""
+    decided_by: str = ""
+    risk_confirmed: bool = False
+    risk_confirmed_at: str = ""
+    updated_at: str = ""
+    raw_payload: Any = None
+
+
+class SeoReviewRun(WorkflowModel):
+    id: str
+    source_article: str
+    source_article_hash: str
+    source_revision: int
+    score: float = Field(ge=0, le=100)
+    dimensions: list[SeoReviewDimension] = Field(default_factory=list)
+    publish_ready: bool = False
+    publish_recommendation: str = ""
+    report: str
+    changes: list[SeoReviewChange] = Field(default_factory=list)
+    status: SeoReviewRunStatus = "open"
+    finalized_at: str = ""
+    finalized_by: str = ""
+    applied_article_hash: str = ""
+    applied_revision: int | None = None
+    # Compatibility fields for review records created by the earlier
+    # whole-article revision prototype.
+    revised_article: str = ""
+    revised_article_hash: str = ""
+    prompt_snapshot: PromptSnapshot
+    primary_keyword: str = ""
+    long_tail_keywords: list[str] = Field(default_factory=list)
+    created_at: str
+
+
 class TaskRecord(WorkflowModel):
     # Storage/workflow metadata.
     schema_version: int = SCHEMA_VERSION
@@ -229,18 +303,21 @@ class TaskRecord(WorkflowModel):
     project_introduction: str = ""
     project_notes: str = ""
     topic_notes: str = ""
+    title_generation_instruction: str = ""
     outline_custom_prompt: str = ""
     article_custom_prompt: str = ""
     use_outline_custom_prompt: bool = False
     use_article_custom_prompt: bool = False
     outline_prompt_selection: str = "project_default"
     article_prompt_selection: str = "project_default"
+    seo_review_prompt_selection: str = "project_default"
     last_outline_prompt_snapshot: PromptSnapshot | None = None
     last_article_prompt_snapshot: PromptSnapshot | None = None
     include_project_introduction: bool = True
     include_project_notes: bool = True
     include_topic_notes: bool = True
     source_key: str = ""
+    source_kind: str = "xlsx"
     synced_from_task_id: str = ""
     synced_from_week: str = ""
     topic_index: int
@@ -261,9 +338,13 @@ class TaskRecord(WorkflowModel):
     raw_draft_article: str = ""
     initial_article: str = ""
     humanized_article: str = ""
+    humanization_skipped: bool = False
     linked_article: str = ""
     final_article: str = ""
     article_versions: list[ArticleVersion] = Field(default_factory=list)
+    seo_primary_keyword: str = ""
+    seo_long_tail_keywords: list[str] = Field(default_factory=list)
+    seo_reviews: list[SeoReviewRun] = Field(default_factory=list)
 
     raw_draft_word_count: int = 0
     raw_draft_hash: str = ""
@@ -302,6 +383,11 @@ class RevisionedRequest(WorkflowModel):
 
 class SelectTitleRequest(RevisionedRequest):
     title: str
+
+
+class ManualTitleGenerationRequest(WorkflowModel):
+    topic: str = Field(min_length=1, max_length=500)
+    instruction: str = Field(default="", max_length=4000)
 
 
 class OutlineUpdateRequest(RevisionedRequest):
@@ -354,9 +440,22 @@ class ProjectBrandUpdateRequest(WorkflowModel):
     brand_name: str = Field(default="", max_length=120)
 
 
+class ProjectDomainUpdateRequest(WorkflowModel):
+    new_domain: str = Field(min_length=1, max_length=253)
+
+
+class AuthLoginRequest(WorkflowModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
 class ProjectContextUpdateRequest(WorkflowModel):
     project_introduction: str = Field(default="", max_length=30000)
     project_notes: str = Field(default="", max_length=30000)
+
+
+class LlmSettingsUpdateRequest(WorkflowModel):
+    model: str = Field(min_length=1, max_length=120)
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"]
 
 
 class WritingSettingsUpdateRequest(RevisionedRequest):
@@ -376,6 +475,42 @@ class AICheckUpdateRequest(RevisionedRequest):
     score: float | None = None
     report: str = ""
     confirmed: bool = True
+
+
+class SeoReviewSettingsUpdateRequest(RevisionedRequest):
+    primary_keyword: str = Field(default="", max_length=240)
+    long_tail_keywords: list[str] = Field(default_factory=list, max_length=30)
+    prompt_selection: str = Field(default="project_default", max_length=128)
+
+
+class SeoReviewRequest(SeoReviewSettingsUpdateRequest):
+    prompt_snapshot: PromptSnapshot | None = None
+
+
+class SeoReviewChangeUpdateRequest(RevisionedRequest):
+    decision: SeoReviewChangeDecision = "pending"
+    reviewed_text: str = Field(default="", max_length=40000)
+    confirm_risks: bool = False
+
+
+class SeoReviewPreviewRequest(RevisionedRequest):
+    pass
+
+
+class SeoReviewFinalizeRequest(RevisionedRequest):
+    preview_hash: str = ""
+    confirm_pending: bool = False
+
+
+class SeoReviewPreview(WorkflowModel):
+    review_id: str
+    article: str
+    article_hash: str
+    accepted_change_ids: list[str] = Field(default_factory=list)
+    pending_count: int = 0
+    rejected_count: int = 0
+    invalid_count: int = 0
+    structure_valid: bool = True
 
 
 class ImagesUpdateRequest(RevisionedRequest):
@@ -401,6 +536,7 @@ BatchOperation = Literal[
     "outline",
     "article",
     "rewrite_article",
+    "seo_review",
     "humanize",
     "restore_links",
     "prepare_images",

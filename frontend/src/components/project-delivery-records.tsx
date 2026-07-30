@@ -2,11 +2,10 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { AlertCircle, Download, ExternalLink, FolderOpen, Package, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, Download, ExternalLink, Package, RefreshCw, Search } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ProjectNavigation } from "@/components/project-navigation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { apiFileUrl, apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ApiMessage, TaskRecord } from "@/types";
+import type { TaskRecord } from "@/types";
 
 type DeliveryFilter = "all" | "incomplete" | "ready" | "packaged";
 
@@ -132,9 +131,8 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <div className="border-b bg-[color-mix(in_oklch,var(--background),var(--accent)_22%)]">
+      <div className="border-b bg-card">
         <div className="mx-auto grid max-w-[1480px] gap-4 px-5 py-5">
-          <ProjectNavigation customer={customer} />
           <div className="px-1">
             <h1 className="text-xl font-semibold">交付记录</h1>
             <p className="mt-1 text-sm text-muted-foreground">集中检查 Word、D 文档、最终 AI 截图、图片和交付包。</p>
@@ -180,7 +178,6 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
                       <TableCell><div className="flex flex-wrap gap-1">{parts.package ? <Badge>已打包</Badge> : missing.length ? missing.map((item) => <Badge key={item} variant="outline">缺 {item}</Badge>) : <Badge>可打包</Badge>}</div></TableCell>
                       <TableCell className="text-xs text-muted-foreground">{formatUpdatedAt(task.updated_at)}</TableCell>
                       <TableCell><div className="flex justify-end gap-1">
-                        <Button size="sm" variant="outline" disabled={Boolean(pending[task.id])} onClick={() => void runTaskAction(task, "打开目录", () => apiPost<ApiMessage>(`/api/tasks/${task.id}/open-folder`))}><FolderOpen />目录</Button>
                         {!parts.package && !missing.length && <Button size="sm" disabled={Boolean(pending[task.id])} onClick={() => void runTaskAction(task, "生成交付包", () => apiPost<TaskRecord>(`/api/tasks/${task.id}/package-delivery`))}><Package />打包</Button>}
                         {parts.package && <Button size="sm" variant="outline" nativeButton={false} render={<a href={apiFileUrl(`/api/tasks/${task.id}/delivery-package/download`)} />}><Download />下载</Button>}
                         <Link href={`${projectPath}/articles/${encodeURIComponent(task.id)}?step=files`} className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 text-sm hover:bg-muted"><ExternalLink className="size-4" />处理</Link>
