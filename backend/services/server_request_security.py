@@ -147,6 +147,44 @@ def server_http_route_available(method: str, path: str) -> bool:
     ):
         return True
     if (
+        normalized_method in {"GET", "POST"}
+        and len(parts) == 5
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "teams"
+    ):
+        return True
+    if (
+        normalized_method == "PATCH"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "teams"
+        and bool(parts[5])
+    ):
+        return True
+    if (
+        normalized_method == "GET"
+        and len(parts) == 7
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "teams"
+        and bool(parts[5])
+        and parts[6] == "members"
+    ):
+        return True
+    if (
+        normalized_method in {"PUT", "DELETE"}
+        and len(parts) == 8
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "teams"
+        and bool(parts[5])
+        and parts[6] == "members"
+        and bool(parts[7])
+    ):
+        return True
+    if (
         normalized_method == "GET"
         and len(parts) in {5, 6}
         and parts[1:3] == ["api", "projects"]

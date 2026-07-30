@@ -134,6 +134,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   创建只建立 Active 本地账号事实，不自动创建邀请或 OIDC 映射；禁用和恢复都会递增
   `session_version`，最后一个 Active Org Admin 不可禁用或降级，业务变更与 Audit
   同事务。
+- 新增 Organization-scoped Team Directory、Team 生命周期与 TeamMembership HTTP：
+  只有同组织 Active Org Admin 可读写；`manager_user_id` 是不授予访问权的管理元数据，
+  只有 Active Team 上显式 `team_lead` Membership 才产生项目继承权限；归档保留成员历史
+  供查看/撤销但停止新增或改角色，Team/成员写入与 Audit 同事务。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -163,8 +167,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
-- 不接邀请、Team 管理或 Organization 级管理员前端控制台；Workspace User 后端目录与
-  生命周期命令已完成，但尚未做邀请和外部身份关联 UI；
+- 不接邀请或 Organization 级管理员前端控制台；Workspace User 与 Team/TeamMembership
+  后端命令已完成，但尚未做邀请、外部身份关联和组织管理 UI；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
 - 不接生产对象存储、生产部署或密钥服务。
 
@@ -397,6 +401,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
 | `backend/services/workspace_users.py` | Workspace User 目录、创建与生命周期事务服务 | Active Org Admin、组织内稳定游标、精确关联计数、最后管理员保护、状态切换递增 Session Version、业务写入与 Audit 同事务 |
+| `backend/server_team_http.py` | Organization-scoped Team/TeamMembership HTTP | 字段/角色白名单、精确路径、Manager 可空语义、归档冲突与安全错误 |
+| `backend/services/team_administration.py` | Team 目录、生命周期和显式成员事务服务 | Active Org Admin、稳定游标、Manager 不授权、Active User 才能新授权、归档停止继承但保留清理路径、Audit 原子性 |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权的显式成员/可授权候选分页读模型，以及带审计的 ProjectMembership 变更 | SQL 内 Project Scope、候选不复制继承访问、稳定游标、授权/写入/审计同事务、跨组织目标不泄露 |
@@ -450,6 +456,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/List/Sign/Delete、对象清理 |
 | `backend/tests/test_m7_project_membership_http.py` | ProjectMembership HTTP 与并发授权测试 | Body/角色边界、跨组织拒绝、Audit 回滚、授权事实行锁 |
 | `backend/tests/test_m7_workspace_user_http.py` | Workspace User HTTP 与 PostgreSQL 集成测试 | 组织隔离、分页/关联计数、最后管理员保护、会话失效、Audit 回滚与响应脱敏 |
+| `backend/tests/test_m7_team_administration_http.py` | Team 管理 HTTP 与 PostgreSQL 集成测试 | Manager/Lead 分离、归档撤权、Disabled 清理、跨组织拒绝、Audit 回滚 |
 
 ## 9. 后续 M7 迁移顺序
 
@@ -1145,3 +1152,11 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     事务边界内？
 41. Workspace User 创建/更新是否仍与安全 Audit 同事务，Audit 是否只记录状态、角色和
     字段变化标记而不记录显示名或内部版本？
+42. Team `manager_user_id` 是否仍只是同组织管理元数据，而不会替代显式 `team_lead`
+    Membership 或授予任何项目权限？
+43. Team 归档是否立即停止 Team Lead 的项目继承权限，同时保留既有 Membership 供只读
+    Roster 与幂等撤销，而不允许在归档 Team 新增或改角色？
+44. TeamMembership 是否仍只允许同组织 Active User 新增/改角色，并且 Disabled User 的
+    旧成员行仍可被管理员看见和撤销？
+45. Team 与 TeamMembership 的创建、更新、归档和撤销是否仍与固定 Action 的 Audit
+    Event 同事务，失败时不留下部分写入？

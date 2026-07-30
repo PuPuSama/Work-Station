@@ -131,6 +131,11 @@
   `login_linked` 布尔值，不公开 Session Version 或外部身份；创建只建立本地 Active
   User，更新显示名/状态/组织角色；禁用和恢复都使旧 Cookie 失效，最后一个 Active
   Org Admin 受保护，写入与 Audit 同事务；邀请和组织级前端控制台尚未实现；
+- 已接入 Organization-scoped Team/TeamMembership 后端命令：仅 Active Org Admin
+  可读写，Team 与成员 Roster 稳定分页；Manager 指针只接受同组织 Active User 且不产生
+  权限，项目继承仍只来自 Active Team 的显式 `team_lead`；归档立即停止继承访问并保留
+  既有成员供清理，Disabled User 不可新增/改角色但旧成员可撤销；全部变更与 Audit
+  同事务；组织级前端控制台尚未实现；
 - 已实现项目级 PostgreSQL Task Repository、SQLite Task 摘要校验导入、
   Revision CAS 和带 SKIP LOCKED/Worker Lease 的 PostgreSQL Job Queue；
 - 已实现 Active Job 排空门和 SQLite Terminal Job 历史迁移，按稳定 ID、
@@ -179,8 +184,8 @@
   Revision 打包，并通过专用接口取得短期下载 URL；未迁移导航不挂载，Local UI 不变；
 - 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不
-  降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；账号后端命令
-  已完成，但邀请、账号/Team 与 Session 撤销的组织级 UI 尚未实现；
+  降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；账号与 Team
+  后端命令已完成，但邀请、账号/Team 与 Session 撤销的组织级 UI 尚未实现；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
 - 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定

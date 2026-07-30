@@ -120,6 +120,30 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   一并回滚，审计 Details 不保存显示名或内部版本；
 - Server Mode 白名单只开放精确 Directory GET/POST 与 User PATCH 路径。
 
+### Team Directory、生命周期与 TeamMembership
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_team_administration_http -v
+```
+
+结果：
+
+- 5 tests；
+- Team Directory、创建/更新和成员 Roster/PUT/DELETE 只允许同 Organization 的 Active
+  Org Admin；普通 Member、跨 Organization 路径和跨 Organization User 均拒绝；
+- Team 列表按 `team_id` 稳定分页，返回成员数、Team Lead 数和归属项目数；成员按
+  `user_id` 稳定分页并保留 Disabled User 旧成员行供清理；
+- `manager_user_id` 只接受同组织 Active User，但不授予项目访问；只有显式
+  `team_lead` Membership 在 Active Team 上产生继承权限；
+- Team 归档后 Team Lead 立即失去继承访问；归档 Team 不允许新增或修改成员角色，但
+  既有成员仍可查看和幂等撤销；
+- Team 与 TeamMembership 的创建、更新、归档、授权、改角色和撤销使用固定 Audit
+  Action；Audit Writer 故障返回脱敏 503 并回滚 Team/成员写入；
+- Server Mode 白名单只开放精确 Team GET/POST、Team PATCH、Member GET 与
+  PUT/DELETE 路径。
+
 ### Alembic 往返和重复升级
 
 在确认 M7 新表均为 0 行后执行：
@@ -233,7 +257,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 566 tests；
+- 571 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -754,8 +778,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
   已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
   Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成；Workspace User
-  后端目录、创建和生命周期命令也已完成，但邀请、账号/Team 管理前端、Session 撤销
-  前端、具体生产 Provider 注册、Client Secret 轮换和
+  和 Team/TeamMembership 后端目录、创建与生命周期命令也已完成，但邀请、账号/Team
+  管理前端、Session 撤销前端、具体生产 Provider 注册、Client Secret 轮换和
   Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
