@@ -331,6 +331,14 @@ sa.Index(
     knowledge_chunks.c.snapshot_id,
     knowledge_chunks.c.embedding_model,
 )
+sa.Index(
+    "ix_knowledge_chunks_search_text",
+    sa.func.to_tsvector(
+        sa.literal_column("'simple'::regconfig"),
+        knowledge_chunks.c.text,
+    ),
+    postgresql_using="gin",
+)
 
 
 knowledge_assets = sa.Table(

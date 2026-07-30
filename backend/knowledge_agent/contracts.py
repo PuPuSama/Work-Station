@@ -368,14 +368,87 @@ class RetrievalQuery:
     def __post_init__(self) -> None:
         object.__setattr__(self, "project_id", _require(self.project_id, "project_id"))
         object.__setattr__(self, "text", _require(self.text, "text"))
-        if self.limit <= 0:
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or self.limit <= 0
+        ):
             raise ValueError("limit must be positive")
+        object.__setattr__(self, "filters", _metadata(self.filters, "filters"))
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalProvenance:
+    """Published source identity returned with a retrieval hit."""
+
+    project_id: str
+    source_id: str
+    snapshot_id: str
+    display_name: str
+    source_kind: SourceKind
+    trust_tier: TrustTier
+    public_source: bool
+    canonical_url: str | None = None
+    fetched_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("project_id", "source_id", "snapshot_id", "display_name"):
+            object.__setattr__(self, name, _require(getattr(self, name), name))
+        if self.source_kind not in SOURCE_KINDS:
+            raise ValueError(
+                f"source_kind must be one of: {', '.join(sorted(SOURCE_KINDS))}"
+            )
+        if self.trust_tier not in TRUST_TIERS:
+            raise ValueError(
+                f"trust_tier must be one of: {', '.join(sorted(TRUST_TIERS))}"
+            )
+        if not isinstance(self.public_source, bool):
+            raise ValueError("public_source must be a boolean")
+        canonical_url = self.canonical_url
+        if canonical_url is not None:
+            canonical_url = _http_url(canonical_url, "canonical_url")
+        if self.public_source and canonical_url is None:
+            raise ValueError("public retrieval provenance requires canonical_url")
+        object.__setattr__(self, "canonical_url", canonical_url)
+        if (
+            self.fetched_at is not None
+            and (
+                not isinstance(self.fetched_at, datetime)
+                or self.fetched_at.tzinfo is None
+                or self.fetched_at.utcoffset() is None
+            )
+        ):
+            raise ValueError("fetched_at must be a timezone-aware datetime")
 
 
 @dataclass(frozen=True, slots=True)
 class RetrievalHit:
     chunk: KnowledgeChunk
     score: float
+    provenance: RetrievalProvenance | None = None
+    explanation: Metadata = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.score, bool) or not isinstance(self.score, (int, float)):
+            raise ValueError("retrieval score must be a finite number")
+        normalized_score = float(self.score)
+        if not isfinite(normalized_score):
+            raise ValueError("retrieval score must be a finite number")
+        object.__setattr__(self, "score", normalized_score)
+        if (
+            self.provenance is not None
+            and (
+                self.provenance.project_id != self.chunk.project_id
+                or self.provenance.source_id != self.chunk.source_id
+                or self.provenance.snapshot_id != self.chunk.snapshot_id
+            )
+        ):
+            raise ValueError("retrieval provenance must identify the hit chunk")
+        object.__setattr__(
+            self,
+            "explanation",
+            _metadata(self.explanation, "explanation"),
+        )
 
     @property
     def project_id(self) -> str:

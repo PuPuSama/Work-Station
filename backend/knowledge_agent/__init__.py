@@ -13,6 +13,7 @@ from .contracts import (
     ResearchRequest,
     ResearchResult,
     RetrievalHit,
+    RetrievalProvenance,
     RetrievalQuery,
     SourceSnapshot,
     SourceCandidate,
@@ -48,6 +49,12 @@ from .repository import (
     SnapshotActivationError,
 )
 from .retriever import PgVectorKnowledgeRetriever
+from .hybrid_retriever import (
+    BasicHybridRetriever,
+    HybridReranker,
+    HybridRetrievalConfig,
+    HybridRetrievalConfigurationError,
+)
 from .assets import (
     ASSET_EVIDENCE_KINDS,
     KnowledgeAsset,
@@ -147,6 +154,7 @@ __all__ = [
     "ASSET_EVIDENCE_KINDS",
     "ArtifactStore",
     "ArtifactStoreError",
+    "BasicHybridRetriever",
     "DiscoveryRequest",
     "DocumentInput",
     "DocumentParseError",
@@ -186,6 +194,9 @@ __all__ = [
     "KnowledgeSourceSummary",
     "KnowledgeLibrarySummary",
     "LocalKnowledgeArtifactStore",
+    "HybridReranker",
+    "HybridRetrievalConfig",
+    "HybridRetrievalConfigurationError",
     "MINERU_CONTENT_LIST_ADAPTER_VERSION",
     "MinerUContentListAdapter",
     "KnowledgeProduct",
@@ -227,6 +238,7 @@ __all__ = [
     "ResearchRequest",
     "ResearchResult",
     "RetrievalHit",
+    "RetrievalProvenance",
     "RetrievalQuery",
     "SourceSnapshot",
     "SnapshotAsset",
