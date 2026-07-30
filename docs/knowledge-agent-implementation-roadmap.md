@@ -121,11 +121,11 @@
   返回显式成员并稳定分页；Candidate 页只返回 Active 同组织普通成员，排除 Org Admin、
   Active Owning Team Lead 与已有显式成员，归档 Team 不再贡献继承访问；写请求只能提交
   `editor/reviewer/viewer`，读写事务均重新检查 `project.members.manage` 并锁定全部可
-  撤权事实；跨组织目标不泄露，Audit 故障回滚；前端成员管理尚未接入；
+  撤权事实；跨组织目标不泄露，Audit 故障回滚；Project Membership Console 已接入；
 - 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
   写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
   Org Admin 的 Organization-scoped HTTP 命令递增目标版本并与安全 Audit 同事务，请求
-  不接受版本或角色字段；前端成员管理尚未接入；
+  不接受版本或角色字段；全会话撤销的前端入口尚未接入；
 - 已实现项目级 PostgreSQL Task Repository、SQLite Task 摘要校验导入、
   Revision CAS 和带 SKIP LOCKED/Worker Lease 的 PostgreSQL Job Queue；
 - 已实现 Active Job 排空门和 SQLite Terminal Job 历史迁移，按稳定 ID、
@@ -172,6 +172,10 @@
 - 已接通窄范围 Server 前端入口：认证状态先分流组件树，Server 首页只列 SQL-scoped
   Project Directory 并直达 Delivery Console；Console 按 Asset 身份识别产物、提交
   Revision 打包，并通过专用接口取得短期下载 URL；未迁移导航不挂载，Local UI 不变；
+- 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
+  Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不
+  降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；邀请、账号、
+  Team 与 Session 撤销的组织级 UI 尚未实现；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
 - 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定

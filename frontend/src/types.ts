@@ -359,6 +359,40 @@ export type AccessibleProject = {
   effective_role: "org_admin" | "team_lead" | "editor" | "reviewer" | "viewer";
 };
 
+export type ProjectMembershipRole = "editor" | "reviewer" | "viewer";
+
+export type ProjectMembership = {
+  user_id: string;
+  display_name: string;
+  status: "active" | "disabled";
+  role: ProjectMembershipRole;
+};
+
+export type ProjectMembershipPage = {
+  items: ProjectMembership[];
+  next_after_user_id: string | null;
+};
+
+export type ProjectMembershipCandidate = {
+  user_id: string;
+  display_name: string;
+};
+
+export type ProjectMembershipCandidatePage = {
+  items: ProjectMembershipCandidate[];
+  next_after_user_id: string | null;
+};
+
+export type ProjectMembershipMutation = {
+  user_id: string;
+  role: ProjectMembershipRole;
+};
+
+export type ProjectMembershipRevocation = {
+  user_id: string;
+  revoked: boolean;
+};
+
 export type ProjectAssetDownload = {
   asset_id: string;
   url: string;

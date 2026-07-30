@@ -41,7 +41,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { apiGet } from "@/lib/api";
-import type { AuthStatus, PublicConfig } from "@/types";
+import type { AccessibleProject, AuthStatus, PublicConfig } from "@/types";
 
 type ProjectShellProps = {
   customer: string;
@@ -59,6 +59,9 @@ const sectionNames = {
 export function ProjectShell({ customer, children }: ProjectShellProps) {
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const [serverMode, setServerMode] = useState<boolean | null>(null);
+  const [serverRole, setServerRole] = useState<
+    AccessibleProject["effective_role"] | null
+  >(null);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
@@ -71,10 +74,23 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
     void apiGet<AuthStatus>("/api/auth/status")
       .then(async (status) => {
         const isServer = status.data?.mode === "server";
+        const isLocal =
+          status.data?.mode === undefined &&
+          typeof status.data?.enabled === "boolean";
+        if (!isServer && !isLocal) {
+          throw new Error("Unrecognized application mode.");
+        }
         if (!active) return;
         setServerMode(isServer);
+        setServerRole(null);
         if (isServer) {
           setKnowledgeEnabled(false);
+          const projects = await apiGet<AccessibleProject[]>("/api/projects");
+          if (!active) return;
+          setServerRole(
+            projects.find((project) => project.project_id === customer)
+              ?.effective_role ?? null,
+          );
           return;
         }
         const value = await apiGet<PublicConfig>("/api/config");
@@ -87,7 +103,7 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [customer]);
 
   const localItems = [
     {
@@ -132,6 +148,14 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
   const projectHome = serverMode === true
     ? `${projectPath}/deliveries`
     : `${projectPath}/articles`;
+  const canManageServerMembers =
+    serverRole === "org_admin" || serverRole === "team_lead";
+  const sectionLabel =
+    section === "settings" && serverMode === true
+      ? "项目成员"
+      : section
+        ? sectionNames[section]
+        : customer;
 
   return (
     <SidebarProvider>
@@ -200,15 +224,19 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
 
         <SidebarFooter className="px-3 pb-3">
           <SidebarMenu>
-            {serverMode === false && (
+            {(serverMode === false || canManageServerMembers) && (
               <SidebarMenuItem>
                 <SidebarMenuButton
                   isActive={section === "settings"}
-                  tooltip="项目设置"
+                  tooltip={
+                    serverMode === true ? "项目成员" : "项目设置"
+                  }
                   render={<Link href={`${projectPath}/settings`} />}
                 >
                   <Settings2 />
-                  <span>项目设置</span>
+                  <span>
+                    {serverMode === true ? "项目成员" : "项目设置"}
+                  </span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             )}
@@ -233,7 +261,7 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
                 ? "文章工作台"
                 : "批次详情"
               : section
-                ? sectionNames[section]
+                ? sectionLabel
                 : customer}
           </span>
           <Breadcrumb className="hidden min-w-0 flex-1 sm:block">
@@ -253,10 +281,10 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
                   <BreadcrumbItem>
                     {isDetail ? (
                       <BreadcrumbLink render={<Link href={`${projectPath}/${section}`} />}>
-                        {sectionNames[section]}
+                        {sectionLabel}
                       </BreadcrumbLink>
                     ) : (
-                      <BreadcrumbPage>{sectionNames[section]}</BreadcrumbPage>
+                      <BreadcrumbPage>{sectionLabel}</BreadcrumbPage>
                     )}
                   </BreadcrumbItem>
                 </>

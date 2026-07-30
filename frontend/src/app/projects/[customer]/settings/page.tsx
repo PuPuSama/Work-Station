@@ -1,4 +1,4 @@
-import { ProjectSettings } from "@/components/project-settings";
+import { ProjectSettingsEntry } from "@/components/project-settings-entry";
 
 type ProjectSettingsPageProps = {
   params: Promise<{
@@ -8,5 +8,5 @@ type ProjectSettingsPageProps = {
 
 export default async function ProjectSettingsPage({ params }: ProjectSettingsPageProps) {
   const { customer } = await params;
-  return <ProjectSettings customer={decodeURIComponent(customer)} />;
+  return <ProjectSettingsEntry customer={decodeURIComponent(customer)} />;
 }

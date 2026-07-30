@@ -153,12 +153,12 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
 - 不猜测或内置 Auth0、Keycloak、Entra ID 等具体供应商；正式 Provider 注册、生产
   Redirect URI、租户策略和 Conformance 冒烟仍需部署环境确认；
-- 尚未提供 Actor Session 撤销的前端成员管理界面；HTTP 命令与事务服务已经实现；
+- 项目显式成员 UI 已接入；Actor Session 全会话撤销仍只有后端命令，没有组织级前端入口；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
-- 不接前端成员管理；
+- 不接邀请、Workspace User 创建、Team 管理或 Organization 级管理员控制台；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
 - 不接生产对象存储、生产部署或密钥服务。
 
@@ -384,7 +384,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/app/login/page.tsx` | 本地密码/Server OIDC 登录入口选择 | 以服务端状态为准、失败不降级、Next Path 只能是本地路径 |
 | `frontend/src/components/project-directory.tsx` | Local/Server 首页组件树分流 | 先读服务端认证状态、失败显式重试、Server 时不挂载 Local 数据请求 |
 | `frontend/src/components/server-project-selector.tsx` | Server 可访问项目入口 | 只渲染 `/api/projects` 的 SQL-scoped 结果、显示有效角色、直达已迁移 Delivery |
-| `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口，不启动 Local Job Center 或设置导航 |
+| `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口；仅 `org_admin/team_lead` 显示成员入口，不启动 Local Job Center |
+| `frontend/src/components/project-settings-entry.tsx` | Local Project Settings 与 Server Project Members 组件树分流 | `/api/auth/status` 失败不降级到 Local，不让 Server 页面发起旧设置 API |
+| `frontend/src/components/server-project-members.tsx` | Server 显式成员 Roster/Candidate、角色更新与撤销 UI | 只消费 Project-scoped API、Disabled 只允许撤销、分页、就近反馈、前端角色不作为安全边界 |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/server_admin_http.py` | Organization-scoped Actor Session 撤销 API | 只接受空 Body、Cookie Actor 与路径 Organization 一致、统一 401/403/503、安全响应 |
@@ -509,8 +511,9 @@ Project 权限查询。
 目标不存在统一拒绝；Audit 失败回滚版本且不回显底层异常。
 `POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke` 只接受空 JSON
 对象，拒绝客户端传入版本、角色或目标 Organization 事实；成功只返回目标 User ID 与
-`revoked=true`。当前尚未接前端成员管理 UI。Token 格式从 v1 升为 v2；新代码有意拒绝
-旧 Cookie，所以首次部署必须在无流量窗口完成旧实例排空并要求重新登录。
+`revoked=true`。当前 Project 成员页不暴露这条 Organization-scoped 全会话撤销命令；
+它仍只有后端接口。Token 格式从 v1 升为 v2；新代码有意拒绝旧 Cookie，所以首次部署
+必须在无流量窗口完成旧实例排空并要求重新登录。
 
 Identity Link/Revoke 只允许当前 Organization 的 Active `org_admin`，并与
 append-only Audit Event 同事务。审计 `target_id` 使用 `issuer + subject` 的 SHA-256，
@@ -518,8 +521,8 @@ Details 只保留 Issuer 和目标本地 User，不写入原始 Subject。
 
 OIDC/JWKS、Callback、State/Nonce、PKCE 和登录 UI 已实现，因此代码能力
 `trusted_identity_source=true`。仍未完成的是具体生产 Provider 注册与 Conformance
-冒烟、Client Secret 托管/轮换证据，以及成员管理 UI；Preflight 会实时探测
-Discovery/JWKS，任一环境证据缺失时整体仍为 no-go。
+冒烟、Client Secret 托管/轮换证据，以及邀请、Team/User 与 Session 撤销的组织级
+管理 UI；Preflight 会实时探测 Discovery/JWKS，任一环境证据缺失时整体仍为 no-go。
 
 请求授权链为：
 
@@ -962,17 +965,42 @@ Config、SQLite Task 和上传接口，既产生噪声，也可能诱导未来�
 Server Project Card 只使用 SQL Directory 返回的 Project ID 和 Effective Role，不从
 URL 客户名推导授权。
 
-`ProjectShell` 在 Server 模式只展示 Delivery，且不挂载 Local Job Center、Article、
-Batch 或 Settings 入口。Delivery Console 仍允许 Reviewer/Viewer 查看 Task 交付状态；
+`ProjectShell` 在 Server 模式展示 Delivery，并且只为 Directory 返回
+`org_admin/team_lead` 的 Actor 显示 Project Members；它仍不挂载 Local Job Center、
+Article、Batch 或本地 Settings 组件。Delivery Console 允许 Reviewer/Viewer 查看 Task 交付状态；
 Reviewer 可以查看终审截图，只有 `org_admin/team_lead/editor` 显示 Word、TDK、打包和
 ZIP 下载动作。前端禁用只是可用性提示，后端仍在路由、对象读取/写入和签名前重新授权，
 不能把 Effective Role 当作安全边界。
 
+#### D1.7 已实现：Server Project Membership Console
+
+```text
+/projects/{project_id}/settings
+  -> ProjectSettingsEntry
+       -> GET /api/auth/status
+       -> Local: 原 ProjectSettings
+       -> Server: ServerProjectMembers
+            -> GET members + candidates（并行、各自稳定分页）
+            -> PUT member role / DELETE membership
+            -> 成功后重新读取两份第一页
+```
+
+Server 入口复用已有 `/settings` 深链接，但组件树先确认运行模式；状态请求失败时显示重试，
+不能降级挂载 Local Settings 并调用旧 `/api/tasks`、Brand/Context/Domain/Delete API。
+Roster 只展示显式成员；Candidate 只展示后端判定为尚无有效访问的用户。Disabled 成员
+不能改角色但仍可撤销。角色选择、保存、添加和撤销都不携带 Organization、Actor 或
+Permission，撤销使用可聚焦确认对话框；成功/失败在对应 Card 就近反馈。
+
+导航读取 `AccessibleProject.effective_role` 只为隐藏无用入口；直接深链接、过期页面状态或
+并发撤权仍由 Roster/Candidate/PUT/DELETE 后端事务返回 401/403。后续重构若改为 Server
+Component 或共享状态，也必须保留“模式先分流、导航不是授权、写后重新读取、Local 页面
+不被 Server 挂载”四项语义。
+
 Local 模式继续挂载原 `ProjectSelector`、完整项目导航、Path 状态和文件下载接口。
 Task Type 同时保留 `*_path` 与 `*_asset_id/hash/filename`，直到 Local/Server 模型正式
 拆分；重构时应把“运行模式分流、Task Artifact 展示模型、签名下载动作”拆成稳定接口，
-而不是在各页面散落字符串前缀。当前只开放目录到交付的窄闭环，未迁移文章编辑、批量
-任务和设置页面仍不得在 Server 导航中重新出现。
+而不是在各页面散落字符串前缀。当前只开放目录、项目成员与交付的窄闭环，未迁移文章
+编辑、批量任务和本地项目设置仍不得在 Server 导航中重新出现。
 
 正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
 在签名前再校验一次，并签发最长一小时的临时下载 URL。知识源上传要求
@@ -1099,3 +1127,5 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 36. Member Candidate 是否仍只返回 Active 同组织普通成员，并排除已有显式成员、Org
     Admin 与 Active Owning Team Lead；Team 归档后原 Lead 是否重新成为候选，而不扩大成
     未经授权的 Organization 用户目录？
+37. `/settings` 是否仍先按 Auth Status 分流 Local/Server 组件树，Server 成员导航是否
+    只作可用性提示，而所有 Roster/Candidate/PUT/DELETE 仍以后端实时授权为准？

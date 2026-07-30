@@ -179,7 +179,8 @@ Snapshot Asset 与 Task `*_asset_id` 三类引用都在当前 Schema 中。
 开始签发 v2。全会话撤销命令为
 `POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke`，Body 必须是
 空 JSON 对象。命令不接受版本、角色或目标 Organization 字段，成功响应也不返回内部版本。
-当前尚无成员管理 UI，因此不能描述成完整的管理员控制台。
+当前 Project Membership Console 不包含这条 Organization-scoped 命令，因此还不能描述
+成完整的管理员控制台。
 
 撤销动作必须由同 Organization 的 Active Org Admin 发起，并验证版本递增与
 `workspace_user.sessions.revoked` Audit 同事务。跨组织目标、非 Admin、目标不存在或
@@ -220,8 +221,19 @@ Permission。冒烟至少验证：
 - 在读写事务尚未结束时并发撤销 Actor 的 Org Admin、Team Lead 或显式
   ProjectMembership 事实会等待该事务，证明没有 check-then-revoke/read 窗口。
 
-当前只完成后端命令，没有成员列表、邀请、Team 管理或前端管理员界面，不能把这两条
-接口描述为完整的成员生命周期。
+Project Membership Console 已完成显式成员列表、候选、授权、改角色和撤销；仍没有邀请、
+Workspace User 创建、Team 管理或 Organization-scoped Session 撤销界面，不能把当前
+页面描述为完整的成员生命周期。
+
+前端冒烟从 `/projects/{project}/settings` 开始，至少验证：
+
+- Local Mode 仍显示原品牌/上下文/域名设置；Server Mode 不请求旧 Task/Settings API；
+- `org_admin/team_lead` 在侧栏看到“项目成员”，Editor/Reviewer/Viewer 不显示；直接
+  深链接仍由后端返回 403，不能把导航隐藏当作授权；
+- Roster/Candidate 首屏并行加载，更多按钮按游标追加且无重复；375px 下卡片纵向排列；
+- Disabled 成员不能保存角色但可以撤销；添加、改角色成功后两份列表一起刷新；
+- 保存与撤销期间禁用并发按钮并显示 Loading；失败在对应 Card 就近显示且可刷新恢复；
+- 撤销对话框可用键盘操作、有明确目标与取消按钮；关键按钮/选择器触控高度至少 44px。
 
 ### OIDC Provider 与 Client Secret
 

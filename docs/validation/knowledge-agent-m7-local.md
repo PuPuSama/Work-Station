@@ -71,6 +71,31 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Server Mode 白名单只开放精确 GET Roster 与 PUT/DELETE 成员路径，POST 和其他未迁移
   变体继续拒绝。
 
+### Server Project Membership Console
+
+```powershell
+Set-Location D:\Project\article\article-agent-formal\frontend
+node .\node_modules\eslint\bin\eslint.js .
+node .\node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- lint 通过；
+- Next.js 16.2.10 production build 与 TypeScript 通过；
+- `/settings` 先读取 Auth Status：Local 继续挂载原 Project Settings，Server 只挂载
+  Project Membership Console，状态失败不降级；
+- Server 侧栏只为 Directory 中的 `org_admin/team_lead` 显示成员入口，后端仍是权限准源；
+- Roster/Candidate 支持稳定游标追加，添加、改角色、撤销后重新读取两份第一页；
+- Disabled 成员只能撤销；角色选择有可见 Label，关键控件至少 44px，撤销使用可聚焦
+  Dialog，错误在对应 Card 就近显示；
+- 源码使用移动优先纵向卡片，`md` 起切换三列信息/角色/动作布局；Local UI 未改写。
+
+受控浏览器可以打开本地页面，但其 URL 策略会拦截本机 `/api/*` 请求并返回
+`ERR_BLOCKED_BY_CLIENT`，因此本轮没有把 375px 数据态、添加/改角色/撤销点击链路或
+Dark Mode 记为浏览器实测通过。这些仍需在允许同源 API 的真实 Server 会话中按 Runbook
+冒烟；当前已确认的是静态源码审查、ESLint、TypeScript 和 production build。
+
 ### Alembic 往返和重复升级
 
 在确认 M7 新表均为 0 行后执行：
@@ -704,8 +729,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
   已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
-  授权/撤销 HTTP/事务服务已完成，但成员管理 UI、邀请/Team 管理、具体生产 Provider
-  注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
+  Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成，但邀请、账号/
+  Team 管理、Session 撤销前端、具体生产 Provider 注册、Client Secret 轮换和
+  Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备
@@ -722,7 +748,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、
   Orphan 双观察延迟清理和 no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
-- 前端已新增 Server OIDC、SQL Project Directory 与窄范围 Delivery Console，并通过
-  lint/build；Article、Batch、Settings 等其余 M7 管理界面尚未接入 Server API。
+- 前端已新增 Server OIDC、SQL Project Directory、Project Membership Console 与窄范围
+  Delivery Console，并通过 lint/build；Article、Batch、Organization/Team/User 管理等
+  其余 M7 界面尚未接入 Server API。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。
