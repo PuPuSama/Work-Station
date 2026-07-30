@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, TypeAlias, cast
 
 import sqlalchemy as sa
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from server_schema import (
     organizations,
@@ -152,6 +152,18 @@ def effective_role_for(facts: ProjectAccessFacts) -> EffectiveRole | None:
     return None
 
 
+def decide_project_permission(
+    facts: ProjectAccessFacts | None,
+    permission: ProjectPermission,
+) -> AuthorizationDecision:
+    role = effective_role_for(facts) if facts is not None else None
+    return AuthorizationDecision(
+        allowed=role is not None and permission in ROLE_PERMISSIONS[role],
+        permission=permission,
+        effective_role=role,
+    )
+
+
 class ProjectAccessService:
     """Apply the shared ADR-0003 permission matrix to repository facts."""
 
@@ -166,12 +178,7 @@ class ProjectAccessService:
     ) -> AuthorizationDecision:
         normalized_project_id = _required_text(project_id, "project_id")
         facts = self._repository.resolve_project_access(actor, normalized_project_id)
-        role = effective_role_for(facts) if facts is not None else None
-        return AuthorizationDecision(
-            allowed=role is not None and permission in ROLE_PERMISSIONS[role],
-            permission=permission,
-            effective_role=role,
-        )
+        return decide_project_permission(facts, permission)
 
     def require(
         self,
@@ -197,7 +204,20 @@ class PostgresProjectAccessRepository:
         project_id: str,
     ) -> ProjectAccessFacts | None:
         normalized_project_id = _required_text(project_id, "project_id")
+        with self._engine.connect() as connection:
+            return self.resolve_project_access_in_connection(
+                connection,
+                actor,
+                normalized_project_id,
+            )
 
+    def resolve_project_access_in_connection(
+        self,
+        connection: Connection,
+        actor: ActorIdentity,
+        project_id: str,
+    ) -> ProjectAccessFacts | None:
+        normalized_project_id = _required_text(project_id, "project_id")
         active_team = teams.alias("active_owning_team")
         owning_team_membership = team_memberships.alias(
             "owning_team_membership"
@@ -265,8 +285,7 @@ class PostgresProjectAccessRepository:
             )
         )
 
-        with self._engine.connect() as connection:
-            row = connection.execute(statement).mappings().one_or_none()
+        row = connection.execute(statement).mappings().one_or_none()
         if row is None:
             return None
         return ProjectAccessFacts(
@@ -291,5 +310,6 @@ __all__ = [
     "ProjectRole",
     "ROLE_PERMISSIONS",
     "TeamRole",
+    "decide_project_permission",
     "effective_role_for",
 ]

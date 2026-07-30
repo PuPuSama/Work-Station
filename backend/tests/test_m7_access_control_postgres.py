@@ -37,6 +37,10 @@ from services.audit_log import (  # noqa: E402
     AuditEvent,
     PostgresAuditEventWriter,
 )
+from services.project_memberships import (  # noqa: E402
+    PostgresProjectMembershipService,
+    ProjectMembershipTargetUnavailable,
+)
 
 
 DATABASE_URL_ENV = "ARTICLE_AGENT_DATABASE_URL"
@@ -55,6 +59,7 @@ class M7AccessControlPostgresTests(unittest.TestCase):
             PostgresProjectAccessRepository(cls.engine)
         )
         cls.audit = PostgresAuditEventWriter()
+        cls.memberships = PostgresProjectMembershipService(cls.engine)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -407,6 +412,170 @@ class M7AccessControlPostgresTests(unittest.TestCase):
                     )
                 )
             delete_savepoint.rollback()
+        finally:
+            transaction.rollback()
+            connection.close()
+
+    def test_membership_grant_and_revoke_share_the_audit_transaction(
+        self,
+    ) -> None:
+        actor = self._actor("lead")
+        target_user_id = self.user_ids["member"]
+        connection = self.engine.connect()
+        transaction = connection.begin()
+        try:
+            record = self.memberships.grant_in_transaction(
+                connection,
+                actor=actor,
+                project_id=self.project_a,
+                target_user_id=target_user_id,
+                role="viewer",
+                event_id=f"{self.prefix}-grant",
+            )
+            self.assertEqual(record.role, "viewer")
+            stored_role = connection.execute(
+                sa.select(project_memberships.c.role).where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == target_user_id,
+                )
+            ).scalar_one()
+            grant_action = connection.execute(
+                sa.select(audit_events.c.action).where(
+                    audit_events.c.organization_id == self.org_a,
+                    audit_events.c.event_id == f"{self.prefix}-grant",
+                )
+            ).scalar_one()
+            self.assertEqual(stored_role, "viewer")
+            self.assertEqual(
+                grant_action,
+                "project.membership.granted",
+            )
+
+            revoked = self.memberships.revoke_in_transaction(
+                connection,
+                actor=actor,
+                project_id=self.project_a,
+                target_user_id=target_user_id,
+                event_id=f"{self.prefix}-revoke",
+            )
+            remaining = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(project_memberships)
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == target_user_id,
+                )
+            ).scalar_one()
+            audit_actions = tuple(
+                connection.execute(
+                    sa.select(audit_events.c.action)
+                    .where(
+                        audit_events.c.organization_id == self.org_a,
+                        audit_events.c.event_id.in_(
+                            (
+                                f"{self.prefix}-grant",
+                                f"{self.prefix}-revoke",
+                            )
+                        ),
+                    )
+                    .order_by(audit_events.c.created_at)
+                ).scalars()
+            )
+            self.assertTrue(revoked)
+            self.assertEqual(remaining, 0)
+            self.assertEqual(
+                audit_actions,
+                (
+                    "project.membership.granted",
+                    "project.membership.revoked",
+                ),
+            )
+        finally:
+            transaction.rollback()
+            connection.close()
+
+    def test_membership_service_rejects_editor_and_cross_org_target(
+        self,
+    ) -> None:
+        connection = self.engine.connect()
+        transaction = connection.begin()
+        try:
+            with self.assertRaisesRegex(
+                ProjectAccessDenied,
+                "^project access denied$",
+            ):
+                self.memberships.grant_in_transaction(
+                    connection,
+                    actor=self._actor("editor"),
+                    project_id=self.project_a,
+                    target_user_id=self.user_ids["member"],
+                    role="viewer",
+                    event_id=f"{self.prefix}-editor-denied",
+                )
+            with self.assertRaisesRegex(
+                ProjectMembershipTargetUnavailable,
+                "^project member target unavailable$",
+            ):
+                self.memberships.grant_in_transaction(
+                    connection,
+                    actor=self._actor("admin"),
+                    project_id=self.project_a,
+                    target_user_id=self.user_ids["other_admin"],
+                    role="viewer",
+                    event_id=f"{self.prefix}-cross-org-denied",
+                )
+        finally:
+            transaction.rollback()
+            connection.close()
+
+    def test_duplicate_audit_identity_rolls_back_membership_update(
+        self,
+    ) -> None:
+        actor = self._actor("admin")
+        target_user_id = self.user_ids["member"]
+        event_id = f"{self.prefix}-stable-event"
+        connection = self.engine.connect()
+        transaction = connection.begin()
+        try:
+            self.memberships.grant_in_transaction(
+                connection,
+                actor=actor,
+                project_id=self.project_a,
+                target_user_id=target_user_id,
+                role="viewer",
+                event_id=event_id,
+            )
+            retry_savepoint = connection.begin_nested()
+            with self.assertRaises(IntegrityError):
+                self.memberships.grant_in_transaction(
+                    connection,
+                    actor=actor,
+                    project_id=self.project_a,
+                    target_user_id=target_user_id,
+                    role="editor",
+                    event_id=event_id,
+                )
+            retry_savepoint.rollback()
+
+            stored_role = connection.execute(
+                sa.select(project_memberships.c.role).where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == target_user_id,
+                )
+            ).scalar_one()
+            event_count = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(audit_events)
+                .where(
+                    audit_events.c.organization_id == self.org_a,
+                    audit_events.c.event_id == event_id,
+                )
+            ).scalar_one()
+            self.assertEqual(stored_role, "viewer")
+            self.assertEqual(event_count, 1)
         finally:
             transaction.rollback()
             connection.close()

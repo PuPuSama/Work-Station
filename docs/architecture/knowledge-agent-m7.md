@@ -11,7 +11,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 3. 再让 API、检索、对象下载与 Worker 强制执行 RBAC；
 4. 验证服务器端闭环后，才收缩 SQLite 正式写入路径和临时兼容层。
 
-## 2. 当前完成范围：M7-A
+## 2. 当前完成范围：M7-A / M7-B 底座
 
 本阶段已实现：
 
@@ -24,6 +24,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不依赖数据库的 `ProjectAccessService` 权限策略；
 - 必须加入调用方业务事务的 `PostgresAuditEventWriter`；
 - 跨组织、禁用用户、角色矩阵、复合外键和审计不可变测试。
+- 显式 `ARTICLE_AGENT_SERVER_MODE` 门禁；
+- 只签名 Organization/User、不缓存 Role 的 `ServerActorSessionCodec`；
+- 使用独立 `ARTICLE_AGENT_SERVER_SESSION_SECRET`，不回退到旧本地 Session Secret；
+- `PostgresProjectMembershipService` 的授权、撤销和同事务审计。
 
 当前明确未做：
 
@@ -35,7 +39,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不接前端成员管理；
 - 不接 S3、生产部署或密钥服务。
 
-因此，M7-A 是可验证的权限底座，不代表多人服务器版已经上线。
+因此，M7-A/B 是可验证的权限与会话底座，不代表多人服务器版已经上线。
 
 ## 3. 为什么使用 `project_ownership`
 
@@ -157,6 +161,13 @@ with engine.begin() as connection:
 
 当前尚未提供正式 Membership 写 API，所以还不存在绕过审计的业务写入口。测试夹具可直接插入，但生产代码新增权限写操作时必须组合 Audit Writer。
 
+`PostgresProjectMembershipService` 已提供两层接口：
+
+- `grant/revoke`：自行建立单个 PostgreSQL 事务；
+- `grant_in_transaction/revoke_in_transaction`：加入调用方已有业务事务。
+
+稳定 `event_id` 若重复会触发唯一约束；数据库错误会使同一事务内的成员变更一起回滚，不会出现“权限已变但审计没写”的状态。
+
 ## 8. 代码地图
 
 | 文件 | 作用 | 重构时必须保留 |
@@ -165,19 +176,23 @@ with engine.begin() as connection:
 | `backend/migrations/versions/20260730_0008_multitenant_access.py` | Schema 唯一迁移准源 | 无虚构组织回填、可升降级、审计 Trigger |
 | `backend/services/access_control.py` | Actor、权限契约、纯策略和 PostgreSQL 事实查询 | 不信任客户端 Role、统一拒绝、未绑定项目 fail closed |
 | `backend/services/audit_log.py` | 业务事务内追加审计事件 | 调用方事务、稳定 Event ID、无更新/删除接口 |
+| `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、独立 Secret、默认不开启 |
+| `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
+| `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
 
 ## 9. 后续 M7 迁移顺序
 
 ### M7-B：身份会话与管理写服务
 
+当前已完成第 2、3、4 项的底层接口，其余顺序：
+
 1. 选择正式身份来源并建立外部 Subject 到 Workspace User 的映射；
-2. 签名会话携带不可篡改的 Organization/User 身份；
-3. 实现 Organization/Team/ProjectMembership 管理服务；
-4. 所有授权变更和状态变更与 Audit Event 同事务；
-5. 在显式 server mode 下接入 API，缺失 Actor 时 fail closed；
-6. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
+2. 在显式 server mode 下接入 API，缺失 Actor 时 fail closed；
+3. 逐一给项目列表、文章、知识检索、对象下载和 Worker 增加权限依赖；
+4. 全部项目级入口覆盖前，不开放服务器登录；
+5. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
 
 ### M7-C：Task/Job PostgreSQL 准源
 

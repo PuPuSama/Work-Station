@@ -1,9 +1,9 @@
-# Knowledge Agent M7-A 本地验证记录
+# Knowledge Agent M7-A/B 本地验证记录
 
 - 日期：2026-07-30
 - 分支：`feature/knowledge-agent-m7`
 - 基线：`cc4bbf2 feat: add M6 retrieval evaluation framework`
-- 范围：多租户 Schema、项目 RBAC、append-only 审计底座
+- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理与 append-only 审计底座
 
 ## 环境
 
@@ -21,13 +21,16 @@
 Set-Location D:\Project\article\article-agent-formal\backend
 # ARTICLE_AGENT_DATABASE_URL 由本地安全环境提供，不写入仓库或终端输出。
 .\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_auth `
   tests.test_m7_access_control `
   tests.test_m7_access_control_postgres -v
 ```
 
 结果：
 
-- 12 tests；
+- 20 tests；
+- Actor Token 防篡改、过期、未来签发与 Secret 隔离；
+- Token 只保存 Organization/User，不保存 Role 或 Permission；
 - 纯权限矩阵通过；
 - 真实 PostgreSQL 跨组织访问拒绝；
 - 普通 Team Member 无隐式项目权限；
@@ -35,6 +38,8 @@ Set-Location D:\Project\article\article-agent-formal\backend
 - ProjectMembership 复合外键拒绝跨组织组合；
 - Audit Writer 在业务事务内追加；
 - Trigger 拒绝 Audit Event 更新和删除。
+- 成员授权/撤销与 Audit Event 同事务；
+- 重复 Event ID 会回滚同事务内的成员角色更新。
 
 ### Alembic 往返和重复升级
 
@@ -65,7 +70,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 424 tests；
+- 432 tests；
 - 全部通过；
 - 1 skipped；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -80,7 +85,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 ## 当前未验证或未接入
 
-- 当前没有带 Organization/User Identity 的正式登录会话；
+- 已有 Actor Session Codec，但正式身份来源与登录签发入口尚未接入；
 - RBAC 尚未接入 FastAPI 路由、Knowledge Retriever、对象下载或 Worker；
 - Task/Job 仍以 SQLite 为准；
 - S3 对象存储、备份恢复和部署门禁尚未实现；

@@ -17,7 +17,7 @@
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
 | M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
-| M7 | 进行中：M7-A 多租户/RBAC 底座完成 | `docs/architecture/knowledge-agent-m7.md` |
+| M7 | 进行中：M7-A/B 多租户、会话、RBAC 底座完成 | `docs/architecture/knowledge-agent-m7.md` |
 
 ## M0：基线与接口边界
 
@@ -115,9 +115,12 @@
 - 已新增 Organization、User、Team、TeamMembership、显式 Project Ownership、
   ProjectMembership 和 append-only Audit Event；
 - 已实现统一权限矩阵、PostgreSQL 事实查询和事务内 Audit Writer；
+- 已实现不携带 Role 的签名 Actor Session，以及授权/撤销/审计同事务的
+  ProjectMembership Service；
 - 已验证跨组织拒绝、禁用用户、旧项目 fail-closed、复合外键、审计不可修改和
   Alembic 往返升级；
-- 当前单密码 Cookie 不具备 User Identity，因此尚未把 RBAC 接入 `app.py`；
-- 后续按“身份会话与管理写服务 -> Task/Job PostgreSQL -> 对象存储与部署门禁”
+- 当前单密码 Cookie 不具备 User Identity，正式身份来源也尚未确定，因此尚未把
+  RBAC 接入 `app.py`；
+- 后续按“正式身份映射与 API 授权覆盖 -> Task/Job PostgreSQL -> 对象存储与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。
