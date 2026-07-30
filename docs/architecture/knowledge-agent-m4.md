@@ -1,6 +1,6 @@
 # Knowledge Agent M4：有界 LangGraph 资料研究子图
 
-> 状态：进行中
+> 状态：完成
 > 分支：`feature/knowledge-agent-m4`
 > M3 检查点：`169c39a`
 
@@ -102,6 +102,11 @@ LangGraph 恢复时会从中断节点开头重跑，因此该节点不得在 `in
 - PostgreSQL Checkpoint 在关闭第一个 Checkpointer、重新构造 Graph 后，仍可使用
   相同 `thread_id` 恢复人工中断并完成。
 - thread ID 含随机唯一部分，且不暴露项目或文章原文。
+- Graph Run/事件/补证 receipt 在真实 PostgreSQL 中通过复合 FK、幂等和终态约束。
+- Tavily 适配器会丢弃跨站结果，重试复用 receipt，不重复搜索。
+- 高置信已批准页面只发布一次；低置信页面留在 Research Inbox。
+- 节点失败事件只保存异常类型，三次 RetryPolicy 尝试分别记录 attempt 与 duration。
+- FastAPI lifespan 会启动独立单并发 Research Worker，普通批量入口不能伪造研究作业。
 
 ## 7. Graph Run 业务投影
 
@@ -130,6 +135,8 @@ LangGraph Checkpoint 负责恢复执行，但不直接作为产品查询模型�
 - `append_event`：锁 Run 后分配连续 sequence，避免并发 Worker 产生重复序号；
 - `record_gap_attempt`：稳定 attempt 身份不可变，节点重试不会重复计费记录；
 - `mark_failed`：只保存异常类型和固定公开文案，不复制 Provider 异常正文或密钥。
+- `append_node_attempt`：按 node operation ID 在事务内分配 attempt，记录耗时和结果，
+  不记录异常原文。
 
 Checkpoint 表和这三张表不能互相替代：前者服务执行恢复，后者服务权限过滤、列表查询、
 产品时间线和审计。重构时必须继续保持这一分界。
@@ -155,14 +162,94 @@ M3ScopeEvidenceAdapter┘      ├─ RetrievalPlanRepository
 
 这一提取点也是未来替换检索器或把 HTTP 拆成独立服务时的稳定重构缝。
 
-## 9. 待完成
+## 9. 后台队列与查询 API
 
-- 实现剩余两个官网发现/入库 Port 的正式适配器。
-- 由现有 SQLite Job Queue 启动 Run，并提供查询/恢复 API。
-- 记录节点耗时、重试、查询预算和脱敏失败信息。
+M4 复用现有 SQLite `JobQueue` 的持久化、进程中断恢复、取消前检查和 Worker
+并发控制，但不把 Graph Run 伪装成文章写作：
+
+```text
+POST research-runs
+  -> PostgreSQL create_run + queued event
+  -> SQLite job(operation=knowledge_research, task_id=research:<thread_id>)
+  -> 独立单并发 Research Worker
+  -> 新建 PostgresSaver 会话
+  -> graph.start / continue_run / resume
+  -> PostgreSQL Run + Event 投影
+```
+
+- Queue 的 `source_revision/result_revision` 存 outline version，只用于兼容现有作业记录；
+- Worker 不读取或写回 SQLite `TaskRecord`，文章状态机仍保持原边界；
+- 每次 Worker 调用新开一个 Checkpointer 连接，避免 API 查询和后台线程共享同一
+  psycopg connection；
+- 进程在节点中间退出时，SQLite 会把 `running` 作业恢复为 `queued`；Run 为
+  `running` 且已存在 Checkpoint 时调用 `continue_run(thread_id)`，不重新提交初始
+  State；
+- 普通异常只把异常类型和固定文案写入 Run/Queue，Provider 原始消息不进入公开状态。
+
+HTTP 契约：
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| `POST` | `/api/knowledge/{project}/research-runs` | 从不可变 Retrieval Plan 创建唯一 thread 并排队 |
+| `GET` | `/api/knowledge/{project}/research-runs` | 按项目， 可选 article 过滤列出 Run |
+| `GET` | `/api/knowledge/{project}/research-runs/{thread}` | 返回 Run、事件、补证尝试和待审候选 |
+| `POST` | `/api/knowledge/{project}/research-runs/{thread}/resume` | 预验证批准 URL 后排队恢复同一 thread |
+
+接口不返回 Checkpoint 全量 State、客户正文、Embedding、连接串或密钥。待审候选仅来自
+同一项目同一 thread 的中断载荷；未知 URL 在入队前和 Graph 节点内各校验一次。
+
+## 10. 官网发现与发布适配器
+
+- `TavilyOfficialDiscoveryAdapter` 用项目表中的 `official_domain` 调用域名限定搜索，
+  再用 SSRF/same-site URL 规范器二次过滤；
+- 搜索摘要正文不进入 Graph State 或知识库，只记录 URL、分数、是否同站和请求 ID
+  是否存在；
+- 稳定 `attempt_id` 先写 `pending` receipt，节点重试优先复用已发现 URL，不重复调用
+  Tavily；
+- 所有搜索发现的新 URL 默认 `needs_review=true`，人工恢复后才抓取；
+- `OfficialCandidateIngestionAdapter` 调用正式 M2 网页抓取/分类，分类置信度至少
+  `0.75` 才可自动批准并调用 `KnowledgePublicationService`；
+- 低置信度、未知类型或解析失败保留在 Research Inbox，结果记为 `blocked`，不伪造
+  发布；
+- attempt 从 `pending` 只允许一次转换为 `improved/no_change/blocked`，终态不可变；
+  重试已完成 attempt 不再次抓取、Embedding 或发布。
+
+## 11. 代码地图与重构缝
+
+| 文件 | 当前职责 | 重构时保持的接口 |
+|---|---|---|
+| `research_graph.py` | State、节点、条件边、两轮/查询预算、interrupt、RetryPolicy | 四个业务 Port + `ResearchTelemetryPort` |
+| `research_adapters.py` | M3 Plan/Pack、Tavily 同站发现、官网抓取与 PublicationGate | Graph 不直接依赖 SQL/SDK/抓取器 |
+| `scope_evidence.py` | HTTP 和 Graph 共用的 Scope 检索/合并/Pack 服务 | `build(project, plan, scope, limit)` |
+| `research_execution.py` | 每次新建 Checkpointer 会话；start/continue/resume 与业务投影同步 | `ResearchGraphExecutionService` |
+| `research_runs.py` | Run、事件、GapFill receipt 的事务与项目隔离 | Repository 方法，不把 Checkpoint 当查询模型 |
+| `research_telemetry.py` | 节点 attempt/duration 的脱敏适配器 | Telemetry 失败不触发外部工具重放 |
+| `http.py` | 创建、列表、详情、恢复的受项目约束 API | 不返回全量 State/密钥/正文 |
+| `app.py` | 把 `knowledge_research` 接入现有 SQLite Queue 和 lifespan | Research Worker 与写作/产品 Worker 分池 |
+
+若未来把 Knowledge Agent 拆成独立服务，优先替换
+`ResearchGraphSessionFactory`、Queue enqueue callback 和各 Port 实现；Graph 的停止条件、
+Plan/Scope/Evidence 契约及 PostgreSQL 业务身份不应随传输层一起重写。
+
+## 12. M4 最终验收
+
+- 后端完整回归：388 tests，1 skipped；
+- M4 定向闭环：41 tests；
+- Alembic `0006 -> 0005 -> 0006` 往返和重复 `upgrade head` 通过；
+- PostgreSQL Checkpointer 显式 setup 与跨会话 interrupt/resume 通过；
+- 前端 ESLint 通过；
+- Next.js 16.2.10 webpack production build 通过。Turbopack 在只读复用另一个工作树
+  `node_modules` 的临时 junction 上按设计拒绝越出 filesystem root，因此不作为代码
+  失败；junction 和额外构建目录均已清理；
+- qewit 真实 M2 数据仍为 4 sources / 4 snapshots / 291 chunks / 3 products /
+  19 assets；
+- main 与学习工作树原有未提交文件保持不变。
+
+## 13. 后续边界
+
 - M5 再接完整研究时间线、SSE 和只读对话，不提前扩张 M4 范围。
 
-## 10. 官方参考
+## 14. 官方参考
 
 - LangGraph Persistence：https://docs.langchain.com/oss/python/langgraph/persistence
 - LangGraph Interrupts：https://docs.langchain.com/oss/python/langgraph/interrupts

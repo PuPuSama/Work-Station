@@ -193,6 +193,8 @@ from workflow.state_machine import (
 from knowledge_agent.http import router as knowledge_agent_router
 from knowledge_agent.embedding import OpenAICompatibleEmbeddingProvider
 from knowledge_agent.runtime import create_knowledge_runtime
+from knowledge_agent.research_graph import ResearchGraphRequest
+from knowledge_agent.research_runs import ResearchRunConflictError
 from knowledge_agent.settings import load_knowledge_agent_settings
 
 
@@ -205,6 +207,7 @@ async def app_lifespan(application: FastAPI):
     cfg = config()
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
+    application.state.knowledge_research_enqueue = None
     if cfg.knowledge_agent_enabled:
         knowledge_settings = load_knowledge_agent_settings(enabled=True)
         knowledge_runtime = create_knowledge_runtime(
@@ -247,19 +250,145 @@ async def app_lifespan(application: FastAPI):
             "package_delivery",
         ),
     )
+    research_runner = None
+    if (
+        knowledge_runtime is not None
+        and knowledge_runtime.research_execution is not None
+    ):
+        research_execution = knowledge_runtime.research_execution
+
+        def execute_research_job(
+            job: dict,
+            cancelled: Callable[[], bool],
+        ) -> int:
+            if cancelled():
+                raise JobCancelled(
+                    "Research job cancelled before graph execution started."
+                )
+            payload = dict(job["request"])
+            graph_request = ResearchGraphRequest(
+                organization_id=str(payload["organization_id"]),
+                project_id=str(payload["project_id"]),
+                article_id=str(payload["article_id"]),
+                outline_version=int(payload["outline_version"]),
+                retrieval_plan_id=str(payload["retrieval_plan_id"]),
+                thread_id=str(payload["thread_id"]),
+                max_gap_fill_rounds=int(payload["max_gap_fill_rounds"]),
+                max_discovery_queries=int(payload["max_discovery_queries"]),
+            )
+            action = str(payload["action"])
+            if action == "start":
+                research_execution.execute_start(graph_request)
+            elif action == "resume":
+                research_execution.execute_resume(
+                    project_id=graph_request.project_id,
+                    thread_id=graph_request.thread_id,
+                    approved_urls=tuple(payload.get("approved_urls") or ()),
+                )
+            else:
+                raise ValueError("unknown knowledge research queue action")
+            return graph_request.outline_version
+
+        research_runner = BatchJobRunner(
+            queue,
+            execute_research_job,
+            concurrency=1,
+            operations=("knowledge_research",),
+        )
+
+        def enqueue_research(
+            *,
+            action: str,
+            graph_request: ResearchGraphRequest,
+            approved_urls: tuple[str, ...],
+        ) -> dict[str, object]:
+            if action == "start":
+                run = research_execution.enqueue(
+                    graph_request,
+                    metadata={"queue_operation": "knowledge_research"},
+                )
+            elif action == "resume":
+                research_execution.validate_resume(
+                    project_id=graph_request.project_id,
+                    thread_id=graph_request.thread_id,
+                    approved_urls=approved_urls,
+                )
+                run = knowledge_runtime.research_run_repository.get_run(
+                    graph_request.project_id,
+                    graph_request.thread_id,
+                )
+                if run is None:
+                    raise ResearchRunConflictError(
+                        "research run was not found before queueing resume"
+                    )
+            else:
+                raise ValueError("unknown knowledge research queue action")
+            queue_identity = f"research:{graph_request.thread_id}"
+            try:
+                batch = queue.create_batch(
+                    "knowledge_research",
+                    [
+                        {
+                            "task_id": queue_identity,
+                            "customer": graph_request.project_id,
+                            "topic": graph_request.article_id,
+                            "source_revision": graph_request.outline_version,
+                            "request": {
+                                "action": action,
+                                "organization_id": graph_request.organization_id,
+                                "project_id": graph_request.project_id,
+                                "article_id": graph_request.article_id,
+                                "outline_version": graph_request.outline_version,
+                                "retrieval_plan_id": (
+                                    graph_request.retrieval_plan_id
+                                ),
+                                "thread_id": graph_request.thread_id,
+                                "max_gap_fill_rounds": (
+                                    graph_request.max_gap_fill_rounds
+                                ),
+                                "max_discovery_queries": (
+                                    graph_request.max_discovery_queries
+                                ),
+                                "approved_urls": list(approved_urls),
+                            },
+                        }
+                    ],
+                    customer=graph_request.project_id,
+                )
+            except ActiveJobError as exc:
+                raise ResearchRunConflictError(
+                    "research run already has an active queue job"
+                ) from exc
+            research_runner.wake()
+            return {
+                "run": run,
+                "batch_id": batch["id"],
+                "job_id": batch["jobs"][0]["id"],
+            }
+
+        application.state.knowledge_research_enqueue = enqueue_research
     application.state.job_queue = queue
     application.state.batch_runner = writing_runner
-    application.state.batch_runners = (writing_runner, product_runner)
+    application.state.batch_runners = tuple(
+        runner
+        for runner in (writing_runner, product_runner, research_runner)
+        if runner is not None
+    )
     writing_runner.start()
     product_runner.start()
+    if research_runner is not None:
+        research_runner.start()
     try:
         yield
     finally:
+        if research_runner is not None:
+            research_runner.stop()
         product_runner.stop()
         writing_runner.stop()
         if knowledge_runtime is not None:
             knowledge_runtime.close()
         application.state.knowledge_agent_runtime = None
+        application.state.knowledge_research_enqueue = None
 
 
 app = FastAPI(
@@ -2040,6 +2169,11 @@ def _execute_batch_job(
 
 @app.post("/api/batches", response_model=BatchCreateResponse)
 def create_batch(request: BatchCreateRequest) -> BatchCreateResponse:
+    if request.operation == "knowledge_research":
+        raise HTTPException(
+            status_code=422,
+            detail="请通过 Knowledge Agent research-runs 接口启动资料研究。",
+        )
     queue = batch_queue()
     task_ids = list(dict.fromkeys(task_id.strip() for task_id in request.task_ids if task_id.strip()))
     if not task_ids:
@@ -2119,9 +2253,19 @@ def read_batch(batch_id: str) -> BatchRecord:
 @app.post("/api/batches/{batch_id}/cancel", response_model=BatchRecord)
 def cancel_batch(batch_id: str) -> BatchRecord:
     try:
-        result = batch_queue().cancel_batch(batch_id)
+        queue = batch_queue()
+        current = queue.get_batch(batch_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="批量任务不存在。") from None
+    if any(
+        job["operation"] == "knowledge_research"
+        for job in current["jobs"]
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="M4 研究 Run 暂不支持通过通用批次接口取消。",
+        )
+    result = queue.cancel_batch(batch_id)
     wake_batch_runner()
     return BatchRecord.model_validate(result)
 
@@ -2129,9 +2273,16 @@ def cancel_batch(batch_id: str) -> BatchRecord:
 @app.post("/api/batch-jobs/{job_id}/cancel", response_model=BatchJobRecord)
 def cancel_batch_job(job_id: str) -> BatchJobRecord:
     try:
-        result = batch_queue().request_cancel(job_id)
+        queue = batch_queue()
+        current = queue.get_job(job_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="批量任务条目不存在。") from None
+    if current["operation"] == "knowledge_research":
+        raise HTTPException(
+            status_code=409,
+            detail="M4 研究 Run 暂不支持通过通用队列接口取消。",
+        )
+    result = queue.request_cancel(job_id)
     wake_batch_runner()
     return BatchJobRecord.model_validate(result)
 
@@ -2141,6 +2292,11 @@ def retry_batch_job(job_id: str) -> BatchJobRecord:
     queue = batch_queue()
     try:
         previous = queue.get_job(job_id)
+        if previous["operation"] == "knowledge_research":
+            raise HTTPException(
+                status_code=409,
+                detail="失败的研究 Run 保持不可变，请创建新 Run 重试。",
+            )
         task = store().get(str(previous["task_id"]))
     except KeyError:
         raise HTTPException(status_code=404, detail="任务或批量任务条目不存在。") from None

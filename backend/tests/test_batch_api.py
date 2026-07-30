@@ -5,7 +5,9 @@ import tempfile
 import time
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -27,6 +29,7 @@ from models import (  # noqa: E402
 )
 from services.job_queue import JobConflict, JobQueue  # noqa: E402
 from storage import TaskStore, now_iso  # noqa: E402
+from knowledge_agent import ResearchGraphRequest, ResearchGraphRun  # noqa: E402
 
 
 def make_task(cfg, task_id: str, status: str) -> TaskRecord:
@@ -48,6 +51,101 @@ def make_task(cfg, task_id: str, status: str) -> TaskRecord:
 
 
 class BatchApiTests(unittest.TestCase):
+    def test_lifespan_dispatches_dedicated_knowledge_research_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = replace(
+                load_config(),
+                data_file=root / "data" / "tasks.json",
+                output_root=root / "output",
+                knowledge_base=root / "knowledge",
+                topic_library=root / "topics",
+                knowledge_agent_enabled=True,
+            )
+            calls: list[str] = []
+
+            class FakeExecution:
+                def enqueue(self, request, *, metadata=None):
+                    return run
+
+                def execute_start(self, request):
+                    calls.append(request.thread_id)
+                    return run
+
+            class FakeRuntime:
+                research_execution = FakeExecution()
+                research_run_repository = SimpleNamespace(get_run=lambda *args: run)
+
+                def close(self):
+                    return None
+
+            request = ResearchGraphRequest(
+                organization_id="org-1",
+                project_id="example.com",
+                article_id="topic_006",
+                outline_version=2,
+                retrieval_plan_id="plan-1",
+                thread_id="thread-lifespan-1",
+            )
+            run = ResearchGraphRun(
+                project_id=request.project_id,
+                thread_id=request.thread_id,
+                organization_id=request.organization_id,
+                retrieval_plan_id=request.retrieval_plan_id,
+                article_id=request.article_id,
+                outline_version=request.outline_version,
+                status="queued",
+                current_node="queued",
+                current_scope_id=None,
+                gap_fill_round=0,
+                max_gap_fill_rounds=2,
+                discovery_queries_used=0,
+                max_discovery_queries=2,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            with (
+                patch.object(app_module, "config", return_value=cfg),
+                patch.object(
+                    app_module,
+                    "load_knowledge_agent_settings",
+                    return_value=SimpleNamespace(database_url="postgresql+psycopg://unused"),
+                ),
+                patch.object(
+                    app_module.OpenAICompatibleEmbeddingProvider,
+                    "from_settings",
+                    return_value=object(),
+                ),
+                patch.object(
+                    app_module,
+                    "create_knowledge_runtime",
+                    return_value=FakeRuntime(),
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                queued = client.app.state.knowledge_research_enqueue(
+                    action="start",
+                    graph_request=request,
+                    approved_urls=(),
+                )
+                deadline = time.time() + 3
+                batch = client.app.state.job_queue.get_batch(queued["batch_id"])
+                while batch["status"] != "succeeded" and time.time() < deadline:
+                    time.sleep(0.02)
+                    batch = client.app.state.job_queue.get_batch(queued["batch_id"])
+
+                self.assertEqual(batch["operation"], "knowledge_research")
+                self.assertEqual(batch["status"], "succeeded")
+                self.assertEqual(calls, [request.thread_id])
+                blocked = client.post(
+                    "/api/batches",
+                    json={
+                        "operation": "knowledge_research",
+                        "task_ids": ["anything"],
+                    },
+                )
+                self.assertEqual(blocked.status_code, 422)
+
     def test_extended_single_task_operations_dispatch_through_queue_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

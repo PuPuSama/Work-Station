@@ -3,7 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import PurePath
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import (
@@ -42,6 +42,15 @@ from .library import KnowledgeSourceSummary
 from .repository import KnowledgeRepositoryError
 from .publication import KnowledgePublicationError
 from .runtime import KnowledgeAgentRuntime
+from .research_graph import ResearchGraphRequest, new_research_thread_id
+from .research_runs import (
+    GapFillAttempt,
+    ResearchGraphEvent,
+    ResearchGraphRun,
+    ResearchRunConflictError,
+    ResearchRunNotFound,
+    ResearchRunRepositoryError,
+)
 from .scope_evidence import ScopeEvidenceNotFound, ScopeEvidenceService
 from .wordpress import (
     OfficialSiteFetchError,
@@ -328,11 +337,93 @@ class ParagraphHashReviewResponse(KnowledgeApiModel):
     marked_needs_review: int
 
 
+class ResearchRunCreateRequest(KnowledgeApiModel):
+    organization_id: str = Field(min_length=1, max_length=200)
+    retrieval_plan_id: str = Field(min_length=1, max_length=200)
+    max_discovery_queries: int = Field(default=2, ge=0, le=20)
+
+
+class ResearchRunResumeRequest(KnowledgeApiModel):
+    approved_urls: list[
+        Annotated[str, Field(min_length=1, max_length=4096)]
+    ] = Field(default_factory=list, max_length=20)
+
+
+class ResearchRunResponse(KnowledgeApiModel):
+    project_id: str
+    thread_id: str
+    organization_id: str
+    retrieval_plan_id: str
+    article_id: str
+    outline_version: int
+    status: str
+    current_node: str
+    current_scope_id: str | None
+    gap_fill_round: int
+    max_gap_fill_rounds: int
+    discovery_queries_used: int
+    max_discovery_queries: int
+    evidence_pack_ids: list[str]
+    warnings: list[str]
+    error_code: str | None
+    error_message: str | None
+    created_at: str | None
+    updated_at: str | None
+    finished_at: str | None
+
+
+class ResearchEventResponse(KnowledgeApiModel):
+    sequence: int
+    event_type: str
+    node_name: str
+    scope_id: str | None
+    attempt: int
+    details: dict[str, object]
+    created_at: str | None
+
+
+class GapFillAttemptResponse(KnowledgeApiModel):
+    scope_id: str
+    round_number: int
+    attempt_id: str
+    reason: str
+    channel: str
+    query: str
+    discovered_urls: list[str]
+    published_source_ids: list[str]
+    result: str
+    cost_usage: dict[str, object]
+    created_at: str | None
+    updated_at: str | None
+
+
+class ResearchRunDetailResponse(ResearchRunResponse):
+    events: list[ResearchEventResponse]
+    gap_fill_attempts: list[GapFillAttemptResponse]
+    review_candidates: list[dict[str, object]]
+
+
+class ResearchRunQueuedResponse(KnowledgeApiModel):
+    run: ResearchRunResponse
+    queue_batch_id: str
+    queue_job_id: str
+
+
 def _runtime(request: Request) -> KnowledgeAgentRuntime:
     runtime = getattr(request.app.state, "knowledge_agent_runtime", None)
     if runtime is None:
         raise HTTPException(status_code=404, detail="Knowledge Agent is disabled.")
     return runtime
+
+
+def _research_enqueue(request: Request):
+    enqueue = getattr(request.app.state, "knowledge_research_enqueue", None)
+    if not callable(enqueue):
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge research queue is not available.",
+        )
+    return enqueue
 
 
 def _project_id(value: str) -> str:
@@ -509,6 +600,60 @@ def _link_response(link: EvidenceLink) -> EvidenceLinkResponse:
     )
 
 
+def _research_run_response(run: ResearchGraphRun) -> ResearchRunResponse:
+    return ResearchRunResponse(
+        project_id=run.project_id,
+        thread_id=run.thread_id,
+        organization_id=run.organization_id,
+        retrieval_plan_id=run.retrieval_plan_id,
+        article_id=run.article_id,
+        outline_version=run.outline_version,
+        status=run.status,
+        current_node=run.current_node,
+        current_scope_id=run.current_scope_id,
+        gap_fill_round=run.gap_fill_round,
+        max_gap_fill_rounds=run.max_gap_fill_rounds,
+        discovery_queries_used=run.discovery_queries_used,
+        max_discovery_queries=run.max_discovery_queries,
+        evidence_pack_ids=list(run.evidence_pack_ids),
+        warnings=list(run.warnings),
+        error_code=run.error_code,
+        error_message=run.error_message,
+        created_at=(run.created_at.isoformat() if run.created_at else None),
+        updated_at=(run.updated_at.isoformat() if run.updated_at else None),
+        finished_at=(run.finished_at.isoformat() if run.finished_at else None),
+    )
+
+
+def _research_event_response(event: ResearchGraphEvent) -> ResearchEventResponse:
+    return ResearchEventResponse(
+        sequence=event.sequence,
+        event_type=event.event_type,
+        node_name=event.node_name,
+        scope_id=event.scope_id,
+        attempt=event.attempt,
+        details=dict(event.details),
+        created_at=(event.created_at.isoformat() if event.created_at else None),
+    )
+
+
+def _gap_attempt_response(attempt: GapFillAttempt) -> GapFillAttemptResponse:
+    return GapFillAttemptResponse(
+        scope_id=attempt.scope_id,
+        round_number=attempt.round_number,
+        attempt_id=attempt.attempt_id,
+        reason=attempt.reason,
+        channel=attempt.channel,
+        query=attempt.query,
+        discovered_urls=list(attempt.discovered_urls),
+        published_source_ids=list(attempt.published_source_ids),
+        result=attempt.result,
+        cost_usage=dict(attempt.cost_usage),
+        created_at=(attempt.created_at.isoformat() if attempt.created_at else None),
+        updated_at=(attempt.updated_at.isoformat() if attempt.updated_at else None),
+    )
+
+
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge-agent"])
 
 
@@ -678,6 +823,179 @@ def read_retrieval_plan(
     if plan is None:
         raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
     return _plan_response(plan)
+
+
+@router.post(
+    "/{project}/research-runs",
+    response_model=ResearchRunQueuedResponse,
+    status_code=202,
+)
+def create_research_run(
+    project: str,
+    payload: ResearchRunCreateRequest,
+    request: Request,
+) -> ResearchRunQueuedResponse:
+    runtime = _runtime(request)
+    if runtime.research_execution is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge research execution is not configured.",
+        )
+    project_id = _project_id(project)
+    plan = runtime.retrieval_plan_repository.get_retrieval_plan(
+        project_id,
+        payload.retrieval_plan_id,
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
+    graph_request = ResearchGraphRequest(
+        organization_id=payload.organization_id,
+        project_id=project_id,
+        article_id=plan.article_id,
+        outline_version=plan.outline_version,
+        retrieval_plan_id=plan.retrieval_plan_id,
+        thread_id=new_research_thread_id(
+            project_id,
+            plan.article_id,
+            plan.outline_version,
+        ),
+        max_gap_fill_rounds=plan.max_gap_fill_rounds,
+        max_discovery_queries=payload.max_discovery_queries,
+    )
+    try:
+        queued = _research_enqueue(request)(
+            action="start",
+            graph_request=graph_request,
+            approved_urls=(),
+        )
+    except (ValueError, ResearchRunRepositoryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ResearchRunQueuedResponse(
+        run=_research_run_response(queued["run"]),
+        queue_batch_id=str(queued["batch_id"]),
+        queue_job_id=str(queued["job_id"]),
+    )
+
+
+@router.get(
+    "/{project}/research-runs",
+    response_model=list[ResearchRunResponse],
+)
+def list_research_runs(
+    project: str,
+    request: Request,
+    article_id: str | None = None,
+    limit: int = 50,
+) -> list[ResearchRunResponse]:
+    runtime = _runtime(request)
+    try:
+        runs = runtime.research_run_repository.list_runs(
+            _project_id(project),
+            article_id=article_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return [_research_run_response(run) for run in runs]
+
+
+@router.get(
+    "/{project}/research-runs/{thread_id}",
+    response_model=ResearchRunDetailResponse,
+)
+def read_research_run(
+    project: str,
+    thread_id: str,
+    request: Request,
+) -> ResearchRunDetailResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    run = runtime.research_run_repository.get_run(project_id, thread_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run was not found.")
+    review_candidates: list[dict[str, object]] = []
+    if run.status == "waiting_for_review" and runtime.research_execution is not None:
+        try:
+            state = runtime.research_execution.checkpoint_state(
+                project_id=project_id,
+                thread_id=thread_id,
+            )
+        except ResearchRunRepositoryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raw_candidates = state.get("discovered_candidates", [])
+        if isinstance(raw_candidates, list):
+            review_candidates = [
+                dict(candidate)
+                for candidate in raw_candidates
+                if isinstance(candidate, dict) and candidate.get("needs_review")
+            ]
+    response = _research_run_response(run)
+    return ResearchRunDetailResponse(
+        **response.model_dump(),
+        events=[
+            _research_event_response(event)
+            for event in runtime.research_run_repository.list_events(
+                project_id,
+                thread_id,
+            )
+        ],
+        gap_fill_attempts=[
+            _gap_attempt_response(attempt)
+            for attempt in runtime.research_run_repository.list_gap_attempts(
+                project_id,
+                thread_id,
+            )
+        ],
+        review_candidates=review_candidates,
+    )
+
+
+@router.post(
+    "/{project}/research-runs/{thread_id}/resume",
+    response_model=ResearchRunQueuedResponse,
+    status_code=202,
+)
+def resume_research_run(
+    project: str,
+    thread_id: str,
+    payload: ResearchRunResumeRequest,
+    request: Request,
+) -> ResearchRunQueuedResponse:
+    runtime = _runtime(request)
+    if runtime.research_execution is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge research execution is not configured.",
+        )
+    project_id = _project_id(project)
+    run = runtime.research_run_repository.get_run(project_id, thread_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run was not found.")
+    graph_request = ResearchGraphRequest(
+        organization_id=run.organization_id,
+        project_id=run.project_id,
+        article_id=run.article_id,
+        outline_version=run.outline_version,
+        retrieval_plan_id=run.retrieval_plan_id,
+        thread_id=run.thread_id,
+        max_gap_fill_rounds=run.max_gap_fill_rounds,
+        max_discovery_queries=run.max_discovery_queries,
+    )
+    try:
+        queued = _research_enqueue(request)(
+            action="resume",
+            graph_request=graph_request,
+            approved_urls=tuple(payload.approved_urls),
+        )
+    except ResearchRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, ResearchRunConflictError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ResearchRunQueuedResponse(
+        run=_research_run_response(queued["run"]),
+        queue_batch_id=str(queued["batch_id"]),
+        queue_job_id=str(queued["job_id"]),
+    )
 
 
 @router.post(

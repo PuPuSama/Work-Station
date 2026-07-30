@@ -525,7 +525,77 @@ export type BatchOperation =
   | "prepare_images"
   | "export_docx"
   | "generate_tdk"
-  | "package_delivery";
+  | "package_delivery"
+  | "knowledge_research";
+
+export type ResearchRunStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_review"
+  | "completed"
+  | "completed_with_warnings"
+  | "failed"
+  | "cancelled";
+
+export type ResearchRun = {
+  project_id: string;
+  thread_id: string;
+  organization_id: string;
+  retrieval_plan_id: string;
+  article_id: string;
+  outline_version: number;
+  status: ResearchRunStatus;
+  current_node: string;
+  current_scope_id: string | null;
+  gap_fill_round: number;
+  max_gap_fill_rounds: number;
+  discovery_queries_used: number;
+  max_discovery_queries: number;
+  evidence_pack_ids: string[];
+  warnings: string[];
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  finished_at: string | null;
+};
+
+export type ResearchRunEvent = {
+  sequence: number;
+  event_type: string;
+  node_name: string;
+  scope_id: string | null;
+  attempt: number;
+  details: Record<string, unknown>;
+  created_at: string | null;
+};
+
+export type ResearchGapFillAttempt = {
+  scope_id: string;
+  round_number: number;
+  attempt_id: string;
+  reason: string;
+  channel: string;
+  query: string;
+  discovered_urls: string[];
+  published_source_ids: string[];
+  result: string;
+  cost_usage: Record<string, unknown>;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type ResearchRunDetail = ResearchRun & {
+  events: ResearchRunEvent[];
+  gap_fill_attempts: ResearchGapFillAttempt[];
+  review_candidates: Array<Record<string, unknown>>;
+};
+
+export type ResearchRunQueued = {
+  run: ResearchRun;
+  queue_batch_id: string;
+  queue_job_id: string;
+};
 
 export type BatchJobStatus =
   | "queued"

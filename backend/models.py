@@ -543,6 +543,7 @@ BatchOperation = Literal[
     "export_docx",
     "generate_tdk",
     "package_delivery",
+    "knowledge_research",
 ]
 BatchJobStatus = Literal[
     "queued",

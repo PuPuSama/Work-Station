@@ -148,6 +148,21 @@ def _attempt_signature(attempt: GapFillAttempt) -> tuple[object, ...]:
     )
 
 
+def _attempt_core(attempt: GapFillAttempt) -> tuple[object, ...]:
+    return (
+        attempt.project_id,
+        attempt.thread_id,
+        attempt.retrieval_plan_id,
+        attempt.scope_id,
+        attempt.round_number,
+        attempt.attempt_id,
+        attempt.reason,
+        attempt.channel,
+        attempt.query,
+        attempt.discovered_urls,
+    )
+
+
 def _run_from_row(row: Mapping[str, object] | RowMapping) -> ResearchGraphRun:
     return ResearchGraphRun(
         project_id=str(row["project_id"]),
@@ -294,6 +309,62 @@ class PostgresResearchRunRepository:
         with self._engine.connect() as connection:
             return self._get(connection, project_id, thread_id)
 
+    def list_runs(
+        self,
+        project_id: str,
+        *,
+        article_id: str | None = None,
+        limit: int = 50,
+    ) -> tuple[ResearchGraphRun, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        statement = sa.select(research_graph_runs).where(
+            research_graph_runs.c.project_id == project_id
+        )
+        if article_id is not None:
+            statement = statement.where(
+                research_graph_runs.c.article_id == article_id
+            )
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                statement.order_by(
+                    research_graph_runs.c.created_at.desc(),
+                    research_graph_runs.c.thread_id,
+                ).limit(limit)
+            ).mappings()
+            return tuple(_run_from_row(row) for row in rows)
+
+    def mark_started(
+        self,
+        project_id: str,
+        thread_id: str,
+        *,
+        current_node: str = "start",
+    ) -> ResearchGraphRun:
+        with self._engine.begin() as connection:
+            current = self._locked_run(connection, project_id, thread_id)
+            if current.status in TERMINAL_RESEARCH_STATUSES:
+                raise ResearchRunConflictError(
+                    "terminal research run cannot be started again"
+                )
+            row = connection.execute(
+                research_graph_runs.update()
+                .where(
+                    research_graph_runs.c.project_id == project_id,
+                    research_graph_runs.c.thread_id == thread_id,
+                )
+                .values(
+                    status="running",
+                    current_node=current_node,
+                    error_code=None,
+                    error_message=None,
+                    updated_at=sa.func.now(),
+                    finished_at=None,
+                )
+                .returning(research_graph_runs)
+            ).mappings().one()
+            return _run_from_row(row)
+
     def update_from_state(
         self,
         project_id: str,
@@ -416,6 +487,69 @@ class PostgresResearchRunRepository:
             ).mappings().one()
             return _event_from_row(row)
 
+    def append_node_attempt(
+        self,
+        *,
+        project_id: str,
+        thread_id: str,
+        node_name: str,
+        scope_id: str | None,
+        operation_id: str,
+        duration_ms: float,
+        outcome: Literal["succeeded", "failed"],
+        error_code: str | None,
+    ) -> ResearchGraphEvent:
+        if duration_ms < 0:
+            raise ValueError("duration_ms must be non-negative")
+        with self._engine.begin() as connection:
+            self._locked_run(connection, project_id, thread_id)
+            sequence = connection.execute(
+                sa.select(
+                    sa.func.coalesce(
+                        sa.func.max(research_graph_events.c.sequence),
+                        0,
+                    )
+                ).where(
+                    research_graph_events.c.project_id == project_id,
+                    research_graph_events.c.thread_id == thread_id,
+                )
+            ).scalar_one()
+            attempt = connection.execute(
+                sa.select(
+                    sa.func.coalesce(
+                        sa.func.max(research_graph_events.c.attempt),
+                        0,
+                    )
+                ).where(
+                    research_graph_events.c.project_id == project_id,
+                    research_graph_events.c.thread_id == thread_id,
+                    research_graph_events.c.event_type == "tool_call",
+                    research_graph_events.c.node_name == node_name,
+                    research_graph_events.c.details["operation_id"].astext
+                    == operation_id,
+                )
+            ).scalar_one()
+            row = connection.execute(
+                research_graph_events.insert()
+                .values(
+                    project_id=project_id,
+                    thread_id=thread_id,
+                    sequence=int(sequence) + 1,
+                    event_type="tool_call",
+                    node_name=node_name,
+                    scope_id=scope_id,
+                    attempt=int(attempt) + 1,
+                    details={
+                        "operation_id": operation_id,
+                        "outcome": outcome,
+                        "duration_ms": duration_ms,
+                        "error_code": error_code,
+                    },
+                )
+                .returning(research_graph_events)
+            ).mappings().one()
+            return _event_from_row(row)
+
     def list_events(
         self,
         project_id: str,
@@ -445,11 +579,37 @@ class PostgresResearchRunRepository:
                 ).mappings().one_or_none()
                 if existing_row is not None:
                     existing = _attempt_from_row(existing_row)
-                    if _attempt_signature(existing) != _attempt_signature(attempt):
+                    if _attempt_core(existing) != _attempt_core(attempt):
                         raise ResearchRunConflictError(
                             "gap-fill attempt identity already has different content"
                         )
-                    return existing
+                    if attempt.result == "pending":
+                        return existing
+                    if existing.result != "pending":
+                        if _attempt_signature(existing) != _attempt_signature(attempt):
+                            raise ResearchRunConflictError(
+                                "completed gap-fill attempt is immutable"
+                            )
+                        return existing
+                    row = connection.execute(
+                        gap_fill_attempts.update()
+                        .where(
+                            gap_fill_attempts.c.project_id == attempt.project_id,
+                            gap_fill_attempts.c.thread_id == attempt.thread_id,
+                            gap_fill_attempts.c.scope_id == attempt.scope_id,
+                            gap_fill_attempts.c.round_number == attempt.round_number,
+                        )
+                        .values(
+                            published_source_ids=list(
+                                attempt.published_source_ids
+                            ),
+                            result=attempt.result,
+                            cost_usage=dict(attempt.cost_usage),
+                            updated_at=sa.func.now(),
+                        )
+                        .returning(gap_fill_attempts)
+                    ).mappings().one()
+                    return _attempt_from_row(row)
                 row = connection.execute(
                     insert(gap_fill_attempts)
                     .values(
@@ -474,6 +634,15 @@ class PostgresResearchRunRepository:
             raise ResearchRunConflictError(
                 "gap-fill attempt violates run, scope, or retry identity constraints"
             ) from exc
+
+    def get_gap_attempt_by_id(self, attempt_id: str) -> GapFillAttempt | None:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(gap_fill_attempts).where(
+                    gap_fill_attempts.c.attempt_id == attempt_id
+                )
+            ).mappings().one_or_none()
+            return _attempt_from_row(row) if row is not None else None
 
     def list_gap_attempts(
         self,

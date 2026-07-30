@@ -41,6 +41,7 @@ jobs:
       LLM_API_KEY: ""
       OPENAI_API_KEY: ""
       TAVILY_API_KEY: ""
+      LANGGRAPH_STRICT_MSGPACK: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -61,6 +62,11 @@ jobs:
         run: |
           python -m alembic -c backend/alembic.ini upgrade head
           python -m alembic -c backend/alembic.ini upgrade head
+
+      - name: Prepare LangGraph checkpoint schema
+        env:
+          PYTHONPATH: backend
+        run: python -m knowledge_agent.checkpoint_setup
 
       - name: Run backend tests
         run: python -m unittest discover -s backend/tests -q

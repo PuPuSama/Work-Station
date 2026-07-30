@@ -150,8 +150,10 @@ from .research_graph import (
     RetrievalPlanPort,
     ScopeEvidenceObservation,
     ScopeEvidencePort,
+    ResearchTelemetryPort,
     new_research_thread_id,
 )
+from .research_telemetry import PostgresResearchTelemetry
 from .research_runs import (
     GapFillAttempt,
     PostgresResearchRunRepository,
@@ -162,7 +164,18 @@ from .research_runs import (
     ResearchRunRepositoryError,
     sanitized_research_error,
 )
-from .research_adapters import M3ScopeEvidenceAdapter, PostgresRetrievalPlanAdapter
+from .research_adapters import (
+    M3ScopeEvidenceAdapter,
+    OfficialCandidateIngestionAdapter,
+    PostgresProjectDirectory,
+    PostgresRetrievalPlanAdapter,
+    TavilyOfficialDiscoveryAdapter,
+)
+from .research_execution import (
+    ResearchExecutionError,
+    ResearchGraphExecutionService,
+    ResearchGraphSessionFactory,
+)
 from .scope_evidence import (
     ScopeEvidenceNotFound,
     ScopeEvidenceService,
@@ -265,6 +278,7 @@ __all__ = [
     "OfficialSiteFetchError",
     "OfficialSiteFetcher",
     "OfficialDiscoveryPort",
+    "OfficialCandidateIngestionAdapter",
     "OfficialWebPageIngestionService",
     "ParsedAsset",
     "ParsedBlock",
@@ -283,6 +297,8 @@ __all__ = [
     "PostgresKnowledgeLibrary",
     "PostgresProductCatalogRepository",
     "PostgresResearchRunRepository",
+    "PostgresResearchTelemetry",
+    "PostgresProjectDirectory",
     "PostgresRetrievalPlanAdapter",
     "PRODUCT_ASSET_ROLES",
     "PRODUCT_SOURCE_RELATIONS",
@@ -300,12 +316,16 @@ __all__ = [
     "ResearchOrchestrator",
     "ResearchCandidate",
     "ResearchGraphEvent",
+    "ResearchGraphExecutionService",
     "ResearchGraphRequest",
     "ResearchGraphRun",
+    "ResearchGraphSessionFactory",
     "ResearchGraphState",
+    "ResearchExecutionError",
     "ResearchRunConflictError",
     "ResearchRunNotFound",
     "ResearchRunRepositoryError",
+    "ResearchTelemetryPort",
     "ResearchRequest",
     "ResearchResult",
     "RetrievalPlan",
@@ -326,6 +346,7 @@ __all__ = [
     "ScopeEvidenceNotFound",
     "ScopeEvidencePort",
     "ScopeEvidenceService",
+    "TavilyOfficialDiscoveryAdapter",
     "UnsafeOfficialSiteUrl",
     "UnsupportedDocumentError",
     "Vector",

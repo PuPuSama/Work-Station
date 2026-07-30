@@ -23,6 +23,7 @@ from knowledge_agent.runtime import create_knowledge_runtime  # noqa: E402
 from knowledge_agent import (  # noqa: E402
     EMBEDDING_DIMENSIONS,
     EmbeddingBatch,
+    KnowledgeProject,
     WordPressProbeResult,
 )
 
@@ -133,6 +134,18 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
         )
         app = FastAPI()
         app.state.knowledge_agent_runtime = cls.runtime
+
+        def enqueue_research(*, action, graph_request, approved_urls):
+            if action != "start":
+                raise ValueError("test queue supports start only")
+            run = cls.runtime.research_execution.enqueue(graph_request)
+            return {
+                "run": run,
+                "batch_id": "batch-research-1",
+                "job_id": "job-research-1",
+            }
+
+        app.state.knowledge_research_enqueue = enqueue_research
         app.include_router(router)
         cls.client = TestClient(app)
 
@@ -145,6 +158,9 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         with self.runtime.engine.begin() as connection:
             for table in (
+                "gap_fill_attempts",
+                "research_graph_events",
+                "research_graph_runs",
                 "evidence_links",
                 "evidence_pack_hits",
                 "evidence_packs",
@@ -164,6 +180,67 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
                     sa.text(f"DELETE FROM {table} WHERE project_id = :project_id"),
                     {"project_id": "example.com"},
                 )
+
+    def test_m4_research_run_is_queued_and_queryable(self) -> None:
+        self.runtime.repository.upsert_project(
+            KnowledgeProject(
+                project_id="example.com",
+                customer_name="Example",
+                official_domain="example.com",
+            )
+        )
+        plan = self.client.post(
+            "/api/knowledge/example.com/retrieval-plans",
+            json={
+                "retrieval_plan_id": "plan-research-v1",
+                "article_id": "topic_006",
+                "outline_version": 1,
+                "scopes": [
+                    {
+                        "scope_id": "scope-overview",
+                        "ordinal": 0,
+                        "scope_type": "h2_section",
+                        "scope_key": "overview",
+                        "title": "Overview",
+                        "query_variants": ["fastener overview"],
+                        "minimum_hits": 1,
+                        "minimum_distinct_sources": 1,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(plan.status_code, 201, plan.text)
+
+        created = self.client.post(
+            "/api/knowledge/example.com/research-runs",
+            json={
+                "organization_id": "org-example",
+                "retrieval_plan_id": "plan-research-v1",
+                "max_discovery_queries": 2,
+            },
+        )
+        self.assertEqual(created.status_code, 202, created.text)
+        payload = created.json()
+        self.assertEqual(payload["run"]["status"], "queued")
+        self.assertEqual(payload["queue_batch_id"], "batch-research-1")
+        thread_id = payload["run"]["thread_id"]
+
+        listing = self.client.get(
+            "/api/knowledge/example.com/research-runs",
+            params={"article_id": "topic_006"},
+        )
+        self.assertEqual(listing.status_code, 200, listing.text)
+        self.assertEqual([item["thread_id"] for item in listing.json()], [thread_id])
+
+        detail = self.client.get(
+            f"/api/knowledge/example.com/research-runs/{thread_id}"
+        )
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(
+            [event["event_type"] for event in detail.json()["events"]],
+            ["queued"],
+        )
+        self.assertEqual(detail.json()["review_candidates"], [])
 
     def tearDown(self) -> None:
         self.setUp()

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy.engine import Engine
+from services.tavily import TavilyClient
 
 from .artifact_store import LocalKnowledgeArtifactStore
 from .assets import PostgresKnowledgeAssetRepository
@@ -19,7 +20,20 @@ from .evidence_repository import (
 from .hybrid_retriever import BasicHybridRetriever
 from .library import PostgresKnowledgeLibrary
 from .publication import KnowledgePublicationService
+from .research_adapters import (
+    M3ScopeEvidenceAdapter,
+    OfficialCandidateIngestionAdapter,
+    PostgresProjectDirectory,
+    PostgresRetrievalPlanAdapter,
+    TavilyOfficialDiscoveryAdapter,
+)
+from .research_execution import (
+    ResearchGraphExecutionService,
+    ResearchGraphSessionFactory,
+)
 from .research_runs import PostgresResearchRunRepository
+from .research_telemetry import PostgresResearchTelemetry
+from .scope_evidence import ScopeEvidenceService
 from .repository import PostgresKnowledgeRepository
 from .web_ingestion import (
     OfficialWebPageIngestionService,
@@ -47,6 +61,7 @@ class KnowledgeAgentRuntime:
     evidence_pack_repository: PostgresEvidencePackRepository
     evidence_link_repository: PostgresEvidenceLinkRepository
     research_run_repository: PostgresResearchRunRepository
+    research_execution: ResearchGraphExecutionService | None
 
     def close(self) -> None:
         close_provider = getattr(self.embedding_provider, "close", None)
@@ -80,6 +95,55 @@ def create_knowledge_runtime(
         fetcher=official_site_fetcher,
         snapshot_lookup=library,
     )
+    publication = (
+        None
+        if embedding_provider is None
+        else KnowledgePublicationService(
+            repository=repository,
+            library=library,
+            embedding_provider=embedding_provider,
+        )
+    )
+    hybrid_retriever = (
+        None
+        if embedding_provider is None
+        else BasicHybridRetriever(engine, embedding_provider)
+    )
+    research_execution = None
+    if publication is not None and hybrid_retriever is not None:
+        projects = PostgresProjectDirectory(engine)
+        scope_evidence = ScopeEvidenceService(
+            plans=retrieval_plan_repository,
+            retriever=hybrid_retriever,
+            packs=evidence_pack_repository,
+        )
+        research_execution = ResearchGraphExecutionService(
+            sessions=ResearchGraphSessionFactory(
+                database_url=database_url,
+                plans=PostgresRetrievalPlanAdapter(
+                    retrieval_plan_repository
+                ),
+                evidence=M3ScopeEvidenceAdapter(scope_evidence),
+                discovery=TavilyOfficialDiscoveryAdapter(
+                    projects=projects,
+                    plans=retrieval_plan_repository,
+                    search=TavilyClient(),
+                    attempts=research_run_repository,
+                ),
+                ingestion=OfficialCandidateIngestionAdapter(
+                    projects=projects,
+                    web_ingestion=web_page_ingestion,
+                    repository=repository,
+                    library=library,
+                    publication=publication,
+                    attempts=research_run_repository,
+                ),
+                telemetry=PostgresResearchTelemetry(
+                    research_run_repository
+                ),
+            ),
+            runs=research_run_repository,
+        )
     return KnowledgeAgentRuntime(
         engine=engine,
         repository=repository,
@@ -97,23 +161,12 @@ def create_knowledge_runtime(
             fetcher=official_site_fetcher,
             page_ingestion=web_page_ingestion,
         ),
-        publication=(
-            None
-            if embedding_provider is None
-            else KnowledgePublicationService(
-                repository=repository,
-                library=library,
-                embedding_provider=embedding_provider,
-            )
-        ),
+        publication=publication,
         embedding_provider=embedding_provider,
-        hybrid_retriever=(
-            None
-            if embedding_provider is None
-            else BasicHybridRetriever(engine, embedding_provider)
-        ),
+        hybrid_retriever=hybrid_retriever,
         retrieval_plan_repository=retrieval_plan_repository,
         evidence_pack_repository=evidence_pack_repository,
         evidence_link_repository=evidence_link_repository,
         research_run_repository=research_run_repository,
+        research_execution=research_execution,
     )

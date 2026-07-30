@@ -6,6 +6,19 @@
 
 学习实验、正式模块的合入门槛和五周建议节奏见 `docs/agent-learning-and-delivery-plan.md`。第一条真实案例固定为 `www.qewitfastener.com / topic_006`，不能只用模拟数据证明流程可运行。
 
+## 实施状态（2026-07-30）
+
+| 里程碑 | 状态 | 结构记录 |
+|---|---|---|
+| M0 | 完成 | 基线接口与 feature flag 测试 |
+| M1 | 完成 | `docs/knowledge-agent-m1-runbook.md` |
+| M2 | 完成正式边界；真实 MinerU 私有样本对比待外部条件 | `docs/architecture/knowledge-agent-m2.md`、`docs/validation/knowledge-agent-m2-qewitfastener.md` |
+| M3 | 完成 | `docs/architecture/knowledge-agent-m3.md`、`knowledge-agent-m3-evidence.md` |
+| M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
+| M5 | 下一里程碑 | 研究时间线、SSE、只读引用问答 |
+| M6 | 未开始 | 评测与作品展示 |
+| M7 | 未开始 | 多人服务器版 |
+
 ## M0：基线与接口边界
 
 - 固定当前后端测试、前端 lint/build 和真实工作台回归基线。

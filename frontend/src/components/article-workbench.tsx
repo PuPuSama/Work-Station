@@ -2689,6 +2689,7 @@ function batchOperationLabel(operation: BatchOperation) {
     export_docx: "导出 Word",
     generate_tdk: "生成 TDK",
     package_delivery: "交付打包",
+    knowledge_research: "知识补证研究",
   };
   return labels[operation];
 }

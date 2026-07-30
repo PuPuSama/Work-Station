@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Literal, Protocol, TypedDict
+from time import perf_counter
+from typing import Callable, Literal, Protocol, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -143,7 +144,9 @@ class OfficialDiscoveryPort(Protocol):
         self,
         *,
         project_id: str,
+        thread_id: str,
         article_id: str,
+        retrieval_plan_id: str,
         scope_id: str,
         round_number: int,
         gap_reasons: Sequence[str],
@@ -156,12 +159,29 @@ class CandidateIngestionPort(Protocol):
         self,
         *,
         project_id: str,
+        thread_id: str,
+        retrieval_plan_id: str,
         scope_id: str,
         round_number: int,
         candidates: Sequence[ResearchCandidate],
         approved_urls: Sequence[str],
         attempt_id: str,
     ) -> CandidateIngestionResult: ...
+
+
+class ResearchTelemetryPort(Protocol):
+    def record_node_attempt(
+        self,
+        *,
+        project_id: str,
+        thread_id: str,
+        node_name: str,
+        scope_id: str | None,
+        operation_id: str,
+        duration_ms: float,
+        outcome: Literal["succeeded", "failed"],
+        error_code: str | None,
+    ) -> None: ...
 
 
 def new_research_thread_id(
@@ -213,11 +233,13 @@ class BoundedResearchGraph:
         discovery: OfficialDiscoveryPort,
         ingestion: CandidateIngestionPort,
         checkpointer: object,
+        telemetry: ResearchTelemetryPort | None = None,
     ) -> None:
         self._plans = plans
         self._evidence = evidence
         self._discovery = discovery
         self._ingestion = ingestion
+        self._telemetry = telemetry
         self._graph = self._compile(checkpointer)
 
     def _compile(self, checkpointer: object):
@@ -231,26 +253,44 @@ class BoundedResearchGraph:
             retry_on=(ConnectionError, TimeoutError, RuntimeError),
         )
 
-        builder.add_node("plan_scopes", self._plan_scopes)
+        builder.add_node(
+            "plan_scopes",
+            self._instrument("plan_scopes", self._plan_scopes),
+        )
         builder.add_node(
             "retrieve_knowledge",
-            self._retrieve_knowledge,
+            self._instrument("retrieve_knowledge", self._retrieve_knowledge),
             retry_policy=network_retry,
         )
-        builder.add_node("assess_evidence", self._assess_evidence)
+        builder.add_node(
+            "assess_evidence",
+            self._instrument("assess_evidence", self._assess_evidence),
+        )
         builder.add_node(
             "discover_official_sources",
-            self._discover_official_sources,
+            self._instrument(
+                "discover_official_sources",
+                self._discover_official_sources,
+            ),
             retry_policy=network_retry,
         )
         builder.add_node(
             "ingest_candidates",
-            self._ingest_candidates,
+            self._instrument("ingest_candidates", self._ingest_candidates),
             retry_policy=network_retry,
         )
-        builder.add_node("await_human_review", self._await_human_review)
-        builder.add_node("build_evidence_pack", self._build_evidence_pack)
-        builder.add_node("finish_with_warning", self._finish_with_warning)
+        builder.add_node(
+            "await_human_review",
+            self._instrument("await_human_review", self._await_human_review),
+        )
+        builder.add_node(
+            "build_evidence_pack",
+            self._instrument("build_evidence_pack", self._build_evidence_pack),
+        )
+        builder.add_node(
+            "finish_with_warning",
+            self._instrument("finish_with_warning", self._finish_with_warning),
+        )
 
         builder.add_edge(START, "plan_scopes")
         builder.add_edge("plan_scopes", "retrieve_knowledge")
@@ -287,6 +327,68 @@ class BoundedResearchGraph:
             {"next": "retrieve_knowledge", "done": END},
         )
         return builder.compile(checkpointer=checkpointer)
+
+    def _instrument(
+        self,
+        node_name: str,
+        node: Callable[[ResearchGraphState], Mapping[str, object]],
+    ) -> Callable[[ResearchGraphState], Mapping[str, object]]:
+        def instrumented(state: ResearchGraphState) -> Mapping[str, object]:
+            started = perf_counter()
+            try:
+                result = node(state)
+            except Exception as exc:
+                self._record_node_attempt(
+                    state,
+                    node_name=node_name,
+                    started=started,
+                    outcome="failed",
+                    error_code=type(exc).__name__,
+                )
+                raise
+            self._record_node_attempt(
+                state,
+                node_name=node_name,
+                started=started,
+                outcome="succeeded",
+                error_code=None,
+            )
+            return result
+
+        return instrumented
+
+    def _record_node_attempt(
+        self,
+        state: ResearchGraphState,
+        *,
+        node_name: str,
+        started: float,
+        outcome: Literal["succeeded", "failed"],
+        error_code: str | None,
+    ) -> None:
+        if self._telemetry is None:
+            return
+        raw_operation = (
+            f"{state['thread_id']}:{node_name}:{state['current_scope_id']}:"
+            f"{state['gap_fill_round']}:{state['discovery_queries_used']}"
+        )
+        operation_id = "node_" + sha256(
+            raw_operation.encode("utf-8")
+        ).hexdigest()[:32]
+        try:
+            self._telemetry.record_node_attempt(
+                project_id=state["project_id"],
+                thread_id=state["thread_id"],
+                node_name=node_name,
+                scope_id=state["current_scope_id"] or None,
+                operation_id=operation_id,
+                duration_ms=round((perf_counter() - started) * 1000, 3),
+                outcome=outcome,
+                error_code=error_code,
+            )
+        except Exception:
+            # Telemetry must not replay a completed external side effect.
+            return
 
     @staticmethod
     def _config(thread_id: str) -> dict[str, dict[str, str]]:
@@ -333,6 +435,16 @@ class BoundedResearchGraph:
         return dict(
             self._graph.invoke(
                 Command(resume=payload),
+                config=self._config(thread_id),
+            )
+        )
+
+    def continue_run(self, thread_id: str) -> dict[str, object]:
+        """Resume the next checkpointed node after a worker/process failure."""
+
+        return dict(
+            self._graph.invoke(
+                None,
                 config=self._config(thread_id),
             )
         )
@@ -423,7 +535,9 @@ class BoundedResearchGraph:
         candidates = tuple(
             self._discovery.discover(
                 project_id=state["project_id"],
+                thread_id=state["thread_id"],
                 article_id=state["article_id"],
+                retrieval_plan_id=state["retrieval_plan_id"],
                 scope_id=state["current_scope_id"],
                 round_number=round_number,
                 gap_reasons=state["latest_gap_reasons"],
@@ -506,6 +620,8 @@ class BoundedResearchGraph:
         round_number = state["gap_fill_round"] + 1
         result = self._ingestion.ingest(
             project_id=state["project_id"],
+            thread_id=state["thread_id"],
+            retrieval_plan_id=state["retrieval_plan_id"],
             scope_id=state["current_scope_id"],
             round_number=round_number,
             candidates=tuple(

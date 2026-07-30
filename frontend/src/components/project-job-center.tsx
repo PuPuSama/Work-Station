@@ -35,6 +35,7 @@ function operationLabel(operation: BatchOperation) {
     export_docx: "导出 Word",
     generate_tdk: "生成 TDK",
     package_delivery: "交付打包",
+    knowledge_research: "知识补证研究",
   };
   return labels[operation];
 }
@@ -162,7 +163,10 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
               const active = ACTIVE_STATUSES.has(job.status);
               const retryable = RETRYABLE_STATUSES.has(job.status);
               const projectPath = `/projects/${encodeURIComponent(customer)}`;
-              const href = `${projectPath}/articles/${encodeURIComponent(job.task_id)}?step=${operationStep(job.operation)}`;
+              const href =
+                job.operation === "knowledge_research"
+                  ? projectPath
+                  : `${projectPath}/articles/${encodeURIComponent(job.task_id)}?step=${operationStep(job.operation)}`;
               return (
                 <div key={job.id} className="grid gap-2 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                   <div className="min-w-0">
@@ -178,15 +182,16 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
                   </div>
                   <div className="flex flex-wrap justify-end gap-1">
                     <Button size="xs" variant="ghost" nativeButton={false} render={<Link href={href} onClick={() => setOpen(false)} />}>
-                      <ExternalLink />打开文章
+                      <ExternalLink />
+                      {job.operation === "knowledge_research" ? "打开项目" : "打开文章"}
                     </Button>
-                    {active && (
+                    {active && job.operation !== "knowledge_research" && (
                       <Button size="xs" variant="outline" disabled={Boolean(pending[job.id])} onClick={() => void mutateJob(job, "cancel")}>
                         {pending[job.id] ? <Loader2 className="animate-spin" /> : <Square />}
                         取消
                       </Button>
                     )}
-                    {retryable && (
+                    {retryable && job.operation !== "knowledge_research" && (
                       <Button size="xs" variant="outline" disabled={Boolean(pending[job.id])} onClick={() => void mutateJob(job, "retry")}>
                         {pending[job.id] ? <Loader2 className="animate-spin" /> : <RotateCcw />}
                         重试
