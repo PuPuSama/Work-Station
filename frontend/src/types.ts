@@ -449,6 +449,33 @@ export type ExternalIdentityMappingPage = {
   next_after_mapping_id: string | null;
 };
 
+export type WorkspaceInvitationStatus =
+  | "pending"
+  | "expired"
+  | "accepted"
+  | "revoked";
+
+export type WorkspaceInvitation = {
+  organization_id: string;
+  invitation_id: string;
+  user_id: string;
+  user_display_name: string;
+  issuer: string;
+  status: WorkspaceInvitationStatus;
+  expires_at: string;
+  created_by_user_id: string;
+  created_at: string;
+};
+
+export type IssuedWorkspaceInvitation = WorkspaceInvitation & {
+  invitation_token: string;
+};
+
+export type WorkspaceInvitationPage = {
+  items: WorkspaceInvitation[];
+  next_after_invitation_id: string | null;
+};
+
 export type ProjectMembershipMutation = {
   user_id: string;
   role: ProjectMembershipRole;

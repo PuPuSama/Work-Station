@@ -138,6 +138,13 @@ M7 不一次性切换整个应用。采用 expand/contract：
   只有同组织 Active Org Admin 可读写；`manager_user_id` 是不授予访问权的管理元数据，
   只有 Active Team 上显式 `team_lead` Membership 才产生项目继承权限；归档保留成员历史
   供查看/撤销但停止新增或改角色，Team/成员写入与 Audit 同事务。
+- Alembic `20260731_0014` 新增一次性 Workspace Invitation：数据库只保存 Token
+  SHA-256，邀请固定 Organization、Active User、预期 Issuer、过期时间与创建者；
+  Pending/Accepted/Revoked 状态由 CHECK、复合 FK 和每 User/Issuer 单 Pending 索引约束。
+- 新增邀请目录、签发、撤销与 OIDC 兑换链：Admin 创建响应只返回一次原 Token；目录、
+  撤销、Audit 和数据库公开读模型不返回 Token/Hash；兑换要求短期 HttpOnly Cookie 与
+  HMAC State 中的 Token Hash 一致，并在 OIDC 验签后原子绑定 External Identity、消费
+  邀请和写 Audit。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -168,8 +175,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
-- 不接邀请与生产 IdP Provider 配置管理；Organization Admin Console 已接入
-  Workspace User、全会话撤销、Team、TeamMembership 与 External Identity 映射，
+- 不接邮件发送服务与生产 IdP Provider 配置管理；Organization Admin Console 已接入
+  Workspace User、全会话撤销、Team、TeamMembership、Invitation 与 External Identity 映射，
   但 Discovery/JWKS、Client Secret 和 Redirect URI 仍由部署环境管理；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
 - 不接生产对象存储、生产部署或密钥服务。
@@ -393,6 +400,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/server_identity_http.py` | Organization-scoped External Identity HTTP | Subject 只允许出现在 Link 请求；列表/响应/撤销只使用 Mapping ID，输入字段白名单与统一安全错误 |
 | `backend/services/oidc_identity.py` | OIDC 配置、Discovery/JWKS、Code Exchange 和 ID Token 验证 | 固定 RS256、精确 Issuer/Audience、Nonce/时间门禁、未知 Kid 刷新、错误不泄露 Secret |
 | `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
+| `backend/migrations/versions/20260731_0014_workspace_invitations.py` | 一次性 Workspace Invitation Schema 准源 | Token 只存 Hash、复合租户 FK、状态/过期约束、每 User/Issuer 单 Pending、可升降级 |
+| `backend/services/workspace_invitations.py` | 邀请目录、签发、撤销与 Verified Identity 兑换事务 | Active Org Admin、一次返回 Token、过期/重放拒绝、Identity/Invitation/Audit 同事务 |
+| `backend/server_invitation_http.py` | Organization-scoped 邀请管理 HTTP | 创建响应与目录响应分型，Token 只出现在创建响应，输入白名单、稳定分页、统一安全错误 |
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
 | `frontend/src/app/login/page.tsx` | 本地密码/Server OIDC 登录入口选择 | 以服务端状态为准、失败不降级、Next Path 只能是本地路径 |
 | `frontend/src/components/project-directory.tsx` | Local/Server 首页组件树分流 | 先读服务端认证状态、失败显式重试、Server 时不挂载 Local 数据请求 |
@@ -403,6 +413,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/organization-admin-entry.tsx` | `/organization` 的 Server 身份与组织边界入口 | Auth Status 必须明确为 Server 且返回已认证 Organization；失败不降级到 Local |
 | `frontend/src/components/organization-admin-console.tsx` | Workspace User/Session 与 Team/TeamMembership 管理控制台 | 只传字段白名单、后端游标分页、危险操作确认、Manager/Lead 文案分离、前端状态不作为授权 |
 | `frontend/src/components/organization-external-identities.tsx` | External Identity 关联、目录与撤销 UI | Subject 只在受控输入中短暂存在且成功后清空；列表/撤销只持有 Mapping ID；危险操作确认 |
+| `frontend/src/components/organization-invitations.tsx` | 邀请签发、一次复制、目录与撤销 UI | Token 不进入列表或持久状态，刷新不可恢复；危险操作确认、过期状态可清理、后端 Cursor |
+| `frontend/src/app/accept-invite/page.tsx` | 邀请领取入口 | Token 优先从 URL Fragment 读取并在网络请求前清除；仅 POST 到准备端点，不进入查询参数或 IdP URL |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
@@ -452,6 +464,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_external_identity.py` | Identity 映射、交换与 PostgreSQL 集成测试 | HTTPS Issuer、跨组织拒绝、状态失效、Link/Revoke 审计 |
 | `backend/tests/test_m7_external_identity_http.py` | External Identity 管理 HTTP 与 PostgreSQL 集成测试 | 稳定分页、Subject 脱敏、幂等 Link、Mapping ID 撤销、跨组织拒绝、Audit 回滚 |
 | `backend/tests/test_m7_oidc_identity.py` | OIDC/JWKS 与浏览器登录流测试 | RSA 签名、Claim/Nonce/PKCE/State、Kid 轮换、重放/开放重定向拒绝、Secret 不泄露 |
+| `backend/tests/test_m7_workspace_invitations.py` | Invitation Schema、管理 HTTP 与兑换事务测试 | Token 一次返回、过期/重放/租户隔离、Mapping/状态/Audit 原子性、错误脱敏 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
 | `backend/tests/test_m7_server_tdk_export.py` | Server TDK 纯内存导出测试 | 私有 Asset 身份、无本地路径、Provider 错误脱敏 |
@@ -515,11 +528,39 @@ Provider 正常签名 Key 轮换。Discovery 返回的 Issuer 必须与配置精
 错误或 Preflight 报告。
 
 State Cookie 使用 Server Session Secret 派生的独立 HMAC 域，保存短期 State、Nonce、
-PKCE Verifier 和签名后的本地 Redirect Path；Cookie 为 HttpOnly/SameSite=Lax，并在
+PKCE Verifier、本地 Redirect Path 和可空 Invitation Token Hash；Cookie 为
+HttpOnly/SameSite=Lax，并在
 Callback 成功或失败后删除。生产反向代理必须让前端与 `/api/auth/*` 处于同一站点，
 Provider 中注册的 Redirect URI 必须与配置精确一致。
 Provider 返回 `error`、缺失 Code/State 或超长参数时，Callback 不回显 Provider 的
 错误说明，统一返回登录失败并立即删除 State Cookie。
+
+邀请状态机与数据流为：
+
+```text
+Active Org Admin -> POST user_id + issuer + expires_in_hours
+  -> random invitation_id + 256-bit bearer token
+  -> DB: SHA-256(token), pending, tenant/user/issuer/expiry
+  -> Audit workspace_invitation.issued（同事务）
+  -> 创建响应唯一一次返回 raw token
+
+/accept-invite#token=...
+  -> 浏览器在网络请求前清除 Fragment
+  -> POST /api/auth/invitations/prepare
+  -> 短期 HttpOnly Invitation Cookie
+  -> OIDC Start State 只绑定 SHA-256(token)
+  -> Callback 先核对 State/Cookie，再换 Token 和验签 ID Token
+  -> 锁定 Pending 未过期 Invitation + Active Org/User
+  -> External Identity upsert + status=accepted + Audit（同事务）
+  -> ResolvedExternalActor -> v2 Actor Session
+```
+
+Invitation Token 是一次性 Bearer Secret，不使用 Email 作为授权事实。数据库、目录、
+撤销响应、Audit、服务日志与 IdP URL 都不得包含原 Token；管理员创建响应和当前浏览器
+内存是仅有的明文边界。State 开始后替换 Invitation Cookie 必须在调用 Token Endpoint
+前拒绝；过期、撤销、已接受、错误 Issuer、Disabled User、Suspended Organization、
+跨 User/Organization Identity 冲突均统一拒绝。兑换审计失败必须同时回滚 Mapping 与
+Invitation 状态。邮件投递属于后续部署集成，不是应用内身份准源。
 
 `ExternalActorSessionService` 不接收原始 Bearer Token，也不解析 Email、Group 或 Role；
 这些外部 Claims 不能直接变成权限。Mapping、Organization 和 Workspace User 必须同时
@@ -566,8 +607,8 @@ User/Organization 时统一拒绝。目录按 Mapping ID 稳定分页并保留 R
 
 OIDC/JWKS、Callback、State/Nonce、PKCE 和登录 UI 已实现，因此代码能力
 `trusted_identity_source=true`。仍未完成的是具体生产 Provider 注册与 Conformance
-冒烟、Client Secret 托管/轮换证据，以及邀请流程；Team/User、Session 撤销和
-External Identity 映射已有组织级管理 UI。Preflight 会实时探测 Discovery/JWKS，
+冒烟、Client Secret 托管/轮换证据，以及邀请邮件投递；Team/User、Session 撤销、
+Invitation 和 External Identity 映射已有组织级管理 UI。Preflight 会实时探测 Discovery/JWKS，
 任一环境证据缺失时整体仍为 no-go。
 
 请求授权链为：
@@ -1207,3 +1248,17 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     统一拒绝且不泄露已有映射归属？
 53. Link/Revoke 与 Audit 是否仍处于同一事务，Audit 失败时是否回滚映射变更并对外返回
     不含 Subject、数据库错误或审计异常正文的统一错误？
+54. Invitation 数据库是否仍只保存 Token SHA-256，并通过复合 FK 把目标 User、创建者
+    与 Organization 锁在同一租户？
+55. 原始 Invitation Token 是否仍只在签发响应出现一次，不进入目录、撤销响应、Audit、
+    日志、数据库明文、查询参数或 IdP URL？
+56. `/accept-invite` 是否仍在发出网络请求前清除 URL Fragment，并把 Token 仅提交到
+    准备端点换取短期 HttpOnly Cookie？
+57. OIDC State 是否仍绑定 Invitation Token Hash，Cookie 被替换时是否在 Token
+    Endpoint 调用前停止？
+58. 兑换是否仍要求 Pending、未过期、Issuer 精确匹配、Active Organization/User，
+    并对重放、撤销、跨 User/Organization 映射冲突统一拒绝？
+59. External Identity 写入、Invitation Accepted 与 `workspace_invitation.accepted`
+    Audit 是否仍在同一事务，任一步失败时均不留下部分账号关联？
+60. 前端邀请目录是否仍使用后端 Cursor，把一次性 Token 与可长期显示的邀请记录分离，
+    并对撤销使用确认而不把前端状态当作授权准源？

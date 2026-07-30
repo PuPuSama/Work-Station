@@ -183,6 +183,102 @@ sa.Index(
 )
 
 
+workspace_invitations = sa.Table(
+    "workspace_invitations",
+    metadata,
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("invitation_id", sa.Text(), nullable=False),
+    sa.Column("user_id", sa.Text(), nullable=False),
+    sa.Column("issuer", sa.Text(), nullable=False),
+    sa.Column("token_hash", sa.Text(), nullable=False),
+    sa.Column(
+        "status",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("'pending'"),
+    ),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("accepted_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_by_user_id", sa.Text(), nullable=False),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "btrim(invitation_id) <> '' AND btrim(user_id) <> '' "
+        "AND btrim(issuer) <> '' AND btrim(created_by_user_id) <> ''",
+        name="ck_workspace_invitations_identity_nonempty",
+    ),
+    sa.CheckConstraint(
+        "token_hash ~ '^[0-9a-f]{64}$'",
+        name="ck_workspace_invitations_token_hash",
+    ),
+    sa.CheckConstraint(
+        "status IN ('pending', 'accepted', 'revoked')",
+        name="ck_workspace_invitations_status",
+    ),
+    sa.CheckConstraint(
+        "(status = 'accepted') = (accepted_at IS NOT NULL)",
+        name="ck_workspace_invitations_acceptance",
+    ),
+    sa.CheckConstraint(
+        "expires_at > created_at",
+        name="ck_workspace_invitations_expiry",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "user_id"],
+        [
+            "workspace_users.organization_id",
+            "workspace_users.user_id",
+        ],
+        name="fk_workspace_invitations_target",
+        ondelete="RESTRICT",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "created_by_user_id"],
+        [
+            "workspace_users.organization_id",
+            "workspace_users.user_id",
+        ],
+        name="fk_workspace_invitations_creator",
+        ondelete="RESTRICT",
+    ),
+    sa.PrimaryKeyConstraint(
+        "organization_id",
+        "invitation_id",
+        name="pk_workspace_invitations",
+    ),
+    sa.UniqueConstraint(
+        "token_hash",
+        name="uq_workspace_invitations_token_hash",
+    ),
+)
+
+sa.Index(
+    "ix_workspace_invitations_directory",
+    workspace_invitations.c.organization_id,
+    workspace_invitations.c.status,
+    workspace_invitations.c.invitation_id,
+)
+
+sa.Index(
+    "uq_workspace_invitations_pending_target_issuer",
+    workspace_invitations.c.organization_id,
+    workspace_invitations.c.user_id,
+    workspace_invitations.c.issuer,
+    unique=True,
+    postgresql_where=workspace_invitations.c.status == "pending",
+)
+
+
 teams = sa.Table(
     "teams",
     metadata,

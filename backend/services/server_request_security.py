@@ -94,6 +94,7 @@ def server_http_route_available(method: str, path: str) -> bool:
     if normalized_method == "POST" and normalized_path in {
         "/api/auth/login",
         "/api/auth/logout",
+        "/api/auth/invitations/prepare",
     }:
         return True
     if normalized_method == "GET" and normalized_path.rstrip("/") == (
@@ -141,6 +142,23 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[1:3] == ["api", "organizations"]
         and bool(parts[3])
         and parts[4] == "external-identities"
+        and bool(parts[5])
+    ):
+        return True
+    if (
+        normalized_method in {"GET", "POST"}
+        and len(parts) == 5
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "invitations"
+    ):
+        return True
+    if (
+        normalized_method == "DELETE"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "invitations"
         and bool(parts[5])
     ):
         return True

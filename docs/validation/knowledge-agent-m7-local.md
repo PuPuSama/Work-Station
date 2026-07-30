@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260731_0013`
+- Alembic Head：`20260731_0014`
 
 ## 已通过验证
 
@@ -240,7 +240,7 @@ Actor Session Version 迁移新增后执行：
 .\.venv\Scripts\alembic.exe current
 ```
 
-结果为 `20260731_0013 (head)`；降级、升级和重复升级均成功。
+结果为 `20260731_0014 (head)`；降级、升级和重复升级均成功。
 
 ### Task/Job PostgreSQL 定向测试
 
@@ -283,7 +283,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 576 tests；
+- 587 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -584,7 +584,7 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - OIDC 配置不完整或实时 Discovery/JWKS 探测失败时 Preflight 单独 fail closed；
 - `object_download_reauthorizes` 已由真实 HTTP 路由与签名前二次授权支撑为 true，
   不再只是未接线的底层 Service；
-- Alembic 不是 `20260731_0013` 时阻止发布；
+- Alembic 不是 `20260731_0014` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
 - 数据库 URL、Embedding Key、OIDC Client Secret、Token、S3 Key/Secret 和供应商
   错误正文不进入公开报告。
@@ -789,7 +789,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Mapping Revoked、User Disabled、Organization Suspended 均不能解析 Actor；
 - Link/Revoke 只有 Active Org Admin 可执行，且与 Audit Event 同事务；
 - 审计目标使用 Subject 哈希，审计 Details 不保存原始 Subject；
-- Preflight Head 已更新为 `20260731_0013`。
+- Preflight Head 已更新为 `20260731_0014`。
 
 ### External Identity 管理 HTTP 与组织控制台
 
@@ -814,6 +814,41 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   列表只保存 Mapping ID，撤销使用确认 Dialog；
 - ESLint、TypeScript 与 Next.js production build 通过，`/organization` 路由正常生成。
 
+### Workspace Invitation 与 OIDC 兑换
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_workspace_invitations `
+  tests.test_m7_oidc_identity -v
+```
+
+结果：
+
+- 22 tests，全部通过；
+- Alembic `20260731_0014` 创建 Invitation 表、状态/接受/过期 CHECK、目标/创建者复合
+  租户 FK、Token Hash 唯一约束和每 User/Issuer 单 Pending 索引；
+- Admin 签发响应唯一一次返回高熵 Token；数据库只存 SHA-256，列表、撤销、Audit 和
+  公开错误不返回 Token/Hash；
+- 邀请目录稳定分页；普通 Member、跨 Organization、Disabled Target、非法 Issuer、
+  额外 Role 字段和重复 Pending 邀请 fail closed；
+- 兑换只接受通过 OIDC 验签的 Issuer/Subject，并要求 Pending、未过期、Active
+  Organization/User；过期、撤销、重放、错误 Issuer 和跨组织已有 Mapping 均拒绝；
+- External Identity 写入、Invitation Accepted 与 Audit 同一事务；注入 Audit 故障时
+  Mapping 与 Invitation 状态共同回滚，公开异常不含私有正文；
+- `/api/auth/invitations/prepare` 把 Token 写入短期 HttpOnly/SameSite Cookie；HMAC
+  State 只绑定 Token Hash，Callback 前替换 Cookie 会在调用 Token Endpoint 前失败；
+- `/accept-invite` 支持粘贴 Token 或 `#token=...` Fragment；Fragment 在首个网络请求前
+  从地址栏移除，Token 不进入查询参数或 IdP URL；
+- Organization Admin Console 新增邀请签发、一次复制、稳定分页与确认撤销；四个 Tab
+  在窄屏换行，ESLint、TypeScript 与 Next.js production build 通过，新增
+  `/accept-invite` 静态路由。
+
+当前受控浏览器仍会拦截本机 `/api/*`，因此没有把真实 375px 数据态、剪贴板权限、
+Fragment 自动清理后的完整 OIDC 重定向或 Dark Mode 记为浏览器实测通过；这些需在允许
+同源 API 的 Server 会话中按 Runbook 冒烟。当前证据为真实 PostgreSQL/HTTP 集成测试、
+OIDC MockTransport、源码审查、ESLint、TypeScript 和 production build。
+
 ## 诊断记录
 
 第一次完整回归未指定 CI Config，2 个既有 Humanize 测试读取本机默认
@@ -828,8 +863,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
   Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成；Workspace User
   和 Team/TeamMembership 后端目录、创建与生命周期命令及 Organization Admin Console
-  也已完成，External Identity 目录/关联/撤销 HTTP 与 UI 已接入；但邀请、具体生产
-  Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
+  也已完成，External Identity 与 Workspace Invitation 的目录/管理/OIDC 兑换及 UI
+  已接入；但邀请邮件投递、具体生产 Provider 注册、Client Secret 轮换和 Conformance
+  冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备
@@ -847,7 +883,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、
   Orphan 双观察延迟清理和 no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
 - 前端已新增 Server OIDC、SQL Project Directory、Project Membership Console、窄范围
-  Delivery Console，以及 Organization/Team/User/Session/External Identity 管理，并
-  通过 lint/build；Article、Batch 与邀请等其余 M7 界面尚未接入 Server API。
+  Delivery Console，以及 Organization/Team/User/Session/External Identity/Invitation
+  管理和 `/accept-invite`，并通过 lint/build；Article、Batch 与邮件投递等其余 M7
+  界面或外部集成尚未接入 Server API。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

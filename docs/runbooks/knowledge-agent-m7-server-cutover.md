@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260731_0013`；
+- `alembic_version = 20260731_0014`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -180,12 +180,25 @@ Snapshot Asset 与 Task `*_asset_id` 三类引用都在当前 Schema 中。
 `POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke`，Body 必须是
 空 JSON 对象。命令不接受版本、角色或目标 Organization 字段，成功响应也不返回内部版本。
 Organization Admin Console 已接入这条 Organization-scoped 命令，但生产 IdP 的登录
-关联、邀请与供应商侧会话仍是独立边界，因此不能描述成完整身份生命周期能力。
+关联、邀请邮件投递与供应商侧会话仍是独立边界，因此不能描述成完整身份生命周期能力。
 
 撤销动作必须由同 Organization 的 Active Org Admin 发起，并验证版本递增与
 `workspace_user.sessions.revoked` Audit 同事务。跨组织目标、非 Admin、目标不存在或
 Audit 故障都必须失败；Audit 失败后旧版本必须仍有效，错误输出不得包含数据库或供应商
 正文。
+
+### Workspace Invitation 与 OIDC State
+
+`20260731_0014` 增加只保存 Token SHA-256 的 Workspace Invitation。应用签发原 Token
+后不能再次读取，生产邮件或其他受信投递系统必须自行安全传递；不得把 Token 放在查询
+参数、服务日志或 IdP Redirect URI 中。推荐链接使用 `/accept-invite#token=...`，前端会
+先清除 Fragment 再准备登录。
+
+本版本同时把 OIDC State HMAC 域升级为 v2，并可选绑定 Invitation Token Hash。发布时
+正在进行的旧 OIDC 登录会失败并要求重试，这是有意的 fail-closed 行为。Callback 成功
+或失败都必须清除 State 与 Invitation HttpOnly Cookie；邀请过期、撤销或已兑换后不得
+恢复。验收至少覆盖：Cookie 中途替换在 Token Endpoint 前失败、同 Token 重放失败，以及
+Audit 故障同时回滚 External Identity 与 Invitation Accepted。
 
 ### ProjectMembership 授权与撤销
 

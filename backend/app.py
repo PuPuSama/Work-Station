@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
 import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import ROOT_DIR, load_config, public_config
 from models import (
@@ -181,6 +182,9 @@ from services.external_identity import (
 from services.external_identity_provisioning import (
     PostgresExternalIdentityProvisioningService,
 )
+from services.workspace_invitations import (
+    PostgresWorkspaceInvitationService,
+)
 from services.oidc_identity import (
     OidcProviderSettings,
     OidcProviderUnavailable,
@@ -188,6 +192,7 @@ from services.oidc_identity import (
 )
 from services.oidc_login import (
     OIDC_STATE_COOKIE_NAME,
+    WORKSPACE_INVITATION_COOKIE_NAME,
     OidcLoginService,
     OidcLoginStateError,
 )
@@ -271,6 +276,7 @@ from server_project_http import router as server_project_router
 from server_admin_http import router as server_admin_router
 from server_team_http import router as server_team_router
 from server_identity_http import router as server_identity_router
+from server_invitation_http import router as server_invitation_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -346,6 +352,11 @@ async def app_lifespan(application: FastAPI):
         "server_external_identity_provisioning",
         None,
     )
+    previous_server_workspace_invitations = getattr(
+        application.state,
+        "server_workspace_invitations",
+        None,
+    )
     server_product_rediscovery = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
@@ -362,6 +373,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_workspace_users = None
     application.state.server_team_administration = None
     application.state.server_external_identity_provisioning = None
+    application.state.server_workspace_invitations = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -393,6 +405,9 @@ async def app_lifespan(application: FastAPI):
         application.state.server_external_identity_provisioning = (
             PostgresExternalIdentityProvisioningService(server_engine)
         )
+        application.state.server_workspace_invitations = (
+            PostgresWorkspaceInvitationService(server_engine)
+        )
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
             access=server_access,
@@ -406,6 +421,7 @@ async def app_lifespan(application: FastAPI):
                     server_engine
                 ),
                 codec=codec,
+                invitations=application.state.server_workspace_invitations,
             )
             application.state.server_oidc_login = server_oidc_login
         application.state.server_project_task_store_factory = (
@@ -540,6 +556,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_external_identity_provisioning = (
                 previous_server_external_identity_provisioning
+            )
+            application.state.server_workspace_invitations = (
+                previous_server_workspace_invitations
             )
             if shutdown_error is not None:
                 raise shutdown_error
@@ -749,6 +768,9 @@ async def app_lifespan(application: FastAPI):
         application.state.server_external_identity_provisioning = (
             previous_server_external_identity_provisioning
         )
+        application.state.server_workspace_invitations = (
+            previous_server_workspace_invitations
+        )
 
 
 app = FastAPI(
@@ -761,6 +783,7 @@ app.include_router(server_project_router)
 app.include_router(server_admin_router)
 app.include_router(server_team_router)
 app.include_router(server_identity_router)
+app.include_router(server_invitation_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -775,6 +798,7 @@ _AUTH_PUBLIC_PATHS = {
     "/api/auth/status",
     "/api/auth/oidc/start",
     "/api/auth/oidc/callback",
+    "/api/auth/invitations/prepare",
     "/api/health",
 }
 
@@ -945,6 +969,48 @@ def _oidc_failure(status_code: int) -> JSONResponse:
         OIDC_STATE_COOKIE_NAME,
         path="/api/auth/oidc",
     )
+    response.delete_cookie(
+        WORKSPACE_INVITATION_COOKIE_NAME,
+        path="/api/auth/oidc",
+    )
+    return response
+
+
+class WorkspaceInvitationPrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invitation_token: str = Field(min_length=1, max_length=512)
+
+    @field_validator("invitation_token")
+    @classmethod
+    def validate_invitation_token(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("invitation_token must not be blank")
+        return normalized
+
+
+@app.post("/api/auth/invitations/prepare")
+def prepare_workspace_invitation(
+    payload: WorkspaceInvitationPrepareRequest,
+    request: Request,
+) -> JSONResponse:
+    service = _server_oidc_login(request)
+    response = JSONResponse(
+        content={
+            "start_path": "/api/auth/oidc/start",
+            "expires_seconds": service.settings.state_seconds,
+        }
+    )
+    response.set_cookie(
+        key=WORKSPACE_INVITATION_COOKIE_NAME,
+        value=payload.invitation_token,
+        max_age=service.settings.state_seconds,
+        httponly=True,
+        secure=auth_cookie_secure(request),
+        samesite="lax",
+        path="/api/auth/oidc",
+    )
     return response
 
 
@@ -953,7 +1019,10 @@ def oidc_login_start(request: Request) -> RedirectResponse:
     service = _server_oidc_login(request)
     try:
         attempt = service.begin(
-            redirect_path=request.query_params.get("next")
+            redirect_path=request.query_params.get("next"),
+            invitation_token=request.cookies.get(
+                WORKSPACE_INVITATION_COOKIE_NAME
+            ),
         )
     except OidcLoginStateError as exc:
         raise HTTPException(
@@ -1007,6 +1076,9 @@ def oidc_login_callback(
                 OIDC_STATE_COOKIE_NAME,
                 "",
             ),
+            invitation_token=request.cookies.get(
+                WORKSPACE_INVITATION_COOKIE_NAME
+            ),
         )
     except OidcProviderUnavailable:
         return _oidc_failure(503)
@@ -1022,6 +1094,10 @@ def oidc_login_callback(
     )
     response.delete_cookie(
         OIDC_STATE_COOKIE_NAME,
+        path="/api/auth/oidc",
+    )
+    response.delete_cookie(
+        WORKSPACE_INVITATION_COOKIE_NAME,
         path="/api/auth/oidc",
     )
     response.set_cookie(
@@ -1051,6 +1127,10 @@ def auth_logout() -> JSONResponse:
     response.delete_cookie(SERVER_AUTH_COOKIE_NAME, path="/")
     response.delete_cookie(
         OIDC_STATE_COOKIE_NAME,
+        path="/api/auth/oidc",
+    )
+    response.delete_cookie(
+        WORKSPACE_INVITATION_COOKIE_NAME,
         path="/api/auth/oidc",
     )
     return response

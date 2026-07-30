@@ -37,6 +37,7 @@ from services.oidc_identity import (  # noqa: E402
 )
 from services.oidc_login import (  # noqa: E402
     OIDC_STATE_COOKIE_NAME,
+    WORKSPACE_INVITATION_COOKIE_NAME,
     OidcLoginService,
     OidcLoginStateCodec,
     OidcLoginStateError,
@@ -180,6 +181,16 @@ class FakeIdentityRepository:
         return self.actor
 
 
+class FakeInvitationRedeemer:
+    def __init__(self, actor: ResolvedExternalActor) -> None:
+        self.actor = actor
+        self.calls = []
+
+    def redeem(self, *, invitation_token, identity, event_id):
+        self.calls.append((invitation_token, identity, event_id))
+        return self.actor
+
+
 class OidcConfigurationTests(unittest.TestCase):
     def test_environment_is_all_or_nothing_and_secret_is_redacted(
         self,
@@ -305,6 +316,42 @@ class OidcStateTests(unittest.TestCase):
                         supplied_state=supplied_state,
                         now=now,
                     )
+
+    def test_invitation_cookie_cannot_be_swapped_after_state_start(
+        self,
+    ) -> None:
+        fake = FakeOidcProvider()
+        _, public_jwk = make_key("unused-key")
+        fake.keys = [public_jwk]
+        client = httpx.Client(transport=fake.transport())
+        service = OidcLoginService.create(
+            settings=settings(),
+            identities=FakeIdentityRepository(None),
+            codec=ServerActorSessionCodec(b"w" * 32),
+            invitations=FakeInvitationRedeemer(
+                ResolvedExternalActor(
+                    ActorIdentity("org-a", "user-a"),
+                    session_version=1,
+                )
+            ),
+            client=client,
+        )
+        try:
+            attempt = service.begin(invitation_token="token-a")
+            state = parse_qs(
+                urlsplit(attempt.authorization_url).query
+            )["state"][0]
+            with self.assertRaises(OidcLoginStateError):
+                service.complete(
+                    code="must-not-be-exchanged",
+                    state=state,
+                    state_cookie=attempt.state_cookie,
+                    invitation_token="token-b",
+                )
+            self.assertEqual(fake.token_calls, [])
+        finally:
+            service.close()
+            client.close()
 
 
 class OidcTokenVerificationTests(unittest.TestCase):
@@ -499,6 +546,108 @@ class OidcTokenVerificationTests(unittest.TestCase):
 
 
 class OidcLoginHttpTests(unittest.TestCase):
+    def test_invitation_token_is_http_only_state_bound_and_redeemed(
+        self,
+    ) -> None:
+        import app as app_module
+
+        fake = FakeOidcProvider()
+        private_key, public_jwk = make_key("invitation-key")
+        fake.keys = [public_jwk]
+        http_client = httpx.Client(transport=fake.transport())
+        codec = ServerActorSessionCodec(b"j" * 32)
+        redeemer = FakeInvitationRedeemer(
+            ResolvedExternalActor(
+                ActorIdentity("org-invited", "user-invited"),
+                session_version=1,
+            )
+        )
+        service = OidcLoginService.create(
+            settings=settings(),
+            identities=FakeIdentityRepository(None),
+            codec=codec,
+            invitations=redeemer,
+            client=http_client,
+        )
+        previous = (
+            getattr(app_module.app.state, "server_mode_enabled", None),
+            getattr(app_module.app.state, "server_oidc_login", None),
+            getattr(
+                app_module.app.state,
+                "server_request_security",
+                None,
+            ),
+        )
+        app_module.app.state.server_mode_enabled = True
+        app_module.app.state.server_oidc_login = service
+        app_module.app.state.server_request_security = ServerRequestSecurity(
+            codec=codec,
+            access=object(),  # type: ignore[arg-type]
+            sessions=type(
+                "AlwaysCurrentSessions",
+                (),
+                {"is_current": lambda self, session: True},
+            )(),
+        )
+        client = TestClient(app_module.app, follow_redirects=False)
+        invitation_token = "invite-" + "x" * 40
+        try:
+            prepared = client.post(
+                "/api/auth/invitations/prepare",
+                json={"invitation_token": invitation_token},
+            )
+            self.assertEqual(prepared.status_code, 200, prepared.text)
+            self.assertNotIn(invitation_token, prepared.text)
+            self.assertIn(
+                WORKSPACE_INVITATION_COOKIE_NAME,
+                client.cookies,
+            )
+            started = client.get("/api/auth/oidc/start")
+            self.assertEqual(started.status_code, 307, started.text)
+            self.assertNotIn(
+                invitation_token,
+                started.headers["location"],
+            )
+            query = parse_qs(
+                urlsplit(started.headers["location"]).query
+            )
+            fake.id_token = encode_id_token(
+                private_key,
+                key_id="invitation-key",
+                nonce=query["nonce"][0],
+                overrides={"sub": "invited-subject"},
+            )
+            completed = client.get(
+                "/api/auth/oidc/callback",
+                params={
+                    "code": "invitation-code",
+                    "state": query["state"][0],
+                },
+            )
+            self.assertEqual(completed.status_code, 303, completed.text)
+            self.assertEqual(len(redeemer.calls), 1)
+            self.assertEqual(redeemer.calls[0][0], invitation_token)
+            self.assertNotIn(
+                WORKSPACE_INVITATION_COOKIE_NAME,
+                client.cookies,
+            )
+            actor_token = client.cookies.get(
+                SERVER_AUTH_COOKIE_NAME
+            )
+            self.assertEqual(
+                codec.parse(str(actor_token)),
+                ActorIdentity("org-invited", "user-invited"),
+            )
+        finally:
+            client.close()
+            service.close()
+            http_client.close()
+            (
+                app_module.app.state.server_mode_enabled,
+                app_module.app.state.server_oidc_login,
+                app_module.app.state.server_request_security,
+            ) = previous
+
     def test_authorization_code_pkce_flow_sets_minimal_actor_cookie(
         self,
     ) -> None:

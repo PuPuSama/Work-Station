@@ -8,6 +8,7 @@ import {
   Building2,
   CheckCircle2,
   Fingerprint,
+  MailPlus,
   Loader2,
   LogOut,
   Plus,
@@ -23,6 +24,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
 import { OrganizationExternalIdentities } from "@/components/organization-external-identities";
+import { OrganizationInvitations } from "@/components/organization-invitations";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -190,7 +192,7 @@ export function OrganizationAdminConsole({
               <h1 className="text-xl font-semibold">组织管理</h1>
             </div>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              管理本组织的本地账号、登录会话、团队、Team Lead 与外部登录身份。邀请流程仍保持独立。
+              管理本组织的本地账号、登录会话、团队、Team Lead、邀请与外部登录身份。
             </p>
             <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={organizationId}>
               {organizationId}
@@ -232,7 +234,7 @@ export function OrganizationAdminConsole({
           </div>
         ) : !loadError || users.length || teams.length ? (
           <Tabs defaultValue="users">
-            <TabsList className="min-h-11">
+            <TabsList className="h-auto min-h-11 flex-wrap justify-start">
               <TabsTrigger value="users" className="min-h-10">
                 <UserRoundCog />账号与会话
               </TabsTrigger>
@@ -241,6 +243,9 @@ export function OrganizationAdminConsole({
               </TabsTrigger>
               <TabsTrigger value="identities" className="min-h-10">
                 <Fingerprint />外部身份
+              </TabsTrigger>
+              <TabsTrigger value="invitations" className="min-h-10">
+                <MailPlus />邀请
               </TabsTrigger>
             </TabsList>
             <TabsContent value="users">
@@ -280,6 +285,12 @@ export function OrganizationAdminConsole({
             </TabsContent>
             <TabsContent value="identities">
               <OrganizationExternalIdentities
+                organizationId={organizationId}
+                users={users}
+              />
+            </TabsContent>
+            <TabsContent value="invitations">
+              <OrganizationInvitations
                 organizationId={organizationId}
                 users={users}
               />

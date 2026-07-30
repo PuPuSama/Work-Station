@@ -16,7 +16,7 @@ from services.access_control import ActorIdentity
 from services.server_auth import ServerActorSessionCodec
 
 
-def _issuer(value: str) -> str:
+def normalize_external_issuer(value: str) -> str:
     normalized = value.strip().rstrip("/")
     parsed = urlsplit(normalized)
     try:
@@ -53,7 +53,11 @@ class VerifiedExternalIdentity:
     subject: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "issuer", _issuer(self.issuer))
+        object.__setattr__(
+            self,
+            "issuer",
+            normalize_external_issuer(self.issuer),
+        )
         object.__setattr__(self, "subject", _subject(self.subject))
 
 
@@ -158,6 +162,17 @@ class ExternalActorSessionService:
             raise ExternalIdentityNotAuthorized(
                 "external identity is not authorized"
             )
+        return self.create_resolved_session(
+            resolved,
+            max_age=max_age,
+        )
+
+    def create_resolved_session(
+        self,
+        resolved: ResolvedExternalActor,
+        *,
+        max_age: int,
+    ) -> str:
         return self._codec.create(
             resolved.actor,
             session_version=resolved.session_version,
@@ -169,6 +184,7 @@ __all__ = [
     "ExternalActorSessionService",
     "ExternalIdentityNotAuthorized",
     "ExternalIdentityRepository",
+    "normalize_external_issuer",
     "PostgresExternalIdentityRepository",
     "ResolvedExternalActor",
     "VerifiedExternalIdentity",

@@ -8,6 +8,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
+import uuid
 
 import httpx
 
@@ -21,10 +22,16 @@ from services.oidc_identity import (
     OidcProviderSettings,
 )
 from services.server_auth import ServerActorSessionCodec
+from services.workspace_invitations import (
+    WorkspaceInvitationDenied,
+    WorkspaceInvitationRedeemer,
+    WorkspaceInvitationUnavailable,
+)
 
 
 OIDC_STATE_COOKIE_NAME = "article_agent_oidc_login_state"
-_STATE_VERSION = 1
+WORKSPACE_INVITATION_COOKIE_NAME = "article_agent_workspace_invitation"
+_STATE_VERSION = 2
 
 
 class OidcLoginStateError(PermissionError):
@@ -66,6 +73,16 @@ class _LoginState:
     nonce: str
     code_verifier: str
     redirect_path: str
+    invitation_hash: str | None
+
+
+def _invitation_hash(invitation_token: str | None) -> str | None:
+    if invitation_token is None:
+        return None
+    normalized = invitation_token.strip()
+    if not normalized or len(normalized) > 512:
+        raise OidcLoginStateError("OIDC login state is invalid")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _local_redirect_path(value: str) -> str:
@@ -97,7 +114,7 @@ class OidcLoginStateCodec:
             raise OidcLoginStateError("OIDC login state is invalid")
         self._secret = hmac.new(
             source,
-            b"article-agent-oidc-login-state-v1",
+            b"article-agent-oidc-login-state-v2",
             hashlib.sha256,
         ).digest()
         self.lifetime_seconds = int(lifetime_seconds)
@@ -106,6 +123,7 @@ class OidcLoginStateCodec:
         self,
         *,
         redirect_path: str,
+        invitation_token: str | None = None,
         now: int | None = None,
     ) -> tuple[_LoginState, str, str]:
         issued_at = int(time.time() if now is None else now)
@@ -119,6 +137,7 @@ class OidcLoginStateCodec:
             "nonce": nonce,
             "verifier": code_verifier,
             "redirect": normalized_redirect,
+            "invitation_hash": _invitation_hash(invitation_token),
             "iat": issued_at,
             "exp": issued_at + self.lifetime_seconds,
         }
@@ -146,6 +165,7 @@ class OidcLoginStateCodec:
                 nonce,
                 code_verifier,
                 normalized_redirect,
+                _invitation_hash(invitation_token),
             ),
             f"{encoded}.{signature}",
             challenge,
@@ -182,6 +202,7 @@ class OidcLoginStateCodec:
                     "nonce",
                     "verifier",
                     "redirect",
+                    "invitation_hash",
                     "iat",
                     "exp",
                 }
@@ -196,6 +217,16 @@ class OidcLoginStateCodec:
             redirect_path = _local_redirect_path(
                 str(payload["redirect"])
             )
+            invitation_hash = payload["invitation_hash"]
+            if invitation_hash is not None and (
+                not isinstance(invitation_hash, str)
+                or len(invitation_hash) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in invitation_hash
+                )
+            ):
+                raise TypeError
             current = int(time.time() if now is None else now)
             if (
                 version != _STATE_VERSION
@@ -214,6 +245,7 @@ class OidcLoginStateCodec:
                 nonce,
                 verifier,
                 redirect_path,
+                invitation_hash,
             )
         except (
             AttributeError,
@@ -237,12 +269,14 @@ class OidcLoginService:
         verifier: OidcIdTokenVerifier,
         sessions: ExternalActorSessionService,
         state_codec: OidcLoginStateCodec,
+        invitations: WorkspaceInvitationRedeemer | None = None,
     ) -> None:
         self.settings = settings
         self._provider = provider
         self._verifier = verifier
         self._sessions = sessions
         self._state_codec = state_codec
+        self._invitations = invitations
 
     @classmethod
     def create(
@@ -251,6 +285,7 @@ class OidcLoginService:
         settings: OidcProviderSettings,
         identities: ExternalIdentityRepository,
         codec: ServerActorSessionCodec,
+        invitations: WorkspaceInvitationRedeemer | None = None,
         client: httpx.Client | None = None,
     ) -> OidcLoginService:
         provider = OidcProviderClient(settings, client=client)
@@ -266,19 +301,22 @@ class OidcLoginService:
                 codec.secret,
                 lifetime_seconds=settings.state_seconds,
             ),
+            invitations=invitations,
         )
 
     def begin(
         self,
         *,
         redirect_path: str | None = None,
+        invitation_token: str | None = None,
     ) -> OidcLoginAttempt:
         state, cookie, challenge = self._state_codec.create(
             redirect_path=(
                 self.settings.post_login_path
                 if redirect_path is None
                 else redirect_path
-            )
+            ),
+            invitation_token=invitation_token,
         )
         document = self._provider.discovery()
         query = urlencode(
@@ -310,11 +348,24 @@ class OidcLoginService:
         code: str,
         state: str,
         state_cookie: str,
+        invitation_token: str | None = None,
     ) -> OidcLoginResult:
         login_state = self._state_codec.parse(
             state_cookie,
             supplied_state=state,
         )
+        supplied_invitation_hash = _invitation_hash(invitation_token)
+        if (
+            (login_state.invitation_hash is None)
+            != (supplied_invitation_hash is None)
+            or login_state.invitation_hash is not None
+            and supplied_invitation_hash is not None
+            and not hmac.compare_digest(
+                login_state.invitation_hash,
+                supplied_invitation_hash,
+            )
+        ):
+            raise OidcLoginStateError("OIDC login state is invalid")
         id_token = self._provider.exchange_code(
             code=code,
             code_verifier=login_state.code_verifier,
@@ -323,11 +374,38 @@ class OidcLoginService:
             id_token,
             expected_nonce=login_state.nonce,
         )
-        return OidcLoginResult(
-            actor_session=self._sessions.create_session(
+        if invitation_token is None:
+            actor_session = self._sessions.create_session(
                 identity,
                 max_age=self.settings.session_seconds,
-            ),
+            )
+        else:
+            if self._invitations is None:
+                raise OidcLoginStateError(
+                    "OIDC login state is invalid"
+                )
+            try:
+                resolved = self._invitations.redeem(
+                    invitation_token=invitation_token,
+                    identity=identity,
+                    event_id=(
+                        f"workspace_invitation_accept_{uuid.uuid4().hex}"
+                    ),
+                )
+            except WorkspaceInvitationDenied as exc:
+                raise ExternalIdentityNotAuthorized(
+                    "external identity is not authorized"
+                ) from exc
+            except WorkspaceInvitationUnavailable as exc:
+                raise OidcProviderUnavailable(
+                    "OIDC login is temporarily unavailable"
+                ) from exc
+            actor_session = self._sessions.create_resolved_session(
+                resolved,
+                max_age=self.settings.session_seconds,
+            )
+        return OidcLoginResult(
+            actor_session=actor_session,
             redirect_path=login_state.redirect_path,
         )
 
@@ -337,6 +415,7 @@ class OidcLoginService:
 
 __all__ = [
     "OIDC_STATE_COOKIE_NAME",
+    "WORKSPACE_INVITATION_COOKIE_NAME",
     "OidcLoginAttempt",
     "OidcLoginResult",
     "OidcLoginService",

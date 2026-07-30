@@ -130,7 +130,7 @@
   Org Admin 可读写，稳定分页返回 Active/Disabled 账号、Team/Project 显式成员数和
   `login_linked` 布尔值，不公开 Session Version 或外部身份；创建只建立本地 Active
   User，更新显示名/状态/组织角色；禁用和恢复都使旧 Cookie 失效，最后一个 Active
-  Org Admin 受保护，写入与 Audit 同事务；组织级前端控制台已实现，邀请仍未实现；
+  Org Admin 受保护，写入与 Audit 同事务；组织级前端控制台已实现；
 - 已接入 Organization-scoped Team/TeamMembership 后端命令：仅 Active Org Admin
   可读写，Team 与成员 Roster 稳定分页；Manager 指针只接受同组织 Active User 且不产生
   权限，项目继承仍只来自 Active Team 的显式 `team_lead`；归档立即停止继承访问并保留
@@ -192,7 +192,12 @@
 - 已接入 Organization-scoped External Identity 目录、关联和撤销：原始 Subject 只在
   Link 请求出现，公开目录/响应/Audit 不返回 Subject；稳定 Mapping ID 用于分页和撤销，
   同一 Active 映射重复 Link 幂等，跨组织/用户冲突统一拒绝，写入与 Audit 同事务；
-  Organization Admin Console 只短暂持有 Subject 输入并在成功后清空；邀请仍未实现；
+  Organization Admin Console 只短暂持有 Subject 输入并在成功后清空；
+- 已接入一次性 Workspace Invitation：数据库只存 Token SHA-256，邀请固定同组织
+  Active User、预期 Issuer 与过期时间；签发响应只返回一次 Token，目录与 Audit 不返回
+  Token/Hash；`/accept-invite` 从 Fragment 取 Token 并先清地址栏，再用短期 HttpOnly
+  Cookie 与 HMAC State Hash 绑定 OIDC 流；验签后 External Identity、Invitation
+  Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
 - 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
