@@ -103,15 +103,66 @@ LangGraph 恢复时会从中断节点开头重跑，因此该节点不得在 `in
   相同 `thread_id` 恢复人工中断并完成。
 - thread ID 含随机唯一部分，且不暴露项目或文章原文。
 
-## 7. 待完成
+## 7. Graph Run 业务投影
 
-- 实现四个 Port 的正式 M3/官网适配器。
-- 增加 Graph Run、GapFillAttempt 和结构化事件业务表。
+LangGraph Checkpoint 负责恢复执行，但不直接作为产品查询模型。迁移
+`20260730_0006` 因此增加三个由 Alembic 管理的业务表：
+
+| 表 | 身份与作用 | 后续消费者 |
+|---|---|---|
+| `research_graph_runs` | `(project_id, thread_id)`；记录文章/大纲/Plan、当前节点、状态、两类预算、Pack ID 和脱敏失败 | 查询 API、队列 Worker、M5 Run 列表 |
+| `research_graph_events` | Run 内递增 `sequence`；保存节点、尝试次数和小型结构化详情 | M5 研究时间线、运维诊断 |
+| `gap_fill_attempts` | `(run, scope, round)`；保存稳定 `attempt_id`、发现渠道、URL/Source ID 和成本摘要 | 幂等重试、两轮上限审计 |
+
+关键约束留在数据库：
+
+- `thread_id` 全局唯一，防止不同项目意外共享 Checkpoint；
+- Run 复合外键必须匹配同项目、同文章和同大纲版本的 Retrieval Plan；
+- Attempt 同时复合引用 Run 和 Retrieval Scope；
+- 终态必须有 `finished_at`，失败态必须有 `error_code`；
+- 轮次只能为 1–2，查询使用量不能超过 Run 预算。
+
+`PostgresResearchRunRepository` 是唯一业务写入口：
+
+- `create_run`：以相同请求重试时幂等；身份内容改变则冲突；
+- `update_from_state`：先锁 Run，再验证 Checkpoint 的 project/article/plan/version
+  不变，最后更新业务投影；
+- `append_event`：锁 Run 后分配连续 sequence，避免并发 Worker 产生重复序号；
+- `record_gap_attempt`：稳定 attempt 身份不可变，节点重试不会重复计费记录；
+- `mark_failed`：只保存异常类型和固定公开文案，不复制 Provider 异常正文或密钥。
+
+Checkpoint 表和这三张表不能互相替代：前者服务执行恢复，后者服务权限过滤、列表查询、
+产品时间线和审计。重构时必须继续保持这一分界。
+
+## 8. M3 接口适配痕迹
+
+为了避免 HTTP 路由和 Graph 各复制一份检索合并逻辑，M3 的 Scope 流程已提取为
+`ScopeEvidenceService`：
+
+```text
+HTTP / Evidence API ─┐
+                     ├─> ScopeEvidenceService
+M3ScopeEvidenceAdapter┘      ├─ RetrievalPlanRepository
+                             ├─ BasicHybridRetriever
+                             └─ EvidencePackRepository
+```
+
+- `PostgresRetrievalPlanAdapter` 实现 `RetrievalPlanPort`，验证 article 与
+  outline version 后才返回有序 Scope；
+- `M3ScopeEvidenceAdapter` 实现 `ScopeEvidencePort`，只把已持久化 Pack 的 ID、
+  充分度、缺口和 Chunk ID 放回 Graph State；
+- 完整 Chunk 文本仍留在 Evidence Pack/知识表中，不写 Checkpoint。
+
+这一提取点也是未来替换检索器或把 HTTP 拆成独立服务时的稳定重构缝。
+
+## 9. 待完成
+
+- 实现剩余两个官网发现/入库 Port 的正式适配器。
 - 由现有 SQLite Job Queue 启动 Run，并提供查询/恢复 API。
 - 记录节点耗时、重试、查询预算和脱敏失败信息。
 - M5 再接完整研究时间线、SSE 和只读对话，不提前扩张 M4 范围。
 
-## 8. 官方参考
+## 10. 官方参考
 
 - LangGraph Persistence：https://docs.langchain.com/oss/python/langgraph/persistence
 - LangGraph Interrupts：https://docs.langchain.com/oss/python/langgraph/interrupts

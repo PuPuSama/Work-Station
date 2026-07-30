@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import PurePath
-from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import quote
@@ -31,12 +30,10 @@ from .contracts import (
     KnowledgeProject,
     KnowledgeSource,
     ParagraphEvidenceTarget,
-    RetrievalHit,
     RetrievalPlan,
-    RetrievalQuery,
     RetrievalScope,
 )
-from .evidence import DefaultEvidencePackBuilder, calculate_knowledge_coverage
+from .evidence import calculate_knowledge_coverage
 from .evidence_repository import EvidenceRepositoryError
 from .hybrid_retriever import HybridRetrievalConfigurationError
 from .ingestion import DocumentInput, DocumentParserError
@@ -45,6 +42,7 @@ from .library import KnowledgeSourceSummary
 from .repository import KnowledgeRepositoryError
 from .publication import KnowledgePublicationError
 from .runtime import KnowledgeAgentRuntime
+from .scope_evidence import ScopeEvidenceNotFound, ScopeEvidenceService
 from .wordpress import (
     OfficialSiteFetchError,
     UnsafeOfficialSiteUrl,
@@ -511,21 +509,6 @@ def _link_response(link: EvidenceLink) -> EvidenceLinkResponse:
     )
 
 
-def _runtime_retrieval_filters(scope: RetrievalScope) -> dict[str, object]:
-    filters = dict(scope.filters)
-    fetched_after = filters.get("fetched_after")
-    if isinstance(fetched_after, str):
-        try:
-            filters["fetched_after"] = datetime.fromisoformat(
-                fetched_after.replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise ValueError(
-                "fetched_after must be an ISO-8601 timezone-aware datetime"
-            ) from exc
-    return filters
-
-
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge-agent"])
 
 
@@ -717,63 +700,19 @@ def build_scope_evidence_pack(
             detail="Embedding Provider is not configured.",
         )
     project_id = _project_id(project)
-    plan = runtime.retrieval_plan_repository.get_retrieval_plan(
-        project_id,
-        retrieval_plan_id,
-    )
-    if plan is None:
-        raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
-    scope = next((item for item in plan.scopes if item.scope_id == scope_id), None)
-    if scope is None:
-        raise HTTPException(status_code=404, detail="Retrieval scope was not found.")
-
     try:
-        filters = _runtime_retrieval_filters(scope)
-        candidates: dict[str, tuple[RetrievalHit, list[str]]] = {}
-        for query_text in scope.query_variants:
-            for hit in runtime.hybrid_retriever.retrieve(
-                RetrievalQuery(
-                    project_id=project_id,
-                    text=query_text,
-                    limit=payload.limit,
-                    filters=filters,
-                )
-            ):
-                existing = candidates.get(hit.chunk.chunk_id)
-                if existing is None:
-                    candidates[hit.chunk.chunk_id] = (hit, [query_text])
-                else:
-                    best, matched_queries = existing
-                    if query_text not in matched_queries:
-                        matched_queries.append(query_text)
-                    if hit.score > best.score:
-                        candidates[hit.chunk.chunk_id] = (hit, matched_queries)
-
-        merged_hits = tuple(
-            replace(
-                hit,
-                explanation={
-                    **dict(hit.explanation),
-                    "matched_query_variants": list(matched_queries),
-                },
-            )
-            for hit, matched_queries in sorted(
-                candidates.values(),
-                key=lambda item: (-item[0].score, item[0].chunk.chunk_id),
-            )[: payload.limit]
-        )
-        pack = DefaultEvidencePackBuilder(
-            minimum_hits=scope.minimum_hits,
-            minimum_distinct_sources=scope.minimum_distinct_sources,
-            require_hard_fact=scope.require_hard_fact,
+        pack = ScopeEvidenceService(
+            plans=runtime.retrieval_plan_repository,
+            retriever=runtime.hybrid_retriever,
+            packs=runtime.evidence_pack_repository,
         ).build(
-            scope.evidence_request(
-                article_id=plan.article_id,
-                outline_version=plan.outline_version,
-            ),
-            merged_hits,
+            project_id=project_id,
+            retrieval_plan_id=retrieval_plan_id,
+            scope_id=scope_id,
+            limit=payload.limit,
         )
-        runtime.evidence_pack_repository.save_evidence_pack(pack)
+    except ScopeEvidenceNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except EmbeddingProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (
@@ -784,13 +723,7 @@ def build_scope_evidence_pack(
     except EvidenceRepositoryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    persisted = runtime.evidence_pack_repository.get_evidence_pack(
-        project_id,
-        pack.evidence_pack_id,
-    )
-    if persisted is None:
-        raise HTTPException(status_code=500, detail="Evidence pack was not persisted.")
-    return _pack_response(persisted)
+    return _pack_response(pack)
 
 
 @router.get(

@@ -19,6 +19,7 @@ from .evidence_repository import (
 from .hybrid_retriever import BasicHybridRetriever
 from .library import PostgresKnowledgeLibrary
 from .publication import KnowledgePublicationService
+from .research_runs import PostgresResearchRunRepository
 from .repository import PostgresKnowledgeRepository
 from .web_ingestion import (
     OfficialWebPageIngestionService,
@@ -45,6 +46,7 @@ class KnowledgeAgentRuntime:
     retrieval_plan_repository: PostgresRetrievalPlanRepository
     evidence_pack_repository: PostgresEvidencePackRepository
     evidence_link_repository: PostgresEvidenceLinkRepository
+    research_run_repository: PostgresResearchRunRepository
 
     def close(self) -> None:
         close_provider = getattr(self.embedding_provider, "close", None)
@@ -68,6 +70,7 @@ def create_knowledge_runtime(
     retrieval_plan_repository = PostgresRetrievalPlanRepository(engine)
     evidence_pack_repository = PostgresEvidencePackRepository(engine)
     evidence_link_repository = PostgresEvidenceLinkRepository(engine)
+    research_run_repository = PostgresResearchRunRepository(engine)
     official_site_fetcher = SafeOfficialSiteFetcher()
     web_page_ingestion = OfficialWebPageIngestionService(
         repository=repository,
@@ -112,4 +115,5 @@ def create_knowledge_runtime(
         retrieval_plan_repository=retrieval_plan_repository,
         evidence_pack_repository=evidence_pack_repository,
         evidence_link_repository=evidence_link_repository,
+        research_run_repository=research_run_repository,
     )
