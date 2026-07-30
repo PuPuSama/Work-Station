@@ -12,10 +12,15 @@
 - 私有资料上传到 Research Inbox；
 - WordPress REST Site Probe、官网产品分类页同步和 Blog/产品二次分类；
 - 官网页面原始 HTML、规范化 JSON、产品事实与原图证据入库；
+- MinerU legacy `content_list.json` 到 `ParsedDocument` 的隔离适配与解析器对比指标；
 - 打开 Inbox 或已发布来源的原始证据；
 - `/projects/{customer}/knowledge` 项目级知识库页面。
 
-当前仍未完成 MinerU 对比和 `www.qewitfastener.com / topic_006` 真实验收。上传或官网同步成功只表示进入 Inbox；运营人员点击“确认并发布”后，系统才生成 Embedding 并原子激活快照。
+`www.qewitfastener.com / topic_006` 的 M2 真实入库已验收，证据见
+`docs/validation/knowledge-agent-m2-qewitfastener.md`。仍需提供不入 Git
+的代表性私有资料并启动独立 MinerU 服务，才能填写真实质量/速度/CPU/GPU 对比值。
+上传或官网同步成功只表示进入 Inbox；运营人员点击“确认并发布”后，系统才生成
+Embedding 并原子激活快照。
 
 ## 2. 环境变量
 
@@ -152,6 +157,19 @@ Content-Type: application/json
 - REST 探测失败不等于 HTML 同步失败；
 - 同步只写 Inbox，不自动发布、不自动确认产品。
 
+真实 qewitfastener 冒烟（在 `backend` 目录）：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_agent.m2_site_smoke `
+  --project qewitfastener.com `
+  --site-url https://www.qewitfastener.com `
+  --category-url https://www.qewitfastener.com/category/fasteners/screws/woodscrews-dry-wall-screws/ `
+  --max-products 3
+```
+
+该命令会写真实 Inbox 数据和 Artifact Root，不会自动清理；重复执行应保持幂等。
+输出只含数量和 ID。
+
 产品确认必须已经有 `primary_detail` 来源证据。只有分类页、Blog 或图片候选时会返回冲突，不会将其伪装成已确认产品。
 
 ## 6. 验证
@@ -181,6 +199,7 @@ npm.cmd run build -- --webpack
 - `test_knowledge_agent_m2_http.py`
 - `test_knowledge_agent_m2_wordpress.py`
 - `test_knowledge_agent_m2_web_ingestion.py`
+- `test_knowledge_agent_m2_mineru.py`
 
 ## 7. 故障判断
 

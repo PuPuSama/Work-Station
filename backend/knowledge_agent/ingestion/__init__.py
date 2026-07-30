@@ -14,6 +14,17 @@ from .parsers import (
     default_document_parsers,
 )
 from .service import IngestionResult, PrivateDocumentIngestionService
+from .benchmark import (
+    BenchmarkParser,
+    ParserBenchmarkObservation,
+    ParserBenchmarkReport,
+    ParserQualityExpectation,
+    compare_parsers,
+)
+from .mineru import (
+    MINERU_CONTENT_LIST_ADAPTER_VERSION,
+    MinerUContentListAdapter,
+)
 
 __all__ = [
     "DocumentInput",
@@ -24,13 +35,20 @@ __all__ = [
     "DocxDocumentParser",
     "ExcelDocumentParser",
     "IngestionResult",
+    "BenchmarkParser",
+    "MINERU_CONTENT_LIST_ADAPTER_VERSION",
+    "MinerUContentListAdapter",
     "ParsedAsset",
     "ParsedBlock",
     "ParsedDocument",
     "ParsedDocumentChunker",
+    "ParserBenchmarkObservation",
+    "ParserBenchmarkReport",
+    "ParserQualityExpectation",
     "PdfDocumentParser",
     "UnsupportedDocumentError",
     "PrivateDocumentIngestionService",
     "block_identity",
+    "compare_parsers",
     "default_document_parsers",
 ]

@@ -269,6 +269,12 @@ class OfficialWebIngestionIntegrationTests(unittest.TestCase):
         self.assertEqual(source_evidence_count, 1)
         self.assertEqual(asset_link_count, 1)
         self.assertEqual(product_asset_count, 1)
+        summaries = PostgresKnowledgeLibrary(self.engine).list_sources(
+            "example.com"
+        )
+        self.assertTrue(
+            all(item.classification_reason for item in summaries)
+        )
 
     def test_identical_category_sync_is_idempotent(self) -> None:
         service = self._service()

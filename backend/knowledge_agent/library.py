@@ -50,6 +50,11 @@ class KnowledgeSourceSummary:
             reason = classification.get("reason")
             if isinstance(reason, str):
                 return reason
+            reasons = classification.get("reasons")
+            if isinstance(reasons, list) and all(
+                isinstance(item, str) for item in reasons
+            ):
+                return "; ".join(reasons)
         return ""
 
 

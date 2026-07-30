@@ -12,7 +12,12 @@ from lxml import etree
 from lxml import html as lxml_html
 
 from services.product_assets import ParsedProductPage, ProductAssetError, parse_product_page
-from services.product_crawler import open_url
+from services.product_crawler import (
+    is_product_detail_page as crawler_is_product_detail_page,
+    is_product_listing_page as crawler_is_product_listing_page,
+    open_url,
+    parse_html as crawler_parse_html,
+)
 
 
 WebPageType = Literal[
@@ -413,13 +418,24 @@ def _breadcrumb_labels(document: etree._Element, heading: str) -> tuple[str, ...
 
 
 def _text_blocks(document: etree._Element) -> tuple[str, ...]:
-    main_nodes = document.xpath("//main | //*[@role='main'] | //article")
-    root = main_nodes[0] if main_nodes else document
+    main_nodes = document.xpath("//main | //*[@role='main']")
+    body_nodes = document.xpath("//body")
+    content_xpath = ".//h1 | .//h2 | .//h3 | .//p | .//li | .//th | .//td"
+    usable_main_nodes = [
+        node
+        for node in main_nodes
+        if len(node.xpath(content_xpath)) >= 2
+    ]
+    root = (
+        max(usable_main_nodes, key=lambda node: len(node.xpath(content_xpath)))
+        if usable_main_nodes
+        else body_nodes[0]
+        if body_nodes
+        else document
+    )
     values: list[str] = []
     seen: set[str] = set()
-    for node in root.xpath(
-        ".//h1 | .//h2 | .//h3 | .//p | .//li | .//th | .//td"
-    ):
+    for node in root.xpath(content_xpath):
         if node.xpath("ancestor::nav | ancestor::header | ancestor::footer | ancestor::aside"):
             continue
         value = _clean_text(node.text_content())
@@ -457,6 +473,24 @@ def classify_web_page(
     schema_types = _schema_types(document)
     classes = _class_tokens(document)
     path = urlsplit(canonical).path.casefold()
+    crawler_terms = list(
+        dict.fromkeys(
+            token
+            for token in re.findall(r"[a-z0-9]+", f"{path} {title.casefold()}")
+            if len(token) >= 3
+        )
+    )[:16]
+    crawler_document = crawler_parse_html(source.decode("utf-8", errors="replace"))
+    crawler_detail = crawler_is_product_detail_page(
+        canonical,
+        crawler_document,
+        crawler_terms,
+    )
+    crawler_listing = crawler_is_product_listing_page(
+        canonical,
+        crawler_document,
+        crawler_terms,
+    )
     product_schema = "product" in schema_types
     article_schema = bool(schema_types & {"article", "blogposting", "newsarticle"})
     woo_detail = (
@@ -488,7 +522,7 @@ def classify_web_page(
     confidence: float
     reasons: list[str]
 
-    if product_schema or woo_detail or add_to_cart:
+    if product_schema or woo_detail or add_to_cart or crawler_detail:
         page_type = "product_detail"
         reasons = []
         confidence = 0.72
@@ -501,6 +535,12 @@ def classify_web_page(
         if add_to_cart:
             reasons.append("an add-to-cart control is present")
             confidence += 0.04
+        if crawler_detail and not (product_schema or woo_detail or add_to_cart):
+            reasons.append(
+                "the conservative B2B product-page detector found a "
+                "substantive page with product identity and image evidence"
+            )
+            confidence += 0.06
     elif article_schema or blog_path or "single-post" in " ".join(
         document.xpath("//body/@class")
     ).casefold():
@@ -513,13 +553,13 @@ def classify_web_page(
                 else "URL or WordPress body class identifies an editorial post"
             )
         ]
-    elif product_listing or category_signal:
+    elif product_listing or category_signal or crawler_listing:
         page_type = "product_category"
-        confidence = 0.84 if product_listing else 0.7
+        confidence = 0.84 if product_listing or crawler_listing else 0.7
         reasons = [
             (
                 "a product-listing container is present"
-                if product_listing
+                if product_listing or crawler_listing
                 else "URL or WordPress body class identifies a category archive"
             )
         ]

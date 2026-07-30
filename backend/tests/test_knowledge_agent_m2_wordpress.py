@@ -175,6 +175,43 @@ class OfficialPageClassificationTests(unittest.TestCase):
         self.assertIsNone(result.product_page)
         self.assertTrue(any("Article" in reason for reason in result.reasons))
 
+    def test_custom_b2b_product_page_without_schema_uses_conservative_fallback(
+        self,
+    ) -> None:
+        html = """
+        <html>
+          <head>
+            <title>Carbon Steel Coach Screws DIN 571</title>
+            <meta property="og:title" content="Carbon Steel Coach Screws DIN 571" />
+            <meta property="og:description"
+                  content="Official dimensional and material information for carbon steel coach screws supplied to industrial buyers." />
+            <meta property="og:image" content="https://example.com/uploads/coach-screw.jpg" />
+          </head>
+          <body>
+            <main>
+              <h1>Carbon Steel Coach Screws DIN 571</h1>
+              <div class="product-gallery">
+                <img src="/uploads/coach-screw.jpg" alt="Coach screw" />
+              </div>
+              <p>Available in zinc plated and stainless steel configurations.</p>
+              <p>Contact the official sales team for dimensions and packaging.</p>
+            </main>
+          </body>
+        </html>
+        """
+
+        result = classify_web_page(
+            requested_url=(
+                "https://example.com/"
+                "carbon-steel-hexagon-head-coach-screws-din-571/"
+            ),
+            html=html,
+        )
+
+        self.assertEqual(result.page_type, "product_detail")
+        self.assertIsNotNone(result.product_page)
+        self.assertTrue(any("B2B" in reason for reason in result.reasons))
+
     def test_category_discovery_keeps_only_same_site_product_context_links(self) -> None:
         html = """
         <html><body>
@@ -204,6 +241,32 @@ class OfficialPageClassificationTests(unittest.TestCase):
                 "https://shop.example.com/product/drywall-screw/",
             ),
         )
+
+    def test_page_without_main_does_not_treat_first_product_card_as_document_root(
+        self,
+    ) -> None:
+        html = """
+        <html>
+          <head><title>Wood Screws - Example</title></head>
+          <body class="archive tax-product_cat">
+            <header><p>Navigation text must be ignored.</p></header>
+            <h1>Products</h1>
+            <article class="product"><h2>Wood Screw A</h2></article>
+            <article class="product"><h2>Wood Screw B</h2></article>
+            <p>Official category introduction.</p>
+          </body>
+        </html>
+        """
+
+        result = classify_web_page(
+            requested_url="https://example.com/category/wood-screws/",
+            html=html,
+        )
+
+        self.assertEqual(result.page_type, "product_category")
+        self.assertIn("Products", result.text_blocks)
+        self.assertIn("Wood Screw B", result.text_blocks)
+        self.assertNotIn("Navigation text must be ignored.", result.text_blocks)
 
     def test_official_url_rejects_cross_site_and_credentials(self) -> None:
         with self.assertRaises(UnsafeOfficialSiteUrl):

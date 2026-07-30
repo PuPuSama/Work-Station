@@ -402,6 +402,7 @@ class OfficialWebPageIngestionService:
                 "classification": {
                     "page_type": classification.page_type,
                     "confidence": classification.confidence,
+                    "reason": "; ".join(classification.reasons),
                     "reasons": list(classification.reasons),
                     "classifier_version": WEB_PAGE_PARSER_VERSION,
                 },

@@ -36,6 +36,8 @@ M2 不实现混合检索、Evidence Pack、LangGraph、RBAC 或 S3。它们分�
 |---|---|---|
 | `knowledge_agent.ingestion.contracts` | 定义解析输入、规范化块、内嵌资产和解析结果 | 不读取文件、不访问数据库 |
 | `knowledge_agent.ingestion.parsers` | 选择解析器并把文件转成 `ParsedDocument` | 不切知识块、不生成 Embedding、不发布来源 |
+| `knowledge_agent.ingestion.mineru` | 把外部 MinerU `content_list.json` 和图片规范化为 `ParsedDocument` | 不在 FastAPI 进程安装/运行 MinerU 模型 |
+| `knowledge_agent.ingestion.benchmark` | 对同一输入记录解析质量、耗时和 Python 峰值内存 | 不替代人工标注，不伪造 GPU/外部服务资源数据 |
 | `knowledge_agent.repository` | 保存 M1 来源、快照、知识块和向量 | 不解析文档、不保存 Evidence Pack |
 | `knowledge_agent.artifact_store` | 内容寻址地保存原始、规范化和图片文件 | 不决定发布状态、不保存业务元数据 |
 | `knowledge_agent.assets` | 按项目去重不可变资产，并关联来源快照 | 不选择文章首图、不生成图片向量 |
@@ -189,6 +191,7 @@ M2 本地阶段使用项目级持久目录保存资产，URI 抽象为后续迁�
 - 本地资产目录以后可替换为 S3，但数据库仍通过 URI 引用；
 - 当前规则分类器以后可加入模型分类，但必须保留分类理由和原始证据；
 - 当前同步调用以后可进入 Job Queue/Worker，但状态迁移和幂等键不能变化；
+- MinerU 当前适配稳定 legacy `content_list.json`；V2 格式仍在开发变化中，升级时新增 Adapter 版本，不能原地改变旧快照解释；
 - 前端页面可重构，API 返回的项目边界和证据定位不能丢失。
 
 ## 9. 实施台账
@@ -204,8 +207,9 @@ M2 本地阶段使用项目级持久目录保存资产，URI 抽象为后续迁�
 | 2026-07-30 | WordPress Site Probe 与规则分类 | 完成（模拟站点验收） | 主/备用 REST 入口、跨域拦截、产品/分类/Blog 分类理由测试 |
 | 2026-07-30 | 分类页同步、产品与原图证据 | 完成（模拟站点验收） | Inbox 门禁、幂等快照、`primary_detail`、图片哈希/尺寸/快照证据集成测试 |
 | 2026-07-30 | 项目级知识库页面 | 完成 | 运营人员可探测/同步官网、上传资料、查看理由和原始证据 |
-| 待完成 | `www.qewitfastener.com` 真实切片 | 未开始 | 分类页和详情页真实原始证据、`topic_006` 可见验收 |
-| 待完成 | 轻量解析器与 MinerU 对比 | 未开始 | 同一代表性资料的质量、速度、资源占用记录 |
+| 2026-07-30 | `www.qewitfastener.com` 真实切片 | 完成（M2 边界） | 4 个原始快照、36 个分类页 Chunk、3 个产品、19 张原图、真实 Blog 正确拒绝；见 `docs/validation/knowledge-agent-m2-qewitfastener.md` |
+| 2026-07-30 | MinerU 规范化与对比框架 | 完成 | legacy `content_list.json` 页码/bbox/表格/图片适配；同输入质量/耗时/内存测试 |
+| 待执行 | 代表性私有资料 MinerU 实测 | 等待资料和独立服务 | 同一非提交客户文件的质量、速度、CPU/GPU/服务峰值资源记录 |
 
 ## 10. 重构检查清单
 
