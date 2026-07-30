@@ -4,7 +4,7 @@
 >
 > 分支：`feature/knowledge-agent-m2`
 >
-> 上游检查点：M1 合并提交 `150af2a`
+> 上游检查点：M1 合并提交 `150af2a`；已同步 main `05917ac`
 
 ## 1. 文档目的
 
@@ -40,21 +40,23 @@ M2 不实现混合检索、Evidence Pack、LangGraph、RBAC 或 S3。它们分�
 | `knowledge_agent.artifact_store` | 内容寻址地保存原始、规范化和图片文件 | 不决定发布状态、不保存业务元数据 |
 | `knowledge_agent.assets` | 按项目去重不可变资产，并关联来源快照 | 不选择文章首图、不生成图片向量 |
 | `knowledge_agent.catalog` | 保存稳定产品身份和不可变来源/图片证据 | 不执行网页抓取、不直接修改文章任务 |
+| `knowledge_agent.wordpress` | 定义官网抓取边界、WordPress REST 探测、规则分类和分类页链接发现 | 不写数据库、不发布来源、不确认产品 |
+| `knowledge_agent.web_ingestion` | 编排官网 HTML 快照、产品证据、原图下载和分类页同步 | 不把 Inbox 自动发布、不把候选产品自动确认 |
 | `knowledge_agent.library` | 为知识库页面提供项目级只读汇总 | 不修改来源或产品状态 |
 | `knowledge_agent.http` | 暴露入库、列表、证据打开和产品确认路由 | 不包含 SQL、不绕过 Repository |
 | `knowledge_agent.runtime` | 组装长生命周期数据库和 Artifact Store 适配器 | 不创建或迁移 Schema |
 | `knowledge_agent.embedding` | 调用独立的 Embedding Provider | 不决定资料是否可信或可发布 |
 | `knowledge_agent.retriever` | 检索已发布的当前快照 | 不检索 Inbox 或未确认资料 |
-| 现有 `services.product_*` | 任务级产品发现、官网事实提取和图片候选选择 | 不是长期知识库的权威存储 |
+| 现有 `services.product_*` | 任务级产品发现、官网事实提取和图片候选选择；M2 复用其经过测试的 DOM 产品解析器和安全出站请求 | 不是长期知识库的权威存储，不拥有 M2 来源/快照/产品身份 |
 
-后续 M2 会继续新增：
+已经落地的编排模块：
 
-| 计划模块 | 责任 |
+| 模块 | 责任 |
 |---|---|
 | `knowledge_agent.ingestion.chunking` | 将规范化块稳定地转换为 `KnowledgeChunk` |
 | `knowledge_agent.ingestion.service` | 编排上传、哈希去重、解析、快照保存和待审状态 |
-| `/api/knowledge/...` 后续路由 | 提供来源审阅、Embedding 和发布动作 |
-| 前端知识库后续面板 | 提供分类修订、发布确认和 WordPress 同步 |
+| `/api/knowledge/...` | 提供上传、站点探测、分类页同步、来源审阅、Embedding 和发布动作 |
+| `project-knowledge-library.tsx` | 提供 WordPress 探测/同步、私有上传、来源证据和发布操作 |
 
 ## 4. 规范化解析契约
 
@@ -92,10 +94,20 @@ M2 不实现混合检索、Evidence Pack、LangGraph、RBAC 或 S3。它们分�
 ## 5. 数据流
 
 ```text
-Upload / WordPress fetch
-  -> DocumentInput 或网页抓取结果
+Private upload
+  -> DocumentInput
   -> DocumentParserRouter
   -> ParsedDocument
+  -> PrivateDocumentIngestionService
+
+Official site
+  -> OfficialSiteFetcher (同项目域名 + DNS/重定向安全边界)
+  -> WordPressSiteProbe / classify_web_page
+  -> ClassifiedWebPage (标签 + 置信度 + 逐条理由)
+  -> OfficialWebPageIngestionService
+  -> ParsedDocument-compatible blocks
+
+Both paths
   -> 稳定切块 + 图片资产登记
   -> KnowledgeSource(status=inbox)
   -> SourceSnapshot + KnowledgeChunk(no embedding)
@@ -108,6 +120,25 @@ Upload / WordPress fetch
 
 解析、Embedding 或人工确认任一步失败时，旧的已发布快照继续服务。
 
+### 5.1 WordPress 分类页同步时序
+
+```text
+POST /wordpress/sync
+  -> 验证 site_url 与 project_id 同域
+  -> WordPress REST Probe (/wp-json/，失败再 ?rest_route=/)
+  -> 抓取并确认 category_url == product_category
+  -> 保存分类页原始 HTML、规范化 JSON、Inbox 快照
+  -> 从产品容器发现同域详情候选（有数量上限）
+  -> 逐页抓取和分类
+      -> product_detail: 保存页面、产品身份、primary_detail 证据、原图证据
+      -> Blog/Guide/unknown: 不创建产品；记录跳过原因
+  -> 返回同步摘要；不自动发布、不自动确认产品
+```
+
+分类和同步是两个边界：`classify_web_page` 是无网络、无数据库的纯函数；
+`OfficialWebPageIngestionService` 只接收已抓取资源和分类结果完成持久化。
+未来把规则分类替换为模型分类时，仍需输出 `page_type + confidence + reasons`。
+
 ## 6. 产品与图片的长期模型
 
 现有 `Product` 是文章任务的选择结果，不直接作为知识库权威数据。M2 的长期模型遵循：
@@ -119,6 +150,9 @@ Upload / WordPress fetch
 5. 原图不可变，文章使用的 WebP 是派生资产；
 6. 文章任务保存产品、快照和资产选择的引用或副本，不能依赖会被覆盖的“当前图片”；
 7. Alt、Caption 和邻近正文可进入文字检索；M2 不把图片向量写进 M1 的 `vector(1536)`。
+8. 官网图片只有在成功下载并通过图片解码后才成为 `KnowledgeAsset`；外域 CDN、非图片响应和损坏字节只产生警告，不伪造资产记录；
+9. 产品详情页图片按 `gallery -> JSON-LD -> body` 排序，首个有效 Gallery/JSON-LD 图片记录为 `primary` 证据，但仍需运营人员确认产品；
+10. 当前页面最多下载 12 张原图，单图最多 12 MB；这是可调实现限制，不是长期业务不变量。
 
 M2 本地阶段使用项目级持久目录保存资产，URI 抽象为后续迁移 S3 保留替换边界。
 
@@ -145,6 +179,8 @@ M2 本地阶段使用项目级持久目录保存资产，URI 抽象为后续迁�
 - 相同输入和解析器版本必须得到稳定内容哈希和块顺序；
 - 解析器不得因为文件名或文档内容泄露密钥；
 - Blog/Guide 可以提供写作参考，但不能被自动当作产品详情页；
+- 分类页候选链接即使出现在名为 `product` 的容器中，也必须经过详情页二次分类；
+- 官网 URL、重定向和图片 URL 必须留在项目官方域名边界，跨域候选不得下载；
 - 只有经过确认的产品详情证据才能投影到文章任务的产品选择。
 
 ## 8. 可替换点
@@ -165,8 +201,11 @@ M2 本地阶段使用项目级持久目录保存资产，URI 抽象为后续迁�
 | 2026-07-30 | 产品与图片资产迁移 | 完成 | 复合 FK、哈希去重、快照证据、产品确认门禁测试 |
 | 2026-07-30 | 私有文件 API 和知识库只读页 | 完成 | 上传、重复幂等、来源汇总、打开原文件和前端构建 |
 | 2026-07-30 | 来源审阅、Embedding 和发布动作 | 完成 | 人工确认门禁、假向量集成测试、原子激活 |
-| 待完成 | WordPress Site Probe | 未开始 | `www.qewitfastener.com` 分类理由与原始证据 |
-| 待完成 | 项目级知识库页面 | 未开始 | 运营人员可查看来源、版本、理由和原始证据 |
+| 2026-07-30 | WordPress Site Probe 与规则分类 | 完成（模拟站点验收） | 主/备用 REST 入口、跨域拦截、产品/分类/Blog 分类理由测试 |
+| 2026-07-30 | 分类页同步、产品与原图证据 | 完成（模拟站点验收） | Inbox 门禁、幂等快照、`primary_detail`、图片哈希/尺寸/快照证据集成测试 |
+| 2026-07-30 | 项目级知识库页面 | 完成 | 运营人员可探测/同步官网、上传资料、查看理由和原始证据 |
+| 待完成 | `www.qewitfastener.com` 真实切片 | 未开始 | 分类页和详情页真实原始证据、`topic_006` 可见验收 |
+| 待完成 | 轻量解析器与 MinerU 对比 | 未开始 | 同一代表性资料的质量、速度、资源占用记录 |
 
 ## 10. 重构检查清单
 

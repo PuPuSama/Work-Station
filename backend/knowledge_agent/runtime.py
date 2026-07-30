@@ -14,6 +14,11 @@ from .interfaces import EmbeddingProvider
 from .library import PostgresKnowledgeLibrary
 from .publication import KnowledgePublicationService
 from .repository import PostgresKnowledgeRepository
+from .web_ingestion import (
+    OfficialWebPageIngestionService,
+    WordPressProductSyncService,
+)
+from .wordpress import SafeOfficialSiteFetcher
 
 
 @dataclass(slots=True)
@@ -27,6 +32,7 @@ class KnowledgeAgentRuntime:
     library: PostgresKnowledgeLibrary
     artifact_store: LocalKnowledgeArtifactStore
     private_document_ingestion: PrivateDocumentIngestionService
+    wordpress_sync: WordPressProductSyncService
     publication: KnowledgePublicationService | None
     embedding_provider: EmbeddingProvider | None
 
@@ -48,11 +54,21 @@ def create_knowledge_runtime(
     asset_repository = PostgresKnowledgeAssetRepository(engine)
     artifact_store = LocalKnowledgeArtifactStore(artifact_root)
     library = PostgresKnowledgeLibrary(engine)
+    catalog_repository = PostgresProductCatalogRepository(engine)
+    official_site_fetcher = SafeOfficialSiteFetcher()
+    web_page_ingestion = OfficialWebPageIngestionService(
+        repository=repository,
+        asset_repository=asset_repository,
+        catalog_repository=catalog_repository,
+        artifact_store=artifact_store,
+        fetcher=official_site_fetcher,
+        snapshot_lookup=library,
+    )
     return KnowledgeAgentRuntime(
         engine=engine,
         repository=repository,
         asset_repository=asset_repository,
-        catalog_repository=PostgresProductCatalogRepository(engine),
+        catalog_repository=catalog_repository,
         library=library,
         artifact_store=artifact_store,
         private_document_ingestion=PrivateDocumentIngestionService(
@@ -60,6 +76,10 @@ def create_knowledge_runtime(
             asset_repository=asset_repository,
             artifact_store=artifact_store,
             snapshot_lookup=library,
+        ),
+        wordpress_sync=WordPressProductSyncService(
+            fetcher=official_site_fetcher,
+            page_ingestion=web_page_ingestion,
         ),
         publication=(
             None

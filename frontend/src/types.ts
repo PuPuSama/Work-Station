@@ -420,6 +420,37 @@ export type KnowledgeUploadResult = {
   message: string;
 };
 
+export type WordPressProbeResult = {
+  project_id: string;
+  site_url: string;
+  detected: boolean;
+  rest_api_url: string | null;
+  namespaces: string[];
+  route_count: number;
+  reason: string;
+  probe_version: string;
+};
+
+export type WordPressSyncedPage = {
+  source_id: string;
+  snapshot_id: string;
+  page_type: string;
+  canonical_url: string;
+  status: string;
+  product_id: string | null;
+  asset_count: number;
+  warnings: string[];
+};
+
+export type WordPressSyncResult = {
+  project_id: string;
+  wordpress_detected: boolean;
+  category: WordPressSyncedPage;
+  products: WordPressSyncedPage[];
+  skipped_urls: string[];
+  warnings: string[];
+};
+
 export type BatchOperation =
   | "titles"
   | "products"

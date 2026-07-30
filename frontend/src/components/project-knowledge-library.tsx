@@ -8,11 +8,13 @@ import {
   CheckCircle2,
   ExternalLink,
   FileStack,
+  Globe2,
   ImageIcon,
   Inbox,
   Loader2,
   PackageSearch,
   RefreshCw,
+  ScanSearch,
   Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -42,6 +44,8 @@ import type {
   KnowledgeLibrary,
   KnowledgeSourceSummary,
   KnowledgeUploadResult,
+  WordPressProbeResult,
+  WordPressSyncResult,
 } from "@/types";
 
 type ProjectKnowledgeLibraryProps = {
@@ -155,6 +159,12 @@ export function ProjectKnowledgeLibrary({
   const [displayName, setDisplayName] = useState("");
   const [trustTier, setTrustTier] =
     useState<TrustTier>("reference_material");
+  const [siteUrl, setSiteUrl] = useState(`https://${customer}`);
+  const [categoryUrl, setCategoryUrl] = useState("");
+  const [probing, setProbing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [probeResult, setProbeResult] =
+    useState<WordPressProbeResult | null>(null);
 
   const loadLibrary = useCallback(
     async (background = false) => {
@@ -262,6 +272,61 @@ export function ProjectKnowledgeLibrary({
       setError(errorMessage(publishError));
     } finally {
       setPublishingSourceId("");
+    }
+  }
+
+  async function probeWordPress() {
+    setProbing(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiPost<WordPressProbeResult>(
+        `/api/knowledge/${encodeURIComponent(customer)}/wordpress/probe`,
+        { site_url: siteUrl.trim() || null },
+      );
+      setProbeResult(result);
+      setSiteUrl(result.site_url);
+      setMessage(
+        result.detected
+          ? `已识别 WordPress：${result.route_count} 条 REST 路由。`
+          : "未识别到 WordPress REST API；仍可使用官网 HTML 分类与入库。",
+      );
+    } catch (probeError) {
+      setError(errorMessage(probeError));
+    } finally {
+      setProbing(false);
+    }
+  }
+
+  async function syncWordPressCategory() {
+    if (!categoryUrl.trim()) {
+      setError("请填写官网产品分类页 URL。");
+      return;
+    }
+    setSyncing(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiPost<WordPressSyncResult>(
+        `/api/knowledge/${encodeURIComponent(customer)}/wordpress/sync`,
+        {
+          site_url: siteUrl.trim() || null,
+          category_url: categoryUrl.trim(),
+          max_products: 12,
+        },
+      );
+      const assetCount = result.products.reduce(
+        (total, item) => total + item.asset_count,
+        0,
+      );
+      setMessage(
+        `官网同步完成：1 个分类页、${result.products.length} 个产品详情页、${assetCount} 张去重原图进入 Inbox。${result.warnings.length ? ` 另有 ${result.warnings.length} 条警告。` : ""}`,
+      );
+      await loadLibrary(true);
+    } catch (syncError) {
+      setError(errorMessage(syncError));
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -449,69 +514,137 @@ export function ProjectKnowledgeLibrary({
                   <Inbox className="mb-3 size-8 text-muted-foreground" />
                   <div className="font-medium">Research Inbox 还是空的</div>
                   <p className="mt-1 max-w-md text-sm text-muted-foreground">
-                    先上传一份私有资料。WordPress 官网同步会在后续切片接入这里。
+                    上传私有资料，或从右侧探测并同步 WordPress 官网产品分类页。
                   </p>
                 </div>
               )}
             </CardContent>
           </Card>
 
-          <Card className="h-fit">
-            <CardHeader>
-              <CardTitle>上传私有资料</CardTitle>
-              <CardDescription>
-                支持 DOCX、PDF、XLSX 和 XLSM，单文件最大 25 MB。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="knowledge-file">资料文件</Label>
-                <Input
-                  ref={fileInputRef}
-                  id="knowledge-file"
-                  type="file"
-                  accept=".docx,.pdf,.xlsx,.xlsm"
-                  onChange={(event) =>
-                    selectFile(event.target.files?.[0] ?? null)
-                  }
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="knowledge-name">显示名称</Label>
-                <Input
-                  id="knowledge-name"
-                  value={displayName}
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  placeholder="例如：2026 产品规格表"
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="knowledge-trust">建议信任层级</Label>
-                <select
-                  id="knowledge-trust"
-                  value={trustTier}
-                  onChange={(event) =>
-                    setTrustTier(event.target.value as TrustTier)
-                  }
-                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          <div className="grid h-fit gap-5">
+            <Card>
+              <CardHeader>
+                <CardTitle>同步 WordPress 官网</CardTitle>
+                <CardDescription>
+                  先探测站点，再从一个产品分类页同步详情、事实与原图。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="knowledge-site-url">官网地址</Label>
+                  <Input
+                    id="knowledge-site-url"
+                    value={siteUrl}
+                    onChange={(event) => setSiteUrl(event.target.value)}
+                    placeholder="https://www.example.com"
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => void probeWordPress()}
+                  disabled={probing || syncing}
                 >
-                  <option value="reference_material">参考资料</option>
-                  <option value="hard_fact">硬事实</option>
-                  <option value="writing_instruction">写作指令</option>
-                </select>
-                <p className="text-xs leading-5 text-muted-foreground">
-                  这里只是运营建议。资料仍会保持待确认，不会自动参与检索。
-                </p>
-              </div>
-              <Button
-                onClick={() => void uploadFile()}
-                disabled={!selectedFile || uploading}
-              >
-                {uploading ? <Loader2 className="animate-spin" /> : <Upload />}
-                {uploading ? "解析并入库中…" : "解析并加入 Inbox"}
-              </Button>
-            </CardContent>
-          </Card>
+                  {probing ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <ScanSearch />
+                  )}
+                  {probing ? "探测中…" : "探测 WordPress"}
+                </Button>
+                {probeResult ? (
+                  <div className="rounded-lg border bg-muted/40 p-3 text-xs leading-5">
+                    <div className="flex items-center gap-2 font-medium">
+                      <Globe2 className="size-4" />
+                      {probeResult.detected ? "已识别 WordPress" : "未识别 REST API"}
+                    </div>
+                    <p className="mt-1 text-muted-foreground">
+                      {probeResult.reason}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="grid gap-2">
+                  <Label htmlFor="knowledge-category-url">产品分类页 URL</Label>
+                  <Input
+                    id="knowledge-category-url"
+                    value={categoryUrl}
+                    onChange={(event) => setCategoryUrl(event.target.value)}
+                    placeholder="https://www.example.com/category/products/"
+                  />
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    同步结果只进入 Inbox，不会自动发布或确认产品。
+                  </p>
+                </div>
+                <Button
+                  onClick={() => void syncWordPressCategory()}
+                  disabled={!categoryUrl.trim() || probing || syncing}
+                >
+                  {syncing ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <PackageSearch />
+                  )}
+                  {syncing ? "抓取、分类并入库中…" : "同步分类与产品"}
+                </Button>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>上传私有资料</CardTitle>
+                <CardDescription>
+                  支持 DOCX、PDF、XLSX 和 XLSM，单文件最大 25 MB。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="knowledge-file">资料文件</Label>
+                  <Input
+                    ref={fileInputRef}
+                    id="knowledge-file"
+                    type="file"
+                    accept=".docx,.pdf,.xlsx,.xlsm"
+                    onChange={(event) =>
+                      selectFile(event.target.files?.[0] ?? null)
+                    }
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="knowledge-name">显示名称</Label>
+                  <Input
+                    id="knowledge-name"
+                    value={displayName}
+                    onChange={(event) => setDisplayName(event.target.value)}
+                    placeholder="例如：2026 产品规格表"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="knowledge-trust">建议信任层级</Label>
+                  <select
+                    id="knowledge-trust"
+                    value={trustTier}
+                    onChange={(event) =>
+                      setTrustTier(event.target.value as TrustTier)
+                    }
+                    className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  >
+                    <option value="reference_material">参考资料</option>
+                    <option value="hard_fact">硬事实</option>
+                    <option value="writing_instruction">写作指令</option>
+                  </select>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    这里只是运营建议。资料仍会保持待确认，不会自动参与检索。
+                  </p>
+                </div>
+                <Button
+                  onClick={() => void uploadFile()}
+                  disabled={!selectedFile || uploading}
+                >
+                  {uploading ? <Loader2 className="animate-spin" /> : <Upload />}
+                  {uploading ? "解析并入库中…" : "解析并加入 Inbox"}
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
         </section>
 
         {library?.products.length ? (

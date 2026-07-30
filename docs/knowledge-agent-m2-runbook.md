@@ -10,10 +10,12 @@
 - 稳定产品身份、来源证据和图片证据；
 - `/api/knowledge/{project}` 项目级读模型；
 - 私有资料上传到 Research Inbox；
+- WordPress REST Site Probe、官网产品分类页同步和 Blog/产品二次分类；
+- 官网页面原始 HTML、规范化 JSON、产品事实与原图证据入库；
 - 打开 Inbox 或已发布来源的原始证据；
 - `/projects/{customer}/knowledge` 项目级知识库页面。
 
-当前仍未接入 WordPress Site Probe 和 MinerU 对比。上传成功只表示进入 Inbox；运营人员点击“确认并发布”后，系统才生成 Embedding 并原子激活快照。
+当前仍未完成 MinerU 对比和 `www.qewitfastener.com / topic_006` 真实验收。上传或官网同步成功只表示进入 Inbox；运营人员点击“确认并发布”后，系统才生成 Embedding 并原子激活快照。
 
 ## 2. 环境变量
 
@@ -68,6 +70,16 @@ backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini current
 8. 点击“原文件”验证原始证据。
 9. 确认分类和信任级别后，点击“确认并发布”生成向量并激活。
 
+WordPress 官网同步：
+
+1. 填写项目官网地址，点击“探测 WordPress”；
+2. 查看 REST 探测结果和理由；未发现 REST API 时，HTML 同步仍可工作；
+3. 填写官网产品分类页 URL；
+4. 点击“同步分类与产品”；
+5. 在来源表确认 `product_category`、`product_detail` 和逐条分类理由；
+6. 打开官网证据，检查产品名称、分类路径和图片数量；
+7. 产品和来源分别人工确认。同步动作本身不会发布来源或确认产品。
+
 重复上传同一个来源和相同内容时复用首次快照，不新增重复快照；相同内嵌图片按项目内 SHA-256 去重。
 
 ## 5. API
@@ -108,6 +120,38 @@ PUT  /api/knowledge/{project}/sources/{source_id}/review
 POST /api/knowledge/{project}/sources/{source_id}/publish
 ```
 
+探测 WordPress：
+
+```http
+POST /api/knowledge/{project}/wordpress/probe
+Content-Type: application/json
+
+{
+  "site_url": "https://www.example.com"
+}
+```
+
+同步一个产品分类页（当前同步执行，最多 50 个候选）：
+
+```http
+POST /api/knowledge/{project}/wordpress/sync
+Content-Type: application/json
+
+{
+  "site_url": "https://www.example.com",
+  "category_url": "https://www.example.com/category/products/",
+  "max_products": 12
+}
+```
+
+安全边界：
+
+- `site_url` 必须属于 URL 路径中的 `{project}` 域名；
+- 分类页、重定向和产品页必须留在官方域名或其子域；
+- 图片外域、非图片响应、损坏图片和超限资源会被跳过并返回警告；
+- REST 探测失败不等于 HTML 同步失败；
+- 同步只写 Inbox，不自动发布、不自动确认产品。
+
 产品确认必须已经有 `primary_detail` 来源证据。只有分类页、Blog 或图片候选时会返回冲突，不会将其伪装成已确认产品。
 
 ## 6. 验证
@@ -135,6 +179,8 @@ npm.cmd run build -- --webpack
 - `test_knowledge_agent_m2_assets.py`
 - `test_knowledge_agent_m2_catalog.py`
 - `test_knowledge_agent_m2_http.py`
+- `test_knowledge_agent_m2_wordpress.py`
+- `test_knowledge_agent_m2_web_ingestion.py`
 
 ## 7. 故障判断
 
@@ -144,3 +190,6 @@ npm.cmd run build -- --webpack
 - PDF 没有可提取文本：保留 Inbox 失败信息，后续用 MinerU 对比流程处理；
 - 原文件 404：检查数据库 URI 是否仍位于配置的 Artifact Root；路由不会读取 Root 外任意文件；
 - 产品不能确认：先检查是否存在同项目、同快照的 `primary_detail` 证据。
+- WordPress 探测未识别：检查 `/wp-json/` 或 `?rest_route=/` 是否公开；仍可尝试分类页 HTML 同步；
+- 分类页返回 422：该 URL 没有被识别为产品分类页，先检查是否误填 Blog、详情页或跨域 URL；
+- 图片数量为 0：查看同步警告，常见原因是图片位于外域 CDN、响应不是图片或原图损坏。

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import sqlalchemy as sa
 from docx import Document
@@ -19,7 +20,11 @@ if str(BACKEND_DIR) not in sys.path:
 
 from knowledge_agent.http import router  # noqa: E402
 from knowledge_agent.runtime import create_knowledge_runtime  # noqa: E402
-from knowledge_agent import EMBEDDING_DIMENSIONS, EmbeddingBatch  # noqa: E402
+from knowledge_agent import (  # noqa: E402
+    EMBEDDING_DIMENSIONS,
+    EmbeddingBatch,
+    WordPressProbeResult,
+)
 
 
 class FakeEmbeddingProvider:
@@ -57,6 +62,59 @@ class DisabledKnowledgeHttpTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Knowledge Agent is disabled.")
+
+
+class FakeWordPressSync:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def probe(self, site_url: str) -> WordPressProbeResult:
+        self.calls.append(site_url)
+        return WordPressProbeResult(
+            site_url="https://example.com",
+            detected=True,
+            rest_api_url="https://example.com/wp-json/",
+            namespaces=("wp/v2",),
+            route_count=7,
+            reason="WordPress REST index exposes the wp/v2 namespace or routes.",
+        )
+
+
+class WordPressHttpContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sync = FakeWordPressSync()
+        app = FastAPI()
+        app.state.knowledge_agent_runtime = SimpleNamespace(
+            wordpress_sync=self.sync
+        )
+        app.include_router(router)
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        self.client.close()
+
+    def test_probe_returns_detection_evidence_without_exposing_credentials(self) -> None:
+        response = self.client.post(
+            "/api/knowledge/www.example.com/wordpress/probe",
+            json={"site_url": "https://example.com"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["project_id"], "example.com")
+        self.assertTrue(payload["detected"])
+        self.assertEqual(payload["namespaces"], ["wp/v2"])
+        self.assertEqual(self.sync.calls, ["https://example.com"])
+        self.assertNotIn("api_key", response.text.casefold())
+
+    def test_probe_rejects_cross_project_site_before_network_call(self) -> None:
+        response = self.client.post(
+            "/api/knowledge/example.com/wordpress/probe",
+            json={"site_url": "https://other.test"},
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.sync.calls, [])
 
 
 @unittest.skipUnless(

@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .artifact_store import ArtifactStoreError
+from .assets import KnowledgeAssetRepositoryError
 from .catalog import (
     KnowledgeProduct,
     ProductCatalogRepositoryError,
@@ -30,6 +31,12 @@ from .library import KnowledgeSourceSummary
 from .repository import KnowledgeRepositoryError
 from .publication import KnowledgePublicationError
 from .runtime import KnowledgeAgentRuntime
+from .wordpress import (
+    OfficialSiteFetchError,
+    UnsafeOfficialSiteUrl,
+    WordPressIngestionError,
+    same_official_site,
+)
 
 
 MAX_KNOWLEDGE_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -129,6 +136,47 @@ class KnowledgePublicationResponse(KnowledgeApiModel):
     chunk_count: int
 
 
+class WordPressProbeRequest(KnowledgeApiModel):
+    site_url: str | None = Field(default=None, max_length=2048)
+
+
+class WordPressProbeResponse(KnowledgeApiModel):
+    project_id: str
+    site_url: str
+    detected: bool
+    rest_api_url: str | None
+    namespaces: list[str]
+    route_count: int
+    reason: str
+    probe_version: str
+
+
+class WordPressSyncRequest(KnowledgeApiModel):
+    category_url: str = Field(min_length=1, max_length=4096)
+    site_url: str | None = Field(default=None, max_length=2048)
+    max_products: int = Field(default=12, ge=1, le=50)
+
+
+class WordPressSyncedPageResponse(KnowledgeApiModel):
+    source_id: str
+    snapshot_id: str
+    page_type: str
+    canonical_url: str
+    status: str
+    product_id: str | None
+    asset_count: int
+    warnings: list[str]
+
+
+class WordPressSyncResponse(KnowledgeApiModel):
+    project_id: str
+    wordpress_detected: bool
+    category: WordPressSyncedPageResponse
+    products: list[WordPressSyncedPageResponse]
+    skipped_urls: list[str]
+    warnings: list[str]
+
+
 def _runtime(request: Request) -> KnowledgeAgentRuntime:
     runtime = getattr(request.app.state, "knowledge_agent_runtime", None)
     if runtime is None:
@@ -189,7 +237,108 @@ def _product_response(item: KnowledgeProduct) -> KnowledgeProductResponse:
     )
 
 
+def _official_site_for_project(project_id: str, requested: str | None) -> str:
+    site_url = (requested or "").strip() or f"https://{project_id}"
+    if not same_official_site(f"https://{project_id}", site_url):
+        raise HTTPException(
+            status_code=422,
+            detail="site_url must belong to the requested project domain.",
+        )
+    return site_url
+
+
+def _synced_page_response(item) -> WordPressSyncedPageResponse:
+    return WordPressSyncedPageResponse(
+        source_id=item.source.source_id,
+        snapshot_id=item.snapshot.snapshot_id,
+        page_type=item.classification.page_type,
+        canonical_url=item.classification.canonical_url,
+        status=item.source.status,
+        product_id=(None if item.product is None else item.product.product_id),
+        asset_count=len(item.assets),
+        warnings=list(item.warnings),
+    )
+
+
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge-agent"])
+
+
+@router.post(
+    "/{project}/wordpress/probe",
+    response_model=WordPressProbeResponse,
+)
+def probe_wordpress_site(
+    project: str,
+    payload: WordPressProbeRequest,
+    request: Request,
+) -> WordPressProbeResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    site_url = _official_site_for_project(project_id, payload.site_url)
+    try:
+        result = runtime.wordpress_sync.probe(site_url)
+    except (UnsafeOfficialSiteUrl, WordPressIngestionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return WordPressProbeResponse(
+        project_id=project_id,
+        site_url=result.site_url,
+        detected=result.detected,
+        rest_api_url=result.rest_api_url,
+        namespaces=list(result.namespaces),
+        route_count=result.route_count,
+        reason=result.reason,
+        probe_version=result.probe_version,
+    )
+
+
+@router.post(
+    "/{project}/wordpress/sync",
+    response_model=WordPressSyncResponse,
+    status_code=201,
+)
+def sync_wordpress_category(
+    project: str,
+    payload: WordPressSyncRequest,
+    request: Request,
+) -> WordPressSyncResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    site_url = _official_site_for_project(project_id, payload.site_url)
+    try:
+        runtime.repository.upsert_project(
+            KnowledgeProject(
+                project_id=project_id,
+                customer_name=project,
+                official_domain=project_id,
+            )
+        )
+        result = runtime.wordpress_sync.sync_category(
+            project_id=project_id,
+            site_url=site_url,
+            category_url=payload.category_url,
+            max_products=payload.max_products,
+        )
+    except UnsafeOfficialSiteUrl as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OfficialSiteFetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (WordPressIngestionError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (
+        KnowledgeRepositoryError,
+        KnowledgeAssetRepositoryError,
+        ProductCatalogRepositoryError,
+        ArtifactStoreError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return WordPressSyncResponse(
+        project_id=project_id,
+        wordpress_detected=result.probe.detected,
+        category=_synced_page_response(result.category),
+        products=[_synced_page_response(item) for item in result.products],
+        skipped_urls=list(result.skipped_urls),
+        warnings=list(result.warnings),
+    )
 
 
 @router.get("/{project}", response_model=KnowledgeLibraryResponse)
