@@ -176,9 +176,10 @@ Snapshot Asset 与 Task `*_asset_id` 三类引用都在当前 Schema 中。
 4. 再开放流量，并公告所有旧 v1 Cookie 需要重新登录。
 
 旧实例不认识 v2 Cookie，新实例也有意拒绝 v1 Cookie；不得在新旧实例同时接收用户流量时
-开始签发 v2。当前全会话撤销只有
-`PostgresActorSessionRevocationService` 服务边界，尚无成员管理 HTTP/UI，不能把代码
-服务描述成运维自助入口。
+开始签发 v2。全会话撤销命令为
+`POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke`，Body 必须是
+空 JSON 对象。命令不接受版本、角色或目标 Organization 字段，成功响应也不返回内部版本。
+当前尚无成员管理 UI，因此不能描述成完整的管理员控制台。
 
 撤销动作必须由同 Organization 的 Active Org Admin 发起，并验证版本递增与
 `workspace_user.sessions.revoked` Audit 同事务。跨组织目标、非 Admin、目标不存在或

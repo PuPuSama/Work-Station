@@ -155,7 +155,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 554 tests；
+- 556 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -503,7 +503,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 37 tests，使用真实 PostgreSQL 和确定性 OIDC/Session 依赖；
+- 39 tests，使用真实 PostgreSQL 和确定性 OIDC/Session 依赖；
 - v2 Cookie 只保存 Organization/User、时间和正整数 Session Version，不保存 Role、
   Permission、Email、Group 或外部 Token；
 - 当前版本 Cookie 可用；Org Admin 递增版本后旧 Cookie 立即失效，新版本 Cookie 可用；
@@ -512,7 +512,11 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 跨 Organization、普通 Member 和不存在目标的全会话撤销统一拒绝；
 - Session Version 更新与真实 PostgreSQL Audit 在同一事务可见；事务回滚后二者均消失；
 - 注入 Audit 故障会回滚版本，公开异常不包含底层 Secret 正文；
-- 数据库 CHECK 拒绝零或负数 Session Version。
+- 数据库 CHECK 拒绝零或负数 Session Version；
+- Org Admin HTTP 命令只接受路径 Organization/User 与空 Body；传入
+  `session_version` 返回 422，成功响应不回传内部版本；
+- 非 Admin、跨 Organization 与缺失目标统一 403；旧 Cookie 在撤销后访问 Project
+  Directory 返回 401；
 
 ### Server Request Security 与 Knowledge Router
 
@@ -670,7 +674,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 ## 当前未验证或未接入
 
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
-  已接入；Session Version 校验与 Org Admin 撤销事务服务已完成，但成员管理 HTTP/UI、
+  已接入；Session Version 校验与 Org Admin 撤销 HTTP/事务服务已完成，但成员管理 UI、
   具体生产 Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、

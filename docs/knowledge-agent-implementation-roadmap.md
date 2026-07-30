@@ -119,7 +119,8 @@
   ProjectMembership Service；
 - 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
   写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
-  Org Admin 的全会话撤销服务递增版本并与安全 Audit 同事务，但成员管理 HTTP/UI 尚未接入；
+  Org Admin 的 Organization-scoped HTTP 命令递增目标版本并与安全 Audit 同事务，请求
+  不接受版本或角色字段；前端成员管理尚未接入；
 - 已实现项目级 PostgreSQL Task Repository、SQLite Task 摘要校验导入、
   Revision CAS 和带 SKIP LOCKED/Worker Lease 的 PostgreSQL Job Queue；
 - 已实现 Active Job 排空门和 SQLite Terminal Job 历史迁移，按稳定 ID、

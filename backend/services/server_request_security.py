@@ -102,6 +102,16 @@ def server_http_route_available(method: str, path: str) -> bool:
         return True
     parts = normalized_path.rstrip("/").split("/")
     if (
+        normalized_method == "POST"
+        and len(parts) == 8
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "users"
+        and bool(parts[5])
+        and parts[6:8] == ["sessions", "revoke"]
+    ):
+        return True
+    if (
         normalized_method == "GET"
         and len(parts) in {5, 6}
         and parts[1:3] == ["api", "projects"]

@@ -126,6 +126,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 `PostgresActorSessionRevocationService`：只允许当前 Organization 的 Active
   Org Admin 递增目标 User 版本，并与 `workspace_user.sessions.revoked` Audit 同事务；
   审计失败同时回滚版本。
+- 新增 Organization-scoped 全会话撤销 HTTP 命令：路径固定 Organization/User，Body
+  必须是空对象；Actor、Organization、当前版本和 Org Admin 权限全部来自 Cookie 与
+  PostgreSQL，响应不返回内部版本。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -150,7 +153,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
 - 不猜测或内置 Auth0、Keycloak、Entra ID 等具体供应商；正式 Provider 注册、生产
   Redirect URI、租户策略和 Conformance 冒烟仍需部署环境确认；
-- 尚未提供 Actor Session 撤销的 HTTP/UI 管理入口；版本校验与事务服务已经实现；
+- 尚未提供 Actor Session 撤销的前端成员管理界面；HTTP 命令与事务服务已经实现；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
@@ -349,6 +352,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口，不启动 Local Job Center 或设置导航 |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
+| `backend/server_admin_http.py` | Organization-scoped Actor Session 撤销 API | 只接受空 Body、Cookie Actor 与路径 Organization 一致、统一 401/403/503、安全响应 |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
@@ -463,9 +467,11 @@ Project 权限查询。
 
 `PostgresActorSessionRevocationService` 锁定 Active Org Admin 与目标 User，递增版本并在
 同一个 PostgreSQL 事务追加 `workspace_user.sessions.revoked`。跨 Organization、非 Admin、
-目标不存在统一拒绝；Audit 失败回滚版本且不回显底层异常。当前只提供可组合服务层，
-尚未接成员管理 HTTP/UI。Token 格式从 v1 升为 v2；新代码有意拒绝旧 Cookie，所以首次
-部署必须在无流量窗口完成旧实例排空并要求重新登录。
+目标不存在统一拒绝；Audit 失败回滚版本且不回显底层异常。
+`POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke` 只接受空 JSON
+对象，拒绝客户端传入版本、角色或目标 Organization 事实；成功只返回目标 User ID 与
+`revoked=true`。当前尚未接前端成员管理 UI。Token 格式从 v1 升为 v2；新代码有意拒绝
+旧 Cookie，所以首次部署必须在无流量窗口完成旧实例排空并要求重新登录。
 
 Identity Link/Revoke 只允许当前 Organization 的 Active `org_admin`，并与
 append-only Audit Event 同事务。审计 `target_id` 使用 `issuer + subject` 的 SHA-256，
@@ -473,7 +479,7 @@ Details 只保留 Issuer 和目标本地 User，不写入原始 Subject。
 
 OIDC/JWKS、Callback、State/Nonce、PKCE 和登录 UI 已实现，因此代码能力
 `trusted_identity_source=true`。仍未完成的是具体生产 Provider 注册与 Conformance
-冒烟、Client Secret 托管/轮换证据，以及 Session 撤销管理入口；Preflight 会实时探测
+冒烟、Client Secret 托管/轮换证据，以及成员管理 UI；Preflight 会实时探测
 Discovery/JWKS，任一环境证据缺失时整体仍为 no-go。
 
 请求授权链为：
@@ -1047,3 +1053,5 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     Organization/User 与版本？
 33. 全会话撤销是否仍要求 Active Org Admin、锁定同 Organization 目标，并与
     `workspace_user.sessions.revoked` Audit 同事务？
+34. Session 撤销 HTTP 是否仍只接受路径 Organization/User 与空 Body，并拒绝客户端
+    提供版本、角色或跨 Organization 目标？

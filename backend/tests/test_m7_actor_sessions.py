@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import sqlalchemy as sa
+from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 
@@ -27,7 +28,13 @@ from services.actor_sessions import (  # noqa: E402
     PostgresActorSessionRepository,
     PostgresActorSessionRevocationService,
 )
-from services.server_auth import ServerActorSessionCodec  # noqa: E402
+from services.server_auth import (  # noqa: E402
+    SERVER_AUTH_COOKIE_NAME,
+    ServerActorSessionCodec,
+)
+from services.server_request_security import (  # noqa: E402
+    ServerRequestSecurity,
+)
 
 
 SECRET_ERROR = "provider-secret-session-revocation-body"
@@ -253,6 +260,168 @@ class ActorSessionPostgresTests(unittest.TestCase):
                     )
                     .values(session_version=0)
                 )
+
+    def test_org_admin_http_revokes_without_accepting_version_input(
+        self,
+    ) -> None:
+        import app as app_module
+
+        old_member_token = self.codec.create(
+            ActorIdentity(self.org_a, self.member_a),
+            session_version=1,
+        )
+        audit = RecordingAuditWriter()
+        previous_mode = getattr(
+            app_module.app.state,
+            "server_mode_enabled",
+            None,
+        )
+        previous_security = getattr(
+            app_module.app.state,
+            "server_request_security",
+            None,
+        )
+        previous_revocation = getattr(
+            app_module.app.state,
+            "server_actor_session_revocation",
+            None,
+        )
+        app_module.app.state.server_mode_enabled = True
+        app_module.app.state.server_request_security = ServerRequestSecurity(
+            codec=self.codec,
+            access=object(),  # type: ignore[arg-type]
+            sessions=PostgresActorSessionRepository(self.engine),
+        )
+        app_module.app.state.server_actor_session_revocation = (
+            PostgresActorSessionRevocationService(
+                self.engine,
+                audit=audit,
+            )
+        )
+        client = TestClient(app_module.app)
+        try:
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self.codec.create(
+                    ActorIdentity(self.org_a, self.admin_a),
+                    session_version=1,
+                ),
+            )
+            path = (
+                f"/api/organizations/{self.org_a}/users/"
+                f"{self.member_a}/sessions/revoke"
+            )
+            rejected = client.post(
+                path,
+                json={"session_version": 99},
+            )
+            self.assertEqual(rejected.status_code, 422)
+            self.assertEqual(self._version(self.org_a, self.member_a), 1)
+
+            response = client.post(path, json={})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                response.json(),
+                {"user_id": self.member_a, "revoked": True},
+            )
+            self.assertEqual(self._version(self.org_a, self.member_a), 2)
+            self.assertEqual(len(audit.events), 1)
+
+            cross_org = client.post(
+                (
+                    f"/api/organizations/{self.org_b}/users/"
+                    f"{self.member_b}/sessions/revoke"
+                ),
+                json={},
+            )
+            self.assertEqual(cross_org.status_code, 403)
+            self.assertEqual(self._version(self.org_b, self.member_b), 1)
+
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                old_member_token,
+            )
+            self.assertEqual(client.get("/api/projects").status_code, 401)
+
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self.codec.create(
+                    ActorIdentity(self.org_a, self.member_a),
+                    session_version=2,
+                ),
+            )
+            denied = client.post(
+                (
+                    f"/api/organizations/{self.org_a}/users/"
+                    f"{self.admin_a}/sessions/revoke"
+                ),
+                json={},
+            )
+            self.assertEqual(denied.status_code, 403)
+        finally:
+            client.close()
+            app_module.app.state.server_mode_enabled = previous_mode
+            app_module.app.state.server_request_security = previous_security
+            app_module.app.state.server_actor_session_revocation = (
+                previous_revocation
+            )
+
+    def test_http_audit_failure_rolls_back_and_redacts_error(self) -> None:
+        import app as app_module
+
+        previous_mode = getattr(
+            app_module.app.state,
+            "server_mode_enabled",
+            None,
+        )
+        previous_security = getattr(
+            app_module.app.state,
+            "server_request_security",
+            None,
+        )
+        previous_revocation = getattr(
+            app_module.app.state,
+            "server_actor_session_revocation",
+            None,
+        )
+        app_module.app.state.server_mode_enabled = True
+        app_module.app.state.server_request_security = ServerRequestSecurity(
+            codec=self.codec,
+            access=object(),  # type: ignore[arg-type]
+            sessions=PostgresActorSessionRepository(self.engine),
+        )
+        app_module.app.state.server_actor_session_revocation = (
+            PostgresActorSessionRevocationService(
+                self.engine,
+                audit=FailingAuditWriter(),
+            )
+        )
+        client = TestClient(app_module.app)
+        try:
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self.codec.create(
+                    ActorIdentity(self.org_a, self.admin_a),
+                    session_version=1,
+                ),
+            )
+            response = client.post(
+                (
+                    f"/api/organizations/{self.org_a}/users/"
+                    f"{self.member_a}/sessions/revoke"
+                ),
+                json={},
+            )
+            self.assertEqual(response.status_code, 503)
+            self.assertNotIn(SECRET_ERROR, response.text)
+            self.assertEqual(self._version(self.org_a, self.member_a), 1)
+        finally:
+            client.close()
+            app_module.app.state.server_mode_enabled = previous_mode
+            app_module.app.state.server_request_security = previous_security
+            app_module.app.state.server_actor_session_revocation = (
+                previous_revocation
+            )
 
 
 if __name__ == "__main__":

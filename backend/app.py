@@ -170,7 +170,10 @@ from services.access_control import (
     PostgresProjectAccessRepository,
     ProjectAccessService,
 )
-from services.actor_sessions import PostgresActorSessionRepository
+from services.actor_sessions import (
+    PostgresActorSessionRepository,
+    PostgresActorSessionRevocationService,
+)
 from services.external_identity import (
     ExternalIdentityNotAuthorized,
     PostgresExternalIdentityRepository,
@@ -259,6 +262,7 @@ from knowledge_agent.research_graph import ResearchGraphRequest
 from knowledge_agent.research_runs import ResearchRunConflictError
 from knowledge_agent.settings import load_knowledge_agent_settings
 from server_project_http import router as server_project_router
+from server_admin_http import router as server_admin_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -309,6 +313,11 @@ async def app_lifespan(application: FastAPI):
         "server_oidc_login",
         None,
     )
+    previous_server_actor_session_revocation = getattr(
+        application.state,
+        "server_actor_session_revocation",
+        None,
+    )
     server_product_rediscovery = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
@@ -320,6 +329,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
     application.state.server_oidc_login = None
+    application.state.server_actor_session_revocation = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -339,6 +349,9 @@ async def app_lifespan(application: FastAPI):
             PostgresProjectAccessRepository(server_engine)
         )
         server_actor_sessions = PostgresActorSessionRepository(server_engine)
+        application.state.server_actor_session_revocation = (
+            PostgresActorSessionRevocationService(server_engine)
+        )
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
             access=server_access,
@@ -468,6 +481,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_oidc_login = (
                 previous_server_oidc_login
+            )
+            application.state.server_actor_session_revocation = (
+                previous_server_actor_session_revocation
             )
             if shutdown_error is not None:
                 raise shutdown_error
@@ -662,6 +678,9 @@ async def app_lifespan(application: FastAPI):
             previous_server_product_rediscovery
         )
         application.state.server_oidc_login = previous_server_oidc_login
+        application.state.server_actor_session_revocation = (
+            previous_server_actor_session_revocation
+        )
 
 
 app = FastAPI(
@@ -671,6 +690,7 @@ app = FastAPI(
 )
 app.include_router(knowledge_agent_router)
 app.include_router(server_project_router)
+app.include_router(server_admin_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
