@@ -75,7 +75,16 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Organization/Project Key 前缀，并签发最长一小时的临时 URL；
 - Alembic `20260730_0010` 的供应商无关 External Identity 映射；
 - 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
-- Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke。
+- Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke；
+- 固定 PyJWT 2.13.0 的供应商无关 OIDC Discovery/JWKS 验签边界，只允许 RS256，
+  强制精确 Issuer、单一 Client Audience、有效期、签发时间、Nonce 和 Subject；
+- `GET /api/auth/oidc/start` 与 `/api/auth/oidc/callback` 使用 Authorization Code +
+  PKCE、短期 HMAC State Cookie 和本地 Redirect Path，成功后只签发
+  Organization/User Actor Session；
+- 登录页先读取 `/api/auth/status`：Server Mode 只显示组织身份登录，本地模式才显示
+  旧密码表单；状态读取失败时不降级为密码登录；
+- Deployment Preflight 新增 OIDC 完整配置与实时 Discovery/JWKS 探测，
+  `trusted_identity_source=true` 只表示代码信任链已接通，不表示生产 IdP 已完成验收。
 - Alembic `20260730_0011` 为新 PostgreSQL Job 增加同 Organization 复合外键约束的
   `requested_by_user_id`；旧 SQLite 历史迁移时允许为空；
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
@@ -94,7 +103,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 当前明确未做：
 
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
-- 不开放正式外部身份登录；现有 `app.py` 只接入服务器请求安全底座；
+- 不猜测或内置 Auth0、Keycloak、Entra ID 等具体供应商；正式 Provider 注册、生产
+  Redirect URI、租户策略和 Conformance 冒烟仍需部署环境确认；
+- 尚未实现 Actor Session 撤销/version；已签发的短期 Session 仍到期失效；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
@@ -247,7 +258,10 @@ with engine.begin() as connection:
 | `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、独立 Secret、默认不开启 |
 | `backend/services/external_identity.py` | 已验证外部身份到本地 Actor 的解析与 Session Exchange | 不接受原始 Token、不信任外部 Role、禁用/暂停/撤销立即失效 |
 | `backend/services/external_identity_provisioning.py` | External Identity Link/Revoke | Org Admin、Subject 哈希审计目标、业务写入与审计同事务 |
+| `backend/services/oidc_identity.py` | OIDC 配置、Discovery/JWKS、Code Exchange 和 ID Token 验证 | 固定 RS256、精确 Issuer/Audience、Nonce/时间门禁、未知 Kid 刷新、错误不泄露 Secret |
+| `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
+| `frontend/src/app/login/page.tsx` | 本地密码/Server OIDC 登录入口选择 | 以服务端状态为准、失败不降级、Next Path 只能是本地路径 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先认证再查数据库 Role、项目规范化、未迁移路由 fail closed |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
@@ -276,6 +290,7 @@ with engine.begin() as connection:
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
 | `backend/tests/test_m7_server_request_security.py` | 请求授权和真实 Lifespan 接线测试 | 旧 API 阻断、Knowledge 全局依赖、权限语义、本地兼容 |
 | `backend/tests/test_m7_external_identity.py` | Identity 映射、交换与 PostgreSQL 集成测试 | HTTPS Issuer、跨组织拒绝、状态失效、Link/Revoke 审计 |
+| `backend/tests/test_m7_oidc_identity.py` | OIDC/JWKS 与浏览器登录流测试 | RSA 签名、Claim/Nonce/PKCE/State、Kid 轮换、重放/开放重定向拒绝、Secret 不泄露 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
@@ -296,25 +311,42 @@ with engine.begin() as connection:
    返回 503，不会退回本地全局数据；
 5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run
    Start/Resume 和原始对象打开，在 Server Mode 单独返回 503；
-6. Project Directory、Task 列表/单条读取和完全重写已新增显式 Actor/Project
-   Scope；继续给 Project 管理写入、其他文章写入、
-   Batch、对象下载和 Worker 增加 Scope 与权限依赖；
-7. 全部项目级入口覆盖前，不开放服务器登录；
+6. Project Directory、Task 列表/单条读取和确定性受限操作已新增显式 Actor/Project
+   Scope；继续给 Project 管理写入、其他文章写入和通用 Batch/Worker 增加权限依赖；
+7. OIDC 登录只在四项 Provider 配置完整时开放，缺项或实时 Discovery/JWKS 失败均
+   fail closed；
 8. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
 
-上面的最后两项仍是硬门禁。`/api/auth/login` 在 Server Mode 明确返回 503，
-因为当前没有正式 IdP；它绝不使用 `APP_PASSWORD` 签发 Actor。`/api/auth/status`
-只报告模式和当前 Cookie 是否可解析，不返回 Organization/User/Role。
+`/api/auth/login` 在 Server Mode 仍明确返回 503，绝不使用 `APP_PASSWORD` 签发
+Actor。标准入口是 `/api/auth/oidc/start` 与 `/api/auth/oidc/callback`；
+`/api/auth/status` 只报告模式、是否已认证和登录是否可用，不返回
+Organization/User/Role。
 
 外部身份边界为：
 
 ```text
-未来 OIDC/JWKS Adapter 验证原始 Token
+OIDC Discovery 精确匹配配置 Issuer
+  -> Authorization Code + PKCE + HMAC State/Nonce
+  -> Token Endpoint(client_secret_basic)
+  -> RS256 JWKS 签名与 Issuer/Audience/exp/iat/nonce 验证
   -> VerifiedExternalIdentity(issuer, subject)
   -> PostgresExternalIdentityRepository
   -> ActorIdentity(organization_id, user_id)
   -> ServerActorSessionCodec
 ```
+
+`OidcProviderClient` 缓存 Discovery/JWKS；遇到未知 `kid` 时只强制刷新一次，以覆盖
+Provider 正常签名 Key 轮换。Discovery 返回的 Issuer 必须与配置精确相同，远程 URL
+必须使用 HTTPS；Token 只接受单一 Client Audience，未配置额外可信 Audience 时拒绝
+多 Audience。Provider 正文、ID Token、Code、Client Secret 和 JWKS 错误都不进入公开
+错误或 Preflight 报告。
+
+State Cookie 使用 Server Session Secret 派生的独立 HMAC 域，保存短期 State、Nonce、
+PKCE Verifier 和签名后的本地 Redirect Path；Cookie 为 HttpOnly/SameSite=Lax，并在
+Callback 成功或失败后删除。生产反向代理必须让前端与 `/api/auth/*` 处于同一站点，
+Provider 中注册的 Redirect URI 必须与配置精确一致。
+Provider 返回 `error`、缺失 Code/State 或超长参数时，Callback 不回显 Provider 的
+错误说明，统一返回登录失败并立即删除 State Cookie。
 
 `ExternalActorSessionService` 不接收原始 Bearer Token，也不解析 Email、Group 或 Role；
 这些外部 Claims 不能直接变成权限。Mapping、Organization 和 Workspace User 必须同时
@@ -325,8 +357,10 @@ Identity Link/Revoke 只允许当前 Organization 的 Active `org_admin`，并�
 append-only Audit Event 同事务。审计 `target_id` 使用 `issuer + subject` 的 SHA-256，
 Details 只保留 Issuer 和目标本地 User，不写入原始 Subject。
 
-尚未实现具体 OIDC Discovery/JWKS 验签、Authorization Code/PKCE Callback、State/Nonce
-校验和登录 UI。因此 `trusted_identity_source` Preflight 仍保持 false。
+OIDC/JWKS、Callback、State/Nonce、PKCE 和登录 UI 已实现，因此代码能力
+`trusted_identity_source=true`。仍未完成的是具体生产 Provider 注册与 Conformance
+冒烟、Client Secret 托管/轮换证据和 Actor Session 撤销/version；Preflight 会实时探测
+Discovery/JWKS，任一环境证据缺失时整体仍为 no-go。
 
 请求授权链为：
 
@@ -559,8 +593,9 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份、全部项目写路由、Task/Job 单写和 Worker 重新授权尚未接线，所以整体仍明确保持
-no-go；不能靠设置一个环境变量把未实现能力标成通过。
+正式身份代码链和私有下载已接线；全部项目写路由、Task/Job 单写和通用 Worker
+重新授权仍未接线，所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力
+标成通过。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
 `docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、

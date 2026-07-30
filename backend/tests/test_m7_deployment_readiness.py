@@ -20,11 +20,20 @@ from services.deployment_readiness import (  # noqa: E402
     run_deployment_preflight,
 )
 from services.object_store import ObjectStoreError  # noqa: E402
+from services.oidc_identity import (  # noqa: E402
+    OidcProviderUnavailable,
+)
 
 
 COMPLETE_ENVIRONMENT = {
     "ARTICLE_AGENT_SERVER_MODE": "true",
     "ARTICLE_AGENT_SERVER_SESSION_SECRET": "s" * 32,
+    "ARTICLE_AGENT_OIDC_ISSUER": "https://identity.test/tenant",
+    "ARTICLE_AGENT_OIDC_CLIENT_ID": "article-agent",
+    "ARTICLE_AGENT_OIDC_CLIENT_SECRET": "private-oidc-secret",
+    "ARTICLE_AGENT_OIDC_REDIRECT_URI": (
+        "https://app.test/api/auth/oidc/callback"
+    ),
     "ARTICLE_AGENT_DATABASE_URL": (
         "postgresql+psycopg://user:private-db-password@db.test/app"
     ),
@@ -60,6 +69,7 @@ class DeploymentReadinessTests(unittest.TestCase):
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
+            identity_provider_probe=lambda settings: None,
             capabilities=ServerCutoverCapabilities(
                 trusted_identity_source=True,
                 project_routes_scoped=True,
@@ -78,10 +88,14 @@ class DeploymentReadinessTests(unittest.TestCase):
             "private-embedding-key",
             "private-access-key",
             "private-object-secret",
+            "private-oidc-secret",
         ):
             self.assertNotIn(secret, public)
 
     def test_current_capabilities_and_missing_attestation_fail_closed(self) -> None:
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.trusted_identity_source
+        )
         self.assertTrue(
             CURRENT_SERVER_CUTOVER_CAPABILITIES.object_download_reauthorizes
         )
@@ -92,6 +106,7 @@ class DeploymentReadinessTests(unittest.TestCase):
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
+            identity_provider_probe=lambda settings: None,
         )
 
         self.assertFalse(report.ready)
@@ -99,7 +114,10 @@ class DeploymentReadinessTests(unittest.TestCase):
             check.check_id: check for check in report.checks
         }
         self.assertFalse(by_id["server_cutover"].passed)
-        self.assertIn("trusted_identity_source", by_id["server_cutover"].detail)
+        self.assertNotIn(
+            "trusted_identity_source",
+            by_id["server_cutover"].detail,
+        )
         self.assertFalse(by_id["backup_restore_drill"].passed)
 
     def test_probe_failures_and_configuration_errors_are_generic(self) -> None:
@@ -114,16 +132,23 @@ class DeploymentReadinessTests(unittest.TestCase):
                 "database URL contained private-db-password"
             )
 
+        def failed_identity_provider(settings):
+            raise OidcProviderUnavailable(
+                "provider included private-oidc-secret"
+            )
+
         report = run_deployment_preflight(
             environment=environment,
             database_probe=failed_database,
             object_store_factory=lambda settings: FakeFailedStore(),
+            identity_provider_probe=failed_identity_provider,
         )
         public = str(report.public_values())
 
         self.assertFalse(report.ready)
         self.assertNotIn("private-db-password", public)
         self.assertNotIn("private-object-secret", public)
+        self.assertNotIn("private-oidc-secret", public)
         self.assertIn("readiness probe failed", public)
 
     def test_wrong_schema_revision_blocks_deployment(self) -> None:
@@ -134,6 +159,7 @@ class DeploymentReadinessTests(unittest.TestCase):
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
+            identity_provider_probe=lambda settings: None,
             capabilities=ServerCutoverCapabilities(
                 True,
                 True,
@@ -163,6 +189,7 @@ class DeploymentReadinessTests(unittest.TestCase):
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
+            identity_provider_probe=lambda settings: None,
             capabilities=ServerCutoverCapabilities(
                 True,
                 True,

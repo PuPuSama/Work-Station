@@ -148,13 +148,15 @@
   Batch API/Runner、排空证明与事务内审计尚未完成，所以整体 Preflight 能力仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
-- Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以
-  登录入口仍保持关闭；
+- Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；已接通供应商无关 OIDC
+  Authorization Code + PKCE、Discovery/JWKS RS256 验签、State/Nonce 与登录页，
+  Provider 配置不完整或实时签名 Key 探测失败时 fail closed；
 - 已新增 External Identity 映射和审计化 Link/Revoke：外部 Issuer/Subject 只能映射
   到同 Organization 的 Workspace User，外部 Role 不进入 Session；
-- 当前单密码 Cookie 不具备 User Identity；`app.py` 已接入 Server Mode 请求安全
-  底座，但具体 OIDC/JWKS 验证与登录入口仍未实现；
-- 后续按“具体 IdP 验证与剩余 API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
+- 当前单密码 Cookie 不具备 User Identity；OIDC 只把已验证 Issuer/Subject 映射为本地
+  Actor，不信任外部 Email/Group/Role；`trusted_identity_source` 代码门禁已完成，
+  具体生产 IdP 注册与 Conformance 冒烟仍待部署环境；
+- 后续按“生产 IdP Conformance 与剩余 API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
   -> 服务器 PostgreSQL 单写切换
   -> 备份恢复与部署门禁”
   顺序推进，完整结构与重构检查清单见

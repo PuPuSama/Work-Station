@@ -11,6 +11,10 @@ from services.deployment_readiness import (
     run_deployment_preflight,
 )
 from services.object_store import S3ObjectStore
+from services.oidc_identity import (
+    OidcProviderClient,
+    OidcProviderSettings,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -48,10 +52,20 @@ def main() -> int:
         finally:
             engine.dispose()
 
+    def identity_provider_probe(
+        settings: OidcProviderSettings,
+    ) -> None:
+        provider = OidcProviderClient(settings)
+        try:
+            provider.check_ready()
+        finally:
+            provider.close()
+
     report = run_deployment_preflight(
         environment=environment,
         database_probe=database_probe,
         object_store_factory=S3ObjectStore,
+        identity_provider_probe=identity_provider_probe,
         backup_restore_drill_passed=(
             arguments.backup_restore_drill_passed
         ),

@@ -18,6 +18,11 @@ from services.object_store import (
     ObjectStoreError,
     S3ObjectStoreSettings,
 )
+from services.oidc_identity import (
+    OidcConfigurationError,
+    OidcProviderSettings,
+    OidcProviderUnavailable,
+)
 from services.server_auth import (
     ServerActorSessionError,
     load_server_actor_session_codec,
@@ -70,6 +75,7 @@ class ServerCutoverCapabilities:
 
 
 CURRENT_SERVER_CUTOVER_CAPABILITIES = ServerCutoverCapabilities(
+    trusted_identity_source=True,
     object_download_reauthorizes=True,
 )
 
@@ -142,6 +148,7 @@ def _configuration_checks(
     list[PreflightCheck],
     KnowledgeAgentSettings | None,
     S3ObjectStoreSettings | None,
+    OidcProviderSettings | None,
 ]:
     checks: list[PreflightCheck] = []
     try:
@@ -156,6 +163,25 @@ def _configuration_checks(
     except ServerActorSessionError:
         checks.append(
             PreflightCheck("server_mode", False, "invalid configuration")
+        )
+
+    oidc_settings: OidcProviderSettings | None = None
+    try:
+        oidc_settings = OidcProviderSettings.from_environment(
+            environment
+        )
+        checks.append(
+            PreflightCheck(
+                "oidc_config",
+                oidc_settings is not None,
+                "configured"
+                if oidc_settings is not None
+                else "not ready",
+            )
+        )
+    except OidcConfigurationError:
+        checks.append(
+            PreflightCheck("oidc_config", False, "not ready")
         )
 
     try:
@@ -213,7 +239,7 @@ def _configuration_checks(
         checks.append(
             PreflightCheck("object_store_transport", False, "not ready")
         )
-    return checks, knowledge_settings, object_settings
+    return checks, knowledge_settings, object_settings, oidc_settings
 
 
 def run_deployment_preflight(
@@ -221,14 +247,20 @@ def run_deployment_preflight(
     environment: Mapping[str, str],
     database_probe: DatabaseProbe,
     object_store_factory: Callable[[S3ObjectStoreSettings], ObjectStore],
+    identity_provider_probe: (
+        Callable[[OidcProviderSettings], None] | None
+    ) = None,
     capabilities: ServerCutoverCapabilities = CURRENT_SERVER_CUTOVER_CAPABILITIES,
     backup_restore_drill_passed: bool = False,
 ) -> DeploymentPreflightReport:
     """Run fail-closed checks without returning sensitive configuration."""
 
-    checks, knowledge_settings, object_settings = _configuration_checks(
-        environment
-    )
+    (
+        checks,
+        knowledge_settings,
+        object_settings,
+        oidc_settings,
+    ) = _configuration_checks(environment)
 
     if knowledge_settings is not None:
         try:
@@ -250,6 +282,33 @@ def run_deployment_preflight(
     else:
         checks.append(
             PreflightCheck("database", False, "configuration unavailable")
+        )
+
+    if oidc_settings is not None and identity_provider_probe is not None:
+        try:
+            identity_provider_probe(oidc_settings)
+            checks.append(
+                PreflightCheck(
+                    "identity_provider",
+                    True,
+                    "metadata and signing keys reachable",
+                )
+            )
+        except OidcProviderUnavailable:
+            checks.append(
+                PreflightCheck(
+                    "identity_provider",
+                    False,
+                    "readiness probe failed",
+                )
+            )
+    else:
+        checks.append(
+            PreflightCheck(
+                "identity_provider",
+                False,
+                "configuration unavailable",
+            )
         )
 
     if object_settings is not None:

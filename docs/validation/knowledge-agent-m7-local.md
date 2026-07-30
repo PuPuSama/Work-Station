@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 501 tests；
+- 512 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -190,15 +190,43 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 
 - 6 tests（含真实 PostgreSQL Preflight Probe）；
 - 全部显式能力、数据库、S3 和恢复演练证明齐全时才返回 ready；
-- 当前缺少正式身份、路由 Scope、Task/Job 单写或 Worker 授权时 fail closed；
+- 当前缺少剩余路由 Scope、Task/Job 单写或通用 Worker 授权时 fail closed；
+- `trusted_identity_source` 已由真实 OIDC/JWKS/PKCE/State/Nonce 登录链支撑为 true；
+- OIDC 配置不完整或实时 Discovery/JWKS 探测失败时 Preflight 单独 fail closed；
 - `object_download_reauthorizes` 已由真实 HTTP 路由与签名前二次授权支撑为 true，
   不再只是未接线的底层 Service；
 - Alembic 不是 `20260730_0011` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
-- 数据库 URL、Embedding Key、S3 Key/Secret 和供应商错误正文不进入公开报告。
+- 数据库 URL、Embedding Key、OIDC Client Secret、Token、S3 Key/Secret 和供应商
+  错误正文不进入公开报告。
 
 当前 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 的预期结果仍是 no-go。本文没有把
 Runbook 的存在描述成“备份已完成”；真实恢复证据、RPO/RTO 和生产供应商待外部环境。
+
+### OIDC/JWKS 身份登录
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_oidc_identity `
+  tests.test_m7_external_identity `
+  tests.test_m7_server_auth -v
+```
+
+结果：
+
+- 24 tests；
+- 供应商配置 all-or-nothing，远程 HTTP Issuer 与外部 Post-login Redirect 被拒绝；
+- Authorization Code + PKCE S256、HMAC State、Nonce 和本地 Next Path 端到端通过；
+- RSA/JWKS 签名、Issuer、单一 Audience、exp/iat、Nonce、Subject 与 `azp` 门禁通过；
+- HS256、错误 Claim、过期/篡改 State、Callback 重放和开放重定向 fail closed；
+- Provider 取消/拒绝授权只返回统一失败并删除 State Cookie，不回显错误说明；
+- 未知 `kid` 只强制刷新一次 JWKS，覆盖 Provider Signing Key 轮换；
+- Provider 错误正文、ID Token 与 Client Secret 不进入公开异常或 HTTP 响应；
+- 外部 Role/Group 不进入 `VerifiedExternalIdentity` 或 Actor Session；
+- Server Lifespan 只构建惰性 OIDC Client，启动与 `/api/auth/status` 不依赖外部网络；
+- 登录页 Server Mode 只显示组织身份按钮，本地模式保留密码，状态失败不降级；
+- 具体生产 Provider 的真实 Redirect 注册与 Conformance 冒烟尚未执行。
 
 ### Server Request Security 与 Knowledge Router
 
@@ -347,8 +375,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 ## 当前未验证或未接入
 
-- 已有 Actor Session Codec 和供应商无关 Identity Mapping，但具体 IdP Token 验证与
-  登录签发入口尚未接入；
+- Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
+  已接入；具体生产 Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”和“快照后替换一个已审阅章节”，但不代表
@@ -364,6 +392,6 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接和 no-go 部署门禁已实现；真实备份恢复演练
   与生产供应商尚未完成；
-- 本阶段未修改前端，因此没有新增 M7 前端验收项。
+- 前端登录页已新增 Server OIDC 分支并通过 lint/build；其余 M7 管理界面尚未接入。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

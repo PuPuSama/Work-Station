@@ -124,6 +124,35 @@ Inventory/版本水位。恢复时先保持应用离线，完成 URI 存在性�
 
 在实现双 Key 验签前，不做无感轮换承诺。
 
+### OIDC Provider 与 Client Secret
+
+以下配置必须一起注入，缺一项即关闭 Server 登录：
+
+```text
+ARTICLE_AGENT_OIDC_ISSUER
+ARTICLE_AGENT_OIDC_CLIENT_ID
+ARTICLE_AGENT_OIDC_CLIENT_SECRET
+ARTICLE_AGENT_OIDC_REDIRECT_URI
+ARTICLE_AGENT_OIDC_POST_LOGIN_PATH
+```
+
+Provider 注册的 Redirect URI 必须与配置逐字一致，并使用生产 HTTPS 域名。前端与
+`/api/auth/*` 必须经同一站点反向代理提供，`POST_LOGIN_PATH` 只能是 `/` 开头的站内
+路径。不要把 Client Secret、Authorization Code、ID Token、State Cookie 或签名下载
+URL 写入普通日志和发布证据。
+
+Client Secret 轮换：
+
+1. 在 Provider 创建新 Secret，保留旧 Secret；
+2. 用新 Secret 在隔离流量执行 Start -> Callback -> Actor Session 冒烟；
+3. 运行 Deployment Preflight，确认 `oidc_config` 与 `identity_provider` 通过；
+4. 滚动更新所有实例并观察登录错误率；
+5. 撤销旧 Secret，再次执行登录和 Preflight。
+
+Provider 的 RS256 Signing Key 由 JWKS 管理；应用遇到未知 `kid` 会刷新一次缓存。轮换
+演练必须验证新 Key 可登录、旧已签发 Actor Session 按本地 Session 策略继续或到期，
+不能把关闭签名校验当作应急回滚。
+
 ### S3 Access Key
 
 1. 创建权限相同的新 Key，不立即删除旧 Key；
@@ -148,6 +177,23 @@ KMS Key 轮换遵循供应商策略；先验证旧对象仍可解密。不得把
 7. 身份、项目 Scope、对象下载、Retriever、Task/Job 冒烟；
 8. 小流量开放；
 9. 观察期结束后才关闭旧服务器写路径。
+
+OIDC 身份冒烟必须从登录页触发，并至少验证：
+
+- `/api/auth/status` 在四项配置完整时返回 `mode=server` 与
+  `login_available=true`，但不返回 Organization/User/Role；
+- Start 重定向包含 Code Flow、`openid`、PKCE S256、State 和 Nonce；
+- Callback 验证精确 Issuer、单一 Client Audience、RS256 Signature、exp/iat、
+  Nonce 和本地 External Identity Mapping；
+- 错误 Audience/Issuer/Nonce、过期 Token、HS256、未知 Subject、篡改/过期 State、
+  重放 Code/State 和外部 Redirect 均 fail closed；
+- 在 Provider 页面取消/拒绝授权时，Callback 返回统一错误、删除 State Cookie，且不
+  回显 `error_description`；
+- Provider Signing Key 轮换后未知 `kid` 触发一次 JWKS 刷新并成功验证；
+- 登录成功后的 Cookie 只包含本地 Organization/User Actor，不包含外部 Role/Group；
+- 本地模式仍显示密码入口；Server Mode 状态请求失败时前端不降级显示密码表单；
+- Preflight 的 `oidc_config` 与实时 `identity_provider` 探测通过，公开输出不含 Client
+  Secret、Token、Provider 正文或 URL。
 
 对象下载冒烟必须通过
 `GET /api/projects/{project}/assets/{asset_id}/download`，验证 URL 过期时间不超过

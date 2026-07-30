@@ -12,9 +12,17 @@ from typing import Callable
 from urllib import parse
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
 import sqlalchemy as sa
@@ -162,6 +170,20 @@ from services.access_control import (
     PostgresProjectAccessRepository,
     ProjectAccessService,
 )
+from services.external_identity import (
+    ExternalIdentityNotAuthorized,
+    PostgresExternalIdentityRepository,
+)
+from services.oidc_identity import (
+    OidcProviderSettings,
+    OidcProviderUnavailable,
+    OidcVerificationError,
+)
+from services.oidc_login import (
+    OIDC_STATE_COOKIE_NAME,
+    OidcLoginService,
+    OidcLoginStateError,
+)
 from services.project_directory import PostgresProjectDirectory
 from services.server_auth import (
     SERVER_AUTH_COOKIE_NAME,
@@ -281,7 +303,13 @@ async def app_lifespan(application: FastAPI):
         "server_product_rediscovery",
         None,
     )
+    previous_server_oidc_login = getattr(
+        application.state,
+        "server_oidc_login",
+        None,
+    )
     server_product_rediscovery = None
+    server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.server_request_security = None
@@ -290,6 +318,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_object_service = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
+    application.state.server_oidc_login = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -312,6 +341,16 @@ async def app_lifespan(application: FastAPI):
             codec=codec,
             access=server_access,
         )
+        oidc_settings = OidcProviderSettings.from_environment()
+        if oidc_settings is not None:
+            server_oidc_login = OidcLoginService.create(
+                settings=oidc_settings,
+                identities=PostgresExternalIdentityRepository(
+                    server_engine
+                ),
+                codec=codec,
+            )
+            application.state.server_oidc_login = server_oidc_login
         application.state.server_project_task_store_factory = (
             ServerProjectTaskStoreFactory(server_engine, cfg)
         )
@@ -392,6 +431,8 @@ async def app_lifespan(application: FastAPI):
         finally:
             if server_product_rediscovery is not None:
                 server_product_rediscovery.stop()
+            if server_oidc_login is not None:
+                server_oidc_login.close()
             if knowledge_runtime is not None:
                 knowledge_runtime.close()
             if server_engine is not None:
@@ -416,6 +457,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_product_rediscovery = (
                 previous_server_product_rediscovery
+            )
+            application.state.server_oidc_login = (
+                previous_server_oidc_login
             )
         return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
@@ -582,6 +626,8 @@ async def app_lifespan(application: FastAPI):
         writing_runner.stop()
         if server_product_rediscovery is not None:
             server_product_rediscovery.stop()
+        if server_oidc_login is not None:
+            server_oidc_login.close()
         if knowledge_runtime is not None:
             knowledge_runtime.close()
         if server_engine is not None:
@@ -605,6 +651,7 @@ async def app_lifespan(application: FastAPI):
         application.state.server_product_rediscovery = (
             previous_server_product_rediscovery
         )
+        application.state.server_oidc_login = previous_server_oidc_login
 
 
 app = FastAPI(
@@ -626,6 +673,8 @@ _AUTH_PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/status",
+    "/api/auth/oidc/start",
+    "/api/auth/oidc/callback",
     "/api/health",
 }
 
@@ -715,7 +764,14 @@ def auth_status(request: Request) -> ApiMessage:
                 "enabled": True,
                 "authenticated": authenticated,
                 "mode": "server",
-                "login_available": False,
+                "login_available": isinstance(
+                    getattr(
+                        request.app.state,
+                        "server_oidc_login",
+                        None,
+                    ),
+                    OidcLoginService,
+                ),
             },
         )
     enabled = authentication_enabled()
@@ -760,6 +816,121 @@ def auth_login(request: Request, payload: AuthLoginRequest):
     return response
 
 
+def _server_oidc_login(request: Request) -> OidcLoginService:
+    if not request_server_mode(request):
+        raise HTTPException(
+            status_code=404,
+            detail="Server OIDC login is not available.",
+        )
+    service = getattr(request.app.state, "server_oidc_login", None)
+    if not isinstance(service, OidcLoginService):
+        raise HTTPException(
+            status_code=503,
+            detail="Server identity provider is not configured.",
+        )
+    return service
+
+
+def _oidc_failure(status_code: int) -> JSONResponse:
+    response = JSONResponse(
+        status_code=status_code,
+        content={"detail": "OIDC login failed."},
+    )
+    response.delete_cookie(
+        OIDC_STATE_COOKIE_NAME,
+        path="/api/auth/oidc",
+    )
+    return response
+
+
+@app.get("/api/auth/oidc/start")
+def oidc_login_start(request: Request) -> RedirectResponse:
+    service = _server_oidc_login(request)
+    try:
+        attempt = service.begin(
+            redirect_path=request.query_params.get("next")
+        )
+    except OidcLoginStateError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid login destination.",
+        ) from exc
+    except OidcProviderUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Identity provider is temporarily unavailable.",
+        ) from exc
+    response = RedirectResponse(
+        url=attempt.authorization_url,
+        status_code=307,
+    )
+    response.set_cookie(
+        key=OIDC_STATE_COOKIE_NAME,
+        value=attempt.state_cookie,
+        max_age=attempt.max_age,
+        httponly=True,
+        secure=auth_cookie_secure(request),
+        samesite="lax",
+        path="/api/auth/oidc",
+    )
+    return response
+
+
+@app.get("/api/auth/oidc/callback", response_model=None)
+def oidc_login_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse | JSONResponse:
+    service = _server_oidc_login(request)
+    if (
+        error is not None
+        or code is None
+        or not code.strip()
+        or len(code) > 4096
+        or state is None
+        or not state.strip()
+        or len(state) > 512
+    ):
+        return _oidc_failure(401)
+    try:
+        result = service.complete(
+            code=code,
+            state=state,
+            state_cookie=request.cookies.get(
+                OIDC_STATE_COOKIE_NAME,
+                "",
+            ),
+        )
+    except OidcProviderUnavailable:
+        return _oidc_failure(503)
+    except (
+        ExternalIdentityNotAuthorized,
+        OidcLoginStateError,
+        OidcVerificationError,
+    ):
+        return _oidc_failure(401)
+    response = RedirectResponse(
+        url=result.redirect_path,
+        status_code=303,
+    )
+    response.delete_cookie(
+        OIDC_STATE_COOKIE_NAME,
+        path="/api/auth/oidc",
+    )
+    response.set_cookie(
+        key=SERVER_AUTH_COOKIE_NAME,
+        value=result.actor_session,
+        max_age=service.settings.session_seconds,
+        httponly=True,
+        secure=auth_cookie_secure(request),
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
 @app.post("/api/auth/logout", response_model=ApiMessage)
 def auth_logout() -> JSONResponse:
     response = JSONResponse(
@@ -773,6 +944,10 @@ def auth_logout() -> JSONResponse:
     )
     response.delete_cookie(AUTH_COOKIE_NAME, path="/")
     response.delete_cookie(SERVER_AUTH_COOKIE_NAME, path="/")
+    response.delete_cookie(
+        OIDC_STATE_COOKIE_NAME,
+        path="/api/auth/oidc",
+    )
     return response
 
 

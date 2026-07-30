@@ -195,6 +195,24 @@ class ServerRequestSecurityTests(unittest.TestCase):
             )
         )
         self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/auth/oidc/start",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/auth/oidc/callback",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "POST",
+                "/api/auth/oidc/callback",
+            )
+        )
+        self.assertTrue(
             server_http_route_available("GET", "/api/health")
         )
         self.assertTrue(

@@ -2,6 +2,7 @@ fastapi==0.116.0
 uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 httpx==0.28.1
+PyJWT[crypto]==2.13.0
 PyYAML==6.0.2
 openpyxl==3.1.5
 python-docx==1.1.2
