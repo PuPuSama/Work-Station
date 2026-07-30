@@ -41,6 +41,7 @@ from services.project_memberships import (  # noqa: E402
     PostgresProjectMembershipService,
     ProjectMembershipTargetUnavailable,
 )
+from services.project_directory import PostgresProjectDirectory  # noqa: E402
 
 
 DATABASE_URL_ENV = "ARTICLE_AGENT_DATABASE_URL"
@@ -60,6 +61,7 @@ class M7AccessControlPostgresTests(unittest.TestCase):
         )
         cls.audit = PostgresAuditEventWriter()
         cls.memberships = PostgresProjectMembershipService(cls.engine)
+        cls.directory = PostgresProjectDirectory(cls.engine)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -290,6 +292,46 @@ class M7AccessControlPostgresTests(unittest.TestCase):
                     "^project access denied$",
                 ):
                     self.access.require(actor, project_id, "project.view")
+
+    def test_archived_project_fails_closed(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                projects.update()
+                .where(projects.c.project_id == self.project_a)
+                .values(status="archived")
+            )
+
+        decision = self.access.decide(
+            self._actor("admin"),
+            self.project_a,
+            "project.view",
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIsNone(decision.effective_role)
+
+    def test_project_directory_is_sql_scoped_and_uses_effective_roles(
+        self,
+    ) -> None:
+        cases = (
+            ("admin", ("org_admin",)),
+            ("lead", ("team_lead",)),
+            ("editor", ("editor",)),
+            ("viewer", ("viewer",)),
+            ("member", ()),
+        )
+        for key, roles in cases:
+            with self.subTest(key=key):
+                result = self.directory.list_for_actor(
+                    self._actor(key)
+                )
+                self.assertEqual(
+                    tuple(item.project_id for item in result),
+                    (self.project_a,) if roles else (),
+                )
+                self.assertEqual(
+                    tuple(item.effective_role for item in result),
+                    roles,
+                )
 
     def test_database_rejects_cross_organization_membership(self) -> None:
         connection = self.engine.connect()

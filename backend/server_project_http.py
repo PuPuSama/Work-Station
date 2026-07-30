@@ -3,6 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from models import TaskRecord
+from services.access_control import ActorIdentity
+from services.project_directory import (
+    AccessibleProject,
+    PostgresProjectDirectory,
+    ProjectDirectoryDenied,
+)
 from services.server_auth import SERVER_AUTH_COOKIE_NAME, server_mode_enabled
 from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_request_security import (
@@ -61,6 +67,59 @@ def require_server_project_access(
         ) from exc
 
 
+def require_server_actor(request: Request) -> ActorIdentity:
+    """Authenticate a server Actor before the SQL-scoped project listing."""
+
+    configured_mode = getattr(
+        request.app.state,
+        "server_mode_enabled",
+        None,
+    )
+    enabled = (
+        server_mode_enabled()
+        if configured_mode is None
+        else bool(configured_mode)
+    )
+    if not enabled:
+        raise HTTPException(
+            status_code=404,
+            detail="Server project API is not available in local mode.",
+        )
+    security = getattr(
+        request.app.state,
+        "server_request_security",
+        None,
+    )
+    if not isinstance(security, ServerRequestSecurity):
+        raise HTTPException(
+            status_code=503,
+            detail="Server security is not available.",
+        )
+    try:
+        return security.authenticate(
+            request.cookies.get(SERVER_AUTH_COOKIE_NAME, "")
+        )
+    except ServerRequestUnauthenticated as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required.",
+        ) from exc
+
+
+def _project_directory(request: Request) -> PostgresProjectDirectory:
+    directory = getattr(
+        request.app.state,
+        "server_project_directory",
+        None,
+    )
+    if not isinstance(directory, PostgresProjectDirectory):
+        raise HTTPException(
+            status_code=503,
+            detail="Server project directory is not available.",
+        )
+    return directory
+
+
 def _task_store(
     request: Request,
     authorized: AuthorizedProjectRequest,
@@ -82,6 +141,23 @@ router = APIRouter(
     prefix="/api/projects",
     tags=["server-project-tasks"],
 )
+
+
+@router.get(
+    "",
+    response_model=list[AccessibleProject],
+)
+def list_accessible_projects(
+    request: Request,
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> list[AccessibleProject]:
+    try:
+        return list(_project_directory(request).list_for_actor(actor))
+    except ProjectDirectoryDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
 
 
 @router.get(
@@ -129,6 +205,7 @@ def read_project_task(
 
 
 __all__ = [
+    "require_server_actor",
     "require_server_project_access",
     "router",
 ]

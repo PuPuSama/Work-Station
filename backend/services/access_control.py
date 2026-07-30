@@ -6,6 +6,7 @@ from typing import Literal, Protocol, TypeAlias, cast
 import sqlalchemy as sa
 from sqlalchemy.engine import Connection, Engine
 
+from knowledge_agent.schema import projects
 from server_schema import (
     organizations,
     project_memberships,
@@ -234,6 +235,11 @@ class PostgresProjectAccessRepository:
             )
             .select_from(
                 project_ownership.join(
+                    projects,
+                    projects.c.project_id
+                    == project_ownership.c.project_id,
+                )
+                .join(
                     organizations,
                     organizations.c.organization_id
                     == project_ownership.c.organization_id,
@@ -280,6 +286,7 @@ class PostgresProjectAccessRepository:
             .where(
                 project_ownership.c.project_id == normalized_project_id,
                 project_ownership.c.organization_id == actor.organization_id,
+                projects.c.status == "active",
                 organizations.c.status == "active",
                 workspace_users.c.status == "active",
             )

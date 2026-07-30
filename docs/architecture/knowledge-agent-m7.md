@@ -53,6 +53,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增只在 Server Mode 开放的
   `GET /api/projects/{project}/tasks[/{task_id}]`，请求先按 `project.view`
   重新授权，再读取固定 Organization/Project 的 PostgreSQL TaskStore；
+- 新增 `GET /api/projects` Project Directory：只在 SQL 中返回 Actor 可见的 Active
+  Project，并给出按既有优先级计算的 Effective Role；
 - Server Task 兼容适配器禁用 JSON/SQLite Legacy Import，构造时也不创建本地数据目录；
 - Alembic `20260730_0010` 的供应商无关 External Identity 映射；
 - 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
@@ -124,7 +126,7 @@ erDiagram
 2. Team、TeamMembership、ProjectMembership 都使用复合外键，不能把另一组织的 User 或 Project 拼进当前组织。
 3. `project_ownership.project_id` 唯一，一个 Project 同一时刻只能属于一个 Organization。
 4. `owning_team_id` 可空；空值表示组织拥有但暂未分配运营 Team。
-5. 禁用 User、暂停 Organization 和归档 Team 不再产生继承权限。
+5. 禁用 User、暂停 Organization、归档 Project 和归档 Team 不再产生访问权限。
 6. `audit_events` 的 Actor 与 Project 外键也带 `organization_id`。
 7. PostgreSQL Trigger 禁止更新或删除审计事件；保留和归档策略以后只能通过分区/受控运维设计，不允许业务代码改历史。
 8. External Identity 以 `(issuer, subject)` 全局唯一，并通过
@@ -221,6 +223,7 @@ with engine.begin() as connection:
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
 | `backend/server_project_http.py` | Server Mode 项目级 Task 只读 API | 路径必须含 Project、每次请求查数据库权限、跨项目只返回 403/404 |
+| `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
@@ -258,7 +261,8 @@ with engine.begin() as connection:
    返回 503，不会退回本地全局数据；
 5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run
    Start/Resume 和原始对象打开，在 Server Mode 单独返回 503；
-6. Task 列表和单条读取已新增显式 Project Scope；继续给 Project 管理、文章写入、
+6. Project Directory、Task 列表和单条读取已新增显式 Actor/Project Scope；继续给
+   Project 管理写入、文章写入、
    Batch、对象下载和 Worker 增加 Scope 与权限依赖；
 7. 全部项目级入口覆盖前，不开放服务器登录；
 8. 本地模式继续使用现有单密码入口，不把它映射成生产用户。

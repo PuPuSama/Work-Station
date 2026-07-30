@@ -90,6 +90,10 @@ def server_http_route_available(method: str, path: str) -> bool:
         "/api/auth/logout",
     }:
         return True
+    if normalized_method == "GET" and normalized_path.rstrip("/") == (
+        "/api/projects"
+    ):
+        return True
     parts = normalized_path.rstrip("/").split("/")
     if (
         normalized_method == "GET"

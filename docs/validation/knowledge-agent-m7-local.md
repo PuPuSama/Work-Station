@@ -28,13 +28,14 @@ Set-Location D:\Project\article\article-agent-formal\backend
 
 结果：
 
-- 20 tests；
+- 22 tests；
 - Actor Token 防篡改、过期、未来签发与 Secret 隔离；
 - Token 只保存 Organization/User，不保存 Role 或 Permission；
 - 纯权限矩阵通过；
 - 真实 PostgreSQL 跨组织访问拒绝；
 - 普通 Team Member 无隐式项目权限；
 - 禁用 User、未绑定旧 Project fail closed；
+- 归档 Project fail closed；
 - ProjectMembership 复合外键拒绝跨组织组合；
 - Audit Writer 在业务事务内追加；
 - Trigger 拒绝 Audit Event 更新和删除。
@@ -113,7 +114,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 487 tests；
+- 489 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -252,8 +253,12 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 - 9 tests；
 - 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
+- Project Directory 只返回 Actor 在当前 Organization 可见的 Active Project 和
+  Effective Role；普通 Team Member 不会看到同 Team Project；
 - Project A 的列表只返回 Project A 的 PostgreSQL Task；
 - 用 Project A 路径请求 Project B Task 返回 404，不跨 Scope 查找；
+- 归档 Project 从 Directory 消失且 Task 路由返回 403；禁用 User 的 Directory
+  请求返回 403；
 - 旧 `/api/tasks` 在 Server Mode 继续返回 503；
 - POST 等尚未迁移的写方法不进入 Server Project Task 白名单；
 - Local Mode 不增加这组服务器专用 API；

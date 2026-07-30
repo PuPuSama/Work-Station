@@ -177,6 +177,9 @@ class ServerRequestSecurityTests(unittest.TestCase):
             server_http_route_available("GET", "/api/health")
         )
         self.assertTrue(
+            server_http_route_available("GET", "/api/projects")
+        )
+        self.assertTrue(
             server_http_route_available(
                 "GET",
                 "/api/projects/example.com/tasks",

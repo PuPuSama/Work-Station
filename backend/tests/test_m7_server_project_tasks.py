@@ -247,6 +247,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app) as client,
             ):
                 self.assertEqual(
+                    client.get("/api/projects").status_code,
+                    401,
+                )
+                self.assertEqual(
                     client.get(
                         f"/api/projects/{self.project_a}/tasks"
                     ).status_code,
@@ -255,6 +259,19 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 client.cookies.set(
                     SERVER_AUTH_COOKIE_NAME,
                     codec.create(actor),
+                )
+                directory = client.get("/api/projects")
+                self.assertEqual(directory.status_code, 200)
+                self.assertEqual(
+                    directory.json(),
+                    [
+                        {
+                            "project_id": self.project_a,
+                            "customer_name": "Project A",
+                            "official_domain": self.project_a,
+                            "effective_role": "viewer",
+                        }
+                    ],
                 )
                 response = client.get(
                     f"/api/projects/{self.project_a}/tasks"
@@ -288,6 +305,43 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertFalse(local_state.exists())
 
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        projects.update()
+                        .where(projects.c.project_id == self.project_a)
+                        .values(status="archived")
+                    )
+                self.assertEqual(
+                    client.get("/api/projects").json(),
+                    [],
+                )
+                self.assertEqual(
+                    client.get(
+                        f"/api/projects/{self.project_a}/tasks"
+                    ).status_code,
+                    403,
+                )
+
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        projects.update()
+                        .where(projects.c.project_id == self.project_a)
+                        .values(status="active")
+                    )
+                    connection.execute(
+                        workspace_users.update()
+                        .where(
+                            workspace_users.c.organization_id
+                            == self.org_a,
+                            workspace_users.c.user_id == self.user_a,
+                        )
+                        .values(status="disabled")
+                    )
+                self.assertEqual(
+                    client.get("/api/projects").status_code,
+                    403,
+                )
+
     def test_server_task_api_is_not_added_to_local_mode(self) -> None:
         import app as app_module
 
@@ -302,6 +356,12 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 f"/api/projects/{self.project_a}/tasks"
             )
             self.assertEqual(response.status_code, 404)
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    "/api/projects"
+                ).status_code,
+                404,
+            )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
 
