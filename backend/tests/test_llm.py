@@ -31,12 +31,12 @@ class ResponsesPayloadTests(unittest.TestCase):
         payload = build_responses_payload(
             model="gpt-5.6-sol",
             messages=[{"role": "user", "content": "Write an outline."}],
-            temperature=0.3,
             max_tokens=800,
             reasoning_effort="medium",
         )
         self.assertEqual(payload["reasoning"], {"effort": "medium"})
         self.assertEqual(payload["model"], "gpt-5.6-sol")
+        self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
 
     def test_default_model_is_gpt_5_6_sol(self) -> None:
@@ -71,6 +71,7 @@ class ResponsesStreamTests(unittest.TestCase):
         self.assertEqual(result, "Streamed text")
         self.assertEqual(payload["model"], "gpt-5.6-sol")
         self.assertEqual(payload["reasoning"], {"effort": "xhigh"})
+        self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
         self.assertEqual(sent_request.get_header("Accept"), "text/event-stream")
 

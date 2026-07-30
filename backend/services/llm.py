@@ -61,7 +61,6 @@ class LLMClient:
         payload = build_responses_payload(
             model=self.model,
             messages=messages,
-            temperature=temperature,
             max_tokens=max_tokens,
             reasoning_effort=self.reasoning_effort,
         )
@@ -89,17 +88,15 @@ def build_responses_payload(
     *,
     model: str,
     messages: list[dict[str, Any]],
-    temperature: float,
     max_tokens: int,
     reasoning_effort: str = "xhigh",
 ) -> dict[str, Any]:
-    """Build the shared Responses API payload with the selected reasoning effort."""
+    """Build a Responses API payload accepted by reasoning-model gateways."""
 
     return {
         "model": model,
         "input": responses_input_from_messages(messages),
         "reasoning": {"effort": reasoning_effort},
-        "temperature": temperature,
         "max_output_tokens": max_tokens,
         "stream": True,
     }
