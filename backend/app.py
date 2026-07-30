@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -344,6 +345,11 @@ def auth_logout() -> JSONResponse:
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+PRODUCT_IMAGE_SUFFIXES = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "WEBP": ".webp",
+}
 _PRODUCT_PROCESSING_GUARD = Lock()
 _PRODUCT_PROCESSING_TASKS: set[str] = set()
 
@@ -2776,6 +2782,49 @@ def upload_image(
     task.hero_image = str(destination)
     invalidate_downstream(task, "hero_image")
     return save_task(task, revision)
+
+
+@app.post("/api/tasks/{task_id}/products/image-upload", response_model=ApiMessage)
+def upload_product_image(
+    task_id: str,
+    file: UploadFile = File(...),
+) -> ApiMessage:
+    task = get_task_or_404(task_id)
+    require_action(task, ACTION_UPDATE_PRODUCTS)
+    content = file.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Product image upload exceeds 25 MB.")
+    if not content:
+        raise HTTPException(status_code=422, detail="Product image is empty.")
+
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image_format = (image.format or "").upper()
+            image.verify()
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(status_code=422, detail="The uploaded file is not a valid image.") from None
+    suffix = PRODUCT_IMAGE_SUFFIXES.get(image_format)
+    if suffix is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Only JPEG, PNG, and WebP product images are supported.",
+        )
+
+    original_name = Path(file.filename or "product-image").name
+    stem = sanitize_image_stem(Path(original_name).stem, fallback="product-image")
+    task_dir = Path(task.task_dir)
+    upload_dir = task_dir / "images" / "uploads" / "products"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    destination = upload_dir / f"{stem}-{uuid4().hex[:8]}{suffix}"
+    destination.write_bytes(content)
+    relative_path = destination.relative_to(task_dir).as_posix()
+    return ApiMessage(
+        message="Product image uploaded.",
+        data={
+            "image_path": relative_path,
+            "filename": destination.name,
+        },
+    )
 
 
 @app.get("/api/tasks/{task_id}/images/preview", response_class=FileResponse)
