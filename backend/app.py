@@ -177,6 +177,11 @@ from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_product_selection import (
     PostgresConfirmedProductSelection,
 )
+from services.server_product_rediscovery import (
+    ServerProductRediscoveryHandler,
+    ServerProductRediscoveryRegistry,
+    create_product_sync_factory,
+)
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -271,6 +276,12 @@ async def app_lifespan(application: FastAPI):
         "server_confirmed_product_selection",
         None,
     )
+    previous_server_product_rediscovery = getattr(
+        application.state,
+        "server_product_rediscovery",
+        None,
+    )
+    server_product_rediscovery = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.server_request_security = None
@@ -278,6 +289,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_directory = None
     application.state.server_project_object_service = None
     application.state.server_confirmed_product_selection = None
+    application.state.server_product_rediscovery = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -309,14 +321,16 @@ async def app_lifespan(application: FastAPI):
         application.state.server_confirmed_product_selection = (
             PostgresConfirmedProductSelection(server_engine)
         )
+        rediscovery_handler = None
         if os.environ.get(
             "ARTICLE_AGENT_OBJECT_STORE_BUCKET",
             "",
         ).strip():
             object_settings = S3ObjectStoreSettings.from_environment()
+            server_object_store = S3ObjectStore(object_settings)
             application.state.server_project_object_service = (
                 ProjectKnowledgeObjectService(
-                    store=S3ObjectStore(object_settings),
+                    store=server_object_store,
                     bucket=object_settings.bucket,
                     repository=PostgresKnowledgeAssetRepository(
                         server_engine
@@ -324,6 +338,23 @@ async def app_lifespan(application: FastAPI):
                     access=server_access,
                 )
             )
+            rediscovery_handler = ServerProductRediscoveryHandler(
+                server_engine,
+                sync_factory=create_product_sync_factory(
+                    server_engine,
+                    store=server_object_store,
+                    bucket=object_settings.bucket,
+                ),
+            )
+        server_product_rediscovery = ServerProductRediscoveryRegistry(
+            server_engine,
+            access=server_access,
+            handler=rediscovery_handler,
+        )
+        server_product_rediscovery.start_existing()
+        application.state.server_product_rediscovery = (
+            server_product_rediscovery
+        )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -351,14 +382,16 @@ async def app_lifespan(application: FastAPI):
         application.state.knowledge_agent_runtime = knowledge_runtime
     if server_mode:
         # Server Mode must never start the portable SQLite queue or its
-        # workers. Project-scoped PostgreSQL runners will be wired separately
-        # after their Actor/Project reauthorization boundary is complete.
+        # workers. Product rediscovery has its own project-scoped PostgreSQL
+        # runner; the general Server Batch/Worker cutover remains closed.
         application.state.job_queue = None
         application.state.batch_runner = None
         application.state.batch_runners = ()
         try:
             yield
         finally:
+            if server_product_rediscovery is not None:
+                server_product_rediscovery.stop()
             if knowledge_runtime is not None:
                 knowledge_runtime.close()
             if server_engine is not None:
@@ -380,6 +413,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_confirmed_product_selection = (
                 previous_server_confirmed_product_selection
+            )
+            application.state.server_product_rediscovery = (
+                previous_server_product_rediscovery
             )
         return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
@@ -544,6 +580,8 @@ async def app_lifespan(application: FastAPI):
             research_runner.stop()
         product_runner.stop()
         writing_runner.stop()
+        if server_product_rediscovery is not None:
+            server_product_rediscovery.stop()
         if knowledge_runtime is not None:
             knowledge_runtime.close()
         if server_engine is not None:
@@ -563,6 +601,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_confirmed_product_selection = (
             previous_server_confirmed_product_selection
+        )
+        application.state.server_product_rediscovery = (
+            previous_server_product_rediscovery
         )
 
 

@@ -13,6 +13,7 @@ from services.access_control import (
     ProjectAccessDenied,
     ProjectPermission,
 )
+from services.job_queue import ActiveJobError, JobConflict
 from services.object_store import ObjectStoreError
 from services.project_directory import (
     AccessibleProject,
@@ -24,6 +25,11 @@ from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_product_selection import (
     ConfirmedProductSelectionError,
     PostgresConfirmedProductSelection,
+)
+from services.server_product_rediscovery import (
+    ProductRediscoveryCommand,
+    ProductRediscoveryUnavailable,
+    ServerProductRediscoveryRegistry,
 )
 from services.server_section_rewrite import (
     SectionRewriteError,
@@ -88,6 +94,34 @@ class ArticleSectionRewriteRequest(BaseModel):
         if any(not value for value in normalized):
             raise ValueError("heading_path values must not be empty")
         return normalized
+
+
+class ProductRediscoveryRequest(BaseModel):
+    """Queue bounded official-site discovery without exposing worker input."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    category_url: str = Field(min_length=1, max_length=4096)
+    max_products: int = Field(default=12, ge=1, le=50)
+
+
+class ProductRediscoveryJobResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    batch_id: str
+    task_id: str
+    operation: str
+    status: str
+    source_revision: int
+    result_revision: int | None
+    attempts: int
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    updated_at: str
+    has_error: bool
 
 
 def require_server_project_access(
@@ -238,6 +272,22 @@ def _confirmed_product_selection(
             detail="Server product selection is not available.",
         )
     return selection
+
+
+def _product_rediscovery(
+    request: Request,
+) -> ServerProductRediscoveryRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_product_rediscovery",
+        None,
+    )
+    if not isinstance(registry, ServerProductRediscoveryRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server product rediscovery is not available.",
+        )
+    return registry
 
 
 def _require_project_permission(
@@ -545,9 +595,100 @@ def rewrite_project_task_article_section(
         ) from exc
 
 
+@router.post(
+    "/{project}/tasks/{task_id}/product-rediscovery",
+    response_model=ProductRediscoveryJobResponse,
+)
+def enqueue_project_product_rediscovery(
+    project: str,
+    task_id: str,
+    payload: ProductRediscoveryRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProductRediscoveryJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "knowledge.edit",
+    )
+    try:
+        job = _product_rediscovery(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+            command=ProductRediscoveryCommand(
+                category_url=payload.category_url.strip(),
+                max_products=payload.max_products,
+            ),
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProductRediscoveryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server product rediscovery is not available.",
+        ) from exc
+    return ProductRediscoveryJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/product-rediscovery/jobs/{job_id}",
+    response_model=ProductRediscoveryJobResponse,
+)
+def read_project_product_rediscovery_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProductRediscoveryJobResponse:
+    del project
+    try:
+        job = _product_rediscovery(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Product rediscovery job was not found.",
+        ) from None
+    except ProductRediscoveryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server product rediscovery is not available.",
+        ) from exc
+    return ProductRediscoveryJobResponse.model_validate(job)
+
+
 __all__ = [
     "ArticleSectionRewriteRequest",
     "ConfirmedProductsUpdateRequest",
+    "ProductRediscoveryJobResponse",
+    "ProductRediscoveryRequest",
     "ProjectAssetDownload",
     "require_server_actor",
     "require_server_project_access",

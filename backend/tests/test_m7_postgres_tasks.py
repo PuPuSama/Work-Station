@@ -655,6 +655,10 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
             worker_permission_for("knowledge_research"),
             "knowledge.edit",
         )
+        self.assertEqual(
+            worker_permission_for("product_rediscovery"),
+            "knowledge.edit",
+        )
 
     def test_concurrent_workers_claim_disjoint_jobs(self) -> None:
         task_ids = tuple(f"concurrent-{index}" for index in range(4))

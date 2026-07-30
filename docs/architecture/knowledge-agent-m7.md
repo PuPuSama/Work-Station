@@ -80,14 +80,24 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `requested_by_user_id`；旧 SQLite 历史迁移时允许为空；
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
-- `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态。
+- `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
+- 新增 `POST /api/projects/{project}/tasks/{task_id}/product-rediscovery` 与对应状态
+  GET：入口要求 `knowledge.edit`，Job 固定 Organization/Project/Requester，并由
+  PostgreSQL Queue 执行正式官网产品重新发现；
+- 产品重新发现只使用 Project 的 Active `official_domain`、安全官网 Fetcher 和
+  Organization/Project 绑定的 S3 ArtifactStore；不允许本地 Artifact 回退；
+- 重新发现只写不可变 Inbox 来源/快照/产品证据，不改 Task Revision、不替换 Task
+  当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
+- 对象存储未配置时，历史 Job 状态仍可读取，但新 Job 明确返回 503；应用重启时只恢复
+  `product_rediscovery` 的 Active PostgreSQL Job。
 
 当前明确未做：
 
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
 - 不开放正式外部身份登录；现有 `app.py` 只接入服务器请求安全底座；
 - 不给旧项目自动补一个虚构 Organization；
-- 尚未把 `app.py` 的 Task/Job 正式写路径切换到 PostgreSQL；
+- 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
+  Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接前端成员管理；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
@@ -249,6 +259,7 @@ with engine.begin() as connection:
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
 | `backend/services/authorized_job_queue.py` | Server Worker 的两阶段重新授权适配器 | Claim 前只看最小元数据、Handler 前二次授权、无可信 Requester 不读取 Payload |
+| `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | 固定租户 Scope、可信 Requester、两阶段授权、只抓 Active 官网、不改 Task、无本地回退 |
 | `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/server_cutover_report.py` | SQLite/PG Task 与 Job 只读双读报告 | 只读连接、同一 Scope、顺序/ID/摘要、正文不出报告 |
@@ -380,23 +391,46 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取和不依赖 Artifact 的“完全重写”“选择已确认产品”
-以及“快照后替换一个已审阅章节”已经接线，但其余 Article 写入、Batch 和 Worker 尚未
-接线。因此不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把“三个受限确定性
-写操作已接线”描述成“服务器单写已完成”，或把
-“已停止旧 Worker”描述成“新 Worker 已就绪”。
+以及“快照后替换一个已审阅章节”已经接线；此外，`product_rediscovery` 已有独立
+PostgreSQL Job API/Runner。其余 Article 写入、通用 Batch 和 Worker 尚未接线。因此
+不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
+Runner 描述成“服务器 Job 单写已完成”。
 
-Worker 授权组件已完成但尚未进入 Server Mode Lifespan：新 Job 可在数据库中保存
-`requested_by_user_id`，Claim Adapter 在返回私有 Request 前按 Operation 权限检查，
-Handler Adapter 在业务执行前再次检查。旧历史 Job 的 Requester 为空是有意的迁移兼容；
-SQLite 扩展字段也不会被提升为可信 Requester。它们只能作为 Terminal History 保留，
-不能被服务器 Worker 重新执行。只有 Server Batch
-API 强制写入 Requester 且 Lifespan 启动 PostgreSQL Runner 后，才能把
-`worker_reauthorizes` 与 `postgres_job_single_write` 标为 true。
+产品重新发现已经把 Worker 授权组件接入 Server Mode Lifespan：新 Job 保存
+`requested_by_user_id`，Claim Adapter 在返回私有 Request 前按 `knowledge.edit`
+检查，Handler Adapter 在业务执行前再次检查。旧历史 Job 的 Requester 为空是有意的
+迁移兼容；SQLite 扩展字段也不会被提升为可信 Requester。它们只能作为 Terminal History
+保留，不能被服务器 Worker 重新执行。因为只有一个 Operation 接线，且还没有通用
+Server Batch API、排空/优雅停机证明和事务内业务审计，所以
+`worker_reauthorizes` 与 `postgres_job_single_write` 仍保持 false。
 
 当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
 PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化
 同进程内不同项目的兼容操作，后续重构可改成 Repository 原子命令，但必须保留 Revision
 CAS、扩展字段和项目 Scope。
+
+产品重新发现把“请求重新抓取”和“确认替换 Task 产品”拆成两条边界：
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/product-rediscovery
+body: { revision, category_url, max_products }
+  -> knowledge.edit
+  -> 校验固定 Project 的 Task Revision
+  -> PostgreSQL Job(requested_by_user_id)
+  -> Claim 前 knowledge.edit
+  -> Handler 前再次 knowledge.edit
+  -> 重新校验 Task Revision + Active Project official_domain
+  -> SafeOfficialSiteFetcher + ScopedS3ArtifactStore
+  -> 不可变 Inbox Source/Snapshot/Product/Asset Evidence
+  -> Task 不变；人工审核后再走 PUT .../products
+```
+
+Registry 按 Organization/Project 懒创建单并发 Runner，这是明确的迁移适配器，不是最终
+全局调度器。后续可以改成共享 Dispatcher，但 Job Scope、Requester、两次授权和私有
+Request 不得丢失。Worker 在官网抓取前后检查取消；当前 WordPress 明细循环中没有逐项
+取消点，因此长抓取的停机/排空仍需后续补强。晚取消或中途失败可能已经留下不可变 Inbox
+证据，这些证据不发布、不删除旧产品，也不会替换 Task 选择。S3 与 PostgreSQL 没有跨系统
+事务，孤儿对象仍按 D2 对账后延迟清理。
 
 Server 产品选择采用“身份输入、服务端投影”接口，而不是复用旧
 `ProductsUpdateRequest`：
@@ -556,3 +590,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 18. 修改前后 ArticleVersion、下游失效和 Task CAS 是否仍属于同一个 PostgreSQL Task
     写入，而非先写文件再更新数据库？
 19. 后续 LLM 是否仍只生成候选 Section Body，而不能绕过本命令覆盖整篇文章？
+20. 产品重新发现是否仍固定 Organization/Project/Requester，并在 Claim 与 Handler
+    两个阶段重新检查 `knowledge.edit`？
+21. 重新发现失败、撤权或取消时，旧 Task 产品和已发布快照是否仍继续服务？
+22. 产品抓取是否仍只写项目绑定的 S3 与不可变 Inbox 证据，且不回退到本地文件？

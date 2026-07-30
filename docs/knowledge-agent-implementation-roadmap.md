@@ -130,20 +130,22 @@
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
-  调用 fail closed，但项目级 PostgreSQL Worker 尚未接线；
+  调用 fail closed；产品重新发现已有独立 Project-scoped PostgreSQL Runner，其余
+  通用 Batch/Worker 尚未接线；
 - 已开放显式 Project 路径的 PostgreSQL Task 只读列表/单条接口；每个请求重新读取
   RBAC 事实，跨项目不扫描全量数据，本地模式不增加该 API；
-- 已接通三个 PostgreSQL-only 受限 Task 写操作：“完全重写”“从正式目录选择已确认产品”
-  和“版本快照后替换一个已审阅章节”；三者都要求 `article.edit`、Project Scope 与
-  Revision CAS，且不创建本地 JSON/SQLite/Artifact；产品接口只接收 Product ID，
-  章节接口按唯一 Heading Path 限制修改范围，其他写路径仍关闭；
+- 原计划三个受限操作已经逐项接通：`knowledge.edit` 的“重新发现产品”PostgreSQL Job、
+  `article.edit` 的“从正式目录确认替换产品”，以及“版本快照后替换一个已审阅章节”；
+  产品重新发现只写项目绑定的 S3 与不可变 Inbox 证据，不改 Task；后两者使用
+  Project Scope 与 Revision CAS，且不创建本地 JSON/SQLite/Artifact；
+- 另有一个辅助迁移入口“完全重写”，它不是原计划三个操作之一；其他写路径仍关闭；
 - 已开放 SQL-scoped Project Directory，只返回 Active Actor 在当前 Organization
   可访问的 Active Project 及 Effective Role；归档 Project 立即 fail closed；
 - 已接通私有知识/产品资产的 Server Mode 下载路由：路由授权与签名前授权各执行一次，
   Bucket 和 Organization/Project Key 前缀不一致时不签名；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
-  元数据授权与 Handler 前二次授权；Server Batch API/Runner 尚未接线，所以相关
-  Preflight 能力仍保持 false；
+  元数据授权与 Handler 前二次授权；产品重新发现已经实际使用这条链路，但通用 Server
+  Batch API/Runner、排空证明与事务内审计尚未完成，所以整体 Preflight 能力仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以

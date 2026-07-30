@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 497 tests；
+- 501 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -273,7 +273,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 14 tests；
+- 15 tests；
 - 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
 - Project Directory 只返回 Actor 在当前 Organization 可见的 Active Project 和
   Effective Role；普通 Team Member 不会看到同 Team Project；
@@ -286,7 +286,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 正常资产只返回 30–3600 秒的签名 URL；缺失资产、伪造为另一 Organization Key 的
   URI 返回 404，跨项目请求返回 403；
 - 旧 `/api/tasks` 在 Server Mode 继续返回 503；
-- 除“完全重写”“选择已确认产品”和“快照后替换一个已审阅章节”外，尚未迁移的
+- 原计划三条受限操作均有精确白名单：“重新发现产品”“选择已确认产品”和
+  “快照后替换一个已审阅章节”；“完全重写”是额外迁移入口，尚未迁移的其他
   POST/PUT 写方法不进入 Server Project Task 白名单；
 - “完全重写”要求 `article.edit`；Viewer 返回 403，Editor 成功后 PostgreSQL Revision
   从 0 增至 1，重复提交旧 Revision 返回 409；
@@ -304,6 +305,14 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   下游 Humanized/Link/Image/Export 状态失效，旧 Revision 不会多写版本；
 - 章节接口不调用 LLM、不写本地 Article Artifact；后续对话 Agent 只能把候选 Body
   送入该确定性提交边界；
+- 产品重新发现要求 `knowledge.edit`，Job 固定 Organization/Project/Requester；公开
+  状态不返回私有 Request、Requester、原始错误或对象 URI；
+- Project A 的 Job 不能从 Project B 访问；撤销 Requester 后，Worker 在读取/执行私有
+  Request 前把 Job 标为通用 conflict；
+- Worker 从 Active Project 的 `official_domain` 构造官网入口，并把正式同步绑定到
+  Project-scoped S3 ArtifactStore；Task Revision 和已选产品在重新发现后保持不变；
+- 对象存储未配置时，新重新发现 Job fail closed，但已有 Job 状态仍可读取；非本
+  `product_rediscovery` Operation 的 Job 不能通过该状态路由读取；
 - Local Mode 不增加这组服务器专用 API；
 - 使用不存在的本地数据目录启动并读取后，该目录仍不存在，证明没有 SQLite/JSON 回退。
 
@@ -341,15 +350,16 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 已有 Actor Session Codec 和供应商无关 Identity Mapping，但具体 IdP Token 验证与
   登录签发入口尚未接入；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
-  旧路由和 Worker 尚未接入；新的项目级 PostgreSQL Task API 已支持读取、“完全重写”
-  “从正式目录选择已确认产品”和“快照后替换一个已审阅章节”，但不代表其余旧路由、
-  对话式章节生成或完整写路径已经迁移；
+  旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
+  “完全重写”“从正式目录选择已确认产品”和“快照后替换一个已审阅章节”，但不代表
+  其余旧路由、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
-- `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
-- 上一条只适用于本地模式；Server Mode 已停止 SQLite Queue/Worker，但新的项目级
-  PostgreSQL Runner 仍未接线；Requester Schema 与两阶段授权组件已经完成，但不能
-  单独算作服务器 Job 单写；
+- 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
+  Task 命令和 `product_rediscovery` Job 为单写，其余路径尚未成为 PostgreSQL 准源；
+- Server Mode 已停止 SQLite Queue/Worker；产品重新发现已有项目级 PostgreSQL Runner
+  和两阶段授权，但通用 Runner、可靠 drain/join、全部 Operation 与事务内审计未完成，
+  不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接和 no-go 部署门禁已实现；真实备份恢复演练

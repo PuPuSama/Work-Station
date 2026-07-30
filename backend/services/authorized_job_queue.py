@@ -28,7 +28,10 @@ def worker_permission_for(operation: str) -> ProjectPermission:
         "package_delivery",
     }:
         return "article.deliver"
-    if normalized == "knowledge_research":
+    if normalized in {
+        "knowledge_research",
+        "product_rediscovery",
+    }:
         return "knowledge.edit"
     return "article.edit"
 

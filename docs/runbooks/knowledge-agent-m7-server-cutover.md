@@ -154,6 +154,28 @@ KMS Key 轮换遵循供应商策略；先验证旧对象仍可解密。不得把
 3600 秒；同时使用另一 Project 的 Actor 和一条错误 Organization Key 前缀的测试资产，
 分别确认 403 与 404。不要把签名 URL 写入长期发布证据或普通日志。
 
+产品重新发现冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/product-rediscovery`，随后只使用响应中的
+Job ID 调用
+`GET /api/projects/{project}/tasks/{task_id}/product-rediscovery/jobs/{job_id}`。
+至少验证：
+
+- Viewer 返回 403；具备 `knowledge.edit` 的 Editor 才能入队；
+- 请求只包含当前 Task Revision、官网内 Category URL 和 1–50 的抓取上限；
+- Job 行保存可信 `requested_by_user_id`，公开响应不包含 Request、Requester、原始错误
+  或对象 URI；
+- 撤销 Requester 后，尚未执行的 Job 进入通用 conflict，Worker 不读取/执行私有请求；
+- 抓取只使用 Active Project 的 `official_domain` 和 Organization/Project 绑定的私有
+  S3 前缀，不创建本地 JSON、SQLite 或 Artifact 目录；
+- 成功、失败或取消都不修改 Task Revision 和当前产品；新证据留在 Inbox，审核发布后
+  才能由产品替换接口选择；
+- 对象存储配置缺失时新 Job 返回 503，但已有 Job 的状态仍可读取；
+- 重启恢复只处理 Active `product_rediscovery` Job，不得把旧无 Requester 历史重新执行。
+
+当前 Runner 只在整次官网同步前后检查取消，产品明细循环中没有逐项取消点。发布窗口必须
+允许在途抓取自然结束；在补齐 drain/join 证明前，不把进程 `stop()` 当作强制中断，也不把
+这一条 Operation 的接线写成整体 Worker Cutover 完成。
+
 产品替换冒烟必须通过
 `PUT /api/projects/{project}/tasks/{task_id}/products`，请求只包含当前 Task Revision
 和 1–3 个 Product ID。至少验证：

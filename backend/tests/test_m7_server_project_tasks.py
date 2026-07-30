@@ -4,6 +4,7 @@ import hashlib
 import os
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from dataclasses import replace
@@ -40,6 +41,8 @@ from knowledge_agent.schema import (  # noqa: E402
 from models import TaskRecord  # noqa: E402
 from server_schema import (  # noqa: E402
     article_tasks,
+    background_jobs,
+    job_batches,
     organizations,
     project_memberships,
     project_ownership,
@@ -59,6 +62,14 @@ from services.access_control import (  # noqa: E402
     ProjectAccessService,
 )
 from services.object_store import build_project_object_key  # noqa: E402
+from services.job_queue import JobConflict  # noqa: E402
+from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
+from services.server_product_rediscovery import (  # noqa: E402
+    ProductRediscoveryCommand,
+    ProductRediscoveryUnavailable,
+    ServerProductRediscoveryHandler,
+    ServerProductRediscoveryRegistry,
+)
 
 
 SERVER_ARTICLE = """# Example Buyer Guide
@@ -302,6 +313,20 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 knowledge_sources.delete().where(
                     knowledge_sources.c.project_id.in_(
                         (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
+                background_jobs.delete().where(
+                    background_jobs.c.organization_id.in_(
+                        (self.org_a, self.org_b)
+                    )
+                )
+            )
+            connection.execute(
+                job_batches.delete().where(
+                    job_batches.c.organization_id.in_(
+                        (self.org_a, self.org_b)
                     )
                 )
             )
@@ -781,6 +806,19 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ).status_code,
                 404,
             )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/product-rediscovery",
+                    json={
+                        "revision": 0,
+                        "category_url": (
+                            f"https://{self.project_a}/products"
+                        ),
+                    },
+                ).status_code,
+                404,
+            )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
 
@@ -990,6 +1028,429 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     409,
                 )
                 self.assertFalse(local_state.exists())
+
+    def test_server_product_rediscovery_uses_requested_actor_and_pg_worker(
+        self,
+    ) -> None:
+        import app as app_module
+
+        calls: list[dict[str, object]] = []
+
+        def handler(job, cancelled):
+            self.assertFalse(cancelled())
+            calls.append(
+                {
+                    "organization_id": job["organization_id"],
+                    "project_id": job["project_id"],
+                    "task_id": job["task_id"],
+                    "requested_by_user_id": job[
+                        "requested_by_user_id"
+                    ],
+                    "request": dict(job["request"]),
+                }
+            )
+            return int(job["source_revision"])
+
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        registry = ServerProductRediscoveryRegistry(
+            self.engine,
+            access=access,
+            handler=handler,
+        )
+        self.addCleanup(registry.stop)
+        codec = ServerActorSessionCodec(b"r" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        task_repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        task_before = task_repository.get(self.task_a)
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "r" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_product_rediscovery = registry
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/product-rediscovery"
+                )
+                payload = {
+                    "revision": 0,
+                    "category_url": (
+                        f"https://{self.project_a}/products"
+                    ),
+                    "max_products": 3,
+                }
+                self.assertEqual(
+                    client.post(path, json=payload).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/product-rediscovery"
+                        ),
+                        json=payload,
+                    ).status_code,
+                    403,
+                )
+                queued = client.post(path, json=payload)
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertEqual(
+                    public_job["operation"],
+                    "product_rediscovery",
+                )
+                self.assertNotIn("request", public_job)
+                self.assertNotIn(
+                    "requested_by_user_id",
+                    public_job,
+                )
+                self.assertNotIn("error", public_job)
+
+                status_path = (
+                    f"{path}/jobs/{public_job['job_id']}"
+                )
+                terminal = None
+                for _attempt in range(100):
+                    current = client.get(status_path)
+                    self.assertEqual(
+                        current.status_code,
+                        200,
+                        current.text,
+                    )
+                    terminal = current.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(terminal["status"], "succeeded")
+                self.assertEqual(terminal["result_revision"], 0)
+                self.assertEqual(
+                    client.get(
+                        (
+                            f"/api/projects/{self.project_a}/tasks/"
+                            f"{self.task_b}/product-rediscovery/jobs/"
+                            f"{public_job['job_id']}"
+                        )
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(
+                    calls[0],
+                    {
+                        "organization_id": self.org_a,
+                        "project_id": self.project_a,
+                        "task_id": self.task_a,
+                        "requested_by_user_id": self.user_a,
+                        "request": {
+                            "category_url": (
+                                f"https://{self.project_a}/products"
+                            ),
+                            "max_products": 3,
+                        },
+                    },
+                )
+                with self.engine.connect() as connection:
+                    requested_by = connection.execute(
+                        sa.select(
+                            background_jobs.c.requested_by_user_id
+                        ).where(
+                            background_jobs.c.organization_id
+                            == self.org_a,
+                            background_jobs.c.project_id
+                            == self.project_a,
+                            background_jobs.c.job_id
+                            == public_job["job_id"],
+                        )
+                    ).scalar_one()
+                self.assertEqual(requested_by, self.user_a)
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={**payload, "revision": 99},
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    task_repository.get(self.task_a),
+                    task_before,
+                )
+                self.assertFalse(local_state.exists())
+            registry.stop()
+
+    def test_product_rediscovery_handler_uses_active_project_domain(
+        self,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+
+        class FakeSync:
+            def sync_category(self, **kwargs):
+                calls.append(dict(kwargs))
+                return object()
+
+        handler = ServerProductRediscoveryHandler(
+            self.engine,
+            sync_factory=lambda organization_id, project_id: (
+                calls.append(
+                    {
+                        "factory_organization_id": organization_id,
+                        "factory_project_id": project_id,
+                    }
+                )
+                or FakeSync()
+            ),
+        )
+        job = {
+            "operation": "product_rediscovery",
+            "organization_id": self.org_a,
+            "project_id": self.project_a,
+            "task_id": self.task_a,
+            "source_revision": 0,
+            "request": {
+                "category_url": (
+                    f"https://{self.project_a}/products"
+                ),
+                "max_products": 4,
+            },
+        }
+
+        result = handler(job, lambda: False)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            calls,
+            [
+                {
+                    "factory_organization_id": self.org_a,
+                    "factory_project_id": self.project_a,
+                },
+                {
+                    "project_id": self.project_a,
+                    "site_url": f"https://{self.project_a}",
+                    "category_url": (
+                        f"https://{self.project_a}/products"
+                    ),
+                    "max_products": 4,
+                },
+            ],
+        )
+        stale = dict(job)
+        stale["source_revision"] = 99
+        with self.assertRaisesRegex(
+            JobConflict,
+            "source task revision changed",
+        ):
+            handler(stale, lambda: False)
+        self.assertEqual(len(calls), 2)
+
+    def test_product_rediscovery_status_survives_unconfigured_runner(
+        self,
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        batch = raw_queue.create_batch(
+            "product_rediscovery",
+            [
+                {
+                    "task_id": self.task_a,
+                    "source_revision": 0,
+                    "customer": self.project_a,
+                    "topic_index": 2,
+                    "request": {
+                        "category_url": (
+                            f"https://{self.project_a}/products"
+                        ),
+                        "max_products": 3,
+                    },
+                }
+            ],
+            customer=self.project_a,
+            requested_by_user_id=self.user_a,
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        registry = ServerProductRediscoveryRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=None,
+        )
+        self.addCleanup(registry.stop)
+        actor = ActorIdentity(self.org_a, self.user_a)
+
+        current = registry.get_job(
+            actor=actor,
+            project_id=self.project_a,
+            task_id=self.task_a,
+            job_id=job_id,
+        )
+
+        self.assertEqual(current["status"], "queued")
+        self.assertIsNone(current["started_at"])
+        with self.assertRaisesRegex(
+            ProductRediscoveryUnavailable,
+            "not configured",
+        ):
+            registry.enqueue(
+                actor=actor,
+                project_id=self.project_a,
+                task_id=self.task_a,
+                source_revision=0,
+                command=ProductRediscoveryCommand(
+                    category_url=(
+                        f"https://{self.project_a}/products"
+                    ),
+                    max_products=3,
+                ),
+            )
+        with self.engine.begin() as connection:
+            connection.execute(
+                background_jobs.update()
+                .where(
+                    background_jobs.c.organization_id == self.org_a,
+                    background_jobs.c.project_id == self.project_a,
+                    background_jobs.c.job_id == job_id,
+                )
+                .values(operation="outline")
+            )
+        with self.assertRaises(KeyError):
+            registry.get_job(
+                actor=actor,
+                project_id=self.project_a,
+                task_id=self.task_a,
+                job_id=job_id,
+            )
+
+    def test_product_rediscovery_worker_rejects_revoked_requester(
+        self,
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        batch = raw_queue.create_batch(
+            "product_rediscovery",
+            [
+                {
+                    "task_id": self.task_a,
+                    "source_revision": 0,
+                    "customer": self.project_a,
+                    "topic_index": 2,
+                    "request": {
+                        "category_url": (
+                            f"https://{self.project_a}/products"
+                        ),
+                        "max_products": 3,
+                    },
+                }
+            ],
+            customer=self.project_a,
+            requested_by_user_id=self.user_a,
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="viewer")
+            )
+        calls: list[str] = []
+        registry = ServerProductRediscoveryRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=lambda job, cancelled: (
+                calls.append(str(job["id"])) or 0
+            ),
+        )
+        self.addCleanup(registry.stop)
+
+        registry.start_existing()
+
+        current = None
+        for _attempt in range(100):
+            current = raw_queue.get_job(job_id)
+            if current["status"] == "conflict":
+                break
+            time.sleep(0.02)
+        assert current is not None
+        self.assertEqual(current["status"], "conflict")
+        self.assertEqual(
+            current["error"],
+            "job actor is not authorized",
+        )
+        self.assertEqual(calls, [])
 
     def test_server_rewrites_only_one_snapshotted_article_section(
         self,
