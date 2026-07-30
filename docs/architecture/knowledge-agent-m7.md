@@ -345,9 +345,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/server_project_http.py` | Server Mode Project Directory、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、写入用 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
-| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
+| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内原子创建、旧返回契约 |
 | `backend/services/authorized_job_queue.py` | Server Worker 的两阶段重新授权适配器 | Claim 前只看最小元数据、Handler 前二次授权、无可信 Requester 不读取 Payload |
-| `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | 固定租户 Scope、可信 Requester、两阶段授权、只抓 Active 官网、不改 Task、无本地回退 |
+| `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | Enqueue 授权/Revision/Job/Audit 同事务、可信 Requester、Worker 两阶段授权、只抓 Active 官网、不改 Task、无本地回退 |
 | `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
 | `backend/migrations/versions/20260730_0012_object_orphan_observations.py` | Orphan 连续观察 Schema 准源 | Project 复合 FK、指纹重置、Eligibility 索引 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
@@ -526,8 +526,10 @@ Runner 描述成“服务器 Job 单写已完成”。
 `requested_by_user_id`，Claim Adapter 在返回私有 Request 前按 `knowledge.edit`
 检查，Handler Adapter 在业务执行前再次检查。旧历史 Job 的 Requester 为空是有意的
 迁移兼容；SQLite 扩展字段也不会被提升为可信 Requester。它们只能作为 Terminal History
-保留，不能被服务器 Worker 重新执行。因为只有一个 Operation 接线，且还没有通用
-Server Batch API、排空/优雅停机证明和事务内业务审计，所以
+保留，不能被服务器 Worker 重新执行。产品重新发现 Enqueue 已把可撤权授权事实、
+Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一个 PostgreSQL
+事务；Audit 失败不留下 Job。因为仍只有一个 Operation 接线，且还没有通用 Server
+Batch API、终态 Job Audit 和排空/优雅停机证明，所以
 `worker_reauthorizes` 与 `postgres_job_single_write` 仍保持 false。
 
 当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
@@ -540,9 +542,12 @@ CAS、扩展字段和项目 Scope。
 ```text
 POST /api/projects/{project}/tasks/{task_id}/product-rediscovery
 body: { revision, category_url, max_products }
-  -> knowledge.edit
-  -> 校验固定 Project 的 Task Revision
+  -> knowledge.edit 预检
+  -> PostgreSQL 事务内锁定 Actor/Organization/Project 授权事实
+  -> 锁定并校验固定 Project 的 Task Revision
   -> PostgreSQL Job(requested_by_user_id)
+  -> append-only Audit（不保存 category_url）
+  -> 任一步失败则 Job/Batch/Audit 全部回滚
   -> Claim 前 knowledge.edit
   -> Handler 前再次 knowledge.edit
   -> 重新校验 Task Revision + Active Project official_domain
@@ -1004,3 +1009,5 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     Fingerprint 和至少 24 小时保留期？
 28. Provider Delete 失败是否仍以无引用物理对象重新进入完整观察窗口，且 Audit 不记录
     Key、URI 或供应商错误正文？
+29. 产品重新发现 Enqueue 是否仍把可撤权授权、Task Revision、Job/Batch 和安全 Audit
+    放在同一事务，并在 Audit 失败时不留下可执行 Job？

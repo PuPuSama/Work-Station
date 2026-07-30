@@ -169,8 +169,9 @@
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
-  元数据授权与 Handler 前二次授权；产品重新发现已经实际使用这条链路，但通用 Server
-  Batch API/Runner、排空证明与事务内审计尚未完成，所以整体 Preflight 能力仍保持 false；
+  元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
+  Job/Batch 和安全 Audit 已在同一事务，但通用 Server Batch API/Runner、终态 Job Audit
+  与排空证明尚未完成，所以整体 Preflight 能力仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；已接通供应商无关 OIDC

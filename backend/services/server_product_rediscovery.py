@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from knowledge_agent.assets import PostgresKnowledgeAssetRepository
 from knowledge_agent.catalog import PostgresProductCatalogRepository
@@ -22,8 +24,19 @@ from knowledge_agent.wordpress import (
     OfficialSiteFetchError,
     SafeOfficialSiteFetcher,
 )
-from server_schema import background_jobs
-from services.access_control import ActorIdentity, ProjectAccessService
+from server_schema import article_tasks, background_jobs
+from services.access_control import (
+    ActorIdentity,
+    PostgresProjectAccessRepository,
+    ProjectAccessDenied,
+    ProjectAccessService,
+    decide_project_permission,
+)
+from services.audit_log import (
+    AuditEvent,
+    AuditEventWriter,
+    PostgresAuditEventWriter,
+)
 from services.authorized_job_queue import (
     AuthorizedPostgresJobQueue,
     ReauthorizingJobHandler,
@@ -230,9 +243,15 @@ class ServerProductRediscoveryRegistry:
         *,
         access: ProjectAccessService,
         handler: ProductRediscoveryJobHandler | None,
+        access_repository: PostgresProjectAccessRepository | None = None,
+        audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._access = access
+        self._access_repository = (
+            access_repository or PostgresProjectAccessRepository(engine)
+        )
+        self._audit = audit or PostgresAuditEventWriter()
         self._handler = handler
         self._lock = threading.Lock()
         self._closed = False
@@ -334,46 +353,109 @@ class ServerProductRediscoveryRegistry:
         source_revision: int,
         command: ProductRediscoveryCommand,
     ) -> dict[str, object]:
+        # Cheap precheck avoids allocating a runner for an unauthorized scope.
+        # The same permission is locked and re-evaluated in the transaction.
         self._access.require(actor, project_id, "knowledge.edit")
-        task = PostgresTaskRepository(
-            self._engine,
-            organization_id=actor.organization_id,
-            project_id=project_id,
-        ).get(task_id)
-        if task is None:
-            raise KeyError(task_id)
-        if int(task.get("revision") or 0) != source_revision:
-            raise JobConflict("source task revision changed")
         project = self._ensure_project(
             actor.organization_id,
             project_id,
             start_runner=True,
         )
         try:
-            batch = project.queue.create_batch(
-                PRODUCT_REDISCOVERY_OPERATION,
-                [
-                    {
-                        "task_id": task_id,
-                        "source_revision": source_revision,
-                        "customer": project_id,
-                        "topic_index": int(
-                            task.get("topic_index") or 0
+            with self._engine.begin() as connection:
+                facts = (
+                    self._access_repository.lock_project_access_in_connection(
+                        connection,
+                        actor,
+                        project_id,
+                    )
+                )
+                if not decide_project_permission(
+                    facts,
+                    "knowledge.edit",
+                ).allowed:
+                    raise ProjectAccessDenied("project access denied")
+                task = connection.execute(
+                    sa.select(
+                        article_tasks.c.revision,
+                        article_tasks.c.topic_index,
+                    )
+                    .where(
+                        article_tasks.c.organization_id
+                        == actor.organization_id,
+                        article_tasks.c.project_id == project_id,
+                        article_tasks.c.task_id == task_id,
+                    )
+                    .with_for_update()
+                ).one_or_none()
+                if task is None:
+                    raise KeyError(task_id)
+                if int(task.revision) != source_revision:
+                    raise JobConflict("source task revision changed")
+                batch = project.queue.create_batch_in_transaction(
+                    connection,
+                    PRODUCT_REDISCOVERY_OPERATION,
+                    [
+                        {
+                            "task_id": task_id,
+                            "source_revision": source_revision,
+                            "customer": project_id,
+                            "topic_index": int(task.topic_index),
+                            "request": command.private_values(),
+                        }
+                    ],
+                    customer=project_id,
+                    requested_by_user_id=actor.user_id,
+                )
+                job = batch["jobs"][0]
+                job_id = str(job["id"])
+                identity = "\n".join(
+                    (
+                        actor.organization_id,
+                        project_id,
+                        job_id,
+                        PRODUCT_REDISCOVERY_OPERATION,
+                    )
+                )
+                self._audit.append(
+                    connection,
+                    AuditEvent(
+                        organization_id=actor.organization_id,
+                        event_id=(
+                            "job_"
+                            + uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                identity,
+                            ).hex
                         ),
-                        "request": command.private_values(),
-                    }
-                ],
-                customer=project_id,
-                requested_by_user_id=actor.user_id,
-            )
-        except ActiveJobError:
+                        actor_user_id=actor.user_id,
+                        project_id=project_id,
+                        action="knowledge.products.rediscovery.queued",
+                        target_type="background_job",
+                        target_id=job_id,
+                        details={
+                            "operation": PRODUCT_REDISCOVERY_OPERATION,
+                            "source_revision": source_revision,
+                            "max_products": command.max_products,
+                        },
+                    ),
+                )
+        except (
+            ActiveJobError,
+            JobConflict,
+            KeyError,
+            ProjectAccessDenied,
+        ):
             raise
+        except (RuntimeError, SQLAlchemyError) as exc:
+            raise ProductRediscoveryUnavailable(
+                "product rediscovery could not be queued"
+            ) from exc
         if project.runner is None:
             raise ProductRediscoveryUnavailable(
                 "product rediscovery runner did not start"
             )
         project.runner.wake()
-        job = batch["jobs"][0]
         return self._public_job(job)
 
     def get_job(

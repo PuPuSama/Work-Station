@@ -144,7 +144,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 543 tests；
+- 544 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -236,7 +236,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 25 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
+- 26 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
 - `article.deliver` 在路由、私有 WebP 读取、DOCX 写入和专用下载签名前重新检查；
 - Task 图片 Asset 的对象 Key、大小、哈希、类型、数据库/Task/实际尺寸全部复核；
 - 现有 Word 排版器新增内存 WebP/字节输出边界，本地文件导出测试保持通过；
@@ -261,7 +261,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 29 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
+- 30 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
 - Local `export_tdk_docx()` 与 Server `build_tdk_docx_bytes()` 复用同一排版核心；
 - Server 要求已有 `docx_asset_id`，从当前文章生成并验证 Title、Description 和六个
   Keyword，不接受客户端 TDK、Prompt、Asset ID、对象 URI 或输出路径；
@@ -289,7 +289,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 74 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
+- 75 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
 - `article.review` 与 `article.deliver` 分离：Reviewer 可上传、确认、查看 Review
   Screenshot，但不能导出文章 DOCX/TDK；
 - 截图在内存执行大小、像素、解码和 EXIF 门禁，并重编码为无元数据 PNG；
@@ -320,7 +320,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 60 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
+- 61 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
 - `article.deliver` 在路由、全部私有对象读取、ZIP 上传和专用下载签名前重新检查；
 - 打包只接受当前 Task 的文章 DOCX、TDK DOCX、Prepared WebP 和终审 Screenshot
   身份，不接受客户端 Asset ID、对象 URI、路径、文件名或文件字节；
@@ -376,7 +376,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 31 tests，使用真实 PostgreSQL；
+- 32 tests，使用真实 PostgreSQL；
 - `PostgresTaskRepository` 保留原 CAS 接口，并新增加入调用方事务的 CAS 边界；
 - Writer 先锁 Organization/User/Project 与现有 Project/Team Membership 撤权事实，
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
@@ -469,7 +469,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 16 tests；
+- 17 tests；
 - Actor Cookie 篡改/缺失统一为未认证；
 - Project 按官网域名规则规范化后才查询 PostgreSQL 权限事实；
 - Viewer 可通过 Knowledge GET，但不能发布来源；
@@ -569,6 +569,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   送入该确定性提交边界；
 - 产品重新发现要求 `knowledge.edit`，Job 固定 Organization/Project/Requester；公开
   状态不返回私有 Request、Requester、原始错误或对象 URI；
+- Enqueue 在同一 PostgreSQL 事务内锁定可撤权授权事实和 Task Revision，创建
+  Batch/Job 并追加不含 Category URL 的 Audit；Audit 失败会回滚 Batch/Job 且只返回
+  通用 503；
 - Project A 的 Job 不能从 Project B 访问；撤销 Requester 后，Worker 在读取/执行私有
   Request 前把 Job 标为通用 conflict；
 - Worker 从 Active Project 的 `official_domain` 构造官网入口，并把正式同步绑定到
@@ -620,8 +623,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
   Task 命令和 `product_rediscovery` Job 为单写，其余路径尚未成为 PostgreSQL 准源；
 - Server Mode 已停止 SQLite Queue/Worker；产品重新发现已有项目级 PostgreSQL Runner
-  和两阶段授权，但通用 Runner、可靠 drain/join、全部 Operation 与事务内审计未完成，
-  不能算作整体服务器 Job 单写；
+  和两阶段授权，Enqueue 也已完成事务内审计；但通用 Runner、可靠 drain/join、全部
+  Operation 与终态 Job Audit 未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、

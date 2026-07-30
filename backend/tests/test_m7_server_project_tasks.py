@@ -2007,10 +2007,12 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         access = ProjectAccessService(
             PostgresProjectAccessRepository(self.engine)
         )
+        rediscovery_audit = RecordingAuditWriter()
         registry = ServerProductRediscoveryRegistry(
             self.engine,
             access=access,
             handler=handler,
+            audit=rediscovery_audit,
         )
         self.addCleanup(registry.stop)
         codec = ServerActorSessionCodec(b"r" * 32)
@@ -2159,6 +2161,28 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         )
                     ).scalar_one()
                 self.assertEqual(requested_by, self.user_a)
+                self.assertEqual(len(rediscovery_audit.events), 1)
+                audit_event = rediscovery_audit.events[0]
+                self.assertEqual(
+                    audit_event.action,
+                    "knowledge.products.rediscovery.queued",
+                )
+                self.assertEqual(
+                    audit_event.target_id,
+                    public_job["job_id"],
+                )
+                self.assertEqual(
+                    audit_event.details,
+                    {
+                        "operation": "product_rediscovery",
+                        "source_revision": 0,
+                        "max_products": 3,
+                    },
+                )
+                self.assertNotIn(
+                    payload["category_url"],
+                    str(audit_event.details),
+                )
                 self.assertEqual(
                     client.post(
                         path,
@@ -2172,6 +2196,71 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertFalse(local_state.exists())
             registry.stop()
+
+    def test_product_rediscovery_audit_failure_rolls_back_job(self) -> None:
+        class FailingAudit:
+            def append(self, connection, event):
+                raise RuntimeError(
+                    "audit provider included https://secret.example.test"
+                )
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        registry = ServerProductRediscoveryRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=lambda job, cancelled: 0,
+            audit=FailingAudit(),
+        )
+        self.addCleanup(registry.stop)
+        command = ProductRediscoveryCommand(
+            category_url="https://secret.example.test/products",
+            max_products=3,
+        )
+
+        with self.assertRaisesRegex(
+            ProductRediscoveryUnavailable,
+            "^product rediscovery could not be queued$",
+        ) as caught:
+            registry.enqueue(
+                actor=ActorIdentity(self.org_a, self.user_a),
+                project_id=self.project_a,
+                task_id=self.task_a,
+                source_revision=0,
+                command=command,
+            )
+
+        self.assertNotIn("secret.example.test", str(caught.exception))
+        with self.engine.connect() as connection:
+            job_count = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(background_jobs)
+                .where(
+                    background_jobs.c.organization_id == self.org_a,
+                    background_jobs.c.project_id == self.project_a,
+                    background_jobs.c.task_id == self.task_a,
+                )
+            ).scalar_one()
+            batch_count = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(job_batches)
+                .where(
+                    job_batches.c.organization_id == self.org_a,
+                    job_batches.c.project_id == self.project_a,
+                )
+            ).scalar_one()
+        self.assertEqual(job_count, 0)
+        self.assertEqual(batch_count, 0)
 
     def test_product_rediscovery_handler_uses_active_project_domain(
         self,

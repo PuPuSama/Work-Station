@@ -220,6 +220,28 @@ class PostgresJobQueue:
         customer: str = "",
         requested_by_user_id: str | None = None,
     ) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            return self.create_batch_in_transaction(
+                connection,
+                operation,
+                items,
+                customer=customer,
+                requested_by_user_id=requested_by_user_id,
+            )
+
+    def create_batch_in_transaction(
+        self,
+        connection: Connection,
+        operation: str,
+        items: list[dict[str, Any]],
+        *,
+        customer: str = "",
+        requested_by_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a batch inside a caller-owned authorization/audit transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError("job creation requires a business transaction")
         normalized_operation = _required_text(operation, "operation")
         normalized_requester = (
             _required_text(
@@ -231,79 +253,85 @@ class PostgresJobQueue:
         )
         if not items:
             raise ValueError("A batch requires at least one job.")
-        task_ids = tuple(_required_text(str(item["task_id"]), "task_id") for item in items)
+        task_ids = tuple(
+            _required_text(str(item["task_id"]), "task_id")
+            for item in items
+        )
         if len(task_ids) != len(set(task_ids)):
             raise ActiveJobError(task_ids[0])
         batch_id = uuid4().hex
         current = _now()
         try:
-            with self._engine.begin() as connection:
-                known_task_ids = set(
-                    connection.execute(
-                        sa.select(article_tasks.c.task_id).where(
-                            article_tasks.c.organization_id
-                            == self.organization_id,
-                            article_tasks.c.project_id == self.project_id,
-                            article_tasks.c.task_id.in_(task_ids),
-                        )
-                    ).scalars()
-                )
-                missing = next(
-                    (task_id for task_id in task_ids if task_id not in known_task_ids),
-                    None,
-                )
-                if missing is not None:
-                    raise KeyError(missing)
-                active = connection.execute(
-                    sa.select(background_jobs.c.task_id)
-                    .where(
-                        *self._job_scope(),
-                        background_jobs.c.task_id.in_(task_ids),
-                        background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
+            known_task_ids = set(
+                connection.execute(
+                    sa.select(article_tasks.c.task_id).where(
+                        article_tasks.c.organization_id
+                        == self.organization_id,
+                        article_tasks.c.project_id == self.project_id,
+                        article_tasks.c.task_id.in_(task_ids),
                     )
-                    .limit(1)
-                ).scalar_one_or_none()
-                if active is not None:
-                    raise ActiveJobError(str(active))
+                ).scalars()
+            )
+            missing = next(
+                (
+                    task_id
+                    for task_id in task_ids
+                    if task_id not in known_task_ids
+                ),
+                None,
+            )
+            if missing is not None:
+                raise KeyError(missing)
+            active = connection.execute(
+                sa.select(background_jobs.c.task_id)
+                .where(
+                    *self._job_scope(),
+                    background_jobs.c.task_id.in_(task_ids),
+                    background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if active is not None:
+                raise ActiveJobError(str(active))
 
-                connection.execute(
-                    job_batches.insert().values(
-                        organization_id=self.organization_id,
-                        project_id=self.project_id,
-                        batch_id=batch_id,
-                        operation=normalized_operation,
-                        customer=customer,
-                        created_at=current,
-                        updated_at=current,
-                    )
+            connection.execute(
+                job_batches.insert().values(
+                    organization_id=self.organization_id,
+                    project_id=self.project_id,
+                    batch_id=batch_id,
+                    operation=normalized_operation,
+                    customer=customer,
+                    created_at=current,
+                    updated_at=current,
                 )
-                connection.execute(
-                    background_jobs.insert(),
-                    tuple(
-                        {
-                            "organization_id": self.organization_id,
-                            "project_id": self.project_id,
-                            "job_id": uuid4().hex,
-                            "batch_id": batch_id,
-                            "task_id": task_id,
-                            "requested_by_user_id": normalized_requester,
-                            "customer": str(item.get("customer", "")),
-                            "topic_index": int(item.get("topic_index", 0)),
-                            "topic": str(item.get("topic", "")),
-                            "operation": normalized_operation,
-                            "status": "queued",
-                            "request": dict(item.get("request", {})),
-                            "source_revision": int(item["source_revision"]),
-                            "available_at": current,
-                            "created_at": current,
-                            "updated_at": current,
-                        }
-                        for task_id, item in zip(task_ids, items, strict=True)
-                    ),
-                )
+            )
+            connection.execute(
+                background_jobs.insert(),
+                tuple(
+                    {
+                        "organization_id": self.organization_id,
+                        "project_id": self.project_id,
+                        "job_id": uuid4().hex,
+                        "batch_id": batch_id,
+                        "task_id": task_id,
+                        "requested_by_user_id": normalized_requester,
+                        "customer": str(item.get("customer", "")),
+                        "topic_index": int(item.get("topic_index", 0)),
+                        "topic": str(item.get("topic", "")),
+                        "operation": normalized_operation,
+                        "status": "queued",
+                        "request": dict(item.get("request", {})),
+                        "source_revision": int(item["source_revision"]),
+                        "available_at": current,
+                        "created_at": current,
+                        "updated_at": current,
+                    }
+                    for task_id, item in zip(task_ids, items, strict=True)
+                ),
+            )
         except IntegrityError as exc:
             raise ActiveJobError(task_ids[0]) from exc
-        return self.get_batch(batch_id)
+        return self._get_batch_in_connection(connection, batch_id)
 
     def claim_jobs(
         self,
@@ -847,26 +875,33 @@ class PostgresJobQueue:
 
     def get_batch(self, batch_id: str) -> dict[str, Any]:
         with self._engine.connect() as connection:
-            batch = connection.execute(
-                sa.select(job_batches).where(
-                    *self._batch_scope(),
-                    job_batches.c.batch_id == batch_id,
-                )
-            ).mappings().one_or_none()
-            if batch is None:
-                raise KeyError(batch_id)
-            jobs = connection.execute(
-                sa.select(background_jobs)
-                .where(
-                    *self._job_scope(),
-                    background_jobs.c.batch_id == batch_id,
-                )
-                .order_by(
-                    background_jobs.c.created_at,
-                    background_jobs.c.topic_index,
-                    background_jobs.c.job_id,
-                )
-            ).mappings().all()
+            return self._get_batch_in_connection(connection, batch_id)
+
+    def _get_batch_in_connection(
+        self,
+        connection: Connection,
+        batch_id: str,
+    ) -> dict[str, Any]:
+        batch = connection.execute(
+            sa.select(job_batches).where(
+                *self._batch_scope(),
+                job_batches.c.batch_id == batch_id,
+            )
+        ).mappings().one_or_none()
+        if batch is None:
+            raise KeyError(batch_id)
+        jobs = connection.execute(
+            sa.select(background_jobs)
+            .where(
+                *self._job_scope(),
+                background_jobs.c.batch_id == batch_id,
+            )
+            .order_by(
+                background_jobs.c.created_at,
+                background_jobs.c.topic_index,
+                background_jobs.c.job_id,
+            )
+        ).mappings().all()
         return self._batch_dict(batch, jobs)
 
     def list_batches(
