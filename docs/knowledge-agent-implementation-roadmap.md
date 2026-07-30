@@ -16,8 +16,8 @@
 | M3 | 完成 | `docs/architecture/knowledge-agent-m3.md`、`knowledge-agent-m3-evidence.md` |
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
-| M6 | 下一里程碑 | 评测与作品展示 |
-| M7 | 未开始 | 多人服务器版 |
+| M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
+| M7 | 进行中：M7-A 多租户/RBAC 底座完成 | `docs/architecture/knowledge-agent-m7.md` |
 
 ## M0：基线与接口边界
 
@@ -109,3 +109,15 @@
 - S3 兼容对象存储、审计日志、备份和密钥管理。
 - 受控云端或公司私有部署。
 - 先增加三个受限对话写操作：重新检索产品、确认后替换产品、版本快照后重写指定章节。再根据明确业务目标决定 GSC、Semrush 和更多写操作。
+
+实施状态（2026-07-30）：
+
+- 已新增 Organization、User、Team、TeamMembership、显式 Project Ownership、
+  ProjectMembership 和 append-only Audit Event；
+- 已实现统一权限矩阵、PostgreSQL 事实查询和事务内 Audit Writer；
+- 已验证跨组织拒绝、禁用用户、旧项目 fail-closed、复合外键、审计不可修改和
+  Alembic 往返升级；
+- 当前单密码 Cookie 不具备 User Identity，因此尚未把 RBAC 接入 `app.py`；
+- 后续按“身份会话与管理写服务 -> Task/Job PostgreSQL -> 对象存储与部署门禁”
+  顺序推进，完整结构与重构检查清单见
+  `docs/architecture/knowledge-agent-m7.md`。
