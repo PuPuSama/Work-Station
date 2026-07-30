@@ -10,7 +10,6 @@
 - 已安装 Git、Python 3、Docker 和 Docker Compose v2。
 - `/root/article/.env` 已配置，不能提交到 Git。
 - `/root/article/workspace` 保存正式数据，不能放进 Git 或部署临时目录。
-- 外部 Docker 网络 `new-api_new-api-network` 已存在。
 - 服务器 checkout 不保留 tracked 手工修改；检测到修改时部署会停止，不会覆盖。
 
 ## 建立专用 SSH 密钥
@@ -45,7 +44,6 @@ git status --short
 git branch --show-current
 git fetch origin main
 docker compose version
-docker network inspect new-api_new-api-network
 docker compose up -d --build --wait --wait-timeout 180
 ```
 

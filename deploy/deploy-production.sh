@@ -59,7 +59,6 @@ test -d "$workspace" || {
   echo "Missing persistent workspace: $workspace" >&2
   exit 1
 }
-"${docker_command[@]}" network inspect new-api_new-api-network >/dev/null
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Server checkout has tracked local changes; refusing to overwrite them." >&2
