@@ -9,7 +9,7 @@ workspace="$repository/workspace"
 environment_file="$repository/.env"
 compose_project="article"
 replacement_started=0
-docker_command=(sudo -n docker)
+docker_command=(sudo -n env "ARTICLE_WORKSPACE_PATH=$workspace" "ARTICLE_ENV_FILE=$environment_file" docker)
 
 export ARTICLE_WORKSPACE_PATH="$workspace"
 export ARTICLE_ENV_FILE="$environment_file"
