@@ -95,6 +95,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
+- 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
+  SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
+  设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
 - 九条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
@@ -326,6 +329,10 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
 | `frontend/src/app/login/page.tsx` | 本地密码/Server OIDC 登录入口选择 | 以服务端状态为准、失败不降级、Next Path 只能是本地路径 |
+| `frontend/src/components/project-directory.tsx` | Local/Server 首页组件树分流 | 先读服务端认证状态、失败显式重试、Server 时不挂载 Local 数据请求 |
+| `frontend/src/components/server-project-selector.tsx` | Server 可访问项目入口 | 只渲染 `/api/projects` 的 SQL-scoped 结果、显示有效角色、直达已迁移 Delivery |
+| `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口，不启动 Local Job Center 或设置导航 |
+| `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先认证再查数据库 Role、项目规范化、未迁移路由 fail closed |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
@@ -716,8 +723,8 @@ Server 编排层负责授权、对象完整性和 Task CAS。Local 模式继续�
 处理。若项目内同一内容哈希已经登记为另一访问类型，导出在 Task CAS 前 fail closed，
 不把它降级成 Viewer 可下载；后续若拆出独立 `task_artifacts` 关系表，必须继续保留这项
 访问分类不变量。TDK DOCX、最终 AI-rate 截图和交付 ZIP 已由后续各节迁移；现有前端
-Delivery UI 尚未切换，因此这里的 `docx_exported` 只代表文章 Word 产物完成，不代表
-操作员已经下载完整交付包。
+Delivery Console 已由 D1.6 切换到专用接口；`docx_exported` 仍只代表文章 Word 产物
+完成，不代表操作员已经生成或下载完整交付包。
 
 #### D1.3 已实现：Server TDK DOCX 生成与下载
 
@@ -755,7 +762,7 @@ GET /api/projects/{project}/tasks/{task_id}/tdk/download
 LLM 调用发生在 PostgreSQL Task 事务前，避免长事务持锁；生成与对象写入成功后才进入
 重新授权、Task CAS 和 Audit 同事务。并发冲突或撤权可能留下内容寻址 `tdk_docx`
 orphan，继续进入延迟对账，不能在失败请求里直接删除。最终 AI-rate 截图和 Delivery
-ZIP 已由后续两节迁移；前端 Delivery UI 仍未切换。
+ZIP 与 Delivery Console 已由后续各节迁移。
 
 #### D1.4 已实现：Server 最终 AI-rate Review 与截图
 
@@ -800,8 +807,8 @@ report，并以 `article_hash` 防止上游正文修改后继续沿用旧确认�
 
 文件读取、PNG 规范化和对象写入发生在 PostgreSQL 事务前；写入后由
 `PostgresAuditedTaskWriter` 再次锁定权限事实并执行 CAS + Audit。并发冲突或撤权可能
-留下内容寻址截图 orphan，继续进入延迟对账。Delivery ZIP 已由下一节对象化；前端
-Delivery UI 仍待切换。
+留下内容寻址截图 orphan，继续进入延迟对账。Delivery ZIP 与 Delivery Console 已由
+后续两节迁移。
 
 #### D1.5 已实现：Server Delivery ZIP 组装与下载
 
@@ -844,6 +851,43 @@ GET /api/projects/{project}/tasks/{task_id}/delivery-package/download
 Audit 只记录 Revision、Status、文件数和图片数，不记录文件名、正文、对象 URI、签名
 URL 或归档字节。后续重构可将 Task Artifact 抽成独立关系表，但必须保留“Task 身份
 绑定 + 专用权限分类 + 内容哈希 + 二次授权”四项不变量。
+
+#### D1.6 已实现：Server Project Directory 到 Delivery Console
+
+```text
+GET /api/auth/status
+  -> mode=server
+  -> 不挂载 Local ProjectSelector
+GET /api/projects
+  -> SQL-scoped AccessibleProject(project_id, customer, domain, effective_role)
+  -> Project Card 只链接 /projects/{project_id}/deliveries
+GET /api/projects/{project_id}/tasks
+  -> Path 或 Asset ID 分别识别 Local/Server 产物
+  -> effective_role 决定 Review/Delivery 控件是否可操作
+POST package-delivery { revision }
+  -> 成功后重新读取 Task 列表
+GET Task-scoped download endpoint
+  -> JSON 短期 URL
+  -> 浏览器导航到签名对象；UI 不接触 Bucket、Key 或永久 URI
+```
+
+首页模式分流必须先完成 `/api/auth/status`，然后才挂载 Local 或 Server 组件树；这不是
+只换 API 前缀。否则 Server 登录后 Local `ProjectSelector` 会并发请求 Dashboard、
+Config、SQLite Task 和上传接口，既产生噪声，也可能诱导未来开发者给旧路由放宽白名单。
+Server Project Card 只使用 SQL Directory 返回的 Project ID 和 Effective Role，不从
+URL 客户名推导授权。
+
+`ProjectShell` 在 Server 模式只展示 Delivery，且不挂载 Local Job Center、Article、
+Batch 或 Settings 入口。Delivery Console 仍允许 Reviewer/Viewer 查看 Task 交付状态；
+Reviewer 可以查看终审截图，只有 `org_admin/team_lead/editor` 显示 Word、TDK、打包和
+ZIP 下载动作。前端禁用只是可用性提示，后端仍在路由、对象读取/写入和签名前重新授权，
+不能把 Effective Role 当作安全边界。
+
+Local 模式继续挂载原 `ProjectSelector`、完整项目导航、Path 状态和文件下载接口。
+Task Type 同时保留 `*_path` 与 `*_asset_id/hash/filename`，直到 Local/Server 模型正式
+拆分；重构时应把“运行模式分流、Task Artifact 展示模型、签名下载动作”拆成稳定接口，
+而不是在各页面散落字符串前缀。当前只开放目录到交付的窄闭环，未迁移文章编辑、批量
+任务和设置页面仍不得在 Server 导航中重新出现。
 
 正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
 在签名前再校验一次，并签发最长一小时的临时下载 URL。知识源上传要求

@@ -22,17 +22,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiFileUrl, apiGet, apiPost } from "@/lib/api";
-import type { ApiMessage } from "@/types";
-
-type AuthStatus = {
-  message: string;
-  data?: {
-    enabled?: boolean;
-    authenticated?: boolean;
-    mode?: "server";
-    login_available?: boolean;
-  };
-};
+import type { ApiMessage, AuthStatus } from "@/types";
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "登录失败，请稍后重试。";

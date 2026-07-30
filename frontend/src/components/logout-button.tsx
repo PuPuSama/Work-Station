@@ -6,15 +6,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ApiMessage } from "@/types";
-
-type AuthStatus = {
-  message: string;
-  data?: {
-    enabled?: boolean;
-    authenticated?: boolean;
-  };
-};
+import type { ApiMessage, AuthStatus } from "@/types";
 
 export function LogoutButton({
   iconOnly = false,

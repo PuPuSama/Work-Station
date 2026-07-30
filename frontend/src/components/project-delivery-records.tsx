@@ -2,7 +2,18 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { AlertCircle, Download, ExternalLink, Package, RefreshCw, Search } from "lucide-react";
+import {
+  AlertCircle,
+  Download,
+  ExternalLink,
+  FileText,
+  ImageIcon,
+  Loader2,
+  Package,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+} from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -14,7 +25,12 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { apiFileUrl, apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { TaskRecord } from "@/types";
+import type {
+  AccessibleProject,
+  AuthStatus,
+  ProjectAssetDownload,
+  TaskRecord,
+} from "@/types";
 
 type DeliveryFilter = "all" | "incomplete" | "ready" | "packaged";
 
@@ -32,15 +48,34 @@ function errorMessage(error: unknown) {
 }
 
 function deliveryParts(task: TaskRecord) {
+  const images = task.images ?? [];
   return {
     article: Boolean(task.final_article || task.linked_article || task.humanized_article),
     links: Boolean(task.link_validation?.passed),
-    screenshot: Boolean(task.final_ai_check?.screenshot_path),
-    images: Boolean(task.images?.length),
-    word: Boolean(task.docx_path),
-    tdk: Boolean(task.tdk_path),
-    package: Boolean(task.delivery_package_path),
+    screenshot: Boolean(
+      task.final_ai_check?.screenshot_path ||
+        task.final_ai_check?.screenshot_asset_id,
+    ),
+    images: Boolean(
+      images.length &&
+        images.every(
+          (image) => image.prepared_path || image.prepared_asset_id,
+        ),
+    ),
+    word: Boolean(task.docx_path || task.docx_asset_id),
+    tdk: Boolean(task.tdk_path || task.tdk_asset_id),
+    package: Boolean(
+      task.delivery_package_path || task.delivery_package_asset_id,
+    ),
   };
+}
+
+function canDeliver(role: AccessibleProject["effective_role"] | null) {
+  return role === "org_admin" || role === "team_lead" || role === "editor";
+}
+
+function canReview(role: AccessibleProject["effective_role"] | null) {
+  return role !== null && role !== "viewer";
 }
 
 function formatUpdatedAt(value: string) {
@@ -56,6 +91,10 @@ function formatUpdatedAt(value: string) {
 
 export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
+  const [mode, setMode] = useState<"loading" | "local" | "server">("loading");
+  const [effectiveRole, setEffectiveRole] = useState<
+    AccessibleProject["effective_role"] | null
+  >(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -67,7 +106,29 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
     setLoading(true);
     setError("");
     try {
-      setTasks(await apiGet<TaskRecord[]>(`/api/tasks?customer=${encodeURIComponent(customer)}`));
+      const status = await apiGet<AuthStatus>("/api/auth/status");
+      const serverMode = status.data?.mode === "server";
+      if (serverMode) {
+        const projectPath = encodeURIComponent(customer);
+        const [nextTasks, projects] = await Promise.all([
+          apiGet<TaskRecord[]>(`/api/projects/${projectPath}/tasks`),
+          apiGet<AccessibleProject[]>("/api/projects"),
+        ]);
+        const project = projects.find(
+          (item) => item.project_id === customer,
+        );
+        setMode("server");
+        setEffectiveRole(project?.effective_role ?? null);
+        setTasks(nextTasks);
+      } else {
+        setMode("local");
+        setEffectiveRole(null);
+        setTasks(
+          await apiGet<TaskRecord[]>(
+            `/api/tasks?customer=${encodeURIComponent(customer)}`,
+          ),
+        );
+      }
     } catch (loadError) {
       setError(errorMessage(loadError));
     } finally {
@@ -121,7 +182,35 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
     }
   }
 
+  async function downloadServerArtifact(
+    task: TaskRecord,
+    label: string,
+    path: string,
+  ) {
+    setPending((current) => ({ ...current, [task.id]: label }));
+    setError("");
+    setMessage("");
+    try {
+      const download = await apiGet<ProjectAssetDownload>(path);
+      if (!download.url) {
+        throw new Error("服务器没有返回可用的短期下载地址。");
+      }
+      window.location.assign(download.url);
+    } catch (downloadError) {
+      setError(errorMessage(downloadError));
+    } finally {
+      setPending((current) => {
+        const next = { ...current };
+        delete next[task.id];
+        return next;
+      });
+    }
+  }
+
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
+  const serverProjectApi = `/api/projects/${encodeURIComponent(customer)}`;
+  const deliveryAllowed = mode !== "server" || canDeliver(effectiveRole);
+  const reviewAllowed = mode !== "server" || canReview(effectiveRole);
   const filters: Array<{ value: DeliveryFilter; label: string }> = [
     { value: "all", label: "全部" },
     { value: "incomplete", label: "缺少交付项" },
@@ -134,8 +223,20 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
       <div className="border-b bg-card">
         <div className="mx-auto grid max-w-[1480px] gap-4 px-5 py-5">
           <div className="px-1">
-            <h1 className="text-xl font-semibold">交付记录</h1>
-            <p className="mt-1 text-sm text-muted-foreground">集中检查 Word、D 文档、最终 AI 截图、图片和交付包。</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-semibold">交付记录</h1>
+              {mode === "server" && (
+                <Badge variant="outline">
+                  <ShieldCheck />
+                  Server 私有交付
+                </Badge>
+              )}
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              集中检查 Word、D 文档、最终 AI 截图、图片和交付包。
+              {mode === "server" &&
+                " 下载时会重新授权并签发短期地址，不展示对象存储路径。"}
+            </p>
           </div>
         </div>
       </div>
@@ -143,10 +244,21 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
       <div className="mx-auto grid max-w-[1480px] gap-4 px-5 py-5">
         {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
         {message && <Alert><AlertTitle>操作完成</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>}
+        {mode === "server" && !deliveryAllowed && !loading && (
+          <Alert>
+            <ShieldCheck />
+            <AlertTitle>当前角色为只读交付视图</AlertTitle>
+            <AlertDescription>
+              你可以查看交付状态
+              {reviewAllowed ? "和终审截图" : ""}
+              ，但不能生成或下载 Word、TDK 与交付 ZIP。
+            </AlertDescription>
+          </Alert>
+        )}
 
         <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
           {filters.map((item) => (
-            <button key={item.value} type="button" onClick={() => setFilter(item.value)} className={cn("rounded-lg border bg-card px-3 py-2.5 text-left hover:bg-accent/40", filter === item.value && "border-primary bg-accent/50 ring-1 ring-primary/20")}>
+            <button key={item.value} type="button" onClick={() => setFilter(item.value)} className={cn("min-h-11 rounded-lg border bg-card px-3 py-2.5 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", filter === item.value && "border-primary bg-accent/50 ring-1 ring-primary/20")} aria-pressed={filter === item.value}>
               <span className="block text-xs text-muted-foreground">{item.label}</span>
               <span className="mt-0.5 block text-xl font-semibold">{counts[item.value]}</span>
             </button>
@@ -156,34 +268,139 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
         <Card className="rounded-lg">
           <CardHeader className="border-b">
             <CardTitle>文章交付状态</CardTitle>
-            <CardDescription>缺失项可直接进入文章的交付阶段补齐。</CardDescription>
+            <CardDescription>
+              {mode === "server"
+                ? "Server 模式只显示已迁移产物；缺失项需由对应受限工作流补齐。"
+                : "缺失项可直接进入文章的交付阶段补齐。"}
+            </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             <div className="flex flex-col gap-2 sm:flex-row">
-              <div className="relative flex-1"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-8" placeholder="搜索编号、话题或标题" /></div>
-              <Button variant="outline" onClick={() => void loadTasks()} disabled={loading}><RefreshCw className={cn(loading && "animate-spin")} />刷新</Button>
+              <div className="relative flex-1"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-8" placeholder="搜索编号、话题或标题" aria-label="搜索交付记录" /></div>
+              <Button variant="outline" onClick={() => void loadTasks()} disabled={loading}>{loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}刷新</Button>
             </div>
-            <div className="overflow-hidden rounded-lg border">
+            <div className="overflow-x-auto rounded-lg border">
               <Table>
-                <TableHeader><TableRow><TableHead className="w-28">编号</TableHead><TableHead>文章</TableHead><TableHead>交付项</TableHead><TableHead className="w-32">更新时间</TableHead><TableHead className="w-64 text-right">操作</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead className="w-28">编号</TableHead><TableHead>文章</TableHead><TableHead>交付项</TableHead><TableHead className="w-32">更新时间</TableHead><TableHead className="min-w-72 text-right">操作</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {filteredTasks.map((task) => {
                     const parts = deliveryParts(task);
                     const missing = Object.entries(parts)
                       .filter(([key, done]) => key !== "package" && !done)
                       .map(([key]) => DELIVERY_LABELS[key]);
+                    const taskPending = pending[task.id];
+                    const encodedTaskId = encodeURIComponent(task.id);
                     return <TableRow key={task.id}>
                       <TableCell className="font-mono text-xs">topic_{String(task.topic_index).padStart(3, "0")}</TableCell>
                       <TableCell className="max-w-0 whitespace-normal"><div className="truncate font-medium">{task.selected_title || task.topic}</div><div className="mt-1 truncate text-xs text-muted-foreground">{task.topic}</div></TableCell>
                       <TableCell><div className="flex flex-wrap gap-1">{parts.package ? <Badge>已打包</Badge> : missing.length ? missing.map((item) => <Badge key={item} variant="outline">缺 {item}</Badge>) : <Badge>可打包</Badge>}</div></TableCell>
                       <TableCell className="text-xs text-muted-foreground">{formatUpdatedAt(task.updated_at)}</TableCell>
-                      <TableCell><div className="flex justify-end gap-1">
-                        {!parts.package && !missing.length && <Button size="sm" disabled={Boolean(pending[task.id])} onClick={() => void runTaskAction(task, "生成交付包", () => apiPost<TaskRecord>(`/api/tasks/${task.id}/package-delivery`))}><Package />打包</Button>}
-                        {parts.package && <Button size="sm" variant="outline" nativeButton={false} render={<a href={apiFileUrl(`/api/tasks/${task.id}/delivery-package/download`)} />}><Download />下载</Button>}
-                        <Link href={`${projectPath}/articles/${encodeURIComponent(task.id)}?step=files`} className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 text-sm hover:bg-muted"><ExternalLink className="size-4" />处理</Link>
+                      <TableCell><div className="flex flex-wrap justify-end gap-1">
+                        {mode === "server" && parts.word && deliveryAllowed && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={Boolean(taskPending)}
+                            aria-label={`下载 topic_${String(task.topic_index).padStart(3, "0")} 的 Word`}
+                            onClick={() =>
+                              void downloadServerArtifact(
+                                task,
+                                "下载 Word",
+                                `${serverProjectApi}/tasks/${encodedTaskId}/docx/download`,
+                              )
+                            }
+                          >
+                            {taskPending === "下载 Word" ? <Loader2 className="animate-spin" /> : <FileText />}
+                            Word
+                          </Button>
+                        )}
+                        {mode === "server" && parts.tdk && deliveryAllowed && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={Boolean(taskPending)}
+                            aria-label={`下载 topic_${String(task.topic_index).padStart(3, "0")} 的 D 文档`}
+                            onClick={() =>
+                              void downloadServerArtifact(
+                                task,
+                                "下载 D 文档",
+                                `${serverProjectApi}/tasks/${encodedTaskId}/tdk/download`,
+                              )
+                            }
+                          >
+                            {taskPending === "下载 D 文档" ? <Loader2 className="animate-spin" /> : <FileText />}
+                            D.docx
+                          </Button>
+                        )}
+                        {mode === "server" && parts.screenshot && reviewAllowed && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={Boolean(taskPending)}
+                            aria-label={`查看 topic_${String(task.topic_index).padStart(3, "0")} 的终审截图`}
+                            onClick={() =>
+                              void downloadServerArtifact(
+                                task,
+                                "打开终审截图",
+                                `${serverProjectApi}/tasks/${encodedTaskId}/checks/final-ai/screenshot/download`,
+                              )
+                            }
+                          >
+                            {taskPending === "打开终审截图" ? <Loader2 className="animate-spin" /> : <ImageIcon />}
+                            终审
+                          </Button>
+                        )}
+                        {!parts.package && !missing.length && deliveryAllowed && (
+                          <Button
+                            size="sm"
+                            disabled={Boolean(taskPending)}
+                            onClick={() =>
+                              void runTaskAction(
+                                task,
+                                "生成交付包",
+                                () =>
+                                  apiPost<TaskRecord>(
+                                    mode === "server"
+                                      ? `${serverProjectApi}/tasks/${encodedTaskId}/package-delivery`
+                                      : `/api/tasks/${encodedTaskId}/package-delivery`,
+                                    mode === "server"
+                                      ? { revision: task.revision ?? 0 }
+                                      : undefined,
+                                  ),
+                              )
+                            }
+                          >
+                            {taskPending === "生成交付包" ? <Loader2 className="animate-spin" /> : <Package />}
+                            打包
+                          </Button>
+                        )}
+                        {mode === "server" && parts.package && deliveryAllowed && (
+                          <Button
+                            size="sm"
+                            disabled={Boolean(taskPending)}
+                            aria-label={`下载 topic_${String(task.topic_index).padStart(3, "0")} 的交付 ZIP`}
+                            onClick={() =>
+                              void downloadServerArtifact(
+                                task,
+                                "下载交付 ZIP",
+                                `${serverProjectApi}/tasks/${encodedTaskId}/delivery-package/download`,
+                              )
+                            }
+                          >
+                            {taskPending === "下载交付 ZIP" ? <Loader2 className="animate-spin" /> : <Download />}
+                            ZIP
+                          </Button>
+                        )}
+                        {mode === "local" && parts.package && (
+                          <Button size="sm" variant="outline" nativeButton={false} render={<a href={apiFileUrl(`/api/tasks/${encodedTaskId}/delivery-package/download`)} />}><Download />下载</Button>
+                        )}
+                        {mode === "local" && (
+                          <Link href={`${projectPath}/articles/${encodedTaskId}?step=files`} className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><ExternalLink className="size-4" />处理</Link>
+                        )}
                       </div></TableCell>
                     </TableRow>;
                   })}
+                  {loading && !filteredTasks.length && <TableRow><TableCell colSpan={5} className="h-36 text-center text-muted-foreground"><span className="inline-flex items-center gap-2" role="status" aria-live="polite"><Loader2 className="size-4 animate-spin" />正在读取交付记录…</span></TableCell></TableRow>}
                   {!loading && !filteredTasks.length && <TableRow><TableCell colSpan={5} className="h-36 text-center text-muted-foreground">没有符合当前条件的交付记录</TableCell></TableRow>}
                 </TableBody>
               </Table>

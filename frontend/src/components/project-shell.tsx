@@ -41,7 +41,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { apiGet } from "@/lib/api";
-import type { PublicConfig } from "@/types";
+import type { AuthStatus, PublicConfig } from "@/types";
 
 type ProjectShellProps = {
   customer: string;
@@ -58,6 +58,7 @@ const sectionNames = {
 
 export function ProjectShell({ customer, children }: ProjectShellProps) {
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
+  const [serverMode, setServerMode] = useState<boolean | null>(null);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
@@ -67,11 +68,18 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
 
   useEffect(() => {
     let active = true;
-    void apiGet<PublicConfig>("/api/config")
-      .then((value) => {
-        if (active) {
-          setKnowledgeEnabled(Boolean(value.features?.knowledge_agent_enabled));
+    void apiGet<AuthStatus>("/api/auth/status")
+      .then(async (status) => {
+        const isServer = status.data?.mode === "server";
+        if (!active) return;
+        setServerMode(isServer);
+        if (isServer) {
+          setKnowledgeEnabled(false);
+          return;
         }
+        const value = await apiGet<PublicConfig>("/api/config");
+        if (!active) return;
+        setKnowledgeEnabled(Boolean(value.features?.knowledge_agent_enabled));
       })
       .catch(() => {
         // Navigation remains on the stable M0 surface when config is unavailable.
@@ -81,7 +89,7 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
     };
   }, []);
 
-  const items = [
+  const localItems = [
     {
       label: "文章任务",
       description: "单篇内容与状态",
@@ -115,6 +123,15 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
       active: section === "deliveries",
     },
   ];
+  const items =
+    serverMode === true
+      ? localItems.filter((item) => item.href.endsWith("/deliveries"))
+      : serverMode === false
+        ? localItems
+        : [];
+  const projectHome = serverMode === true
+    ? `${projectPath}/deliveries`
+    : `${projectPath}/articles`;
 
   return (
     <SidebarProvider>
@@ -183,16 +200,18 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
 
         <SidebarFooter className="px-3 pb-3">
           <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                isActive={section === "settings"}
-                tooltip="项目设置"
-                render={<Link href={`${projectPath}/settings`} />}
-              >
-                <Settings2 />
-                <span>项目设置</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
+            {serverMode === false && (
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={section === "settings"}
+                  tooltip="项目设置"
+                  render={<Link href={`${projectPath}/settings`} />}
+                >
+                  <Settings2 />
+                  <span>项目设置</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            )}
             <SidebarMenuItem>
               <SidebarMenuButton tooltip="返回全部项目" render={<Link href="/" />}>
                 <ArrowLeft />
@@ -221,7 +240,7 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
             <BreadcrumbList className="flex-nowrap">
               <BreadcrumbItem className="min-w-0">
                 <BreadcrumbLink
-                  render={<Link href={`${projectPath}/articles`} />}
+                  render={<Link href={projectHome} />}
                   className="max-w-48 truncate"
                   title={customer}
                 >
@@ -254,7 +273,7 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
               )}
             </BreadcrumbList>
           </Breadcrumb>
-          <ProjectJobCenter customer={customer} />
+          {serverMode === false && <ProjectJobCenter customer={customer} />}
           <LogoutButton iconOnly />
         </header>
         <div className="min-w-0 flex-1">{children}</div>

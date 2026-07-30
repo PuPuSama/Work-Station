@@ -214,7 +214,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 导出/专用下载返回 403；通用 Asset 下载对 `article_docx` 返回 404；
 - 同哈希资产已属于其他访问类型时在 Task CAS 前 fail closed，不降级下载权限；
 - 旧 Revision 在对象读取/写入前返回 409，未产生额外对象；
-- Delivery ZIP 已由后续切片对象化；前端 Delivery UI 仍待切换。
+- Delivery ZIP 与窄范围 Server Delivery Console 已由后续切片接通。
 
 ### Server 私有 TDK DOCX
 
@@ -240,7 +240,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 生成/专用下载返回 403；通用 Asset 下载与文章 DOCX 专用下载不能取得 TDK；
 - 旧 Revision 在 LLM 和对象写入前返回 409；成功 Task CAS 产生
   `article.tdk.generated` Audit，Details 只含字符数和关键词数量；
-- Delivery ZIP 已由后续切片对象化；前端 Delivery UI 和 orphan 对账仍未完成。
+- Delivery ZIP 与窄范围 Server Delivery Console 已由后续切片接通；orphan 对账仍未
+  完成。
 
 ### Server 最终 AI-rate Review
 
@@ -270,7 +271,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 旧 Revision 在读取 multipart 字节前返回 409，跨 Project 与 Viewer 均返回 403；
 - 两个 Audit Action 只保存截图尺寸、confirmed 和是否有 score，不含 Report、score 值、
   文章正文、图片字节或 URL；
-- Delivery ZIP 已由下一节对象化；前端 Delivery UI 和 orphan 对账仍未完成。
+- Delivery ZIP 与窄范围 Server Delivery Console 已由后续两节接通；orphan 对账仍未
+  完成。
 
 ### Server 私有 Delivery ZIP
 
@@ -303,6 +305,33 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   或签名 URL；
 - 上游无效化会同时清空 Delivery 的路径与全部 Server Asset 身份；对象写入后发生 CAS
   冲突产生的内容寻址 orphan 仍待延迟对账。
+
+### Server Project Directory 与 Delivery Console
+
+```powershell
+& '<工作区 Node 绝对路径>' node_modules/eslint/bin/eslint.js .
+& '<工作区 Node 绝对路径>' node_modules/next/dist/bin/next build
+```
+
+结果：
+
+- ESLint 通过；
+- Next.js 16.2.10 Production Build 与 TypeScript 通过，静态/动态路由生成完成；
+- 首页先读取 `/api/auth/status` 再挂载 Local 或 Server 组件树，Server 模式不会启动
+  Local ProjectSelector 的 Dashboard/Config/SQLite Task 请求；
+- Server Project Selector 只读取 `/api/projects`，显示 Effective Role，并以
+  `project_id` 直达 Delivery；无项目、加载、失败与重试状态均有文字反馈；
+- Project Shell 在 Server 模式只显示 Delivery，不挂载 Local Job Center、Article、
+  Batch 或 Settings；Local 模式保持原导航；
+- Delivery Console 以 `*_asset_id` 识别 Server DOCX/TDK/Review/ZIP，以 `*_path`
+  识别 Local 产物；打包发送当前 Revision，成功后重载 Task；
+- Reviewer/Viewer 的交付动作按角色隐藏或禁用，错误 Alert 可被辅助技术宣告；后端
+  路由和对象服务仍是实际安全准源；
+- Server 下载先调用 Task-scoped 接口取得短期 URL；前端不显示或拼接 Bucket、Object
+  Key、URI 或通用 Asset 下载；
+- 过滤器具备 Pressed/Focus 状态，异步按钮禁用并显示 Spinner，表格窄屏时可水平滚动；
+- 浏览器级假 API 冒烟未计为通过证据：内置浏览器安全层对本地 API 路径返回
+  `ERR_BLOCKED_BY_CLIENT`；测试用同源路由、环境文件和后台进程均已删除，未进入差异。
 
 ### Server Task CAS 与事务内 Audit
 
@@ -566,6 +595,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象和
   no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
-- 前端登录页已新增 Server OIDC 分支并通过 lint/build；其余 M7 管理界面尚未接入。
+- 前端已新增 Server OIDC、SQL Project Directory 与窄范围 Delivery Console，并通过
+  lint/build；Article、Batch、Settings 等其余 M7 管理界面尚未接入 Server API。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

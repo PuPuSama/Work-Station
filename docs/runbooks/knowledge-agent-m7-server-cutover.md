@@ -233,8 +233,8 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 - 通用 `GET .../assets/{asset_id}/download` 对 `article_docx` 返回 404，专用下载路由
   重新要求 `article.deliver` 并签发不超过一小时的 URL；
 - 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
-- Delivery ZIP 已由后续专用接口对象化；前端 Delivery UI 尚未切换，发布证据不得
-  写成“操作员完整交付流程已上线”。
+- Delivery ZIP 与窄范围 Server Delivery Console 已接线；完整 Article/Batch/Settings
+  前端尚未迁移，发布证据不得写成“全部操作员工作流已上线”。
 
 TDK DOCX 冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/generate-tdk`，随后使用
@@ -294,6 +294,26 @@ Delivery ZIP 冒烟必须通过
 - Audit 只含文件数和图片数，不含文件名、正文、对象 URI、签名 URL 或归档字节；
 - 旧 Revision 在对象读取前返回 409；并发 CAS 后的未引用 ZIP 进入延迟 orphan 对账，
   不在失败请求中直接删除。
+
+Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
+
+- `/api/auth/status` 返回 Server Mode 后不再发起 Local Dashboard、Config、SQLite Task、
+  Batch Job 或上传请求；
+- 首页只渲染 `/api/projects` 返回的 SQL-scoped 项目，Card 使用 `project_id` 进入
+  `/projects/{project_id}/deliveries`，不以显示客户名推导 Scope；
+- 项目侧栏只显示 Delivery，且不挂载 Local Job Center、Article、Batch 或 Settings；
+- Delivery 列表只请求 `/api/projects/{project_id}/tasks`，Server 产物以 Asset ID 判定，
+  页面不显示 Path、Bucket、Object Key 或永久 URI；
+- Viewer 不显示 Review/Delivery 动作；Reviewer 只可查看终审截图；
+  `org_admin/team_lead/editor` 才显示 Word、TDK、打包和 ZIP 下载；
+- 打包按钮发送当前 Task Revision，等待期间禁用同 Task 动作并显示 Loading；失败信息
+  由 `role=alert` 宣告且可刷新重试，成功后重新读取 Task；
+- 下载按钮先调用 Task-scoped 专用接口取得短期 URL，再导航到签名对象；前端不拼接
+  S3 地址，也不使用通用 Asset 下载绕过访问分类；
+- 375px 宽度下过滤器和表格可操作，表格允许水平滚动，无内容被固定侧栏覆盖；键盘
+  Focus Ring、按钮 Disabled 状态、明暗主题语义 Token 保持可辨识；
+- Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
+  改写现有行为。
 
 九条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 

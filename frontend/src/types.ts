@@ -39,6 +39,11 @@ export type AiCheckRecord = {
   score: number | null;
   report: string;
   screenshot_path: string;
+  screenshot_asset_id?: string;
+  screenshot_content_hash?: string;
+  screenshot_filename?: string;
+  screenshot_width?: number | null;
+  screenshot_height?: number | null;
   article_hash: string;
   confirmed_at: string;
 };
@@ -325,10 +330,39 @@ export type TaskRecord = {
   docx_filename?: string;
   tdk?: TdkMetadata;
   tdk_path?: string;
+  tdk_asset_id?: string;
+  tdk_content_hash?: string;
+  tdk_filename?: string;
   delivery_package_path?: string;
+  delivery_package_asset_id?: string;
+  delivery_package_content_hash?: string;
+  delivery_package_filename?: string;
   zero_gpt_report: string;
   created_at: string;
   updated_at: string;
+};
+
+export type AuthStatus = {
+  message: string;
+  data?: {
+    enabled?: boolean;
+    authenticated?: boolean;
+    mode?: "server";
+    login_available?: boolean;
+  };
+};
+
+export type AccessibleProject = {
+  project_id: string;
+  customer_name: string;
+  official_domain: string;
+  effective_role: "org_admin" | "team_lead" | "editor" | "reviewer" | "viewer";
+};
+
+export type ProjectAssetDownload = {
+  asset_id: string;
+  url: string;
+  expires_seconds: number;
 };
 
 export type DashboardSummary = {

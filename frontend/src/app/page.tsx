@@ -1,5 +1,5 @@
-import { ProjectSelector } from "@/components/project-selector";
+import { ProjectDirectory } from "@/components/project-directory";
 
 export default function Home() {
-  return <ProjectSelector />;
+  return <ProjectDirectory />;
 }
