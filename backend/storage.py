@@ -19,7 +19,7 @@ from models import (
     TaskRecord,
 )
 from services.task_identity import article_source_key, normalized_customer
-from services.task_repository import SQLiteTaskRepository
+from services.task_repository import SQLiteTaskRepository, TaskRecordRepository
 
 
 _TASK_STORE_LOCK = RLock()
@@ -256,11 +256,25 @@ class TaskStore:
         "schema_version",
     }
 
-    def __init__(self, config: AppConfig):
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        repository: TaskRecordRepository | None = None,
+        legacy_import_enabled: bool = True,
+    ):
         self.path = config.data_file
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.repository = SQLiteTaskRepository(self.path)
-        self.database_path = self.repository.database_path
+        local_repository = (
+            SQLiteTaskRepository(self.path) if repository is None else None
+        )
+        self.repository: TaskRecordRepository = repository or local_repository
+        self.database_path = (
+            local_repository.database_path
+            if local_repository is not None
+            else None
+        )
+        self.legacy_import_enabled = legacy_import_enabled and repository is None
         self.migration_backup_path = self.path.with_name(
             f"{self.path.stem}.v1.backup{self.path.suffix}"
         )
@@ -291,7 +305,7 @@ class TaskStore:
             imported_monolith = False
             if self.repository.is_initialized():
                 raw = self.repository.load_all()
-            elif self.path.exists():
+            elif self.legacy_import_enabled and self.path.exists():
                 original = self.path.read_text(encoding="utf-8")
                 raw = json.loads(original)
                 if not isinstance(raw, list):
@@ -318,7 +332,11 @@ class TaskStore:
 
     def save(self, tasks: Iterable[TaskRecord]) -> None:
         with _TASK_STORE_LOCK:
-            original = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+            original = (
+                self.path.read_text(encoding="utf-8")
+                if self.legacy_import_enabled and self.path.exists()
+                else ""
+            )
             self._write_records(tasks)
             if original:
                 self._archive_monolith(original)
@@ -344,6 +362,8 @@ class TaskStore:
         expected_revision: int | None = None,
     ) -> TaskRecord:
         with _TASK_STORE_LOCK:
+            original_revision = task.revision
+            original_updated_at = task.updated_at
             try:
                 existing = self.get(task.id)
             except KeyError:
@@ -371,7 +391,31 @@ class TaskStore:
                 task.schema_version = max(SCHEMA_VERSION, task.schema_version)
                 task.revision = max(0, task.revision)
                 task.updated_at = now_iso()
-            self.repository.upsert(task.model_dump(mode="json"))
+            atomic_put = getattr(self.repository, "put_if_revision", None)
+            if callable(atomic_put):
+                persisted = atomic_put(
+                    task.model_dump(mode="json"),
+                    expected_revision=(
+                        existing.revision if existing is not None else None
+                    ),
+                )
+                if not persisted:
+                    task.revision = original_revision
+                    task.updated_at = original_updated_at
+                    current = self.repository.get(task.id)
+                    actual = (
+                        int(current.get("revision") or 0)
+                        if current is not None
+                        else 0
+                    )
+                    expected = (
+                        expected_revision
+                        if expected_revision is not None
+                        else original_revision
+                    )
+                    raise RevisionConflictError(task.id, expected, actual)
+            else:
+                self.repository.upsert(task.model_dump(mode="json"))
             return task
 
     def update_customer_brand(self, customer: str, brand_name: str) -> int:
@@ -628,7 +672,9 @@ class TaskStore:
                 )
 
             scope = incoming[0].week_folder
-            if any(task.week_folder != scope for task in loaded):
+            if self.legacy_import_enabled and any(
+                task.week_folder != scope for task in loaded
+            ):
                 if not self.weekly_backup_path.exists():
                     self.weekly_backup_path.write_text(
                         json.dumps(

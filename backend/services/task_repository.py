@@ -4,7 +4,25 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping, Protocol
+
+
+class TaskRecordRepository(Protocol):
+    """Storage boundary consumed by TaskStore in local and server modes."""
+
+    def is_initialized(self) -> bool: ...
+
+    def load_all(self) -> list[dict[str, Any]]: ...
+
+    def get(self, task_id: str) -> dict[str, Any] | None: ...
+
+    def replace_all(self, records: Iterable[Mapping[str, Any]]) -> None: ...
+
+    def upsert(self, record: Mapping[str, Any]) -> None: ...
+
+    def upsert_many(self, records: Iterable[Mapping[str, Any]]) -> None: ...
+
+    def delete_many(self, task_ids: Iterable[str]) -> int: ...
 
 
 class SQLiteTaskRepository:

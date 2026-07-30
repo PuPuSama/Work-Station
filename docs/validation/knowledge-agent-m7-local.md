@@ -1,9 +1,9 @@
-# Knowledge Agent M7-A/B 本地验证记录
+# Knowledge Agent M7-A/B/C1 本地验证记录
 
 - 日期：2026-07-30
 - 分支：`feature/knowledge-agent-m7`
 - 基线：`cc4bbf2 feat: add M6 retrieval evaluation framework`
-- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理与 append-only 审计底座
+- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL 与 append-only 审计底座
 
 ## 环境
 
@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260730_0008`
+- Alembic Head：`20260730_0009`
 
 ## 已通过验证
 
@@ -59,6 +59,36 @@ Set-Location D:\Project\article\article-agent-formal\backend
 - 重复 `upgrade head` 成功；
 - 当前为 `20260730_0008 (head)`。
 
+Task/Job 迁移新增后，再在四张新表均为 0 行时执行：
+
+```powershell
+.\.venv\Scripts\alembic.exe downgrade 20260730_0008
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe current
+```
+
+结果为 `20260730_0009 (head)`。
+
+### Task/Job PostgreSQL 定向测试
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_postgres_tasks -v
+```
+
+结果：
+
+- 11 tests；
+- 同 Task ID 跨 Project 隔离；
+- JSON 扩展字段、顺序和 `TaskStore` Revision 语义保留；
+- SQLite Task 导入数量与 SHA-256 摘要复核，差异目标不覆盖；
+- 两个并发 Writer 只有一个 Revision CAS 成功；
+- 两个 Worker 的并发 Claim 结果不重叠；
+- 过期 Lease 可接管，旧 Worker 不能写回结果；
+- Retry、Conflict、Cancel 和 Batch 汇总契约通过；
+- Task/Job 复合外键、Lease CHECK 和活跃 Job 部分唯一索引通过。
+
 ### 完整后端回归
 
 ```powershell
@@ -70,7 +100,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 432 tests；
+- 443 tests；
 - 全部通过；
 - 1 skipped；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -87,7 +117,8 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 - 已有 Actor Session Codec，但正式身份来源与登录签发入口尚未接入；
 - RBAC 尚未接入 FastAPI 路由、Knowledge Retriever、对象下载或 Worker；
-- Task/Job 仍以 SQLite 为准；
+- `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
+- SQLite Terminal Job 历史导入和切换双读报告尚未实现；
 - S3 对象存储、备份恢复和部署门禁尚未实现；
 - 本阶段未修改前端，因此没有新增 M7 前端验收项。
 

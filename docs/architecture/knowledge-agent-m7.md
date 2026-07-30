@@ -11,7 +11,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 3. 再让 API、检索、对象下载与 Worker 强制执行 RBAC；
 4. 验证服务器端闭环后，才收缩 SQLite 正式写入路径和临时兼容层。
 
-## 2. 当前完成范围：M7-A / M7-B 底座
+## 2. 当前完成范围：M7-A / M7-B / M7-C1
 
 本阶段已实现：
 
@@ -28,18 +28,24 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 只签名 Organization/User、不缓存 Role 的 `ServerActorSessionCodec`；
 - 使用独立 `ARTICLE_AGENT_SERVER_SESSION_SECRET`，不回退到旧本地 Session Secret；
 - `PostgresProjectMembershipService` 的授权、撤销和同事务审计。
+- Alembic `20260730_0009` 的项目级 Task/Job 表；
+- 兼容现有 `TaskStore` 的 `PostgresTaskRepository`；
+- SQLite Task -> PostgreSQL 的一次性摘要校验导入器；
+- PostgreSQL Revision compare-and-swap，避免多进程丢更新；
+- 使用部分唯一索引、`FOR UPDATE SKIP LOCKED` 和 Worker Lease 的
+  `PostgresJobQueue`。
 
 当前明确未做：
 
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
 - 不在 `app.py` 中启用服务器 RBAC；
 - 不给旧项目自动补一个虚构 Organization；
-- 不迁移 SQLite Task/Job；
+- 尚未把 `app.py` 的 Task/Job 正式写路径切换到 PostgreSQL；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接前端成员管理；
 - 不接 S3、生产部署或密钥服务。
 
-因此，M7-A/B 是可验证的权限与会话底座，不代表多人服务器版已经上线。
+因此，M7-A/B/C1 是可验证的服务器持久层，不代表多人服务器版已经上线。
 
 ## 3. 为什么使用 `project_ownership`
 
@@ -178,9 +184,15 @@ with engine.begin() as connection:
 | `backend/services/audit_log.py` | 业务事务内追加审计事件 | 调用方事务、稳定 Event ID、无更新/删除接口 |
 | `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、独立 Secret、默认不开启 |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
+| `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
+| `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
+| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
+| `backend/services/task_repository.py` | 本地/服务器 Task Repository Protocol 与 SQLite 实现 | 本地模式保持可用 |
+| `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
+| `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 
 ## 9. 后续 M7 迁移顺序
 
@@ -196,14 +208,36 @@ with engine.begin() as connection:
 
 ### M7-C：Task/Job PostgreSQL 准源
 
-1. 先定义 PostgreSQL Task、Job、Attempt 和状态事件表；
-2. 建立 SQLite -> PostgreSQL 一次性导入器和校验报告；
-3. 增加双读比对，仍由旧路径写入；
-4. 切换服务器模式为 PostgreSQL 单写；
+当前 C1 已完成：
+
+1. PostgreSQL Task、Batch、Job 表及项目复合外键；
+2. Task JSONB 兼容 Repository；
+3. SQLite Task -> PostgreSQL 一次性导入、数量和 SHA-256 摘要校验；
+4. Task Revision compare-and-swap；
+5. Job 活跃唯一索引、并发 Claim、Worker Lease 和状态变更。
+
+后续 C2 顺序：
+
+1. 增加 SQLite Job 历史导出；切换前要求所有活跃 Job 排空或显式取消；
+2. 迁移 Terminal Job 历史并生成数量/状态摘要，Running Job 不跨系统续跑；
+3. 先做只读双读比对，仍由旧路径写入；
+4. 正式身份和项目路由覆盖后，切换服务器模式为 PostgreSQL 单写；
 5. 观察并验证后移除服务器 SQLite 写入；
 6. 本地模式继续保留 SQLite，不做双向同步。
 
 所有 Task/Job 必须带 `organization_id + project_id`，Worker Claim 不能跨组织；幂等键和状态机语义必须与现有实现逐项对照。
+
+Task 正文仍保存完整 JSONB，避免把当前工作流上百个字段一次拆表；同时提升以下列用于约束和查询：
+
+```text
+organization_id / project_id / task_id / customer / topic_index
+revision / position / record_updated_at
+```
+
+Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运行时间、取消标记、Worker 和 Lease。只有 Lease 过期的 `running` Job 才可恢复；一个 Worker 不能提交另一个 Worker 已接管的结果。
+
+当前 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。在请求还没有可信
+`ActorIdentity + project_id` 前，不允许用一个全局“默认项目”强行切换 PostgreSQL。
 
 ### M7-D：对象存储与部署
 

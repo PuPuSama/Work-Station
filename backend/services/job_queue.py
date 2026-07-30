@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Protocol
 from uuid import uuid4
 
 
@@ -33,6 +33,35 @@ class JobCancelled(RuntimeError):
 
 class JobConflict(RuntimeError):
     pass
+
+
+class JobQueueBackend(Protocol):
+    def recover_interrupted(
+        self,
+        operations: Iterable[str] | None = None,
+    ) -> int: ...
+
+    def claim_jobs(
+        self,
+        limit: int,
+        operations: Iterable[str] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def is_cancel_requested(self, job_id: str) -> bool: ...
+
+    def mark_succeeded(self, job_id: str, result_revision: int) -> None: ...
+
+    def mark_cancelled(self, job_id: str) -> None: ...
+
+    def mark_conflict(self, job_id: str, error: str) -> None: ...
+
+    def mark_failed(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        retryable: bool,
+    ) -> str: ...
 
 
 class JobQueue:
@@ -666,7 +695,7 @@ def is_retryable_error(error: BaseException) -> bool:
 class BatchJobRunner:
     def __init__(
         self,
-        queue: JobQueue,
+        queue: JobQueueBackend,
         handler: Callable[[dict[str, Any], Callable[[], bool]], int],
         *,
         concurrency: int = 3,
