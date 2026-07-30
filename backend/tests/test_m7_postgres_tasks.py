@@ -39,6 +39,7 @@ from services.job_queue import (  # noqa: E402
     ActiveJobError,
     JobConflict,
     JobQueue,
+    JobStateTransitionError,
 )
 from services.access_control import (  # noqa: E402
     PostgresProjectAccessRepository,
@@ -512,6 +513,57 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
                 "outline",
                 [{"task_id": "missing-task", "source_revision": 0}],
             )
+
+    def test_terminal_audit_failure_rolls_back_and_releases_claim(self) -> None:
+        class FailingTerminalAudit:
+            def append(self, connection, event):
+                raise RuntimeError(
+                    "audit provider included secret-terminal-body"
+                )
+
+        self.repository_a.replace_all((self._record("terminal-audit"),))
+        queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+            worker_id=f"{self.prefix}-terminal-audit-worker",
+            terminal_audit=FailingTerminalAudit(),
+        )
+        batch = queue.create_batch(
+            "product_rediscovery",
+            [{"task_id": "terminal-audit", "source_revision": 0}],
+            requested_by_user_id=self.admin_id,
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        queue.claim_jobs(1)
+
+        with self.assertRaisesRegex(
+            JobStateTransitionError,
+            "^job terminal state could not be committed$",
+        ) as caught:
+            queue.mark_succeeded(job_id, 0)
+
+        self.assertNotIn("secret-terminal-body", str(caught.exception))
+        still_running = queue.get_job(job_id)
+        self.assertEqual(still_running["status"], "running")
+        self.assertEqual(still_running["error"], "")
+        queue.mark_interrupted(job_id)
+        released = queue.get_job(job_id)
+        self.assertEqual(released["status"], "queued")
+        with self.engine.connect() as connection:
+            claim = connection.execute(
+                sa.select(
+                    background_jobs.c.worker_id,
+                    background_jobs.c.lease_expires_at,
+                ).where(
+                    background_jobs.c.organization_id
+                    == self.organization_id,
+                    background_jobs.c.project_id == self.project_a,
+                    background_jobs.c.job_id == job_id,
+                )
+            ).one()
+        self.assertIsNone(claim.worker_id)
+        self.assertIsNone(claim.lease_expires_at)
 
     def test_authorized_worker_rejects_missing_or_disabled_requester(
         self,

@@ -4,6 +4,7 @@ import hashlib
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -69,7 +70,7 @@ from services.object_store import (  # noqa: E402
     StoredObject,
     build_project_object_key,
 )
-from services.job_queue import JobConflict  # noqa: E402
+from services.job_queue import JobCancelled, JobConflict  # noqa: E402
 from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
 from services.server_product_rediscovery import (  # noqa: E402
     ProductRediscoveryCommand,
@@ -2161,7 +2162,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         )
                     ).scalar_one()
                 self.assertEqual(requested_by, self.user_a)
-                self.assertEqual(len(rediscovery_audit.events), 1)
+                self.assertEqual(len(rediscovery_audit.events), 2)
                 audit_event = rediscovery_audit.events[0]
                 self.assertEqual(
                     audit_event.action,
@@ -2182,6 +2183,29 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertNotIn(
                     payload["category_url"],
                     str(audit_event.details),
+                )
+                terminal_audit = rediscovery_audit.events[1]
+                self.assertEqual(
+                    terminal_audit.action,
+                    "background_job.terminal",
+                )
+                self.assertEqual(
+                    terminal_audit.target_id,
+                    public_job["job_id"],
+                )
+                self.assertEqual(
+                    terminal_audit.details,
+                    {
+                        "operation": "product_rediscovery",
+                        "status": "succeeded",
+                        "attempts": 1,
+                        "source_revision": 0,
+                        "result_revision": 0,
+                    },
+                )
+                self.assertNotIn(
+                    payload["category_url"],
+                    str(terminal_audit.details),
                 )
                 self.assertEqual(
                     client.post(
@@ -2261,6 +2285,81 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             ).scalar_one()
         self.assertEqual(job_count, 0)
         self.assertEqual(batch_count, 0)
+
+    def test_product_rediscovery_stop_requeues_and_reports_drain(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        entered = threading.Event()
+
+        def cooperative_handler(job, cancelled):
+            entered.set()
+            while not cancelled():
+                time.sleep(0.005)
+            raise JobCancelled("server is stopping")
+
+        registry = ServerProductRediscoveryRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=cooperative_handler,
+            audit=RecordingAuditWriter(),
+        )
+        job = registry.enqueue(
+            actor=ActorIdentity(self.org_a, self.user_a),
+            project_id=self.project_a,
+            task_id=self.task_a,
+            source_revision=0,
+            command=ProductRediscoveryCommand(
+                category_url=f"https://{self.project_a}/products",
+                max_products=3,
+            ),
+        )
+        self.assertTrue(entered.wait(timeout=2))
+
+        report = registry.stop(timeout_seconds=2)
+
+        self.assertTrue(report.drained)
+        self.assertEqual(report.project_runner_count, 1)
+        self.assertEqual(report.remaining_jobs, 0)
+        self.assertEqual(registry.stop(), report)
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        interrupted = raw_queue.get_job(str(job["job_id"]))
+        self.assertEqual(interrupted["status"], "queued")
+        self.assertFalse(interrupted["cancel_requested"])
+
+        replacement = ServerProductRediscoveryRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=lambda queued, cancelled: int(
+                queued["source_revision"]
+            ),
+            audit=RecordingAuditWriter(),
+        )
+        self.addCleanup(replacement.stop)
+        replacement.start_existing()
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            resumed = raw_queue.get_job(str(job["job_id"]))
+            if resumed["status"] == "succeeded":
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("Interrupted product rediscovery did not resume.")
 
     def test_product_rediscovery_handler_uses_active_project_domain(
         self,
@@ -2475,6 +2574,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             handler=lambda job, cancelled: (
                 calls.append(str(job["id"])) or 0
             ),
+            audit=RecordingAuditWriter(),
         )
         self.addCleanup(registry.stop)
 

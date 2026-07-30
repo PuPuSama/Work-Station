@@ -5,7 +5,8 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Protocol
@@ -35,6 +36,23 @@ class JobConflict(RuntimeError):
     pass
 
 
+class JobStateTransitionError(RuntimeError):
+    """A durable terminal state could not be committed safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class BatchJobRunnerStopReport:
+    """Bounded evidence that a runner stopped claiming and joined its work."""
+
+    dispatcher_stopped: bool
+    claimed_at_stop: int
+    remaining_jobs: int
+
+    @property
+    def drained(self) -> bool:
+        return self.dispatcher_stopped and self.remaining_jobs == 0
+
+
 class JobQueueBackend(Protocol):
     def recover_interrupted(
         self,
@@ -52,6 +70,8 @@ class JobQueueBackend(Protocol):
     def mark_succeeded(self, job_id: str, result_revision: int) -> None: ...
 
     def mark_cancelled(self, job_id: str) -> None: ...
+
+    def mark_interrupted(self, job_id: str) -> None: ...
 
     def mark_conflict(self, job_id: str, error: str) -> None: ...
 
@@ -395,6 +415,23 @@ class JobQueue:
                 WHERE id = ? AND status IN ('queued', 'retry_wait', 'running')
                 """,
                 (now, now, job_id),
+            )
+            self._touch_batch(connection, job_id, now)
+
+    def mark_interrupted(self, job_id: str) -> None:
+        """Release a controlled-shutdown claim without user cancellation."""
+
+        now = _now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'queued', available_at = ?, error = '',
+                    started_at = '', finished_at = '', updated_at = ?
+                WHERE id = ? AND status = 'running'
+                  AND cancel_requested = 0
+                """,
+                (time.time(), now, job_id),
             )
             self._touch_batch(connection, job_id, now)
 
@@ -749,12 +786,44 @@ class BatchJobRunner:
     def wake(self) -> None:
         self._wake.set()
 
-    def stop(self) -> None:
+    def stop(
+        self,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> BatchJobRunnerStopReport:
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        deadline = time.monotonic() + timeout_seconds
         self._stop.set()
         self._wake.set()
         if self._thread:
-            self._thread.join(timeout=2)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+            self._thread.join(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        dispatcher_stopped = not (
+            self._thread and self._thread.is_alive()
+        )
+        with self._guard:
+            futures = set(self._futures)
+        claimed_at_stop = len(futures)
+        _done, pending = wait(
+            futures,
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
+        self._executor.shutdown(
+            wait=not pending,
+            cancel_futures=False,
+        )
+        with self._guard:
+            self._futures = {
+                future for future in self._futures if not future.done()
+            }
+            remaining_jobs = len(self._futures)
+        return BatchJobRunnerStopReport(
+            dispatcher_stopped=dispatcher_stopped,
+            claimed_at_stop=claimed_at_stop,
+            remaining_jobs=remaining_jobs,
+        )
 
     def _dispatch_loop(self) -> None:
         while not self._stop.is_set():
@@ -770,21 +839,41 @@ class BatchJobRunner:
 
     def _run_job(self, job: dict[str, Any]) -> None:
         job_id = str(job["id"])
-        cancelled = lambda: self.queue.is_cancel_requested(job_id)
+        user_cancelled = lambda: self.queue.is_cancel_requested(job_id)
+        should_stop = lambda: self._stop.is_set() or user_cancelled()
         try:
-            if cancelled():
-                raise JobCancelled("Job cancelled before generation started.")
-            result_revision = self.handler(job, cancelled)
-            self.queue.mark_succeeded(job_id, result_revision)
-        except JobCancelled as exc:
-            self.queue.mark_cancelled(job_id)
-        except JobConflict as exc:
-            self.queue.mark_conflict(job_id, str(exc))
-        except Exception as exc:  # keep the dispatcher alive after one bad task
-            self.queue.mark_failed(
-                job_id,
-                str(exc),
-                retryable=is_retryable_error(exc),
-            )
+            try:
+                if self._stop.is_set():
+                    self.queue.mark_interrupted(job_id)
+                    return
+                if user_cancelled():
+                    raise JobCancelled(
+                        "Job cancelled before generation started."
+                    )
+                result_revision = self.handler(job, should_stop)
+                self.queue.mark_succeeded(job_id, result_revision)
+            except JobCancelled:
+                if self._stop.is_set() and not user_cancelled():
+                    self.queue.mark_interrupted(job_id)
+                else:
+                    self.queue.mark_cancelled(job_id)
+            except JobConflict as exc:
+                self.queue.mark_conflict(job_id, str(exc))
+            except JobStateTransitionError:
+                raise
+            except Exception as exc:  # keep dispatcher alive after one bad task
+                self.queue.mark_failed(
+                    job_id,
+                    str(exc),
+                    retryable=is_retryable_error(exc),
+                )
+        except JobStateTransitionError:
+            # Terminal state and its mandatory Audit failed together. Release
+            # the claim without persisting provider details; a later worker
+            # may retry after the audit dependency recovers.
+            try:
+                self.queue.mark_interrupted(job_id)
+            except Exception:
+                pass
         finally:
             self.wake()

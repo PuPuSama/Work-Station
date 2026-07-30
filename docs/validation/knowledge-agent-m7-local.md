@@ -112,7 +112,7 @@ Object Orphan Observation 迁移新增后执行：
 
 结果：
 
-- 17 tests；
+- 18 tests；
 - 同 Task ID 跨 Project 隔离；
 - JSON 扩展字段、顺序和 `TaskStore` Revision 语义保留；
 - SQLite Task 导入数量与 SHA-256 摘要复核，差异目标不覆盖；
@@ -144,7 +144,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 544 tests；
+- 548 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -205,7 +205,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 25 tests，使用确定性内存图片和真实 PostgreSQL，不调用外部图片或模型服务；
+- 26 tests，使用确定性内存图片和真实 PostgreSQL，不调用外部图片或模型服务；
 - Hero 使用请求中的项目 Asset ID；产品图只能来自 Task 当前
   `Product.selected_asset_id`，客户端不能替换为任意项目图片；
 - 源对象读取再次要求 `article.edit`，并验证 Bucket、Organization/Project Key、
@@ -220,8 +220,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 共享派生资产元数据不保存文章角色、产品或来源关系，避免内容去重复用后残留第一次
   使用者的关系；这些关系只保存在 Task `ArticleImage`；
 - Viewer 返回 403；旧 Revision 在对象读取前返回 409；派生对象仍经授权下载路由访问；
-- Server TDK 与 Delivery ZIP 已对象化；派生 orphan 对账尚未完成；该 Task 写操作已
-  进入事务内 Audit。
+- Server TDK 与 Delivery ZIP 已对象化；派生 orphan 已进入双观察延迟对账；该 Task
+  写操作已进入事务内 Audit。
 
 ### Server 私有文章 DOCX
 
@@ -236,7 +236,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 26 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
+- 27 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
 - `article.deliver` 在路由、私有 WebP 读取、DOCX 写入和专用下载签名前重新检查；
 - Task 图片 Asset 的对象 Key、大小、哈希、类型、数据库/Task/实际尺寸全部复核；
 - 现有 Word 排版器新增内存 WebP/字节输出边界，本地文件导出测试保持通过；
@@ -261,7 +261,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 30 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
+- 31 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
 - Local `export_tdk_docx()` 与 Server `build_tdk_docx_bytes()` 复用同一排版核心；
 - Server 要求已有 `docx_asset_id`，从当前文章生成并验证 Title、Description 和六个
   Keyword，不接受客户端 TDK、Prompt、Asset ID、对象 URI 或输出路径；
@@ -271,8 +271,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 生成/专用下载返回 403；通用 Asset 下载与文章 DOCX 专用下载不能取得 TDK；
 - 旧 Revision 在 LLM 和对象写入前返回 409；成功 Task CAS 产生
   `article.tdk.generated` Audit，Details 只含字符数和关键词数量；
-- Delivery ZIP 与窄范围 Server Delivery Console 已由后续切片接通；orphan 对账仍未
-  完成。
+- Delivery ZIP 与窄范围 Server Delivery Console 已由后续切片接通；orphan 已进入
+  双观察延迟对账。
 
 ### Server 最终 AI-rate Review
 
@@ -289,7 +289,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 75 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
+- 76 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
 - `article.review` 与 `article.deliver` 分离：Reviewer 可上传、确认、查看 Review
   Screenshot，但不能导出文章 DOCX/TDK；
 - 截图在内存执行大小、像素、解码和 EXIF 门禁，并重编码为无元数据 PNG；
@@ -302,8 +302,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 旧 Revision 在读取 multipart 字节前返回 409，跨 Project 与 Viewer 均返回 403；
 - 两个 Audit Action 只保存截图尺寸、confirmed 和是否有 score，不含 Report、score 值、
   文章正文、图片字节或 URL；
-- Delivery ZIP 与窄范围 Server Delivery Console 已由后续两节接通；orphan 对账仍未
-  完成。
+- Delivery ZIP 与窄范围 Server Delivery Console 已由后续两节接通；orphan 已进入
+  双观察延迟对账。
 
 ### Server 私有 Delivery ZIP
 
@@ -320,7 +320,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 61 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
+- 62 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
 - `article.deliver` 在路由、全部私有对象读取、ZIP 上传和专用下载签名前重新检查；
 - 打包只接受当前 Task 的文章 DOCX、TDK DOCX、Prepared WebP 和终审 Screenshot
   身份，不接受客户端 Asset ID、对象 URI、路径、文件名或文件字节；
@@ -376,7 +376,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 32 tests，使用真实 PostgreSQL；
+- 34 tests，使用真实 PostgreSQL；
 - `PostgresTaskRepository` 保留原 CAS 接口，并新增加入调用方事务的 CAS 边界；
 - Writer 先锁 Organization/User/Project 与现有 Project/Team Membership 撤权事实，
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
@@ -387,8 +387,29 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
 - 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
-  事务，失败后的内容寻址 orphan 由后续对账
-  延迟清理。
+  事务，失败后的内容寻址 orphan 由双观察延迟对账清理。
+
+### Product Rediscovery 受控停机与终态 Audit
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_job_queue `
+  tests.test_m7_postgres_tasks `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 45 tests，使用真实 PostgreSQL 和确定性 Handler；
+- Runner 停止新 Claim，并把协作式停机从用户取消语义中分离：无取消请求的在途 Job
+  释放为 `queued`，新 Registry 可继续执行；
+- 非协作 Handler 超过有界等待时间时返回 `remaining_jobs > 0`，不得宣称已排空；
+- `succeeded/failed/conflict/cancelled` 与 `background_job.terminal` Audit 同事务；
+- 注入 Audit 失败会回滚终态，异常正文不写入 Job 或公开响应，Claim 可安全释放重试；
+- Product Rediscovery Enqueue Audit 与 Terminal Audit 均不含 Category URL、Request、
+  对象 URI、Provider 响应或原始异常。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
 一次性随机开发凭据和专用 `article-agent-test-*` Bucket。由于该本地 MinIO
@@ -530,7 +551,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 16 tests；
+- 17 tests；
 - 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
 - Project Directory 只返回 Actor 在当前 Organization 可见的 Active Project 和
   Effective Role；普通 Team Member 不会看到同 Team Project；
@@ -623,8 +644,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
   Task 命令和 `product_rediscovery` Job 为单写，其余路径尚未成为 PostgreSQL 准源；
 - Server Mode 已停止 SQLite Queue/Worker；产品重新发现已有项目级 PostgreSQL Runner
-  和两阶段授权，Enqueue 也已完成事务内审计；但通用 Runner、可靠 drain/join、全部
-  Operation 与终态 Job Audit 未完成，不能算作整体服务器 Job 单写；
+  和两阶段授权，Enqueue、该 Operation 的终态 Audit 与有界 drain/join 报告已完成；
+  但通用 Server Batch/Runner、全部 Operation 和正式停机演练未完成，不能算作整体
+  服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、

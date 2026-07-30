@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Connection, Engine, RowMapping
@@ -14,10 +14,16 @@ from server_schema import (
     background_jobs,
     job_batches,
 )
+from services.audit_log import (
+    AuditEvent,
+    AuditEventWriter,
+)
 from services.job_queue import (
     ACTIVE_JOB_STATUSES,
     RETRY_DELAYS_SECONDS,
     ActiveJobError,
+    JobStateTransitionError,
+    TERMINAL_JOB_STATUSES,
 )
 
 
@@ -80,6 +86,7 @@ class PostgresJobQueue:
         project_id: str,
         worker_id: str | None = None,
         lease_seconds: int = 15 * 60,
+        terminal_audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self.organization_id = _required_text(
@@ -94,6 +101,7 @@ class PostgresJobQueue:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         self.lease_seconds = int(lease_seconds)
+        self._terminal_audit = terminal_audit
 
     def _job_scope(self) -> tuple[sa.ColumnElement[bool], ...]:
         return (
@@ -124,7 +132,7 @@ class PostgresJobQueue:
             )
         cancelled = background_jobs.c.cancel_requested.is_(True)
         with self._engine.begin() as connection:
-            result = connection.execute(
+            rows = connection.execute(
                 background_jobs.update()
                 .where(*conditions)
                 .values(
@@ -141,8 +149,11 @@ class PostgresJobQueue:
                     lease_expires_at=None,
                     updated_at=current,
                 )
-            )
-        return int(result.rowcount or 0)
+                .returning(background_jobs)
+            ).mappings().all()
+            for row in rows:
+                self._append_terminal_audit(connection, row)
+        return len(rows)
 
     def active_task_ids(self, task_ids: Iterable[str]) -> set[str]:
         values = tuple(dict.fromkeys(str(task_id) for task_id in task_ids))
@@ -507,7 +518,7 @@ class PostgresJobQueue:
 
         current = _now()
         with self._engine.begin() as connection:
-            result = connection.execute(
+            row = connection.execute(
                 background_jobs.update()
                 .where(
                     *self._job_scope(),
@@ -524,10 +535,12 @@ class PostgresJobQueue:
                     lease_expires_at=None,
                     updated_at=current,
                 )
-            )
-            if result.rowcount:
+                .returning(background_jobs)
+            ).mappings().one_or_none()
+            if row is not None:
                 self._touch_batch(connection, job_id, current)
-        return bool(result.rowcount)
+                self._append_terminal_audit(connection, row)
+        return row is not None
 
     def renew_lease(self, job_id: str) -> bool:
         current = _now()
@@ -577,7 +590,7 @@ class PostgresJobQueue:
     def mark_cancelled(self, job_id: str) -> None:
         current = _now()
         with self._engine.begin() as connection:
-            result = connection.execute(
+            row = connection.execute(
                 background_jobs.update()
                 .where(
                     *self._job_scope(),
@@ -594,6 +607,36 @@ class PostgresJobQueue:
                     status="cancelled",
                     cancel_requested=True,
                     finished_at=current,
+                    worker_id=None,
+                    lease_expires_at=None,
+                    updated_at=current,
+                )
+                .returning(background_jobs)
+            ).mappings().one_or_none()
+            if row is not None:
+                self._touch_batch(connection, job_id, current)
+                self._append_terminal_audit(connection, row)
+
+    def mark_interrupted(self, job_id: str) -> None:
+        """Release this worker's claim for a controlled service shutdown."""
+
+        current = _now()
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                background_jobs.update()
+                .where(
+                    *self._job_scope(),
+                    background_jobs.c.job_id == job_id,
+                    background_jobs.c.status == "running",
+                    background_jobs.c.worker_id == self.worker_id,
+                    background_jobs.c.cancel_requested.is_(False),
+                )
+                .values(
+                    status="queued",
+                    available_at=current,
+                    error="",
+                    started_at=None,
+                    finished_at=None,
                     worker_id=None,
                     lease_expires_at=None,
                     updated_at=current,
@@ -660,7 +703,7 @@ class PostgresJobQueue:
             else:
                 status = "failed"
                 values.update(status=status, finished_at=current)
-            connection.execute(
+            updated = connection.execute(
                 background_jobs.update()
                 .where(
                     *self._job_scope(),
@@ -669,8 +712,14 @@ class PostgresJobQueue:
                     background_jobs.c.worker_id == self.worker_id,
                 )
                 .values(**values)
-            )
+                .returning(background_jobs)
+            ).mappings().one_or_none()
             self._touch_batch(connection, job_id, current)
+            if (
+                updated is not None
+                and str(updated["status"]) in TERMINAL_JOB_STATUSES
+            ):
+                self._append_terminal_audit(connection, updated)
         return status
 
     def _mark_running(
@@ -694,7 +743,7 @@ class PostgresJobQueue:
             values["result_revision"] = result_revision
             values["cancel_requested"] = False
         with self._engine.begin() as connection:
-            result = connection.execute(
+            row = connection.execute(
                 background_jobs.update()
                 .where(
                     *self._job_scope(),
@@ -703,15 +752,69 @@ class PostgresJobQueue:
                     background_jobs.c.worker_id == self.worker_id,
                 )
                 .values(**values)
-            )
-            if result.rowcount:
+                .returning(background_jobs)
+            ).mappings().one_or_none()
+            if row is not None:
                 self._touch_batch(connection, job_id, current)
+                self._append_terminal_audit(connection, row)
+
+    def _append_terminal_audit(
+        self,
+        connection: Connection,
+        row: Mapping[str, object] | RowMapping,
+    ) -> None:
+        if self._terminal_audit is None:
+            return
+        status = str(row["status"])
+        if status not in TERMINAL_JOB_STATUSES:
+            return
+        job_id = str(row["job_id"])
+        attempts = int(row["attempts"])
+        details: dict[str, object] = {
+            "operation": str(row["operation"]),
+            "status": status,
+            "attempts": attempts,
+            "source_revision": int(row["source_revision"]),
+        }
+        if row["result_revision"] is not None:
+            details["result_revision"] = int(row["result_revision"])
+        identity = "\n".join(
+            (
+                self.organization_id,
+                self.project_id,
+                job_id,
+                status,
+                str(attempts),
+            )
+        )
+        try:
+            self._terminal_audit.append(
+                connection,
+                AuditEvent(
+                    organization_id=self.organization_id,
+                    event_id=f"job_{uuid5(NAMESPACE_URL, identity).hex}",
+                    actor_user_id=(
+                        None
+                        if row["requested_by_user_id"] is None
+                        else str(row["requested_by_user_id"])
+                    ),
+                    project_id=self.project_id,
+                    action="background_job.terminal",
+                    target_type="background_job",
+                    target_id=job_id,
+                    details=details,
+                ),
+            )
+        except Exception as exc:
+            raise JobStateTransitionError(
+                "job terminal state could not be committed"
+            ) from exc
 
     def request_cancel(self, job_id: str) -> dict[str, Any]:
         current = _now()
         with self._engine.begin() as connection:
             row = connection.execute(
-                sa.select(background_jobs.c.status)
+                sa.select(background_jobs)
                 .where(
                     *self._job_scope(),
                     background_jobs.c.job_id == job_id,
@@ -721,7 +824,7 @@ class PostgresJobQueue:
             if row is None:
                 raise KeyError(job_id)
             if row.status in ("queued", "retry_wait"):
-                connection.execute(
+                cancelled = connection.execute(
                     background_jobs.update()
                     .where(
                         *self._job_scope(),
@@ -735,7 +838,9 @@ class PostgresJobQueue:
                         lease_expires_at=None,
                         updated_at=current,
                     )
-                )
+                    .returning(background_jobs)
+                ).mappings().one()
+                self._append_terminal_audit(connection, cancelled)
             elif row.status == "running":
                 connection.execute(
                     background_jobs.update()
@@ -761,7 +866,7 @@ class PostgresJobQueue:
                 raise KeyError(batch_id)
             queued = background_jobs.c.status.in_(("queued", "retry_wait"))
             active = background_jobs.c.status.in_(ACTIVE_JOB_STATUSES)
-            connection.execute(
+            rows = connection.execute(
                 background_jobs.update()
                 .where(
                     *self._job_scope(),
@@ -785,7 +890,10 @@ class PostgresJobQueue:
                     ),
                     updated_at=current,
                 )
-            )
+                .returning(background_jobs)
+            ).mappings().all()
+            for row in rows:
+                self._append_terminal_audit(connection, row)
             connection.execute(
                 job_batches.update()
                 .where(

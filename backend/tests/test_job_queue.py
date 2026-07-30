@@ -15,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services.job_queue import (
     ActiveJobError,
     BatchJobRunner,
+    JobCancelled,
     JobConflict,
     JobQueue,
 )
@@ -185,6 +186,83 @@ class JobQueueTests(unittest.TestCase):
 
             self.assertEqual(handled, ["products"])
             self.assertEqual(queue.get_batch(writing_batch["id"])["status"], "queued")
+
+    def test_controlled_stop_requeues_claim_without_user_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            batch = queue.create_batch("products", [queue_item("task-1")])
+            entered = threading.Event()
+
+            def cooperative_handler(job, cancelled):
+                entered.set()
+                while not cancelled():
+                    time.sleep(0.005)
+                raise JobCancelled("runner is stopping")
+
+            runner = BatchJobRunner(
+                queue,
+                cooperative_handler,
+                concurrency=1,
+                poll_seconds=0.01,
+            )
+            runner.start()
+            self.assertTrue(entered.wait(timeout=2))
+
+            report = runner.stop(timeout_seconds=2)
+
+            self.assertTrue(report.dispatcher_stopped)
+            self.assertTrue(report.drained)
+            self.assertEqual(report.claimed_at_stop, 1)
+            current = queue.get_batch(batch["id"])["jobs"][0]
+            self.assertEqual(current["status"], "queued")
+            self.assertFalse(current["cancel_requested"])
+            replacement = BatchJobRunner(
+                queue,
+                lambda job, cancelled: 1,
+                concurrency=1,
+                poll_seconds=0.01,
+            )
+            replacement.start()
+            try:
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    current = queue.get_batch(batch["id"])["jobs"][0]
+                    if current["status"] == "succeeded":
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("Requeued shutdown job was not resumed.")
+            finally:
+                replacement.stop()
+
+    def test_controlled_stop_reports_non_cooperative_handler_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            queue.create_batch("products", [queue_item("task-1")])
+            entered = threading.Event()
+            release = threading.Event()
+
+            def non_cooperative_handler(job, cancelled):
+                entered.set()
+                release.wait(timeout=2)
+                return 1
+
+            runner = BatchJobRunner(
+                queue,
+                non_cooperative_handler,
+                concurrency=1,
+                poll_seconds=0.01,
+            )
+            runner.start()
+            self.assertTrue(entered.wait(timeout=2))
+            try:
+                timed_out = runner.stop(timeout_seconds=0.01)
+                self.assertFalse(timed_out.drained)
+                self.assertEqual(timed_out.remaining_jobs, 1)
+            finally:
+                release.set()
+                drained = runner.stop(timeout_seconds=2)
+            self.assertTrue(drained.drained)
 
 
 if __name__ == "__main__":

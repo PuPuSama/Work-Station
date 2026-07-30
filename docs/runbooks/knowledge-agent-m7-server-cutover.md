@@ -390,9 +390,22 @@ Job ID 调用
 - 对象存储配置缺失时新 Job 返回 503，但已有 Job 的状态仍可读取；
 - 重启恢复只处理 Active `product_rediscovery` Job，不得把旧无 Requester 历史重新执行。
 
-当前 Runner 只在整次官网同步前后检查取消，产品明细循环中没有逐项取消点。发布窗口必须
-允许在途抓取自然结束；在补齐 drain/join 证明前，不把进程 `stop()` 当作强制中断，也不把
-这一条 Operation 的接线写成整体 Worker Cutover 完成。
+当前 Runner 只在整次官网同步前后检查停止/取消，产品明细循环中没有逐项检查点。
+`stop()` 的运维语义是：
+
+- 先停止新 Claim，再在有界时间内等待已领取工作；
+- Handler 在协作检查点因服务停机退出时，Job 释放为 `queued`，不得写成用户
+  `cancelled`；
+- 有界等待后 `remaining_jobs > 0` 表示未排空，Lifespan 必须失败，且不得提前释放
+  PostgreSQL Engine；
+- 终态 Job 与 `background_job.terminal` Audit 必须同事务；Audit 失败时终态回滚，
+  Claim 释放后等待恢复重试；
+- Audit 只允许 Operation、Status、Attempt 和 Revision 等稳定字段，不得记录 Request、
+  Category URL、对象 URI、原始异常或 Provider 响应。
+
+因此发布窗口仍应允许长抓取自然结束，并把 `drained=true` 作为本 Operation 的停机证据。
+非协作 Handler 的超时是明确的 no-go，不是强制中断成功。这一条 Operation 的接线仍不能
+写成整体 Worker Cutover 完成；通用 Batch/Runner 和正式环境停机演练需单独验收。
 
 产品替换冒烟必须通过
 `PUT /api/projects/{project}/tasks/{task_id}/products`，请求只包含当前 Task Revision

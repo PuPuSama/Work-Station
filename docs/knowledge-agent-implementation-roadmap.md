@@ -170,8 +170,10 @@
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
-  Job/Batch 和安全 Audit 已在同一事务，但通用 Server Batch API/Runner、终态 Job Audit
-  与排空证明尚未完成，所以整体 Preflight 能力仍保持 false；
+  Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界
+  drain/join 报告也已完成，受控停机释放 Claim 而不伪装成用户取消；但通用 Server
+  Batch API、全部 Operation Runner 和正式排空演练尚未完成，所以整体 Preflight
+  能力仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；已接通供应商无关 OIDC

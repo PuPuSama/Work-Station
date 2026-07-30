@@ -132,6 +132,9 @@ class AuthorizedPostgresJobQueue:
     def mark_cancelled(self, job_id: str) -> None:
         self._queue.mark_cancelled(job_id)
 
+    def mark_interrupted(self, job_id: str) -> None:
+        self._queue.mark_interrupted(job_id)
+
     def mark_conflict(self, job_id: str, error: str) -> None:
         self._queue.mark_conflict(job_id, error)
 

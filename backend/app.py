@@ -429,13 +429,18 @@ async def app_lifespan(application: FastAPI):
         try:
             yield
         finally:
+            shutdown_error: RuntimeError | None = None
             if server_product_rediscovery is not None:
-                server_product_rediscovery.stop()
+                stop_report = server_product_rediscovery.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server product rediscovery did not drain"
+                    )
             if server_oidc_login is not None:
                 server_oidc_login.close()
             if knowledge_runtime is not None:
                 knowledge_runtime.close()
-            if server_engine is not None:
+            if server_engine is not None and shutdown_error is None:
                 server_engine.dispose()
             application.state.knowledge_agent_runtime = None
             application.state.knowledge_research_enqueue = None
@@ -461,6 +466,8 @@ async def app_lifespan(application: FastAPI):
             application.state.server_oidc_login = (
                 previous_server_oidc_login
             )
+            if shutdown_error is not None:
+                raise shutdown_error
         return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
     writing_runner = BatchJobRunner(

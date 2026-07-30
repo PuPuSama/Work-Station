@@ -132,6 +132,12 @@ M7 不一次性切换整个应用。采用 expand/contract：
   当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
 - 对象存储未配置时，历史 Job 状态仍可读取，但新 Job 明确返回 503；应用重启时只恢复
   `product_rediscovery` 的 Active PostgreSQL Job。
+- 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
+  释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
+  数据库 Engine，不宣称已经排空。
+- `product_rediscovery` 的终态 Job 更新与 `background_job.terminal` Audit 在同一个
+  PostgreSQL 事务；审计失败会回滚终态并释放当前 Claim，Audit Details 不含请求正文、
+  URL、对象 URI、原始异常或 Provider 响应。
 
 当前明确未做：
 
@@ -345,16 +351,16 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/server_project_http.py` | Server Mode Project Directory、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、写入用 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
-| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内原子创建、旧返回契约 |
+| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内原子创建、终态与安全 Audit 同事务 |
 | `backend/services/authorized_job_queue.py` | Server Worker 的两阶段重新授权适配器 | Claim 前只看最小元数据、Handler 前二次授权、无可信 Requester 不读取 Payload |
-| `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | Enqueue 授权/Revision/Job/Audit 同事务、可信 Requester、Worker 两阶段授权、只抓 Active 官网、不改 Task、无本地回退 |
+| `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | Enqueue 原子性、可信 Requester、两阶段授权、只抓 Active 官网、不改 Task、聚合停机报告 |
 | `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
 | `backend/migrations/versions/20260730_0012_object_orphan_observations.py` | Orphan 连续观察 Schema 准源 | Project 复合 FK、指纹重置、Eligibility 索引 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/server_cutover_report.py` | SQLite/PG Task 与 Job 只读双读报告 | 只读连接、同一 Scope、顺序/ID/摘要、正文不出报告 |
 | `backend/knowledge_agent/m7_cutover_report.py` | C3 冻结窗口比对 CLI | ready 为 0、差异为 2、数据库 URL 只读环境注入 |
 | `backend/services/task_repository.py` | 本地/服务器 Task Repository Protocol 与 SQLite 实现 | 本地模式保持可用 |
-| `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
+| `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 用户取消和服务停机分离、停止 Claim、有界 Join 与未排空报告 |
 | `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
 | `backend/services/object_orphan_reconciliation.py` | 项目对象引用对账与延迟清理 | Snapshot URI、Asset Link、Task Asset 联合集合；双观察、指纹、保留期、事务内重授权与安全审计 |
 | `backend/knowledge_agent/object_storage.py` | M2 资产接入 S3 及授权后的知识对象服务 | 解析器适配与权限分离、下载重新授权、数据库只存 URI/证据 |
@@ -528,9 +534,15 @@ Runner 描述成“服务器 Job 单写已完成”。
 迁移兼容；SQLite 扩展字段也不会被提升为可信 Requester。它们只能作为 Terminal History
 保留，不能被服务器 Worker 重新执行。产品重新发现 Enqueue 已把可撤权授权事实、
 Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一个 PostgreSQL
-事务；Audit 失败不留下 Job。因为仍只有一个 Operation 接线，且还没有通用 Server
-Batch API、终态 Job Audit 和排空/优雅停机证明，所以
-`worker_reauthorizes` 与 `postgres_job_single_write` 仍保持 false。
+事务；Audit 失败不留下 Job。该 Operation 的 `succeeded/failed/conflict/cancelled`
+终态也与安全 Audit 同事务，受控停机则不写伪终态：Runner 停止新 Claim，把在协作检查点
+退出的非用户取消 Job 释放回 `queued`，并返回有界 Join 报告。若报告仍有在途 Job，
+Lifespan 明确失败且不释放数据库 Engine。
+
+这套语义当前只接到 `product_rediscovery`。仍没有通用 Server Batch API、全部 Operation
+的 Runner 和正式环境排空演练，所以 `worker_reauthorizes` 与
+`postgres_job_single_write` 仍保持 false，不能把单条 Operation 的证据扩写成整体
+Worker Cutover 已完成。
 
 当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
 PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -94,6 +95,19 @@ class ProductRediscoveryCommand:
             "category_url": self.category_url,
             "max_products": self.max_products,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ProductRediscoveryStopReport:
+    """Aggregate controlled-shutdown evidence for project runners."""
+
+    project_runner_count: int
+    dispatcher_stopped: bool
+    remaining_jobs: int
+
+    @property
+    def drained(self) -> bool:
+        return self.dispatcher_stopped and self.remaining_jobs == 0
 
 
 ProductSyncFactory = Callable[
@@ -256,6 +270,7 @@ class ServerProductRediscoveryRegistry:
         self._lock = threading.Lock()
         self._closed = False
         self._projects: dict[tuple[str, str], _ProjectRunner] = {}
+        self._stop_report: ProductRediscoveryStopReport | None = None
 
     def _ensure_project(
         self,
@@ -281,6 +296,7 @@ class ServerProductRediscoveryRegistry:
                         self._engine,
                         organization_id=organization_id,
                         project_id=project_id,
+                        terminal_audit=self._audit,
                     ),
                     runner=None,
                 )
@@ -506,10 +522,20 @@ class ServerProductRediscoveryRegistry:
             "has_error": bool(str(job.get("error") or "")),
         }
 
-    def stop(self) -> None:
+    def stop(
+        self,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> ProductRediscoveryStopReport:
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
         with self._lock:
             if self._closed:
-                return
+                return self._stop_report or ProductRediscoveryStopReport(
+                    project_runner_count=0,
+                    dispatcher_stopped=True,
+                    remaining_jobs=0,
+                )
             self._closed = True
             runners = [
                 project.runner
@@ -517,13 +543,34 @@ class ServerProductRediscoveryRegistry:
                 if project.runner is not None
             ]
             self._projects.clear()
+        deadline = time.monotonic() + timeout_seconds
+        dispatcher_stopped = True
+        remaining_jobs = 0
         for runner in runners:
-            runner.stop()
+            report = runner.stop(
+                timeout_seconds=max(
+                    0.0,
+                    deadline - time.monotonic(),
+                )
+            )
+            dispatcher_stopped = (
+                dispatcher_stopped and report.dispatcher_stopped
+            )
+            remaining_jobs += report.remaining_jobs
+        result = ProductRediscoveryStopReport(
+            project_runner_count=len(runners),
+            dispatcher_stopped=dispatcher_stopped,
+            remaining_jobs=remaining_jobs,
+        )
+        with self._lock:
+            self._stop_report = result
+        return result
 
 
 __all__ = [
     "PRODUCT_REDISCOVERY_OPERATION",
     "ProductRediscoveryCommand",
+    "ProductRediscoveryStopReport",
     "ProductRediscoveryUnavailable",
     "ServerProductRediscoveryHandler",
     "ServerProductRediscoveryRegistry",
