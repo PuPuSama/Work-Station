@@ -2,7 +2,14 @@
 
 这里保存可提交、可复现的检索评测标注，不保存客户私有文件或 API Key。
 
-第一份数据集为 `qewitfastener_product_retrieval.jsonl`。一行是一个话题，每行至少包含：
+正式 M6 数据集位于
+`knowledge-agent/qewitfastener/retrieval-cases.jsonl`，格式和人工标注流程见同目录
+`README.md`。
+
+根目录的 `qewitfastener_product_retrieval.jsonl` 是早期学习阶段模板，保留用于追溯，
+不再作为正式评测 Runner 的输入。
+
+早期模板一行是一个话题，每行至少包含：
 
 - `topic_id`：工作台任务编号。
 - `topic_text`：原始英文话题，必须从工作台复制，不能凭印象改写。

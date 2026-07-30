@@ -91,6 +91,17 @@
 
 验收：不仅能展示“聊天”，还能展示准确率、证据覆盖、检查点恢复、人工中断和费用边界。
 
+实施状态（2026-07-30）：
+
+- 已完成统一 Retrieval/Evidence Improvement 指标、20 条 qewitfastener JSONL、
+  Basic Hybrid Runner、LightRAG HTTP Candidate Provider 和 PostgreSQL 二次发布门；
+- 已完成确定性单元测试及真实 PostgreSQL 跨项目/旧快照集成测试；
+- `topic_006` 为唯一已批准标注，其余 19 条待人工审核；
+- qewitfastener 真实来源仍为 Inbox，LightRAG 独立 Server 尚未运行，因此真实对照分数、
+  索引成本和运行截图明确待执行；
+- 结构、命令和重构不变量见
+  `docs/architecture/knowledge-agent-m6.md`。
+
 ## M7：多人服务器版
 
 - Task/Job 数据迁移 PostgreSQL。
