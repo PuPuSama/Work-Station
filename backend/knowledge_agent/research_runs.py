@@ -554,13 +554,22 @@ class PostgresResearchRunRepository:
         self,
         project_id: str,
         thread_id: str,
+        *,
+        after_sequence: int = 0,
     ) -> tuple[ResearchGraphEvent, ...]:
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+        ):
+            raise ValueError("after_sequence must be a non-negative integer")
         with self._engine.connect() as connection:
             rows = connection.execute(
                 sa.select(research_graph_events)
                 .where(
                     research_graph_events.c.project_id == project_id,
                     research_graph_events.c.thread_id == thread_id,
+                    research_graph_events.c.sequence > after_sequence,
                 )
                 .order_by(research_graph_events.c.sequence)
             ).mappings()
@@ -662,6 +671,27 @@ class PostgresResearchRunRepository:
                 )
             ).mappings()
             return tuple(_attempt_from_row(row) for row in rows)
+
+    def prune_expired_details(self, *, before: datetime) -> dict[str, int]:
+        """Delete old node telemetry and attempts while retaining run summaries."""
+
+        if before.tzinfo is None or before.utcoffset() is None:
+            raise ValueError("before must be timezone-aware")
+        with self._engine.begin() as connection:
+            events = connection.execute(
+                research_graph_events.delete().where(
+                    research_graph_events.c.created_at < before
+                )
+            )
+            attempts = connection.execute(
+                gap_fill_attempts.delete().where(
+                    gap_fill_attempts.c.updated_at < before
+                )
+            )
+            return {
+                "research_graph_events": int(events.rowcount or 0),
+                "gap_fill_attempts": int(attempts.rowcount or 0),
+            }
 
     @staticmethod
     def _get(

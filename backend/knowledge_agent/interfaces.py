@@ -75,6 +75,14 @@ class RetrievalPlanRepository(Protocol):
         self, project_id: str, retrieval_plan_id: str
     ) -> RetrievalPlan | None: ...
 
+    def list_retrieval_plans(
+        self,
+        project_id: str,
+        *,
+        article_id: str | None = None,
+        limit: int = 100,
+    ) -> Sequence[RetrievalPlan]: ...
+
 
 @runtime_checkable
 class EvidenceLinkRepository(Protocol):

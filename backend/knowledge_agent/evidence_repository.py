@@ -184,6 +184,40 @@ class PostgresRetrievalPlanRepository:
         with self._engine.connect() as connection:
             return self._get(connection, project_id, retrieval_plan_id)
 
+    def list_retrieval_plans(
+        self,
+        project_id: str,
+        *,
+        article_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[RetrievalPlan, ...]:
+        """List newest immutable plans without crossing the project boundary."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        statement = sa.select(
+            retrieval_plans.c.retrieval_plan_id
+        ).where(retrieval_plans.c.project_id == project_id)
+        if article_id is not None:
+            statement = statement.where(
+                retrieval_plans.c.article_id == article_id
+            )
+        with self._engine.connect() as connection:
+            plan_ids = connection.execute(
+                statement.order_by(
+                    retrieval_plans.c.created_at.desc(),
+                    retrieval_plans.c.retrieval_plan_id,
+                ).limit(limit)
+            ).scalars()
+            return tuple(
+                plan
+                for plan_id in plan_ids
+                if (
+                    plan := self._get(connection, project_id, str(plan_id))
+                )
+                is not None
+            )
+
     @staticmethod
     def _get(
         connection: sa.Connection,

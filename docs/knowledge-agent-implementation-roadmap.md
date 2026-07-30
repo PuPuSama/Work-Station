@@ -15,8 +15,8 @@
 | M2 | 完成正式边界；真实 MinerU 私有样本对比待外部条件 | `docs/architecture/knowledge-agent-m2.md`、`docs/validation/knowledge-agent-m2-qewitfastener.md` |
 | M3 | 完成 | `docs/architecture/knowledge-agent-m3.md`、`knowledge-agent-m3-evidence.md` |
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
-| M5 | 下一里程碑 | 研究时间线、SSE、只读引用问答 |
-| M6 | 未开始 | 评测与作品展示 |
+| M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
+| M6 | 下一里程碑 | 评测与作品展示 |
 | M7 | 未开始 | 多人服务器版 |
 
 ## M0：基线与接口边界

@@ -29,6 +29,7 @@ import type {
 } from "@/components/article-seo-review-panel";
 import { ArticleOutlineStep } from "@/components/article-outline-step";
 import { ArticleProductsStep } from "@/components/article-products-step";
+import { ProjectResearchWorkspace } from "@/components/project-research-workspace";
 import { ArticleTitleStep } from "@/components/article-title-step";
 import { ArticleWritingRequirementsStep } from "@/components/article-writing-requirements-step";
 import { RevisionConflictDialog } from "@/components/revision-conflict-dialog";
@@ -111,6 +112,7 @@ type WorkbenchTab =
   | "products"
   | "requirements"
   | "outline"
+  | "research"
   | "article"
   | "review"
   | "media"
@@ -129,10 +131,11 @@ const WORKBENCH_TABS: Array<{
   { value: "products", step: 2, label: "产品" },
   { value: "requirements", step: 3, label: "写作要求" },
   { value: "outline", step: 4, label: "大纲" },
-  { value: "article", step: 5, label: "第一版" },
-  { value: "review", step: 6, label: "人工处理" },
-  { value: "media", step: 7, label: "图片" },
-  { value: "files", step: 8, label: "交付" },
+  { value: "research", step: 5, label: "资料研究" },
+  { value: "article", step: 6, label: "第一版" },
+  { value: "review", step: 7, label: "人工处理" },
+  { value: "media", step: 8, label: "图片" },
+  { value: "files", step: 9, label: "交付" },
 ];
 
 type WorkflowStage = "prepare" | "writing" | "review" | "media" | "delivery";
@@ -144,7 +147,7 @@ const WORKFLOW_STAGES: Array<{
   tabs: WorkbenchTab[];
 }> = [
   { value: "prepare", step: 1, label: "内容准备", tabs: ["titles", "products", "requirements"] },
-  { value: "writing", step: 2, label: "写作", tabs: ["outline", "article"] },
+  { value: "writing", step: 2, label: "写作", tabs: ["outline", "research", "article"] },
   { value: "review", step: 3, label: "人工质检", tabs: ["review"] },
   { value: "media", step: 4, label: "图片", tabs: ["media"] },
   { value: "delivery", step: 5, label: "交付", tabs: ["files"] },
@@ -191,6 +194,10 @@ type EditableSection =
   | "review"
   | "media"
   | "files";
+
+function isEditableSection(value: WorkbenchTab): value is EditableSection {
+  return value !== "research";
+}
 
 type ServerConflict = {
   section: EditableSection;
@@ -1739,9 +1746,9 @@ export function ArticleWorkbench({
     WORKFLOW_STAGES.findIndex((stage) => stage.tabs.includes(suggestedTab)),
   );
   const busyTabs = new Set(
-    WORKBENCH_TABS.filter((tab) => sectionPending(tab.value)).map(
-      (tab) => tab.value,
-    ),
+    WORKBENCH_TABS.filter(
+      (tab) => isEditableSection(tab.value) && sectionPending(tab.value),
+    ).map((tab) => tab.value),
   );
   const outlineHasDownstream = Boolean(
     selectedTask && STATUS_PHASE[selectedTask.status] > STATUS_PHASE.outline_confirmed,
@@ -2185,7 +2192,8 @@ export function ArticleWorkbench({
                             onClick={() => selectTab(tab.value)}
                           >
                             {tab.label}
-                            {sectionPending(tab.value) && (
+                            {isEditableSection(tab.value) &&
+                              sectionPending(tab.value) && (
                               <Loader2 className="size-3 animate-spin" />
                             )}
                             {dirtyTabs.has(tab.value) && (
@@ -2448,6 +2456,15 @@ export function ArticleWorkbench({
                       onSaveDraft={() => saveOutline(false)}
                       onSaveAndConfirm={() => saveOutline(true)}
                       onRestore={restoreVersion}
+                    />
+                  </TabsContent>
+
+                  <TabsContent value="research" className="min-w-0 pt-4">
+                    <ProjectResearchWorkspace
+                      customer={selectedTask.customer}
+                      articleId={`topic_${String(selectedTask.topic_index).padStart(3, "0")}`}
+                      taskId={selectedTask.id}
+                      embedded
                     />
                   </TabsContent>
 

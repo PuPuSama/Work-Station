@@ -78,6 +78,7 @@ from models import (
     STATUS_TITLES_READY,
     TaskRecord,
     VersionRestoreRequest,
+    WORKFLOW_STATUSES,
     WorkflowError,
     WritingSettingsUpdateRequest,
     ZeroGptReportRequest,
@@ -190,8 +191,17 @@ from workflow.state_machine import (
     reset_for_full_rewrite,
     transition_task,
 )
-from knowledge_agent.http import router as knowledge_agent_router
+from knowledge_agent.contracts import KnowledgeProject
+from knowledge_agent.evidence_repository import EvidenceRepositoryError
+from knowledge_agent.http import (
+    RetrievalPlanResponse,
+    _plan_response,
+    router as knowledge_agent_router,
+)
 from knowledge_agent.embedding import OpenAICompatibleEmbeddingProvider
+from knowledge_agent.retrieval_plan_generation import generate_retrieval_plan
+from knowledge_agent.research_chat import LlmResearchAnswerProvider
+from knowledge_agent.retention import prune_expired_research_details
 from knowledge_agent.runtime import create_knowledge_runtime
 from knowledge_agent.research_graph import ResearchGraphRequest
 from knowledge_agent.research_runs import ResearchRunConflictError
@@ -210,6 +220,7 @@ async def app_lifespan(application: FastAPI):
     application.state.knowledge_research_enqueue = None
     if cfg.knowledge_agent_enabled:
         knowledge_settings = load_knowledge_agent_settings(enabled=True)
+        research_answer_provider = LlmResearchAnswerProvider(LLMClient(cfg))
         knowledge_runtime = create_knowledge_runtime(
             database_url=knowledge_settings.database_url or "",
             artifact_root=Path(
@@ -221,7 +232,13 @@ async def app_lifespan(application: FastAPI):
             embedding_provider=OpenAICompatibleEmbeddingProvider.from_settings(
                 knowledge_settings
             ),
+            answer_provider=(
+                research_answer_provider
+                if research_answer_provider.ready
+                else None
+            ),
         )
+        prune_expired_research_details(knowledge_runtime)
         application.state.knowledge_agent_runtime = knowledge_runtime
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
     writing_runner = BatchJobRunner(
@@ -876,6 +893,78 @@ def list_tasks(customer: str | None = None, status: str | None = None) -> list[T
 @app.get("/api/tasks/{task_id}", response_model=TaskRecord)
 def read_task(task_id: str) -> TaskRecord:
     return expose_task(get_task_or_404(task_id))
+
+
+@app.post(
+    "/api/knowledge/{project}/tasks/{task_id}/retrieval-plan",
+    response_model=RetrievalPlanResponse,
+    status_code=201,
+)
+def create_task_retrieval_plan(
+    project: str,
+    task_id: str,
+) -> RetrievalPlanResponse:
+    """Freeze the confirmed SQLite outline as a PostgreSQL retrieval plan."""
+
+    runtime = getattr(app.state, "knowledge_agent_runtime", None)
+    if runtime is None:
+        raise HTTPException(status_code=404, detail="Knowledge Agent is disabled.")
+    task = get_task_or_404(task_id)
+    project_id = normalized_customer(project)
+    if normalized_customer(task.customer) != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        )
+    try:
+        confirmed_or_later = (
+            WORKFLOW_STATUSES.index(task.status)
+            >= WORKFLOW_STATUSES.index(STATUS_OUTLINE_CONFIRMED)
+        )
+    except ValueError:
+        confirmed_or_later = False
+    if not confirmed_or_later or not task.outline.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm the outline before creating a retrieval plan.",
+        )
+    outline_version = max(
+        1,
+        sum(
+            1
+            for version in task.article_versions
+            if version.kind == "outline"
+            and version.source_kind == "manual_confirmed"
+        ),
+    )
+    article_id = f"topic_{task.topic_index:03d}"
+    plan = generate_retrieval_plan(
+        project_id=project_id,
+        article_id=article_id,
+        task_id=task.id,
+        outline_version=outline_version,
+        outline=task.outline,
+        topic=task.topic,
+        products=[product.model_dump() for product in task.products],
+    )
+    try:
+        runtime.repository.upsert_project(
+            KnowledgeProject(
+                project_id=project_id,
+                customer_name=task.brand_name or task.customer,
+                official_domain=project_id,
+            )
+        )
+        runtime.retrieval_plan_repository.save_retrieval_plan(plan)
+    except (ValueError, EvidenceRepositoryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    persisted = runtime.retrieval_plan_repository.get_retrieval_plan(
+        project_id,
+        plan.retrieval_plan_id,
+    )
+    if persisted is None:
+        raise HTTPException(status_code=500, detail="Retrieval plan was not persisted.")
+    return _plan_response(persisted)
 
 
 def append_version(task: TaskRecord, kind: str, content: str, source_kind: str = "") -> None:

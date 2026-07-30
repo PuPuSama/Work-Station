@@ -242,6 +242,34 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(detail.json()["review_candidates"], [])
 
+        plans = self.client.get(
+            "/api/knowledge/example.com/retrieval-plans",
+            params={"article_id": "topic_006"},
+        )
+        self.assertEqual(plans.status_code, 200, plans.text)
+        self.assertEqual(
+            [item["retrieval_plan_id"] for item in plans.json()],
+            ["plan-research-v1"],
+        )
+
+        self.runtime.research_run_repository.mark_failed(
+            "example.com",
+            thread_id,
+            RuntimeError("provider key must stay private"),
+        )
+        streamed = self.client.get(
+            (
+                f"/api/knowledge/example.com/research-runs/{thread_id}"
+                "/events/stream"
+            ),
+            headers={"Last-Event-ID": "0"},
+        )
+        self.assertEqual(streamed.status_code, 200, streamed.text)
+        self.assertIn("event: research_event", streamed.text)
+        self.assertIn("event: run_state", streamed.text)
+        self.assertIn("event: done", streamed.text)
+        self.assertNotIn("provider key", streamed.text)
+
     def tearDown(self) -> None:
         self.setUp()
 

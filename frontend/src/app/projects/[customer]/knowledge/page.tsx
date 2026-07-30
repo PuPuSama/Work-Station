@@ -1,5 +1,6 @@
 import { ProjectKnowledgeLibrary } from "@/components/project-knowledge-library";
 import { ProjectEvidenceWorkbench } from "@/components/project-evidence-workbench";
+import { ProjectResearchWorkspace } from "@/components/project-research-workspace";
 
 type ProjectKnowledgePageProps = {
   params: Promise<{
@@ -15,6 +16,7 @@ export default async function ProjectKnowledgePage({
   return (
     <>
       <ProjectKnowledgeLibrary customer={decodedCustomer} />
+      <ProjectResearchWorkspace customer={decodedCustomer} />
       <ProjectEvidenceWorkbench customer={decodedCustomer} />
     </>
   );

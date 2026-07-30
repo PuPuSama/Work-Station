@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from hashlib import sha256
 from pathlib import PurePath
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Annotated, Literal
 from urllib.parse import quote
 
@@ -14,7 +16,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .artifact_store import ArtifactStoreError
@@ -50,6 +52,16 @@ from .research_runs import (
     ResearchRunConflictError,
     ResearchRunNotFound,
     ResearchRunRepositoryError,
+    TERMINAL_RESEARCH_STATUSES,
+)
+from .research_stream import encode_sse, resolve_after_sequence
+from .research_chat import (
+    ResearchAnswerProviderError,
+    ResearchChatError,
+)
+from .research_chat_repository import (
+    ResearchChatRepositoryError,
+    ResearchConversation,
 )
 from .scope_evidence import ScopeEvidenceNotFound, ScopeEvidenceService
 from .wordpress import (
@@ -409,6 +421,44 @@ class ResearchRunQueuedResponse(KnowledgeApiModel):
     queue_job_id: str
 
 
+class ResearchChatAskRequest(KnowledgeApiModel):
+    request_id: str = Field(min_length=1, max_length=120)
+    question: str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = Field(default=None, max_length=200)
+    article_id: str | None = Field(default=None, max_length=200)
+    limit: int = Field(default=8, ge=1, le=20)
+
+
+class ResearchCitationResponse(KnowledgeApiModel):
+    chunk_id: str
+    source_id: str
+    snapshot_id: str
+    display_name: str
+    canonical_url: str | None
+    text: str
+    ordinal: int
+
+
+class ResearchMessageResponse(KnowledgeApiModel):
+    message_id: str
+    request_id: str
+    sequence: int
+    role: str
+    content: str
+    citations: list[ResearchCitationResponse]
+    created_at: str | None
+
+
+class ResearchConversationResponse(KnowledgeApiModel):
+    project_id: str
+    conversation_id: str
+    article_id: str | None
+    messages: list[ResearchMessageResponse]
+    created_at: str | None
+    updated_at: str | None
+    expires_at: str | None
+
+
 def _runtime(request: Request) -> KnowledgeAgentRuntime:
     runtime = getattr(request.app.state, "knowledge_agent_runtime", None)
     if runtime is None:
@@ -654,6 +704,58 @@ def _gap_attempt_response(attempt: GapFillAttempt) -> GapFillAttemptResponse:
     )
 
 
+def _conversation_response(
+    conversation: ResearchConversation,
+) -> ResearchConversationResponse:
+    return ResearchConversationResponse(
+        project_id=conversation.project_id,
+        conversation_id=conversation.conversation_id,
+        article_id=conversation.article_id,
+        created_at=(
+            conversation.created_at.isoformat()
+            if conversation.created_at is not None
+            else None
+        ),
+        updated_at=(
+            conversation.updated_at.isoformat()
+            if conversation.updated_at is not None
+            else None
+        ),
+        expires_at=(
+            conversation.expires_at.isoformat()
+            if conversation.expires_at is not None
+            else None
+        ),
+        messages=[
+            ResearchMessageResponse(
+                message_id=message.message_id,
+                request_id=message.request_id,
+                sequence=message.sequence,
+                role=message.role,
+                content=message.content,
+                created_at=(
+                    message.created_at.isoformat()
+                    if message.created_at is not None
+                    else None
+                ),
+                citations=[
+                    ResearchCitationResponse(
+                        chunk_id=citation.chunk_id,
+                        source_id=citation.source_id,
+                        snapshot_id=citation.snapshot_id,
+                        display_name=citation.display_name,
+                        canonical_url=citation.canonical_url,
+                        text=citation.text,
+                        ordinal=citation.ordinal,
+                    )
+                    for citation in message.citations
+                ],
+            )
+            for message in conversation.messages
+        ],
+    )
+
+
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge-agent"])
 
 
@@ -807,6 +909,28 @@ def create_retrieval_plan(
 
 
 @router.get(
+    "/{project}/retrieval-plans",
+    response_model=list[RetrievalPlanResponse],
+)
+def list_retrieval_plans(
+    project: str,
+    request: Request,
+    article_id: str | None = None,
+    limit: int = 100,
+) -> list[RetrievalPlanResponse]:
+    runtime = _runtime(request)
+    try:
+        plans = runtime.retrieval_plan_repository.list_retrieval_plans(
+            _project_id(project),
+            article_id=article_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return [_plan_response(plan) for plan in plans]
+
+
+@router.get(
     "/{project}/retrieval-plans/{retrieval_plan_id}",
     response_model=RetrievalPlanResponse,
 )
@@ -950,6 +1074,93 @@ def read_research_run(
     )
 
 
+@router.get(
+    "/{project}/research-runs/{thread_id}/events/stream",
+    response_class=StreamingResponse,
+)
+async def stream_research_run_events(
+    project: str,
+    thread_id: str,
+    request: Request,
+    after_sequence: int | None = None,
+) -> StreamingResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    try:
+        cursor = resolve_after_sequence(
+            after_sequence,
+            request.headers.get("last-event-id"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    run = await asyncio.to_thread(
+        runtime.research_run_repository.get_run,
+        project_id,
+        thread_id,
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Research run was not found.")
+
+    async def events():
+        nonlocal cursor
+        first_iteration = True
+        last_heartbeat = monotonic()
+        while True:
+            new_events = await asyncio.to_thread(
+                runtime.research_run_repository.list_events,
+                project_id,
+                thread_id,
+                after_sequence=cursor,
+            )
+            for event in new_events:
+                cursor = event.sequence
+                yield encode_sse(
+                    event="research_event",
+                    event_id=event.sequence,
+                    data=_research_event_response(event).model_dump(),
+                )
+            current = await asyncio.to_thread(
+                runtime.research_run_repository.get_run,
+                project_id,
+                thread_id,
+            )
+            if current is None:
+                return
+            if first_iteration or new_events:
+                yield encode_sse(
+                    event="run_state",
+                    event_id=cursor,
+                    data=_research_run_response(current).model_dump(),
+                )
+                first_iteration = False
+            if current.status in TERMINAL_RESEARCH_STATUSES:
+                yield encode_sse(
+                    event="done",
+                    event_id=cursor,
+                    data={"status": current.status},
+                )
+                return
+            if await request.is_disconnected():
+                return
+            now = monotonic()
+            if now - last_heartbeat >= 15:
+                yield encode_sse(
+                    event="heartbeat",
+                    data={"server_time": datetime.now(timezone.utc).isoformat()},
+                )
+                last_heartbeat = now
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post(
     "/{project}/research-runs/{thread_id}/resume",
     response_model=ResearchRunQueuedResponse,
@@ -996,6 +1207,62 @@ def resume_research_run(
         queue_batch_id=str(queued["batch_id"]),
         queue_job_id=str(queued["job_id"]),
     )
+
+
+@router.post(
+    "/{project}/research-assistant/messages",
+    response_model=ResearchConversationResponse,
+    status_code=201,
+)
+def ask_research_assistant(
+    project: str,
+    payload: ResearchChatAskRequest,
+    request: Request,
+) -> ResearchConversationResponse:
+    runtime = _runtime(request)
+    if runtime.research_chat is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Research assistant generation is not configured.",
+        )
+    try:
+        conversation = runtime.research_chat.ask(
+            project_id=_project_id(project),
+            question=payload.question,
+            request_id=payload.request_id,
+            conversation_id=payload.conversation_id,
+            article_id=payload.article_id,
+            limit=payload.limit,
+        )
+    except ResearchAnswerProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (ValueError, ResearchChatError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ResearchChatRepositoryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _conversation_response(conversation)
+
+
+@router.get(
+    "/{project}/research-conversations/{conversation_id}",
+    response_model=ResearchConversationResponse,
+)
+def read_research_conversation(
+    project: str,
+    conversation_id: str,
+    request: Request,
+) -> ResearchConversationResponse:
+    runtime = _runtime(request)
+    conversation = runtime.research_chat_repository.get_conversation(
+        _project_id(project),
+        conversation_id,
+    )
+    if conversation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Research conversation was not found.",
+        )
+    return _conversation_response(conversation)
 
 
 @router.post(

@@ -597,6 +597,36 @@ export type ResearchRunQueued = {
   queue_job_id: string;
 };
 
+export type ResearchCitation = {
+  chunk_id: string;
+  source_id: string;
+  snapshot_id: string;
+  display_name: string;
+  canonical_url: string | null;
+  text: string;
+  ordinal: number;
+};
+
+export type ResearchMessage = {
+  message_id: string;
+  request_id: string;
+  sequence: number;
+  role: "user" | "assistant";
+  content: string;
+  citations: ResearchCitation[];
+  created_at: string | null;
+};
+
+export type ResearchConversation = {
+  project_id: string;
+  conversation_id: string;
+  article_id: string | null;
+  messages: ResearchMessage[];
+  created_at: string | null;
+  updated_at: string | null;
+  expires_at: string | null;
+};
+
 export type BatchJobStatus =
   | "queued"
   | "running"

@@ -32,6 +32,8 @@ from .research_execution import (
     ResearchGraphSessionFactory,
 )
 from .research_runs import PostgresResearchRunRepository
+from .research_chat import ResearchAnswerProvider, ResearchChatService
+from .research_chat_repository import PostgresResearchChatRepository
 from .research_telemetry import PostgresResearchTelemetry
 from .scope_evidence import ScopeEvidenceService
 from .repository import PostgresKnowledgeRepository
@@ -61,6 +63,8 @@ class KnowledgeAgentRuntime:
     evidence_pack_repository: PostgresEvidencePackRepository
     evidence_link_repository: PostgresEvidenceLinkRepository
     research_run_repository: PostgresResearchRunRepository
+    research_chat_repository: PostgresResearchChatRepository
+    research_chat: ResearchChatService | None
     research_execution: ResearchGraphExecutionService | None
 
     def close(self) -> None:
@@ -75,6 +79,7 @@ def create_knowledge_runtime(
     database_url: str,
     artifact_root: Path,
     embedding_provider: EmbeddingProvider | None = None,
+    answer_provider: ResearchAnswerProvider | None = None,
 ) -> KnowledgeAgentRuntime:
     engine = create_knowledge_engine(database_url)
     repository = PostgresKnowledgeRepository(engine)
@@ -86,6 +91,7 @@ def create_knowledge_runtime(
     evidence_pack_repository = PostgresEvidencePackRepository(engine)
     evidence_link_repository = PostgresEvidenceLinkRepository(engine)
     research_run_repository = PostgresResearchRunRepository(engine)
+    research_chat_repository = PostgresResearchChatRepository(engine)
     official_site_fetcher = SafeOfficialSiteFetcher()
     web_page_ingestion = OfficialWebPageIngestionService(
         repository=repository,
@@ -110,6 +116,13 @@ def create_knowledge_runtime(
         else BasicHybridRetriever(engine, embedding_provider)
     )
     research_execution = None
+    research_chat = None
+    if hybrid_retriever is not None and answer_provider is not None:
+        research_chat = ResearchChatService(
+            retriever=hybrid_retriever,
+            provider=answer_provider,
+            conversations=research_chat_repository,
+        )
     if publication is not None and hybrid_retriever is not None:
         projects = PostgresProjectDirectory(engine)
         scope_evidence = ScopeEvidenceService(
@@ -168,5 +181,7 @@ def create_knowledge_runtime(
         evidence_pack_repository=evidence_pack_repository,
         evidence_link_repository=evidence_link_repository,
         research_run_repository=research_run_repository,
+        research_chat_repository=research_chat_repository,
+        research_chat=research_chat,
         research_execution=research_execution,
     )
