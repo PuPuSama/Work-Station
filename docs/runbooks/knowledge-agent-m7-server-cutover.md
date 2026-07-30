@@ -170,6 +170,18 @@ KMS Key 轮换遵循供应商策略；先验证旧对象仍可解密。不得把
 - 重复提交旧 Revision 返回 409；
 - 图片展示继续单独调用授权下载路由，不能把签名 URL 回写 Task。
 
+章节替换冒烟必须通过
+`PUT /api/projects/{project}/tasks/{task_id}/article/sections`。至少验证：
+
+- Viewer 返回 403，Editor 只在 `ACTION_UPDATE_ARTICLE` 允许时提交；
+- 不存在或重复的 Heading Path、同级/更高级 Heading 注入返回 422；
+- fenced code block 中的 `##` 不被识别为章节边界；
+- 成功后只有目标 Section Body 变化，相邻章节和目标 Heading 保持不变；
+- `article_versions` 原子追加 `before_section_rewrite` 与 `section_rewrite`，下游人化、
+  链接、图片和导出状态失效；
+- 重复提交旧 Revision 返回 409，且不多追加版本；
+- 本接口不调用 LLM；对话式生成只能提供候选 Body，不能直接写完整 Article。
+
 回滚原则：
 
 - 代码回滚优先，数据库迁移只在确认新表没有新业务数据时降级；

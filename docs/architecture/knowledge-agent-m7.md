@@ -66,6 +66,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Current Snapshot 主详情证据的产品，再用 Revision CAS 替换 Task 产品快照；
 - Server 产品投影不接受客户端上传的名称、URL、事实或图片地址；图片只复制稳定
   `asset_id`，不复制对象 URI、源站 URL 或本地路径；
+- 新增第三个 PostgreSQL-only 受限 Task 写操作
+  `PUT /api/projects/{project}/tasks/{task_id}/article/sections`：只接受当前 Revision、
+  唯一 Heading Path 和已审阅的 Replacement Body；在同一次 Task CAS 中保存修改前/
+  修改后版本快照，只替换目标 Markdown 章节并使全部下游产物失效；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
   Object Service 在签名前再次读取 `project.view`，核对数据库 URI 的 Bucket 与
   Organization/Project Key 前缀，并签发最长一小时的临时 URL；
@@ -376,8 +380,9 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取和不依赖 Artifact 的“完全重写”“选择已确认产品”
-已经接线，但其余 Article 写入、Batch 和 Worker 尚未接线。因此不能用一个全局“默认项目”
-强行切换 PostgreSQL，也不能把“两个确定性写操作已接线”描述成“服务器单写已完成”，或把
+以及“快照后替换一个已审阅章节”已经接线，但其余 Article 写入、Batch 和 Worker 尚未
+接线。因此不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把“三个受限确定性
+写操作已接线”描述成“服务器单写已完成”，或把
 “已停止旧 Worker”描述成“新 Worker 已就绪”。
 
 Worker 授权组件已完成但尚未进入 Server Mode Lifespan：新 Job 可在数据库中保存
@@ -425,6 +430,35 @@ body: { revision, product_ids[1..3] }
 
 该操作目前还没有事务内 Audit Event，因此它仍属于 M7 迁移切片，不足以把
 全部项目写路由或 `postgres_task_single_write` 标为完成。
+
+Server 章节替换同样采用“生成/审阅”和“提交”分离的接口：
+
+```text
+PUT /api/projects/{project}/tasks/{task_id}/article/sections
+body: { revision, heading_path, replacement_body }
+  -> project.view + article.edit
+  -> 固定 Project 的 PostgreSQL Task
+  -> ACTION_UPDATE_ARTICLE
+  -> Markdown Fence-aware Heading Parser
+  -> 唯一 Heading Path；禁止 Replacement 引入同级/更高级标题
+  -> 完整文章结构、H3、过渡段和官网链接验证
+  -> ArticleVersion(before_section_rewrite)
+  -> 只替换目标 Section Body
+  -> invalidate_downstream("initial_article")
+  -> ArticleVersion(section_rewrite)
+  -> Task Revision CAS
+```
+
+Heading Path 不含 H1；例如 `["Buyer Guide", "Material"]` 可定位某个 H2 下的 H3。
+目标不存在或重复时都 fail closed，不能用“第一个同名标题”猜测。Parser 忽略 fenced
+code block 中的 `#`，Replacement Body 可以保留更深层子标题，但不能创建目标同级或
+更高级标题，防止一次请求越界覆盖相邻章节。目标 Heading 本身、目标前缀和后续兄弟章节
+保持不变；完整文章验证如果需要自动修改目标外内容，也会拒绝提交。
+
+当前接口提交的是操作者或上游 Agent 已审阅的 Replacement Body，本身不调用 LLM，也不
+开放 Server Batch Runner。后续接对话式章节生成时，模型只能产出候选 Body，最终仍必须
+经过本命令的 Scope、版本快照、验证和 Revision CAS；不能让模型直接覆盖完整文章。
+该写操作同样尚未补事务内 Audit Event，因此整体 Task 单写能力继续为 false。
 
 ### M7-D：对象存储与部署
 
@@ -518,3 +552,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 15. Server 产品替换是否仍只接受 Product ID，并只投影 Confirmed + Published Current
     Snapshot 证据，而不信任客户端产品字段？
 16. Task 是否只保存 `asset_id`，且图片展示仍通过重新授权的短期下载 URL？
+17. 章节重写是否仍按唯一 Heading Path 限制作用域，并拒绝同级/更高级标题注入？
+18. 修改前后 ArticleVersion、下游失效和 Task CAS 是否仍属于同一个 PostgreSQL Task
+    写入，而非先写文件再更新数据库？
+19. 后续 LLM 是否仍只生成候选 Section Body，而不能绕过本命令覆盖整篇文章？

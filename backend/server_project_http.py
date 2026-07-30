@@ -25,6 +25,10 @@ from services.server_product_selection import (
     ConfirmedProductSelectionError,
     PostgresConfirmedProductSelection,
 )
+from services.server_section_rewrite import (
+    SectionRewriteError,
+    rewrite_initial_article_section,
+)
 from services.server_request_security import (
     AuthorizedProjectRequest,
     ServerRequestForbidden,
@@ -34,6 +38,7 @@ from services.server_request_security import (
 from storage import RevisionConflictError
 from workflow.state_machine import (
     ACTION_REWRITE_FROM_SCRATCH,
+    ACTION_UPDATE_ARTICLE,
     ACTION_UPDATE_PRODUCTS,
     WorkflowActionNotAllowed,
     ensure_action_allowed,
@@ -64,6 +69,24 @@ class ConfirmedProductsUpdateRequest(BaseModel):
             raise ValueError("product ids must not be empty")
         if len(set(normalized)) != len(normalized):
             raise ValueError("product ids must be unique")
+        return normalized
+
+
+class ArticleSectionRewriteRequest(BaseModel):
+    """A bounded article mutation; generation happens before this commit step."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    heading_path: list[str] = Field(min_length=1, max_length=5)
+    replacement_body: str = Field(min_length=1, max_length=30000)
+
+    @field_validator("heading_path")
+    @classmethod
+    def validate_heading_path(cls, values: list[str]) -> list[str]:
+        normalized = [" ".join(value.split()) for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("heading_path values must not be empty")
         return normalized
 
 
@@ -468,7 +491,62 @@ def replace_project_task_products(
         ) from exc
 
 
+@router.put(
+    "/{project}/tasks/{task_id}/article/sections",
+    response_model=TaskRecord,
+)
+def rewrite_project_task_article_section(
+    project: str,
+    task_id: str,
+    payload: ArticleSectionRewriteRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_UPDATE_ARTICLE)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    try:
+        rewrite_initial_article_section(
+            task,
+            heading_path=payload.heading_path,
+            replacement_body=payload.replacement_body,
+        )
+    except SectionRewriteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        return store.put(
+            task,
+            expected_revision=payload.revision,
+        )
+    except RevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+
 __all__ = [
+    "ArticleSectionRewriteRequest",
     "ConfirmedProductsUpdateRequest",
     "ProjectAssetDownload",
     "require_server_actor",

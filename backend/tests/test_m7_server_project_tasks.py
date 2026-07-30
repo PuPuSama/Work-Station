@@ -61,6 +61,36 @@ from services.access_control import (  # noqa: E402
 from services.object_store import build_project_object_key  # noqa: E402
 
 
+SERVER_ARTICLE = """# Example Buyer Guide
+
+This introduction points readers to [example.com](https://example.com/) before the detailed guidance.
+
+## Buyer Checks
+
+### Confirm the application
+
+Keep the original application guidance.
+
+### Compare evidence
+
+Keep the original evidence guidance.
+
+## FAQ
+
+**Q: What should buyers send?**
+
+A: Send requirements and quantities.
+
+**Q: When should buyers request samples?**
+
+A: Request samples before approval.
+
+**Q: Why compare supplier capability?**
+
+A: Capability affects quality and support.
+"""
+
+
 class FakeDownloadStore:
     def __init__(self) -> None:
         self.signed: list[tuple[str, int]] = []
@@ -739,6 +769,18 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ).status_code,
                 404,
             )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article/sections",
+                    json={
+                        "revision": 0,
+                        "heading_path": ["Buyer Checks"],
+                        "replacement_body": "Replacement.",
+                    },
+                ).status_code,
+                404,
+            )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
 
@@ -946,6 +988,160 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         },
                     ).status_code,
                     409,
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_rewrites_only_one_snapshotted_article_section(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "status": "humanized_ready",
+                "selected_title": "Example Buyer Guide",
+                "initial_article": SERVER_ARTICLE,
+                "humanized_article": "downstream copy",
+                "article": "downstream copy",
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+
+        codec = ServerActorSessionCodec(b"q" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "q" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article/sections"
+                )
+                request = {
+                    "revision": 0,
+                    "heading_path": ["Buyer Checks"],
+                    "replacement_body": (
+                        "### Confirm the application\n\n"
+                        "Use revised application guidance.\n\n"
+                        "### Compare evidence\n\n"
+                        "Use revised evidence guidance."
+                    ),
+                }
+                self.assertEqual(
+                    client.put(path, json=request).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                escaped = dict(request)
+                escaped["replacement_body"] = (
+                    "## FAQ\n\nAttempted sibling replacement."
+                )
+                self.assertEqual(
+                    client.put(path, json=escaped).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    repository.get(self.task_a)["revision"],  # type: ignore[index]
+                    0,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_a}/tasks/"
+                            f"{self.task_b}/article/sections"
+                        ),
+                        json=request,
+                    ).status_code,
+                    404,
+                )
+
+                response = client.put(path, json=request)
+                self.assertEqual(response.status_code, 200, response.text)
+                saved = response.json()
+                self.assertEqual(saved["revision"], 1)
+                self.assertEqual(saved["status"], "draft_ready")
+                self.assertEqual(saved["humanized_article"], "")
+                self.assertIn(
+                    "Use revised application guidance.",
+                    saved["initial_article"],
+                )
+                self.assertNotIn(
+                    "Keep the original application guidance.",
+                    saved["initial_article"],
+                )
+                original_prefix = SERVER_ARTICLE.split(
+                    "## Buyer Checks",
+                    1,
+                )[0]
+                original_suffix = (
+                    "## FAQ" + SERVER_ARTICLE.split("## FAQ", 1)[1]
+                )
+                self.assertTrue(
+                    saved["initial_article"].startswith(original_prefix)
+                )
+                self.assertTrue(
+                    saved["initial_article"].endswith(original_suffix)
+                )
+                self.assertEqual(
+                    [
+                        item["source_kind"]
+                        for item in saved["article_versions"]
+                    ],
+                    [
+                        "before_section_rewrite",
+                        "section_rewrite",
+                    ],
+                )
+                self.assertEqual(
+                    saved["article_versions"][0]["content"],
+                    SERVER_ARTICLE,
+                )
+                self.assertEqual(
+                    client.put(path, json=request).status_code,
+                    409,
+                )
+                persisted = repository.get(self.task_a)
+                self.assertEqual(
+                    len(persisted["article_versions"]),  # type: ignore[index]
+                    2,
                 )
                 self.assertFalse(local_state.exists())
 
