@@ -1,0 +1,122 @@
+# M7 Server 路由与 Worker 迁移矩阵
+
+> 目的：记录 Local SQLite/File 工作流向 Server PostgreSQL/ObjectStore 迁移时的结构边界。
+> 本文是重构导航，不是授权准源；运行时仍以
+> `server_request_security.py`、Project-scoped Router 和事务服务为准。
+
+## 1. 状态定义
+
+| 状态 | 含义 |
+|---|---|
+| Server Ready | 路径显式包含 Project 或 Organization，使用服务器准源并有请求级授权 |
+| Server Narrow | 只开放已验证的窄操作；同组其他旧路径继续 503 |
+| Local Only | 仍读取 SQLite、本地文件或 Local 全局单例；Server Mode 必须 503 |
+| External Gate | 代码能力存在，但完成验收需要生产 IdP、对象存储或运维环境 |
+
+任何路由从 Local Only 变为 Server Ready 前，至少同时满足：
+
+1. URL 含可信 Scope，或 Scope 完全来自已验签 Actor；
+2. 读路径在 SQL 内过滤 Organization/Project，不先读全量再过滤；
+3. 写路径在事务内重新锁定可撤权权限事实；
+4. Task 使用 Revision CAS，Job 使用可信 Requester 和 Project Queue；
+5. 私有请求、正文、Token、Subject、对象 URI 和底层错误不进入公开响应/Audit；
+6. 本地与服务器组件树显式分流，不在 Server Mode 回退 SQLite/File；
+7. 有跨项目、跨组织、撤权竞态、Audit 回滚和路由精确白名单测试。
+
+## 2. 已迁移控制面
+
+| 能力 | Server 路径 | 准源 | 权限/身份 | 状态 |
+|---|---|---|---|---|
+| OIDC 登录 | `/api/auth/oidc/*` | IdP + External Identity + Session Version | 已验证 Issuer/Subject | Server Ready |
+| Workspace Invitation | `/api/organizations/{org}/invitations`、`/accept-invite` | PostgreSQL + OIDC State | Active Org Admin / Verified Identity | Server Ready |
+| Organization User/Session | `/api/organizations/{org}/users/*` | PostgreSQL | Active Org Admin | Server Ready |
+| Team/TeamMembership | `/api/organizations/{org}/teams/*` | PostgreSQL | Active Org Admin | Server Ready |
+| External Identity 管理 | `/api/organizations/{org}/external-identities/*` | PostgreSQL | Active Org Admin | Server Ready |
+| Project Directory/Membership | `/api/projects`、`/api/projects/{project}/members/*` | PostgreSQL | Project RBAC | Server Ready |
+| Knowledge API | `/api/knowledge/projects/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
+| Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
+| Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
+
+## 3. Task 写操作矩阵
+
+| 业务操作 | Project-scoped Server 路径 | 权限 | 存储边界 | 状态 |
+|---|---|---|---|---|
+| 完全重写 | `POST .../rewrite-from-scratch` | `article.edit` | PostgreSQL CAS + Audit | Server Ready |
+| 选择已确认产品 | `PUT .../products` | `article.edit` | Published Evidence 投影 + CAS + Audit | Server Ready |
+| 产品重新发现 | `POST .../product-rediscovery` | `knowledge.edit` | PostgreSQL Job + S3 Inbox Evidence | Server Ready |
+| 替换指定章节 | `PUT .../article/sections` | `article.edit` | Heading Scope + Version + CAS + Audit | Server Ready |
+| 准备文章图片 | `POST .../prepare-images` | `article.edit` | 私有 Asset + 内存 WebP + CAS + Audit | Server Ready |
+| 最终 AI 截图 | `POST .../checks/final-ai/screenshot` | `article.review` | 私有 PNG Asset + CAS + Audit | Server Ready |
+| 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
+| 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |
+| 生成 TDK DOCX | `POST .../generate-tdk` | `article.deliver` | 私有 TDK Asset + CAS + Audit | Server Ready |
+| 打包交付 ZIP | `POST .../package-delivery` | `article.deliver` | 私有 ZIP Asset + CAS + Audit | Server Ready |
+
+旧 `/api/tasks/{task_id}/*` 路径即使存在同名操作也仍是 Local Only；Server 版本不能通过
+重用旧 Handler 而省略 Project Scope、PostgreSQL Repository 或对象身份复核。
+
+## 4. 仍为 Local Only 的路由组
+
+| 路由组 | 当前依赖 | Server 目标 | 迁移前必须补齐 |
+|---|---|---|---|
+| `/api/config`、`/api/settings/llm` | Local Config/.env | Server 管理配置 | Secret Manager、组织/环境权限、公开字段分型 |
+| `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
+| `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
+| `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
+| Project Prompt Library | 本地 Prompt 文件/JSON | Project Prompt Snapshot | 不可变版本、Active 指针、Project 权限 |
+| Title/Product/Outline/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Provider 错误脱敏、CAS/Audit |
+| Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
+| 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
+| `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
+
+## 5. PostgreSQL Job Operation 现状
+
+| Operation | Enqueue | Worker | Claim 前授权 | Handler 前授权 | 控制面 |
+|---|---|---|---|---|---|
+| `product_rediscovery` | Project-scoped、与 Task Revision/Audit 同事务 | Project Registry | `knowledge.edit` | `knowledge.edit` | Project-scoped Batch/Job 列表、取消、重试已完成 |
+| `titles` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `outline` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `seo_review` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `article` / `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `humanize` / `restore_links` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `knowledge_research` | Local Research Queue | Local Runner | 无完整 Server 链 | 无完整 Server 链 | Local Only |
+
+不能因为 `PostgresJobQueue` 支持任意 Operation 字符串，就把某个 Operation 标成已迁移。
+每个 Operation 必须有可信 Requester、两阶段权限映射、Server-only Handler、私有存储
+边界和取消/重试测试。
+
+## 6. 已完成闭环：Project Job Control
+
+已只为迁移完成的 `product_rediscovery` 增加：
+
+```text
+GET  /api/projects/{project}/batches
+GET  /api/projects/{project}/batches/{batch_id}
+POST /api/projects/{project}/batches/{batch_id}/cancel
+POST /api/projects/{project}/jobs/{job_id}/cancel
+POST /api/projects/{project}/jobs/{job_id}/retry
+```
+
+目标公共读模型不得返回 `request`、`requested_by_user_id`、Category URL、原始错误或对象
+URI。读取要求 `project.view`；Cancel/Retry 要求 Operation 对应的 Worker 权限，并在同一
+事务锁定权限事实、Job/Batch 状态和 Audit。Retry 不接受客户端替换 Request、Requester、
+Operation、Task 或 Source Revision；它重放服务器已保存的同一可信命令，并由 Worker
+再次执行两阶段授权。
+
+旧 `/api/batches*` 在控制面完成后仍保持 503，调用方必须使用 Project-scoped 路径，
+不能建立无 Project 的兼容别名。下一项 Operation 只有在可信 Enqueue、两阶段权限、
+Server-only Handler、私有存储和停机测试全部完成后，才能加入显式 Operation 集合。
+
+## 7. 重构检查点
+
+1. Route Gate 是否仍为精确 Method + Segment 白名单？
+2. 新 Router 是否只消费 Project-scoped Service，不直接访问 Local `store()`/`batch_queue()`？
+3. 公共 Job DTO 是否与 Queue 内部 Dict 分离？
+4. Cancel/Retry 是否在事务内重新读取权限，而非只依赖 Router 的先前判断？
+5. Retry 是否拒绝客户端修改私有 Request 或 Source Revision？
+6. 未迁移 Operation 是否仍不可读、不可取消、不可重试、不可被 Server Runner Claim？
+7. 取消终态与 `background_job.terminal`、操作者命令 Audit 是否保持一致且可回滚？
+8. 跨 Organization/Project ID 是否只在当前 Scope 查询，不扫描后再过滤？
+9. SQLite 冻结窗口证据是否仍与目标 Organization/Project/摘要绑定？
+10. Server 单写切换后，Local Mode 是否仍可独立使用 SQLite，且两种模式不会双写？

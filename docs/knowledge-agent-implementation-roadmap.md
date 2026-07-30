@@ -151,6 +151,11 @@
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
   调用 fail closed；产品重新发现已有独立 Project-scoped PostgreSQL Runner，其余
   通用 Batch/Worker 尚未接线；
+- 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
+  只展示 `product_rediscovery`，公开 DTO 不含私有 Request、Requester、Category URL、
+  原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
+  Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
+  返回 422；旧无 Project 的 `/api/batches*` 继续关闭；
 - 已开放显式 Project 路径的 PostgreSQL Task 只读列表/单条接口；每个请求重新读取
   RBAC 事实，跨项目不扫描全量数据，本地模式不增加该 API；
 - 原计划三个受限操作已经逐项接通：`knowledge.edit` 的“重新发现产品”PostgreSQL Job、
@@ -206,9 +211,10 @@
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界
-  drain/join 报告也已完成，受控停机释放 Claim 而不伪装成用户取消；但通用 Server
-  Batch API、全部 Operation Runner 和正式排空演练尚未完成，所以整体 Preflight
-  能力仍保持 false；
+  drain/join 报告也已完成，受控停机释放 Claim 而不伪装成用户取消；该 Operation 的
+  Project-scoped Batch/Job Control 也已完成，但其他 Operation 的可信 Enqueue、
+  Server-only Handler、通用 Runner 和正式排空演练尚未完成，所以整体 Preflight 能力
+  仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；已接通供应商无关 OIDC
@@ -219,7 +225,7 @@
 - 当前单密码 Cookie 不具备 User Identity；OIDC 只把已验证 Issuer/Subject 映射为本地
   Actor，不信任外部 Email/Group/Role；`trusted_identity_source` 代码门禁已完成，
   具体生产 IdP 注册与 Conformance 冒烟仍待部署环境；
-- 后续按“生产 IdP Conformance 与剩余 API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
+- 后续按“生产 IdP Conformance 与逐 Operation API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
   -> 服务器 PostgreSQL 单写切换
   -> 备份恢复与部署门禁”
   顺序推进，完整结构与重构检查清单见

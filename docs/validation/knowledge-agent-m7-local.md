@@ -550,6 +550,34 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Product Rediscovery Enqueue Audit 与 Terminal Audit 均不含 Category URL、Request、
   对象 URI、Provider 响应或原始异常。
 
+### Project-scoped Batch/Job Control
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_job_control `
+  tests.test_m7_postgres_tasks `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 35 tests，使用真实 PostgreSQL；其中 9 条为新增 Job Control 集成测试；
+- 列表与详情在 SQL 中固定 Organization/Project，并只返回
+  `product_rediscovery`；Project B、其他 Organization 和未迁移 Operation 不可见；
+- Keyset 分页以 `created_at + batch_id` 稳定排序，非法或跨 Scope Cursor 返回 404；
+- Viewer 可以读取但不能取消/重试；Editor 的 Project Membership 在路由后被撤销时，
+  事务内授权仍返回 403，Job 保持原状态；
+- 单 Job/整 Batch 取消、终态 Audit、操作者命令 Audit 与状态变化同一事务；注入 Audit
+  故障会回滚且公开异常不含私有故障正文；
+- Retry 只重放数据库中原 Request 与 Source Revision；携带覆盖字段的 HTTP Body 返回
+  422，合法空 Body 重试不会修改私有命令；
+- 公开响应只含稳定 ID、状态、Revision、Attempt、时间戳、取消标记和 `has_error`
+  布尔值，不含 Request、Requester、Category URL、原始 Error、Worker Lease 或对象 URI；
+- Method + Segment 白名单只开放五条 Project-scoped 路径；旧 `/api/batches`、通用
+  Job Detail、任意 Run/Delete 变体继续关闭。
+
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
 一次性随机开发凭据和专用 `article-agent-test-*` Bucket。由于该本地 MinIO
 未配置 KMS，测试显式使用 `ARTICLE_AGENT_OBJECT_STORE_SSE=none`；生产默认不变。
@@ -849,6 +877,22 @@ Fragment 自动清理后的完整 OIDC 重定向或 Dark Mode 记为浏览器实
 同源 API 的 Server 会话中按 Runbook 冒烟。当前证据为真实 PostgreSQL/HTTP 集成测试、
 OIDC MockTransport、源码审查、ESLint、TypeScript 和 production build。
 
+### M7-C Job Control 完整回归
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest discover -s tests -q
+```
+
+结果：
+
+- 596 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
+- 首次完整回归被一次更早的故障注入清理失败遗留的 `m7-jobctl-*` Active Test Job
+  污染，目标撤权 Job 本身已正确进入 conflict；只清除该精确测试前缀的 15 条 Job 与
+  14 条 Batch 后，完整回归通过。没有删除正式或其他测试 Scope 数据。
+
 ## 诊断记录
 
 第一次完整回归未指定 CI Config，2 个既有 Humanize 测试读取本机默认
@@ -869,15 +913,16 @@ OIDC MockTransport、源码审查、ESLint、TypeScript 和 production build。
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备
-  和文章 DOCX 导出/下载，但不代表其余旧路由、对话式章节生成或完整写路径已经迁移；
+  和文章 DOCX 导出/下载，并为 `product_rediscovery` 提供窄范围 Batch/Job 控制；但不
+  代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
   Task 命令和 `product_rediscovery` Job 为单写，其余路径尚未成为 PostgreSQL 准源；
 - Server Mode 已停止 SQLite Queue/Worker；产品重新发现已有项目级 PostgreSQL Runner
   和两阶段授权，Enqueue、该 Operation 的终态 Audit 与有界 drain/join 报告已完成；
-  但通用 Server Batch/Runner、全部 Operation 和正式停机演练未完成，不能算作整体
-  服务器 Job 单写；
+  该 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
+  Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、

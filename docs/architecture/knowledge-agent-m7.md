@@ -430,7 +430,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、成员 Body/角色白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
-| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内原子创建、终态与安全 Audit 同事务 |
+| `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内创建/取消/重试、终态与安全 Audit 同事务 |
+| `backend/services/server_job_control.py` | Project-scoped Batch/Job 公开读模型与事务控制服务 | SQL Scope、Operation 白名单、权限事实先锁定、私有字段投影隔离、命令 Audit 原子性 |
+| `backend/server_job_http.py` | Project Batch 列表/详情和 Batch/Job Cancel/Retry HTTP | 空命令 Body、稳定 Cursor、统一 403/404/409/503、安全 Response Model |
 | `backend/services/authorized_job_queue.py` | Server Worker 的两阶段重新授权适配器 | Claim 前只看最小元数据、Handler 前二次授权、无可信 Requester 不读取 Payload |
 | `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | Enqueue 原子性、可信 Requester、两阶段授权、只抓 Active 官网、不改 Task、聚合停机报告 |
 | `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
@@ -457,6 +459,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
 | `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 非零即停止发布、备份恢复只能显式证明 |
 | `docs/runbooks/knowledge-agent-m7-server-cutover.md` | 备份、恢复、轮换、发布和回滚操作准源 | 新实例恢复、跨系统恢复点、禁止默认 Actor/Project |
+| `docs/architecture/m7-server-route-migration-matrix.md` | Local 到 Server 的路由/Worker 迁移索引 | 每条能力的准源、权限、存储、Operation 状态和下一闭环门禁 |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
@@ -466,6 +469,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_oidc_identity.py` | OIDC/JWKS 与浏览器登录流测试 | RSA 签名、Claim/Nonce/PKCE/State、Kid 轮换、重放/开放重定向拒绝、Secret 不泄露 |
 | `backend/tests/test_m7_workspace_invitations.py` | Invitation Schema、管理 HTTP 与兑换事务测试 | Token 一次返回、过期/重放/租户隔离、Mapping/状态/Audit 原子性、错误脱敏 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
+| `backend/tests/test_m7_server_job_control.py` | Project Job Control 真实 PostgreSQL/HTTP 集成测试 | 跨项目、Operation 隔离、撤权、取消/重试、私有字段、Audit 回滚、精确路由 |
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
 | `backend/tests/test_m7_server_tdk_export.py` | Server TDK 纯内存导出测试 | 私有 Asset 身份、无本地路径、Provider 错误脱敏 |
 | `backend/tests/test_m7_server_ai_screenshots.py` | Server AI-rate 截图规范化测试 | PNG/尺寸/大小门禁、私有 Asset 类型、无本地路径 |
@@ -1089,6 +1093,39 @@ Task Type 同时保留 `*_path` 与 `*_asset_id/hash/filename`，直到 Local/Se
 而不是在各页面散落字符串前缀。当前只开放目录、项目成员与交付的窄闭环，未迁移文章
 编辑、批量任务和本地项目设置仍不得在 Server 导航中重新出现。
 
+#### D1.8 已实现：Project-scoped PostgreSQL Batch/Job Control
+
+```text
+GET  /api/projects/{project_id}/batches
+GET  /api/projects/{project_id}/batches/{batch_id}
+POST /api/projects/{project_id}/batches/{batch_id}/cancel
+POST /api/projects/{project_id}/jobs/{job_id}/cancel
+POST /api/projects/{project_id}/jobs/{job_id}/retry
+```
+
+这一层不是把 `PostgresJobQueue` 的内部 Dict 直接暴露为 HTTP。Queue 内部保留
+`request`、`requested_by_user_id`、原始 `error`、Customer/Topic 和 Worker Lease；
+`ServerJobSummary/ServerBatchSummary` 是独立公开投影，只返回稳定身份、状态、Revision、
+Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
+Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
+分页；当前唯一可见 Operation 是 `product_rediscovery`。旧 `/api/batches*` 继续 503，
+未迁移的 `titles/products/article/...` 即使误写入 PostgreSQL 也不会出现在控制面。
+
+读取要求 `project.view`。取消与重试先锁定 Organization/User/Project 及全部可撤权
+Membership 事实，再锁 Batch/Job，并按 Operation 映射到 Worker 的最小权限；因此路由
+预检后撤权仍会在事务内失败。Queue 新增 caller-owned transaction 方法，原有 Local/
+Worker 调用仍可使用自持事务方法，控制服务则把状态变化、终态 Audit 和操作者命令 Audit
+放在同一事务。Audit 只记录 Operation、前后状态、是否变化或受影响数量，不记录私有
+Request、Category URL、Requester、原始错误或对象 URI。
+
+Retry 是服务端保存命令的重放：HTTP 只接受空 Body，额外的 Request、Source Revision、
+Operation、Requester 或 Task 覆盖字段明确返回 422；Queue 中原始 Request 和
+Source Revision 保持不变，Worker 重新执行 Claim 前与 Handler 前两阶段授权。Audit
+失败会回滚取消/重试；跨 Organization/Project ID、未迁移 Operation 和不存在对象统一
+保持项目 Scope 内的 403/404 边界。这个控制面完成不代表通用 Runner 已迁移，其他
+Operation 必须逐个完成可信 Enqueue、权限映射、Server-only Handler、私有存储和停机
+测试后才能加入 `SERVER_JOB_CONTROL_OPERATIONS`。
+
 正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
 在签名前再校验一次，并签发最长一小时的临时下载 URL。知识源上传要求
 `knowledge.edit`，文章派生写入要求 `article.edit`。S3 Key 和数据库查询同时锁定
@@ -1152,9 +1189,9 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链和私有下载已接线；全部项目写路由、Task/Job 单写和通用 Worker
-重新授权仍未接线，所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力
-标成通过。
+身份代码链、九条 Task 写操作、`product_rediscovery` 的 Enqueue/Runner 和窄范围
+Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
+所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
 `docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、
@@ -1262,3 +1299,17 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     Audit 是否仍在同一事务，任一步失败时均不留下部分账号关联？
 60. 前端邀请目录是否仍使用后端 Cursor，把一次性 Token 与可长期显示的邀请记录分离，
     并对撤销使用确认而不把前端状态当作授权准源？
+61. Batch/Job 公开 DTO 是否仍与 Queue 内部 Dict 分离，不返回 Request、Requester、
+    Category URL、原始 Error、Worker Lease 或对象 URI？
+62. Batch 列表是否仍在 SQL 内绑定 Organization/Project/已迁移 Operation，并使用
+    `created_at + batch_id` Keyset，而不是读出全局 Batch 后过滤？
+63. Cancel/Retry 是否仍先锁定全部可撤权 Access Facts，再锁 Batch/Job，并按 Operation
+    使用 Worker 的最小权限？
+64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
+    Requester、Operation 或 Task？
+65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
+66. `product_rediscovery` 以外的 Operation 是否仍不出现在列表、详情、取消或重试接口？
+67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
+    别名？
+68. 新 Operation 加入控制面前，是否已经具备可信 Enqueue、两阶段 Worker 授权、
+    Server-only Handler、私有存储边界和有界停机测试？

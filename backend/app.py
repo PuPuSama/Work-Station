@@ -219,6 +219,7 @@ from services.server_product_rediscovery import (
     ServerProductRediscoveryRegistry,
     create_product_sync_factory,
 )
+from services.server_job_control import PostgresServerJobControlService
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -277,6 +278,7 @@ from server_admin_http import router as server_admin_router
 from server_team_http import router as server_team_router
 from server_identity_http import router as server_identity_router
 from server_invitation_http import router as server_invitation_router
+from server_job_http import router as server_job_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -327,6 +329,11 @@ async def app_lifespan(application: FastAPI):
         "server_product_rediscovery",
         None,
     )
+    previous_server_job_control = getattr(
+        application.state,
+        "server_job_control",
+        None,
+    )
     previous_server_oidc_login = getattr(
         application.state,
         "server_oidc_login",
@@ -368,6 +375,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_object_service = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
+    application.state.server_job_control = None
     application.state.server_oidc_login = None
     application.state.server_actor_session_revocation = None
     application.state.server_workspace_users = None
@@ -389,9 +397,10 @@ async def app_lifespan(application: FastAPI):
             database_url,
             pool_pre_ping=True,
         )
-        server_access = ProjectAccessService(
-            PostgresProjectAccessRepository(server_engine)
+        server_access_repository = PostgresProjectAccessRepository(
+            server_engine
         )
+        server_access = ProjectAccessService(server_access_repository)
         server_actor_sessions = PostgresActorSessionRepository(server_engine)
         application.state.server_actor_session_revocation = (
             PostgresActorSessionRevocationService(server_engine)
@@ -435,6 +444,12 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_confirmed_product_selection = (
             PostgresConfirmedProductSelection(server_engine)
+        )
+        application.state.server_job_control = (
+            PostgresServerJobControlService(
+                server_engine,
+                access_repository=server_access_repository,
+            )
         )
         rediscovery_handler = None
         if os.environ.get(
@@ -498,7 +513,7 @@ async def app_lifespan(application: FastAPI):
     if server_mode:
         # Server Mode must never start the portable SQLite queue or its
         # workers. Product rediscovery has its own project-scoped PostgreSQL
-        # runner; the general Server Batch/Worker cutover remains closed.
+        # runner and narrow Job control; every other Operation remains closed.
         application.state.job_queue = None
         application.state.batch_runner = None
         application.state.batch_runners = ()
@@ -542,6 +557,7 @@ async def app_lifespan(application: FastAPI):
             application.state.server_product_rediscovery = (
                 previous_server_product_rediscovery
             )
+            application.state.server_job_control = previous_server_job_control
             application.state.server_oidc_login = (
                 previous_server_oidc_login
             )
@@ -755,6 +771,7 @@ async def app_lifespan(application: FastAPI):
         application.state.server_product_rediscovery = (
             previous_server_product_rediscovery
         )
+        application.state.server_job_control = previous_server_job_control
         application.state.server_oidc_login = previous_server_oidc_login
         application.state.server_actor_session_revocation = (
             previous_server_actor_session_revocation
@@ -784,6 +801,7 @@ app.include_router(server_admin_router)
 app.include_router(server_team_router)
 app.include_router(server_identity_router)
 app.include_router(server_invitation_router)
+app.include_router(server_job_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

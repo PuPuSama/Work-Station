@@ -477,6 +477,22 @@ Job ID 调用
 - 对象存储配置缺失时新 Job 返回 503，但已有 Job 的状态仍可读取；
 - 重启恢复只处理 Active `product_rediscovery` Job，不得把旧无 Requester 历史重新执行。
 
+Project-scoped Job Control 冒烟必须另外验证：
+
+- `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
+  `product_rediscovery`，并且响应不存在 Request、Requester、Category URL、原始 Error、
+  Worker Lease、对象 URI 或签名 URL；
+- Viewer 可读但 Cancel/Retry 返回 403；具备 `knowledge.edit` 的 Actor 才能控制该
+  Operation，且撤权后即使 Cookie 与页面仍有效也必须失败；
+- Batch/Job ID 从另一 Project 或 Organization 带入当前路径时返回 404，不能读取后
+  再由应用层过滤；
+- `POST .../cancel` 使用空 Body；Queued/Retry-wait 直接成为 Cancelled，Running 只设置
+  Cancel Requested，终态与命令 Audit 都不包含私有输入；
+- `POST .../retry` 只允许 Failed/Cancelled/Conflict，空 Body 重放服务端保存的同一
+  Request 与 Source Revision；任何客户端覆盖字段返回 422；
+- 人工注入 Audit 故障时状态变化完整回滚；旧 `/api/batches*`、无 Project Job Detail
+  和未迁移 Operation 继续由精确白名单拒绝。
+
 当前 Runner 只在整次官网同步前后检查停止/取消，产品明细循环中没有逐项检查点。
 `stop()` 的运维语义是：
 

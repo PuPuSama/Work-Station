@@ -811,98 +811,125 @@ class PostgresJobQueue:
             ) from exc
 
     def request_cancel(self, job_id: str) -> dict[str, Any]:
-        current = _now()
         with self._engine.begin() as connection:
-            row = connection.execute(
-                sa.select(background_jobs)
+            return self.request_cancel_in_transaction(connection, job_id)
+
+    def request_cancel_in_transaction(
+        self,
+        connection: Connection,
+        job_id: str,
+    ) -> dict[str, Any]:
+        """Request cancellation inside a caller-owned authorization transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError("job cancellation requires a business transaction")
+        current = _now()
+        row = connection.execute(
+            sa.select(background_jobs)
+            .where(
+                *self._job_scope(),
+                background_jobs.c.job_id == job_id,
+            )
+            .with_for_update()
+        ).one_or_none()
+        if row is None:
+            raise KeyError(job_id)
+        if row.status in ("queued", "retry_wait"):
+            cancelled = connection.execute(
+                background_jobs.update()
                 .where(
                     *self._job_scope(),
                     background_jobs.c.job_id == job_id,
                 )
-                .with_for_update()
-            ).one_or_none()
-            if row is None:
-                raise KeyError(job_id)
-            if row.status in ("queued", "retry_wait"):
-                cancelled = connection.execute(
-                    background_jobs.update()
-                    .where(
-                        *self._job_scope(),
-                        background_jobs.c.job_id == job_id,
-                    )
-                    .values(
-                        status="cancelled",
-                        cancel_requested=True,
-                        finished_at=current,
-                        worker_id=None,
-                        lease_expires_at=None,
-                        updated_at=current,
-                    )
-                    .returning(background_jobs)
-                ).mappings().one()
-                self._append_terminal_audit(connection, cancelled)
-            elif row.status == "running":
-                connection.execute(
-                    background_jobs.update()
-                    .where(
-                        *self._job_scope(),
-                        background_jobs.c.job_id == job_id,
-                    )
-                    .values(cancel_requested=True, updated_at=current)
-                )
-            self._touch_batch(connection, job_id, current)
-        return self.get_job(job_id)
-
-    def cancel_batch(self, batch_id: str) -> dict[str, Any]:
-        current = _now()
-        with self._engine.begin() as connection:
-            exists = connection.execute(
-                sa.select(job_batches.c.batch_id).where(
-                    *self._batch_scope(),
-                    job_batches.c.batch_id == batch_id,
-                )
-            ).scalar_one_or_none()
-            if exists is None:
-                raise KeyError(batch_id)
-            queued = background_jobs.c.status.in_(("queued", "retry_wait"))
-            active = background_jobs.c.status.in_(ACTIVE_JOB_STATUSES)
-            rows = connection.execute(
-                background_jobs.update()
-                .where(
-                    *self._job_scope(),
-                    background_jobs.c.batch_id == batch_id,
-                    active,
-                )
                 .values(
-                    status=sa.case((queued, "cancelled"), else_=background_jobs.c.status),
+                    status="cancelled",
                     cancel_requested=True,
-                    finished_at=sa.case(
-                        (queued, current),
-                        else_=background_jobs.c.finished_at,
-                    ),
-                    worker_id=sa.case(
-                        (queued, None),
-                        else_=background_jobs.c.worker_id,
-                    ),
-                    lease_expires_at=sa.case(
-                        (queued, None),
-                        else_=background_jobs.c.lease_expires_at,
-                    ),
+                    finished_at=current,
+                    worker_id=None,
+                    lease_expires_at=None,
                     updated_at=current,
                 )
                 .returning(background_jobs)
-            ).mappings().all()
-            for row in rows:
-                self._append_terminal_audit(connection, row)
+            ).mappings().one()
+            self._append_terminal_audit(connection, cancelled)
+        elif row.status == "running":
             connection.execute(
-                job_batches.update()
+                background_jobs.update()
                 .where(
-                    *self._batch_scope(),
-                    job_batches.c.batch_id == batch_id,
+                    *self._job_scope(),
+                    background_jobs.c.job_id == job_id,
                 )
-                .values(updated_at=current)
+                .values(cancel_requested=True, updated_at=current)
             )
-        return self.get_batch(batch_id)
+        self._touch_batch(connection, job_id, current)
+        return self._get_job_in_connection(connection, job_id)
+
+    def cancel_batch(self, batch_id: str) -> dict[str, Any]:
+        with self._engine.begin() as connection:
+            return self.cancel_batch_in_transaction(connection, batch_id)
+
+    def cancel_batch_in_transaction(
+        self,
+        connection: Connection,
+        batch_id: str,
+    ) -> dict[str, Any]:
+        """Request cancellation for a Batch in the caller's transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError("batch cancellation requires a business transaction")
+        current = _now()
+        exists = connection.execute(
+            sa.select(job_batches.c.batch_id)
+            .where(
+                *self._batch_scope(),
+                job_batches.c.batch_id == batch_id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if exists is None:
+            raise KeyError(batch_id)
+        queued = background_jobs.c.status.in_(("queued", "retry_wait"))
+        active = background_jobs.c.status.in_(ACTIVE_JOB_STATUSES)
+        rows = connection.execute(
+            background_jobs.update()
+            .where(
+                *self._job_scope(),
+                background_jobs.c.batch_id == batch_id,
+                active,
+            )
+            .values(
+                status=sa.case(
+                    (queued, "cancelled"),
+                    else_=background_jobs.c.status,
+                ),
+                cancel_requested=True,
+                finished_at=sa.case(
+                    (queued, current),
+                    else_=background_jobs.c.finished_at,
+                ),
+                worker_id=sa.case(
+                    (queued, None),
+                    else_=background_jobs.c.worker_id,
+                ),
+                lease_expires_at=sa.case(
+                    (queued, None),
+                    else_=background_jobs.c.lease_expires_at,
+                ),
+                updated_at=current,
+            )
+            .returning(background_jobs)
+        ).mappings().all()
+        for row in rows:
+            self._append_terminal_audit(connection, row)
+        connection.execute(
+            job_batches.update()
+            .where(
+                *self._batch_scope(),
+                job_batches.c.batch_id == batch_id,
+            )
+            .values(updated_at=current)
+        )
+        return self._get_batch_in_connection(connection, batch_id)
 
     def retry_job(
         self,
@@ -911,72 +938,98 @@ class PostgresJobQueue:
         source_revision: int | None = None,
         request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        current = _now()
         with self._engine.begin() as connection:
-            row = connection.execute(
-                sa.select(
-                    background_jobs.c.task_id,
-                    background_jobs.c.status,
-                )
-                .where(
-                    *self._job_scope(),
-                    background_jobs.c.job_id == job_id,
-                )
-                .with_for_update()
-            ).one_or_none()
-            if row is None:
-                raise KeyError(job_id)
-            if row.status not in ("failed", "cancelled", "conflict"):
-                raise ValueError(
-                    "Only failed, cancelled, or conflicted jobs can be retried."
-                )
-            active = connection.execute(
-                sa.select(background_jobs.c.job_id)
-                .where(
-                    *self._job_scope(),
-                    background_jobs.c.task_id == row.task_id,
-                    background_jobs.c.job_id != job_id,
-                    background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            if active is not None:
-                raise ActiveJobError(str(row.task_id))
-            values: dict[str, object] = {
-                "status": "queued",
-                "attempts": 0,
-                "available_at": current,
-                "cancel_requested": False,
-                "error": "",
-                "started_at": None,
-                "finished_at": None,
-                "worker_id": None,
-                "lease_expires_at": None,
-                "updated_at": current,
-            }
-            if source_revision is not None:
-                values["source_revision"] = int(source_revision)
-            if request is not None:
-                values["request"] = dict(request)
-            connection.execute(
-                background_jobs.update()
-                .where(
-                    *self._job_scope(),
-                    background_jobs.c.job_id == job_id,
-                )
-                .values(**values)
+            return self.retry_job_in_transaction(
+                connection,
+                job_id,
+                source_revision=source_revision,
+                request=request,
             )
-            self._touch_batch(connection, job_id, current)
-        return self.get_job(job_id)
+
+    def retry_job_in_transaction(
+        self,
+        connection: Connection,
+        job_id: str,
+        *,
+        source_revision: int | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retry a terminal Job in the caller's authorization transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError("job retry requires a business transaction")
+        current = _now()
+        row = connection.execute(
+            sa.select(
+                background_jobs.c.task_id,
+                background_jobs.c.status,
+            )
+            .where(
+                *self._job_scope(),
+                background_jobs.c.job_id == job_id,
+            )
+            .with_for_update()
+        ).one_or_none()
+        if row is None:
+            raise KeyError(job_id)
+        if row.status not in ("failed", "cancelled", "conflict"):
+            raise ValueError(
+                "Only failed, cancelled, or conflicted jobs can be retried."
+            )
+        active = connection.execute(
+            sa.select(background_jobs.c.job_id)
+            .where(
+                *self._job_scope(),
+                background_jobs.c.task_id == row.task_id,
+                background_jobs.c.job_id != job_id,
+                background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if active is not None:
+            raise ActiveJobError(str(row.task_id))
+        values: dict[str, object] = {
+            "status": "queued",
+            "attempts": 0,
+            "available_at": current,
+            "cancel_requested": False,
+            "error": "",
+            "started_at": None,
+            "finished_at": None,
+            "worker_id": None,
+            "lease_expires_at": None,
+            "updated_at": current,
+        }
+        if source_revision is not None:
+            values["source_revision"] = int(source_revision)
+        if request is not None:
+            values["request"] = dict(request)
+        connection.execute(
+            background_jobs.update()
+            .where(
+                *self._job_scope(),
+                background_jobs.c.job_id == job_id,
+            )
+            .values(**values)
+        )
+        self._touch_batch(connection, job_id, current)
+        return self._get_job_in_connection(connection, job_id)
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         with self._engine.connect() as connection:
-            row = connection.execute(
-                sa.select(background_jobs).where(
-                    *self._job_scope(),
-                    background_jobs.c.job_id == job_id,
-                )
-            ).mappings().one_or_none()
+            return self._get_job_in_connection(connection, job_id)
+
+    def _get_job_in_connection(
+        self,
+        connection: Connection,
+        job_id: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            sa.select(background_jobs).where(
+                *self._job_scope(),
+                background_jobs.c.job_id == job_id,
+            )
+        ).mappings().one_or_none()
         if row is None:
             raise KeyError(job_id)
         return self._job_dict(row)

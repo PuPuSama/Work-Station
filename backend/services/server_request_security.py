@@ -224,6 +224,35 @@ def server_http_route_available(method: str, path: str) -> bool:
         and len(parts) in {5, 6}
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])
+        and parts[4] == "batches"
+        and (len(parts) == 5 or bool(parts[5]))
+    ):
+        return True
+    if (
+        normalized_method == "POST"
+        and len(parts) == 7
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "batches"
+        and bool(parts[5])
+        and parts[6] == "cancel"
+    ):
+        return True
+    if (
+        normalized_method == "POST"
+        and len(parts) == 7
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "jobs"
+        and bool(parts[5])
+        and parts[6] in {"cancel", "retry"}
+    ):
+        return True
+    if (
+        normalized_method == "GET"
+        and len(parts) in {5, 6}
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
         and parts[4] == "tasks"
         and (len(parts) == 5 or bool(parts[5]))
     ):
