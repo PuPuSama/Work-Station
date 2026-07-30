@@ -37,7 +37,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiFileUrl, apiGet, apiUpload } from "@/lib/api";
+import { apiFileUrl, apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import type {
   KnowledgeLibrary,
   KnowledgeSourceSummary,
@@ -148,6 +148,7 @@ export function ProjectKnowledgeLibrary({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [publishingSourceId, setPublishingSourceId] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -230,6 +231,37 @@ export function ProjectKnowledgeLibrary({
       setError(errorMessage(uploadError));
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function approveAndPublish(source: KnowledgeSourceSummary) {
+    setPublishingSourceId(source.source_id);
+    setError("");
+    setMessage("");
+    try {
+      await apiPut(
+        `/api/knowledge/${encodeURIComponent(customer)}/sources/${encodeURIComponent(source.source_id)}/review`,
+        {
+          source_kind: source.source_kind,
+          trust_tier: source.trust_tier,
+          decision: "approve",
+          reason: "Operator confirmed classification in the project knowledge page.",
+        },
+      );
+      const result = await apiPost<{
+        embedding_model: string;
+        chunk_count: number;
+      }>(
+        `/api/knowledge/${encodeURIComponent(customer)}/sources/${encodeURIComponent(source.source_id)}/publish`,
+      );
+      setMessage(
+        `${source.display_name} 已发布：${result.chunk_count} 个知识块，模型 ${result.embedding_model}。`,
+      );
+      await loadLibrary(true);
+    } catch (publishError) {
+      setError(errorMessage(publishError));
+    } finally {
+      setPublishingSourceId("");
     }
   }
 
@@ -387,7 +419,25 @@ export function ProjectKnowledgeLibrary({
                             {formatDate(source.latest_fetched_at)}
                           </TableCell>
                           <TableCell className="text-right align-top">
-                            <SourceEvidenceLink source={source} />
+                            <div className="flex justify-end gap-1">
+                              {source.status === "inbox" ? (
+                                <Button
+                                  size="sm"
+                                  onClick={() => void approveAndPublish(source)}
+                                  disabled={
+                                    Boolean(publishingSourceId) || source.chunk_count === 0
+                                  }
+                                >
+                                  {publishingSourceId === source.source_id ? (
+                                    <Loader2 className="animate-spin" />
+                                  ) : (
+                                    <CheckCircle2 />
+                                  )}
+                                  确认并发布
+                                </Button>
+                              ) : null}
+                              <SourceEvidenceLink source={source} />
+                            </div>
                           </TableCell>
                         </TableRow>
                       ))}

@@ -13,7 +13,7 @@
 - 打开 Inbox 或已发布来源的原始证据；
 - `/projects/{customer}/knowledge` 项目级知识库页面。
 
-当前仍未接入 WordPress Site Probe、Embedding/发布按钮和 MinerU 对比。因此上传成功只表示进入 Inbox，不表示资料已参与检索。
+当前仍未接入 WordPress Site Probe 和 MinerU 对比。上传成功只表示进入 Inbox；运营人员点击“确认并发布”后，系统才生成 Embedding 并原子激活快照。
 
 ## 2. 环境变量
 
@@ -66,6 +66,7 @@ backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini current
 6. 点击“解析并加入 Inbox”；
 7. 在来源列表检查分类理由、版本数、Chunk 数和资产数；
 8. 点击“原文件”验证原始证据。
+9. 确认分类和信任级别后，点击“确认并发布”生成向量并激活。
 
 重复上传同一个来源和相同内容时复用首次快照，不新增重复快照；相同内嵌图片按项目内 SHA-256 去重。
 
@@ -98,6 +99,13 @@ GET /api/knowledge/{project}/sources/{source_id}/snapshots/{snapshot_id}/raw
 
 ```http
 POST /api/knowledge/{project}/products/{product_id}/confirm
+```
+
+审阅并发布来源：
+
+```http
+PUT  /api/knowledge/{project}/sources/{source_id}/review
+POST /api/knowledge/{project}/sources/{source_id}/publish
 ```
 
 产品确认必须已经有 `primary_detail` 来源证据。只有分类页、Blog 或图片候选时会返回冲突，不会将其伪装成已确认产品。

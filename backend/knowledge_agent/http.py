@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from pathlib import PurePath
+from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import quote
 
@@ -22,9 +23,12 @@ from .catalog import (
     ProductCatalogRepositoryError,
 )
 from .contracts import KnowledgeProject
+from .contracts import KnowledgeSource
 from .ingestion import DocumentInput, DocumentParserError
+from .embedding import EmbeddingProviderError
 from .library import KnowledgeSourceSummary
 from .repository import KnowledgeRepositoryError
+from .publication import KnowledgePublicationError
 from .runtime import KnowledgeAgentRuntime
 
 
@@ -94,6 +98,35 @@ class ProductConfirmResponse(KnowledgeApiModel):
     project_id: str
     product_id: str
     status: str
+
+
+class KnowledgeSourceReviewRequest(KnowledgeApiModel):
+    source_kind: Literal[
+        "private_file",
+        "product_detail",
+        "product_category",
+        "official_blog",
+        "knowledge_page",
+    ]
+    trust_tier: TrustTierValue
+    decision: Literal["approve", "needs_review", "reject"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class KnowledgeSourceReviewResponse(KnowledgeApiModel):
+    project_id: str
+    source_id: str
+    status: str
+    decision: str
+
+
+class KnowledgePublicationResponse(KnowledgeApiModel):
+    project_id: str
+    source_id: str
+    snapshot_id: str
+    status: str
+    embedding_model: str
+    chunk_count: int
 
 
 def _runtime(request: Request) -> KnowledgeAgentRuntime:
@@ -239,6 +272,95 @@ def upload_private_knowledge(
         chunk_count=len(result.chunks),
         asset_count=len(result.assets),
         message="File parsed and stored in the Research Inbox.",
+    )
+
+
+@router.put(
+    "/{project}/sources/{source_id}/review",
+    response_model=KnowledgeSourceReviewResponse,
+)
+def review_knowledge_source(
+    project: str,
+    source_id: str,
+    payload: KnowledgeSourceReviewRequest,
+    request: Request,
+) -> KnowledgeSourceReviewResponse:
+    runtime = _runtime(request)
+    project_id = _project_id(project)
+    source = runtime.library.get_source(project_id, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Knowledge source was not found.")
+    if source.status == "published":
+        raise HTTPException(
+            status_code=409,
+            detail="Published source review requires a new snapshot.",
+        )
+    status_by_decision = {
+        "approve": "inbox",
+        "needs_review": "needs_review",
+        "reject": "rejected",
+    }
+    metadata = dict(source.metadata)
+    metadata["review"] = {
+        "decision": payload.decision,
+        "reason": payload.reason.strip(),
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    reviewed = KnowledgeSource(
+        project_id=source.project_id,
+        source_id=source.source_id,
+        display_name=source.display_name,
+        source_kind=payload.source_kind,
+        trust_tier=payload.trust_tier,
+        status=status_by_decision[payload.decision],  # type: ignore[arg-type]
+        canonical_url=source.canonical_url,
+        public_source=source.public_source,
+        metadata=metadata,
+    )
+    try:
+        runtime.repository.upsert_source(reviewed)
+    except (ValueError, KnowledgeRepositoryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return KnowledgeSourceReviewResponse(
+        project_id=project_id,
+        source_id=source_id,
+        status=reviewed.status,
+        decision=payload.decision,
+    )
+
+
+@router.post(
+    "/{project}/sources/{source_id}/publish",
+    response_model=KnowledgePublicationResponse,
+)
+def publish_knowledge_source(
+    project: str,
+    source_id: str,
+    request: Request,
+) -> KnowledgePublicationResponse:
+    runtime = _runtime(request)
+    if runtime.publication is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding Provider is not configured.",
+        )
+    project_id = _project_id(project)
+    try:
+        result = runtime.publication.publish(
+            project_id=project_id,
+            source_id=source_id,
+        )
+    except EmbeddingProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (KnowledgePublicationError, KnowledgeRepositoryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return KnowledgePublicationResponse(
+        project_id=result.project_id,
+        source_id=result.source_id,
+        snapshot_id=result.snapshot_id,
+        status="published",
+        embedding_model=result.embedding_model,
+        chunk_count=result.chunk_count,
     )
 
 

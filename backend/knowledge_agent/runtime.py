@@ -10,7 +10,9 @@ from .assets import PostgresKnowledgeAssetRepository
 from .catalog import PostgresProductCatalogRepository
 from .database import create_knowledge_engine
 from .ingestion import PrivateDocumentIngestionService
+from .interfaces import EmbeddingProvider
 from .library import PostgresKnowledgeLibrary
+from .publication import KnowledgePublicationService
 from .repository import PostgresKnowledgeRepository
 
 
@@ -25,8 +27,13 @@ class KnowledgeAgentRuntime:
     library: PostgresKnowledgeLibrary
     artifact_store: LocalKnowledgeArtifactStore
     private_document_ingestion: PrivateDocumentIngestionService
+    publication: KnowledgePublicationService | None
+    embedding_provider: EmbeddingProvider | None
 
     def close(self) -> None:
+        close_provider = getattr(self.embedding_provider, "close", None)
+        if callable(close_provider):
+            close_provider()
         self.engine.dispose()
 
 
@@ -34,6 +41,7 @@ def create_knowledge_runtime(
     *,
     database_url: str,
     artifact_root: Path,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> KnowledgeAgentRuntime:
     engine = create_knowledge_engine(database_url)
     repository = PostgresKnowledgeRepository(engine)
@@ -53,4 +61,14 @@ def create_knowledge_runtime(
             artifact_store=artifact_store,
             snapshot_lookup=library,
         ),
+        publication=(
+            None
+            if embedding_provider is None
+            else KnowledgePublicationService(
+                repository=repository,
+                library=library,
+                embedding_provider=embedding_provider,
+            )
+        ),
+        embedding_provider=embedding_provider,
     )

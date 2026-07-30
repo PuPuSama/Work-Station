@@ -190,6 +190,7 @@ from workflow.state_machine import (
     transition_task,
 )
 from knowledge_agent.http import router as knowledge_agent_router
+from knowledge_agent.embedding import OpenAICompatibleEmbeddingProvider
 from knowledge_agent.runtime import create_knowledge_runtime
 from knowledge_agent.settings import load_knowledge_agent_settings
 
@@ -212,6 +213,9 @@ async def app_lifespan(application: FastAPI):
                     "ARTICLE_AGENT_KNOWLEDGE_ROOT",
                     str(cfg.data_file.parent / "knowledge-agent"),
                 )
+            ),
+            embedding_provider=OpenAICompatibleEmbeddingProvider.from_settings(
+                knowledge_settings
             ),
         )
         application.state.knowledge_agent_runtime = knowledge_runtime

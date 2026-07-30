@@ -8,6 +8,8 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 from .contracts import SourceSnapshot
+from .contracts import KnowledgeChunk, KnowledgeSource
+from .repository import _chunk_from_row
 from .schema import (
     knowledge_assets,
     knowledge_chunks,
@@ -244,6 +246,86 @@ class PostgresKnowledgeLibrary:
             ),
             metadata=dict(row["metadata"]),  # type: ignore[arg-type]
         )
+
+    def get_source(
+        self, project_id: str, source_id: str
+    ) -> KnowledgeSource | None:
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_source_id = _required_text(source_id, "source_id")
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(knowledge_sources).where(
+                    knowledge_sources.c.project_id == normalized_project_id,
+                    knowledge_sources.c.source_id == normalized_source_id,
+                )
+            ).mappings().one_or_none()
+        if row is None:
+            return None
+        return KnowledgeSource(
+            project_id=str(row["project_id"]),
+            source_id=str(row["source_id"]),
+            display_name=str(row["display_name"]),
+            source_kind=str(row["source_kind"]),  # type: ignore[arg-type]
+            trust_tier=str(row["trust_tier"]),  # type: ignore[arg-type]
+            status=str(row["status"]),  # type: ignore[arg-type]
+            canonical_url=(
+                None if row["canonical_url"] is None else str(row["canonical_url"])
+            ),
+            public_source=bool(row["public_source"]),
+            current_snapshot_id=(
+                None
+                if row["current_snapshot_id"] is None
+                else str(row["current_snapshot_id"])
+            ),
+            metadata=dict(row["metadata"]),  # type: ignore[arg-type]
+        )
+
+    def latest_snapshot(
+        self, project_id: str, source_id: str
+    ) -> SourceSnapshot | None:
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_source_id = _required_text(source_id, "source_id")
+        with self._engine.connect() as connection:
+            snapshot_id = connection.execute(
+                sa.select(source_snapshots.c.snapshot_id)
+                .where(
+                    source_snapshots.c.project_id == normalized_project_id,
+                    source_snapshots.c.source_id == normalized_source_id,
+                )
+                .order_by(
+                    source_snapshots.c.fetched_at.desc(),
+                    source_snapshots.c.snapshot_id.desc(),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+        if snapshot_id is None:
+            return None
+        return self.get_snapshot(
+            normalized_project_id,
+            normalized_source_id,
+            str(snapshot_id),
+        )
+
+    def get_snapshot_chunks(
+        self,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+    ) -> tuple[KnowledgeChunk, ...]:
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_source_id = _required_text(source_id, "source_id")
+        normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(knowledge_chunks)
+                .where(
+                    knowledge_chunks.c.project_id == normalized_project_id,
+                    knowledge_chunks.c.source_id == normalized_source_id,
+                    knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
+                )
+                .order_by(knowledge_chunks.c.ordinal.asc())
+            ).mappings().all()
+        return tuple(_chunk_from_row(row) for row in rows)
 
     def find_snapshot_by_content(
         self,

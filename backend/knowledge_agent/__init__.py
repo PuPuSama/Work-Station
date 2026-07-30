@@ -86,6 +86,11 @@ from .runtime import (
     KnowledgeAgentRuntime,
     create_knowledge_runtime,
 )
+from .publication import (
+    KnowledgePublicationError,
+    KnowledgePublicationService,
+    PublicationResult,
+)
 from .ingestion import (
     DocumentInput,
     DocumentParseError,
@@ -150,6 +155,8 @@ __all__ = [
     "KnowledgeLibrarySummary",
     "LocalKnowledgeArtifactStore",
     "KnowledgeProduct",
+    "KnowledgePublicationError",
+    "KnowledgePublicationService",
     "OpenAICompatibleEmbeddingProvider",
     "ParsedAsset",
     "ParsedBlock",
@@ -171,6 +178,7 @@ __all__ = [
     "ProductCatalogRepositoryError",
     "ProductConfirmationError",
     "ProductSourceEvidence",
+    "PublicationResult",
     "PrivateDocumentIngestionService",
     "ResearchOrchestrator",
     "ResearchRequest",

@@ -19,6 +19,23 @@ if str(BACKEND_DIR) not in sys.path:
 
 from knowledge_agent.http import router  # noqa: E402
 from knowledge_agent.runtime import create_knowledge_runtime  # noqa: E402
+from knowledge_agent import EMBEDDING_DIMENSIONS, EmbeddingBatch  # noqa: E402
+
+
+class FakeEmbeddingProvider:
+    model_id = "test-embedding-model"
+    dimensions = EMBEDDING_DIMENSIONS
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def embed(self, texts: tuple[str, ...]) -> EmbeddingBatch:
+        self.calls.append(tuple(texts))
+        vectors = tuple(
+            (float(index + 1),) + (0.0,) * (EMBEDDING_DIMENSIONS - 1)
+            for index, _text in enumerate(texts)
+        )
+        return EmbeddingBatch(vectors=vectors, model=self.model_id)
 
 
 def docx_bytes() -> bytes:
@@ -50,9 +67,11 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temp_directory = tempfile.TemporaryDirectory()
+        cls.embedding_provider = FakeEmbeddingProvider()
         cls.runtime = create_knowledge_runtime(
             database_url=os.environ["ARTICLE_AGENT_DATABASE_URL"],
             artifact_root=Path(cls.temp_directory.name),
+            embedding_provider=cls.embedding_provider,
         )
         app = FastAPI()
         app.state.knowledge_agent_runtime = cls.runtime
@@ -152,6 +171,50 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
         listing = self.client.get("/api/knowledge/example.com")
         self.assertEqual(listing.status_code, 200)
         self.assertEqual(listing.json()["source_count"], 0)
+
+    def test_source_requires_review_before_embedding_and_atomic_publication(self) -> None:
+        uploaded = self.client.post(
+            "/api/knowledge/example.com/sources/upload",
+            files={"file": ("private-spec.docx", docx_bytes())},
+        ).json()
+        source_id = uploaded["source_id"]
+
+        premature = self.client.post(
+            f"/api/knowledge/example.com/sources/{source_id}/publish"
+        )
+        self.assertEqual(premature.status_code, 409)
+        self.assertIn("approved", premature.json()["detail"])
+
+        reviewed = self.client.put(
+            f"/api/knowledge/example.com/sources/{source_id}/review",
+            json={
+                "source_kind": "private_file",
+                "trust_tier": "hard_fact",
+                "decision": "approve",
+                "reason": "Operator verified the supplied product specification.",
+            },
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.assertEqual(reviewed.json()["decision"], "approve")
+
+        published = self.client.post(
+            f"/api/knowledge/example.com/sources/{source_id}/publish"
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        self.assertEqual(published.json()["status"], "published")
+        self.assertEqual(
+            published.json()["embedding_model"],
+            self.embedding_provider.model_id,
+        )
+        self.assertGreater(published.json()["chunk_count"], 0)
+
+        library = self.client.get("/api/knowledge/example.com").json()
+        self.assertEqual(library["published_count"], 1)
+        self.assertEqual(library["inbox_count"], 0)
+        self.assertEqual(
+            library["sources"][0]["current_snapshot_id"],
+            uploaded["snapshot_id"],
+        )
 
 
 if __name__ == "__main__":
