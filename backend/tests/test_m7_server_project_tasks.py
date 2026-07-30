@@ -1537,6 +1537,124 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     tdk_download.json()["asset_id"],
                     tdk_delivered["tdk_asset_id"],
                 )
+                screenshot_bytes = self._image_bytes("white")
+                screenshot_asset = (
+                    object_service.upload_final_ai_screenshot(
+                        actor=actor,
+                        project_id=self.project_a,
+                        asset_id=(
+                            "asset_"
+                            + hashlib.sha256(
+                                screenshot_bytes
+                            ).hexdigest()
+                        ),
+                        data=screenshot_bytes,
+                        width=320,
+                        height=240,
+                    )
+                )
+                complete = repository.get(self.task_a)
+                assert complete is not None
+                complete["humanized_article"] = complete["linked_article"]
+                complete["final_ai_check"] = {
+                    "confirmed": True,
+                    "screenshot_asset_id": screenshot_asset.asset_id,
+                    "screenshot_content_hash": (
+                        screenshot_asset.content_hash
+                    ),
+                    "screenshot_filename": "final-ai-rate.png",
+                    "screenshot_width": 320,
+                    "screenshot_height": 240,
+                    "article_hash": hashlib.sha256(
+                        complete["linked_article"].encode("utf-8")
+                    ).hexdigest(),
+                }
+                repository.upsert(complete)
+                package_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/package-delivery"
+                )
+                packaged = client.post(
+                    package_path,
+                    json={"revision": 3},
+                )
+                self.assertEqual(
+                    packaged.status_code,
+                    200,
+                    packaged.text,
+                )
+                package_task = packaged.json()
+                self.assertEqual(package_task["revision"], 4)
+                self.assertEqual(
+                    package_task["delivery_package_path"],
+                    "",
+                )
+                self.assertTrue(
+                    package_task["delivery_package_asset_id"]
+                )
+                self.assertEqual(
+                    package_task["delivery_package_filename"],
+                    (
+                        f"{self.project_a}-topic_"
+                        f"{package_task['topic_index']:03d}.zip"
+                    ),
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.images.prepared",
+                        "article.docx.exported",
+                        "article.tdk.generated",
+                        "article.delivery.packaged",
+                    ],
+                )
+                package_asset = (
+                    PostgresKnowledgeAssetRepository(
+                        self.engine
+                    ).get_asset(
+                        self.project_a,
+                        package_task[
+                            "delivery_package_asset_id"
+                        ],
+                    )
+                )
+                assert package_asset is not None
+                package_key = str(
+                    package_asset.metadata["object_key"]
+                )
+                with ZipFile(
+                    BytesIO(private_store.objects[package_key])
+                ) as archive:
+                    self.assertEqual(
+                        set(archive.namelist()),
+                        {
+                            delivered["docx_filename"],
+                            "D.docx",
+                            *[
+                                image["filename"]
+                                for image in delivered["images"]
+                            ],
+                            "final-ai-rate.png",
+                        },
+                    )
+                self.assertEqual(
+                    client.get(
+                        (
+                            f"/api/projects/{self.project_a}/assets/"
+                            f"{package_task['delivery_package_asset_id']}/"
+                            "download"
+                        )
+                    ).status_code,
+                    404,
+                )
+                package_download_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/delivery-package/download"
+                )
+                self.assertEqual(
+                    client.get(package_download_path).status_code,
+                    200,
+                )
                 put_count = len(private_store.put_calls)
                 self.assertEqual(
                     client.post(
@@ -1582,6 +1700,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     client.get(tdk_download_path).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.get(package_download_path).status_code,
                     403,
                 )
                 self.assertFalse(local_state.exists())

@@ -44,6 +44,10 @@ from services.server_docx_export import (
     ServerArticleDocxError,
     ServerArticleDocxExport,
 )
+from services.server_delivery_package import (
+    ServerDeliveryPackage,
+    ServerDeliveryPackageError,
+)
 from services.server_project_tasks import (
     ServerProjectTaskRuntime,
     ServerProjectTaskStoreFactory,
@@ -82,6 +86,7 @@ from workflow.state_machine import (
     ACTION_DOWNLOAD_DOCX,
     ACTION_EXPORT_DOCX,
     ACTION_GENERATE_TDK,
+    ACTION_PACKAGE_DELIVERY,
     ACTION_PREPARE_IMAGES,
     ACTION_REWRITE_FROM_SCRATCH,
     ACTION_UPDATE_ARTICLE,
@@ -1321,6 +1326,158 @@ def create_project_task_tdk_download(
         raise HTTPException(
             status_code=503,
             detail="TDK download is temporarily unavailable.",
+        ) from exc
+    return ProjectAssetDownload(
+        asset_id=asset_id,
+        url=url,
+        expires_seconds=expires_seconds,
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/package-delivery",
+    response_model=TaskRecord,
+)
+def package_project_task_delivery(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.deliver",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_PACKAGE_DELIVERY)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        ServerDeliveryPackage(
+            objects=_knowledge_object_service(request),
+        ).package(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task=task,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A required delivery asset is no longer available.",
+        ) from exc
+    except ObjectTooLarge as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="A required delivery asset exceeds its size limit.",
+        ) from exc
+    except ServerDeliveryPackageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Delivery packaging is temporarily unavailable.",
+        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.delivery.packaged",
+        details={
+            "file_count": len(task.images) + 3,
+            "image_count": len(task.images),
+        },
+    )
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/delivery-package/download",
+    response_model=ProjectAssetDownload,
+)
+def create_project_task_delivery_download(
+    project: str,
+    task_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectAssetDownload:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.deliver",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    asset_id = task.delivery_package_asset_id.strip()
+    if not asset_id:
+        raise HTTPException(
+            status_code=409,
+            detail="The Server delivery package has not been generated.",
+        )
+    try:
+        url = (
+            _knowledge_object_service(
+                request
+            ).create_delivery_zip_download_url(
+                actor=authorized.actor,
+                project_id=authorized.project_id,
+                asset_id=asset_id,
+                content_hash=task.delivery_package_content_hash,
+                expires_seconds=expires_seconds,
+            )
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery package was not found in the requested project.",
+        ) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Delivery download is temporarily unavailable.",
         ) from exc
     return ProjectAssetDownload(
         asset_id=asset_id,

@@ -265,6 +265,19 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "POST",
+                "/api/projects/project-a/tasks/task-a/package-delivery",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/projects/project-a/tasks/task-a/"
+                "delivery-package/download",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "GET",
                 "/api/projects/project-a/tasks/task-a/tdk/download",
             )

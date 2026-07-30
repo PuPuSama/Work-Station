@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -14,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 from models import AICheck, ArticleImage, TaskRecord  # noqa: E402
 from services.delivery_package import (  # noqa: E402
     DeliveryPackageError,
+    build_delivery_zip_bytes,
     build_delivery_zip,
     official_website_folder_name,
     package_delivery,
@@ -46,6 +48,50 @@ def task_at(root: Path) -> TaskRecord:
 
 
 class DeliveryPackageTests(unittest.TestCase):
+    def test_in_memory_zip_is_deterministic_and_keeps_flat_layout(
+        self,
+    ) -> None:
+        arguments = {
+            "article_docx": b"article",
+            "article_filename": "Buyer Guide.docx",
+            "tdk_docx": b"tdk",
+            "images": [
+                ("hero.webp", b"hero"),
+                ("hero.webp", b"body"),
+            ],
+            "final_screenshot": b"screenshot",
+        }
+        first = build_delivery_zip_bytes(**arguments)
+        second = build_delivery_zip_bytes(**arguments)
+        self.assertEqual(first, second)
+        with ZipFile(BytesIO(first)) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                [
+                    "Buyer Guide.docx",
+                    "D.docx",
+                    "hero.webp",
+                    "hero-2.webp",
+                    "final-ai-rate.png",
+                ],
+            )
+            self.assertEqual(
+                archive.read("final-ai-rate.png"),
+                b"screenshot",
+            )
+
+    def test_in_memory_zip_rejects_unsafe_article_filename(self) -> None:
+        for filename in ("../article.docx", "final-ai-rate.png"):
+            with self.subTest(filename=filename):
+                with self.assertRaises(DeliveryPackageError):
+                    build_delivery_zip_bytes(
+                        article_docx=b"article",
+                        article_filename=filename,
+                        tdk_docx=b"tdk",
+                        images=[("hero.webp", b"hero")],
+                        final_screenshot=b"screenshot",
+                    )
+
     def test_folder_uses_official_website_and_contains_all_deliverables(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

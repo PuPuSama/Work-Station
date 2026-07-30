@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
-from zipfile import ZIP_DEFLATED, ZipFile
+from io import BytesIO
 from pathlib import Path
+from typing import Sequence
 from urllib.parse import urlsplit
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from models import TaskRecord
 
@@ -85,6 +87,139 @@ def _validate_delivery_images(image_sources: list[Path]) -> None:
                 f"{source.name} duplicates {duplicate.name}."
             )
         seen_hashes[content_hash] = source
+
+
+def _archive_filename(value: str, label: str) -> str:
+    normalized = str(value or "").strip()
+    if (
+        not normalized
+        or Path(normalized).name != normalized
+        or "/" in normalized
+        or "\\" in normalized
+        or any(ord(character) < 32 for character in normalized)
+    ):
+        raise DeliveryPackageError(
+            f"{label} has an unsafe filename."
+        )
+    return normalized
+
+
+def _unique_archive_filename(
+    filename: str,
+    used_names: set[str],
+) -> str:
+    candidate = Path(filename)
+    name = candidate.name
+    counter = 2
+    while name.casefold() in used_names:
+        name = f"{candidate.stem}-{counter}{candidate.suffix}"
+        counter += 1
+    used_names.add(name.casefold())
+    return name
+
+
+def _write_deterministic_zip_entry(
+    archive: ZipFile,
+    filename: str,
+    data: bytes,
+) -> None:
+    info = ZipInfo(filename, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = ZIP_DEFLATED
+    info.external_attr = 0o600 << 16
+    info.create_system = 3
+    archive.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=6)
+
+
+def build_delivery_zip_bytes(
+    *,
+    article_docx: bytes,
+    article_filename: str,
+    tdk_docx: bytes,
+    images: Sequence[tuple[str, bytes]],
+    final_screenshot: bytes,
+) -> bytes:
+    """Build the public delivery layout without filesystem metadata."""
+
+    article_data = bytes(article_docx)
+    tdk_data = bytes(tdk_docx)
+    screenshot_data = bytes(final_screenshot)
+    if not article_data:
+        raise DeliveryPackageError("Article Word document is empty.")
+    if not tdk_data:
+        raise DeliveryPackageError("D document is empty.")
+    if not screenshot_data:
+        raise DeliveryPackageError("Final AI-rate screenshot is empty.")
+    if not images:
+        raise DeliveryPackageError(
+            "No prepared article images are available for delivery."
+        )
+    if len(images) > MAX_DELIVERY_IMAGES:
+        raise DeliveryPackageError(
+            f"Article delivery supports at most {MAX_DELIVERY_IMAGES} "
+            f"images; received {len(images)}."
+        )
+
+    normalized_article_name = _archive_filename(
+        article_filename,
+        "Article Word document",
+    )
+    if Path(normalized_article_name).suffix.casefold() != ".docx":
+        raise DeliveryPackageError(
+            "Article Word document must use a .docx filename."
+        )
+    if normalized_article_name.casefold() == "d.docx":
+        normalized_article_name = "Article.docx"
+    used_names = {
+        normalized_article_name.casefold(),
+        "d.docx",
+        "final-ai-rate.png",
+    }
+    normalized_images: list[tuple[str, bytes]] = []
+    seen_hashes: set[str] = set()
+    for raw_filename, raw_data in images:
+        data = bytes(raw_data)
+        if not data:
+            raise DeliveryPackageError(
+                "Prepared article image is empty."
+            )
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in seen_hashes:
+            raise DeliveryPackageError(
+                "Duplicate article image content is not allowed."
+            )
+        seen_hashes.add(digest)
+        filename = _archive_filename(
+            raw_filename,
+            "Prepared article image",
+        )
+        normalized_images.append(
+            (
+                _unique_archive_filename(filename, used_names),
+                data,
+            )
+        )
+
+    output = BytesIO()
+    with ZipFile(
+        output,
+        "w",
+        compression=ZIP_DEFLATED,
+        compresslevel=6,
+    ) as archive:
+        _write_deterministic_zip_entry(
+            archive,
+            normalized_article_name,
+            article_data,
+        )
+        _write_deterministic_zip_entry(archive, "D.docx", tdk_data)
+        for filename, data in normalized_images:
+            _write_deterministic_zip_entry(archive, filename, data)
+        _write_deterministic_zip_entry(
+            archive,
+            "final-ai-rate.png",
+            screenshot_data,
+        )
+    return output.getvalue()
 
 
 def _reset_delivery_directory(task_directory: Path, destination: Path) -> None:

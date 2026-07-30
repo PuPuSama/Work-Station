@@ -59,7 +59,7 @@ class ServerArticleDocxObjectService(Protocol):
     ) -> KnowledgeAsset: ...
 
 
-def _verified_webp_payload(
+def verified_server_article_webp(
     image: ArticleImage,
     stored: ProjectKnowledgeObject,
 ) -> EmbeddedArticleImage:
@@ -150,7 +150,7 @@ class ServerArticleDocxExport:
                 asset_id=asset_id,
                 max_bytes=MAX_SERVER_SOURCE_IMAGE_BYTES,
             )
-            embedded_images[asset_id] = _verified_webp_payload(
+            embedded_images[asset_id] = verified_server_article_webp(
                 image,
                 stored,
             )
@@ -200,4 +200,5 @@ __all__ = [
     "ServerArticleDocxError",
     "ServerArticleDocxExport",
     "ServerArticleDocxObjectService",
+    "verified_server_article_webp",
 ]

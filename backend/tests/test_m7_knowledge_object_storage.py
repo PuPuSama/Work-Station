@@ -16,6 +16,7 @@ from knowledge_agent.assets import (  # noqa: E402
 )
 from knowledge_agent.object_storage import (  # noqa: E402
     ARTICLE_DOCX_CONTENT_TYPE,
+    DELIVERY_ZIP_ARTIFACT_KIND,
     FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
     KnowledgeObjectIntegrityError,
     KnowledgeObjectNotFound,
@@ -331,6 +332,40 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             expires_seconds=90,
         )
         self.assertTrue(docx_url.startswith("https://signed.example.test/"))
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.deliver",
+        )
+        delivery_zip = self.service.upload_delivery_zip(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="delivery-zip",
+            data=b"private-delivery-archive",
+        )
+        self.assertEqual(delivery_zip.content_type, "application/zip")
+        self.assertEqual(
+            delivery_zip.metadata["artifact_kind"],
+            DELIVERY_ZIP_ARTIFACT_KIND,
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=delivery_zip.asset_id,
+            )
+        delivery_url = self.service.create_delivery_zip_download_url(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id=delivery_zip.asset_id,
+            content_hash=delivery_zip.content_hash,
+            expires_seconds=90,
+        )
+        self.assertTrue(
+            delivery_url.startswith("https://signed.example.test/")
+        )
         self.assertEqual(
             self.access.calls[-1][2],
             "article.deliver",

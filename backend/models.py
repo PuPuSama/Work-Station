@@ -395,6 +395,9 @@ class TaskRecord(WorkflowModel):
     tdk_content_hash: str = ""
     tdk_filename: str = ""
     delivery_package_path: str = ""
+    delivery_package_asset_id: str = ""
+    delivery_package_content_hash: str = ""
+    delivery_package_filename: str = ""
     legacy_export: bool = False
     zero_gpt_report: str = ""
     created_at: str

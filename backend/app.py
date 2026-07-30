@@ -3721,6 +3721,9 @@ def perform_package_delivery(task_id: str, request: RevisionedRequest) -> TaskRe
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     task.delivery_package_path = str(output)
+    task.delivery_package_asset_id = ""
+    task.delivery_package_content_hash = ""
+    task.delivery_package_filename = ""
     task.workflow_error = None
     return save_task(task, request.revision)
 

@@ -157,9 +157,12 @@
 - 已接通 Server 最终 AI-rate Review：Reviewer 上传的图片在内存规范化为无元数据 PNG，
   AICheck 只保存私有 Asset 身份且绑定当前 Humanized Article 哈希；专用下载重新授权，
   通用 Viewer Asset 下载不能取得截图；
-- 交付 ZIP 和前端 Delivery UI 仍未对象化，不能把文章 DOCX/TDK/Review 描述成完整
-  Server 交付链路完成；
-- 已让八条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已接通 Server Delivery ZIP：服务端只读取 Task 已绑定且逐项复核的文章 DOCX、
+  `D.docx`、Prepared WebP 和已确认终审截图，在内存生成确定性扁平 ZIP；Task 只保存
+  私有 `delivery_zip` Asset 身份，通用 Viewer 下载隐藏，专用下载重新授权；
+- 前端 Delivery UI 尚未切换到这些 Server 专用下载接口，派生对象 orphan 对账也仍待
+  完成；因此不能把这项后端闭环描述成操作界面或生产交付已经上线；
+- 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小

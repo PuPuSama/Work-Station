@@ -233,8 +233,8 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 - 通用 `GET .../assets/{asset_id}/download` 对 `article_docx` 返回 404，专用下载路由
   重新要求 `article.deliver` 并签发不超过一小时的 URL；
 - 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
-- 交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据不得写成“完整 Server Delivery
-  已完成”。
+- Delivery ZIP 已由后续专用接口对象化；前端 Delivery UI 尚未切换，发布证据不得
+  写成“操作员完整交付流程已上线”。
 
 TDK DOCX 冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/generate-tdk`，随后使用
@@ -275,14 +275,35 @@ TDK DOCX 冒烟必须通过
   文章正文、对象 URI 或签名 URL；
 - 并发 CAS 后的未引用 PNG 进入延迟 orphan 对账，不在失败请求中直接删除。
 
-八条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+Delivery ZIP 冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/package-delivery`，随后使用
+`GET /api/projects/{project}/tasks/{task_id}/delivery-package/download`。至少验证：
+
+- Viewer 和 Reviewer 返回 403；具备 `article.deliver` 的 Editor 请求只含当前
+  Revision，不接受文件字节、Asset ID、对象 URI、输出路径或文件名；
+- 终审必须已确认且其 `article_hash` 精确匹配当前 Humanized Article；不匹配时不读取
+  或上传归档；
+- 文章 DOCX、TDK DOCX、1–3 张 Prepared WebP 和 Review PNG 均由 Task 身份选取，
+  对象读取前再次授权并复核 Key Scope、大小、SHA-256、访问类型和必要尺寸；
+- ZIP 纯内存生成，不创建 Task 目录或临时文件；条目扁平且固定包含文章 DOCX、
+  `D.docx`、WebP 和 `final-ai-rate.png`，同输入字节生成同一哈希；
+- 成功 Task 只保存 `delivery_package_asset_id/delivery_package_content_hash/
+  delivery_package_filename`，`delivery_package_path` 为空；
+- 通用 Asset 下载对 `delivery_zip` 返回 404；专用下载再次要求 `article.deliver`，
+  复核 Task Asset ID/Hash/类型后签发不超过一小时的 URL；
+- Audit 只含文件数和图片数，不含文件名、正文、对象 URI、签名 URL 或归档字节；
+- 旧 Revision 在对象读取前返回 409；并发 CAS 后的未引用 ZIP 进入延迟 orphan 对账，
+  不在失败请求中直接删除。
+
+九条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
 - “完全重写、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
-  确认最终检查”分别产生
+  确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
   `article.docx.exported`、`article.tdk.generated`、
-  `article.final_ai_screenshot.uploaded`、`article.final_ai_check.updated`；
+  `article.final_ai_screenshot.uploaded`、`article.final_ai_check.updated`、
+  `article.delivery.packaged`；
 - Action 到 `article.edit/article.review/article.deliver` 的映射由服务端常量决定，
   请求不能提交或覆盖 Permission；
 - Event 的 Organization/Project/Actor/Task 与请求 Scope 一致，Details 只含
@@ -290,7 +311,8 @@ TDK DOCX 冒烟必须通过
   URL、对象 URI、签名 URL、Token 或 Secret；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
-- Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG
+- Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/
+  Delivery ZIP
   已先写对象而 Task/Audit 后失败时，只记录内容寻址 orphan 进入延迟对账，不直接删除。
 
 产品重新发现冒烟必须通过

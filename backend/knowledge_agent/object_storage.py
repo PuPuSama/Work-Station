@@ -48,9 +48,11 @@ ARTICLE_DOCX_CONTENT_TYPE = (
 )
 TDK_DOCX_ARTIFACT_KIND = "tdk_docx"
 FINAL_AI_SCREENSHOT_ARTIFACT_KIND = "final_ai_rate_screenshot"
+DELIVERY_ZIP_ARTIFACT_KIND = "delivery_zip"
 PRIVATE_TASK_ARTIFACT_KINDS = frozenset(
     {
         ARTICLE_DOCX_ARTIFACT_KIND,
+        DELIVERY_ZIP_ARTIFACT_KIND,
         FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
         TDK_DOCX_ARTIFACT_KIND,
     }
@@ -259,6 +261,28 @@ class ProjectKnowledgeObjectService:
             metadata={
                 "artifact_kind": FINAL_AI_SCREENSHOT_ARTIFACT_KIND
             },
+        )
+
+    def upload_delivery_zip(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+    ) -> KnowledgeAsset:
+        """Persist one content-addressed private delivery archive."""
+
+        self._access.require(actor, project_id, "article.deliver")
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type="application/zip",
+            width=None,
+            height=None,
+            metadata={"artifact_kind": DELIVERY_ZIP_ARTIFACT_KIND},
         )
 
     def _store_asset(
@@ -529,10 +553,42 @@ class ProjectKnowledgeObjectService:
             expires_seconds=expires_seconds,
         )
 
+    def create_delivery_zip_download_url(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        content_hash: str,
+        expires_seconds: int = 300,
+    ) -> str:
+        """Sign one complete archive after a fresh delivery decision."""
+
+        self._access.require(actor, project_id, "article.deliver")
+        asset = self._repository.get_asset(project_id, asset_id)
+        if (
+            asset is None
+            or str(asset.metadata.get("artifact_kind") or "")
+            != DELIVERY_ZIP_ARTIFACT_KIND
+            or asset.content_type != "application/zip"
+            or asset.content_hash != content_hash.strip().casefold()
+        ):
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
+        )
+        return self._store.create_download_url(
+            key,
+            expires_seconds=expires_seconds,
+        )
+
 
 __all__ = [
     "ARTICLE_DOCX_ARTIFACT_KIND",
     "ARTICLE_DOCX_CONTENT_TYPE",
+    "DELIVERY_ZIP_ARTIFACT_KIND",
     "FINAL_AI_SCREENSHOT_ARTIFACT_KIND",
     "KnowledgeObjectIntegrityError",
     "KnowledgeObjectNotFound",

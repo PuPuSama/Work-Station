@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 534 tests；
+- 538 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -189,8 +189,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 共享派生资产元数据不保存文章角色、产品或来源关系，避免内容去重复用后残留第一次
   使用者的关系；这些关系只保存在 Task `ArticleImage`；
 - Viewer 返回 403；旧 Revision 在对象读取前返回 409；派生对象仍经授权下载路由访问；
-- Server TDK 已对象化；Delivery ZIP 和派生 orphan 对账尚未完成；该 Task 写操作已进入
-  事务内 Audit。
+- Server TDK 与 Delivery ZIP 已对象化；派生 orphan 对账尚未完成；该 Task 写操作已
+  进入事务内 Audit。
 
 ### Server 私有文章 DOCX
 
@@ -214,7 +214,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 导出/专用下载返回 403；通用 Asset 下载对 `article_docx` 返回 404；
 - 同哈希资产已属于其他访问类型时在 Task CAS 前 fail closed，不降级下载权限；
 - 旧 Revision 在对象读取/写入前返回 409，未产生额外对象；
-- Delivery ZIP 和前端 Delivery UI 仍待后续切片。
+- Delivery ZIP 已由后续切片对象化；前端 Delivery UI 仍待切换。
 
 ### Server 私有 TDK DOCX
 
@@ -240,7 +240,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 生成/专用下载返回 403；通用 Asset 下载与文章 DOCX 专用下载不能取得 TDK；
 - 旧 Revision 在 LLM 和对象写入前返回 409；成功 Task CAS 产生
   `article.tdk.generated` Audit，Details 只含字符数和关键词数量；
-- Delivery ZIP、前端 Delivery UI 和 orphan 对账仍未完成。
+- Delivery ZIP 已由后续切片对象化；前端 Delivery UI 和 orphan 对账仍未完成。
 
 ### Server 最终 AI-rate Review
 
@@ -270,7 +270,39 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 旧 Revision 在读取 multipart 字节前返回 409，跨 Project 与 Viewer 均返回 403；
 - 两个 Audit Action 只保存截图尺寸、confirmed 和是否有 score，不含 Report、score 值、
   文章正文、图片字节或 URL；
-- Delivery ZIP、前端 Delivery UI 和 orphan 对账仍未完成。
+- Delivery ZIP 已由下一节对象化；前端 Delivery UI 和 orphan 对账仍未完成。
+
+### Server 私有 Delivery ZIP
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_delivery_package `
+  tests.test_delivery_package `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_state_machine
+```
+
+结果：
+
+- 60 tests，使用确定性内存文件和真实 PostgreSQL，不调用外部模型或对象服务；
+- `article.deliver` 在路由、全部私有对象读取、ZIP 上传和专用下载签名前重新检查；
+- 打包只接受当前 Task 的文章 DOCX、TDK DOCX、Prepared WebP 和终审 Screenshot
+  身份，不接受客户端 Asset ID、对象 URI、路径、文件名或文件字节；
+- confirmed 终审的 `article_hash` 必须匹配当前 Humanized Article，正文改变后旧确认
+  无法打包；
+- ZIP 在内存生成，条目扁平且固定为文章 DOCX、`D.docx`、1–3 张 WebP 和
+  `final-ai-rate.png`；固定顺序、时间戳、权限及压缩参数使同输入输出稳定；
+- Task 只保存 `delivery_package_asset_id/delivery_package_content_hash/
+  delivery_package_filename`，`delivery_package_path` 为空；
+- 通用 Asset 下载对 `delivery_zip` 返回 404；专用下载要求 `article.deliver` 并复核
+  Task Asset ID、内容哈希和访问类型；Viewer 返回 403；
+- `article.delivery.packaged` Audit 只保存文件数和图片数，不含正文、文件名、对象 URI
+  或签名 URL；
+- 上游无效化会同时清空 Delivery 的路径与全部 Server Asset 身份；对象写入后发生 CAS
+  冲突产生的内容寻址 orphan 仍待延迟对账。
 
 ### Server Task CAS 与事务内 Audit
 
@@ -290,12 +322,12 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 八条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx/tdk/
-  final-ai-screenshot/final-ai-check Action；
+- 九条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx/tdk/
+  final-ai-screenshot/final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
-- 图片/文章 DOCX/TDK DOCX/Review PNG 的 S3 Put 仍不属于 PostgreSQL 事务，失败后的
-  内容寻址 orphan 由后续对账
+- 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
+  事务，失败后的内容寻址 orphan 由后续对账
   延迟清理。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
@@ -532,8 +564,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
-- S3 对象存储底层、产品资产桥接、文章 DOCX 私有对象和 no-go 部署门禁已实现；
-  Delivery ZIP 对象化、真实备份恢复演练与生产供应商尚未完成；
+- S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象和
+  no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
 - 前端登录页已新增 Server OIDC 分支并通过 lint/build；其余 M7 管理界面尚未接入。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

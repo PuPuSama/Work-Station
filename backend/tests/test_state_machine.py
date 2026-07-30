@@ -318,6 +318,9 @@ class InvalidationTests(unittest.TestCase):
         task.tdk_content_hash = "e" * 64
         task.tdk_filename = "D.docx"
         task.delivery_package_path = "D:/article/example.com"
+        task.delivery_package_asset_id = "asset-delivery"
+        task.delivery_package_content_hash = "c" * 64
+        task.delivery_package_filename = "example.com-topic_001.zip"
         task.legacy_export = True
         task.workflow_error = WorkflowError(code="old")
         task.article_versions = [
@@ -356,6 +359,10 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.tdk_content_hash, "")
         self.assertEqual(task.tdk_filename, "")
         self.assertEqual(task.tdk.title, "")
+        self.assertEqual(task.delivery_package_path, "")
+        self.assertEqual(task.delivery_package_asset_id, "")
+        self.assertEqual(task.delivery_package_content_hash, "")
+        self.assertEqual(task.delivery_package_filename, "")
         self.assertFalse(task.legacy_export)
         self.assertIsNone(task.workflow_error)
         self.assertEqual(
@@ -391,6 +398,9 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.tdk_path, "")
         self.assertEqual(task.tdk_asset_id, "")
         self.assertEqual(task.delivery_package_path, "")
+        self.assertEqual(task.delivery_package_asset_id, "")
+        self.assertEqual(task.delivery_package_content_hash, "")
+        self.assertEqual(task.delivery_package_filename, "")
         self.assertEqual(
             [v.kind for v in task.article_versions],
             ["raw", "initial", "humanized", "linked", "final"],
@@ -426,6 +436,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(image.status, "pending")
         self.assertEqual(task.docx_path, "")
         self.assertEqual(task.docx_asset_id, "")
+        self.assertEqual(task.delivery_package_asset_id, "")
 
     def test_final_article_edit_only_invalidates_export(self) -> None:
         task = self.populated_task()
@@ -439,6 +450,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.docx_asset_id, "")
         self.assertEqual(task.docx_content_hash, "")
         self.assertEqual(task.docx_filename, "")
+        self.assertEqual(task.delivery_package_asset_id, "")
         self.assertEqual(task.images[0].prepared_path, "D:/title.webp")
 
     def test_unknown_invalidation_stage_is_rejected(self) -> None:
@@ -483,6 +495,9 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.tdk_path, "")
         self.assertEqual(task.tdk_asset_id, "")
         self.assertEqual(task.delivery_package_path, "")
+        self.assertEqual(task.delivery_package_asset_id, "")
+        self.assertEqual(task.delivery_package_content_hash, "")
+        self.assertEqual(task.delivery_package_filename, "")
         self.assertEqual(task.zero_gpt_report, "")
         self.assertFalse(hasattr(task, "compression"))
         self.assertIsNone(task.workflow_error)

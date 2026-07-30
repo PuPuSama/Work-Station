@@ -294,6 +294,9 @@ def _clear_tdk(task: TaskRecord) -> None:
     task.tdk_content_hash = ""
     task.tdk_filename = ""
     task.delivery_package_path = ""
+    task.delivery_package_asset_id = ""
+    task.delivery_package_content_hash = ""
+    task.delivery_package_filename = ""
 
 
 def _clear_export(task: TaskRecord) -> None:
