@@ -42,6 +42,9 @@ class FakeStore:
         self.put_calls: list[dict[str, object]] = []
         self.signed: list[tuple[str, int]] = []
 
+    def check_ready(self):
+        return None
+
     def put(self, *, key, data, content_type, metadata=None):
         self.put_calls.append(
             {

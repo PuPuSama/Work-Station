@@ -199,6 +199,9 @@ with engine.begin() as connection:
 | `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
 | `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
 | `backend/knowledge_agent/object_storage.py` | M2 资产接入 S3 及授权后的知识对象服务 | 解析器适配与权限分离、下载重新授权、数据库只存 URI/证据 |
+| `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
+| `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 非零即停止发布、备份恢复只能显式证明 |
+| `docs/runbooks/knowledge-agent-m7-server-cutover.md` | 备份、恢复、轮换、发布和回滚操作准源 | 新实例恢复、跨系统恢复点、禁止默认 Actor/Project |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
@@ -304,10 +307,20 @@ LLM/Embedding Key；Access Key/Secret 不进入公开配置或异常消息。默
 加密 `AES256`，`none` 只允许本地兼容目标显式使用。开发 MinIO profile 仅用于
 S3 契约验证，不是生产供应商选择。
 
-#### D2 待实现：运维与部署门禁
+#### D2 已实现底座、待真实演练：运维与部署门禁
 
-之后补齐备份恢复演练、对象版本/生命周期、密钥轮换、迁移前检查、部署健康门和回滚方案，
-再讨论受控云端或公司私有部署。正式身份和 API 全覆盖之前，不把对象服务开放为公共入口。
+`DeploymentPreflightReport` 已把 Server Mode、Actor Session、Knowledge 配置、
+Alembic/pgvector、S3 Bucket、代码切换能力和备份恢复证明拆成稳定 Check ID。报告不返回
+URL、密钥或供应商错误正文。
+
+`CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。当前正式身份、
+项目路由、Task/Job 单写和 Worker 重新授权尚未接线，所以它明确保持 no-go；不能靠设置
+一个环境变量把未实现能力标成通过。
+
+备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
+`docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、
+RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖之前，不把对象服务开放为
+公共入口。
 
 ## 10. 重构检查清单
 

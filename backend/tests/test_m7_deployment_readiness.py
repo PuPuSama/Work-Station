@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+from pathlib import Path
+
+import sqlalchemy as sa
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from services.deployment_readiness import (  # noqa: E402
+    DatabaseReadiness,
+    ServerCutoverCapabilities,
+    postgres_database_probe,
+    run_deployment_preflight,
+)
+from services.object_store import ObjectStoreError  # noqa: E402
+
+
+COMPLETE_ENVIRONMENT = {
+    "ARTICLE_AGENT_SERVER_MODE": "true",
+    "ARTICLE_AGENT_SERVER_SESSION_SECRET": "s" * 32,
+    "ARTICLE_AGENT_DATABASE_URL": (
+        "postgresql+psycopg://user:private-db-password@db.test/app"
+    ),
+    "EMBEDDING_BASE_URL": "https://embedding.test/v1",
+    "EMBEDDING_API_KEY": "private-embedding-key",
+    "EMBEDDING_MODEL": "text-embedding-3-small",
+    "EMBEDDING_DIMENSIONS": "1536",
+    "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "private-bucket",
+    "ARTICLE_AGENT_OBJECT_STORE_REGION": "us-east-1",
+    "ARTICLE_AGENT_OBJECT_STORE_ENDPOINT": "https://objects.test",
+    "ARTICLE_AGENT_OBJECT_STORE_ACCESS_KEY": "private-access-key",
+    "ARTICLE_AGENT_OBJECT_STORE_SECRET_KEY": "private-object-secret",
+    "ARTICLE_AGENT_OBJECT_STORE_SSE": "AES256",
+}
+
+
+class FakeReadyStore:
+    def check_ready(self):
+        return None
+
+
+class FakeFailedStore:
+    def check_ready(self):
+        raise ObjectStoreError("provider included private-object-secret")
+
+
+class DeploymentReadinessTests(unittest.TestCase):
+    def test_all_explicit_gates_can_pass_without_exposing_secrets(self) -> None:
+        report = run_deployment_preflight(
+            environment=COMPLETE_ENVIRONMENT,
+            database_probe=lambda: DatabaseReadiness(
+                revision="20260730_0009",
+                vector_extension="0.8.1",
+            ),
+            object_store_factory=lambda settings: FakeReadyStore(),
+            capabilities=ServerCutoverCapabilities(
+                trusted_identity_source=True,
+                project_routes_scoped=True,
+                postgres_task_single_write=True,
+                postgres_job_single_write=True,
+                worker_reauthorizes=True,
+                object_download_reauthorizes=True,
+            ),
+            backup_restore_drill_passed=True,
+        )
+
+        self.assertTrue(report.ready)
+        public = str(report.public_values())
+        for secret in (
+            "private-db-password",
+            "private-embedding-key",
+            "private-access-key",
+            "private-object-secret",
+        ):
+            self.assertNotIn(secret, public)
+
+    def test_current_capabilities_and_missing_attestation_fail_closed(self) -> None:
+        report = run_deployment_preflight(
+            environment=COMPLETE_ENVIRONMENT,
+            database_probe=lambda: DatabaseReadiness(
+                revision="20260730_0009",
+                vector_extension="0.8.1",
+            ),
+            object_store_factory=lambda settings: FakeReadyStore(),
+        )
+
+        self.assertFalse(report.ready)
+        by_id = {
+            check.check_id: check for check in report.checks
+        }
+        self.assertFalse(by_id["server_cutover"].passed)
+        self.assertIn("trusted_identity_source", by_id["server_cutover"].detail)
+        self.assertFalse(by_id["backup_restore_drill"].passed)
+
+    def test_probe_failures_and_configuration_errors_are_generic(self) -> None:
+        environment = {
+            **COMPLETE_ENVIRONMENT,
+            "ARTICLE_AGENT_SERVER_SESSION_SECRET": "too-short",
+            "ARTICLE_AGENT_OBJECT_STORE_SSE": "none",
+        }
+
+        def failed_database():
+            raise RuntimeError(
+                "database URL contained private-db-password"
+            )
+
+        report = run_deployment_preflight(
+            environment=environment,
+            database_probe=failed_database,
+            object_store_factory=lambda settings: FakeFailedStore(),
+        )
+        public = str(report.public_values())
+
+        self.assertFalse(report.ready)
+        self.assertNotIn("private-db-password", public)
+        self.assertNotIn("private-object-secret", public)
+        self.assertIn("readiness probe failed", public)
+
+    def test_wrong_schema_revision_blocks_deployment(self) -> None:
+        report = run_deployment_preflight(
+            environment=COMPLETE_ENVIRONMENT,
+            database_probe=lambda: DatabaseReadiness(
+                revision="20260730_0008",
+                vector_extension="0.8.1",
+            ),
+            object_store_factory=lambda settings: FakeReadyStore(),
+            capabilities=ServerCutoverCapabilities(
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+            ),
+            backup_restore_drill_passed=True,
+        )
+        self.assertFalse(report.ready)
+        database = next(
+            check for check in report.checks if check.check_id == "database"
+        )
+        self.assertFalse(database.passed)
+
+    def test_remote_plain_http_object_endpoint_blocks_deployment(self) -> None:
+        report = run_deployment_preflight(
+            environment={
+                **COMPLETE_ENVIRONMENT,
+                "ARTICLE_AGENT_OBJECT_STORE_ENDPOINT": (
+                    "http://objects.internal.test"
+                ),
+            },
+            database_probe=lambda: DatabaseReadiness(
+                revision="20260730_0009",
+                vector_extension="0.8.1",
+            ),
+            object_store_factory=lambda settings: FakeReadyStore(),
+            capabilities=ServerCutoverCapabilities(
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+            ),
+            backup_restore_drill_passed=True,
+        )
+        transport = next(
+            check
+            for check in report.checks
+            if check.check_id == "object_store_transport"
+        )
+        self.assertFalse(report.ready)
+        self.assertFalse(transport.passed)
+
+    @unittest.skipUnless(
+        os.environ.get("ARTICLE_AGENT_DATABASE_URL"),
+        "ARTICLE_AGENT_DATABASE_URL is required for the PostgreSQL probe",
+    )
+    def test_real_postgres_probe_reports_head_and_pgvector(self) -> None:
+        engine = sa.create_engine(
+            os.environ["ARTICLE_AGENT_DATABASE_URL"],
+            pool_pre_ping=True,
+        )
+        try:
+            readiness = postgres_database_probe(engine)
+        finally:
+            engine.dispose()
+        self.assertEqual(readiness.revision, "20260730_0009")
+        self.assertTrue(readiness.vector_extension)
+
+
+if __name__ == "__main__":
+    unittest.main()

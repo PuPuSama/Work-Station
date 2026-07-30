@@ -115,6 +115,8 @@ class StoredObject:
 
 
 class ObjectStore(Protocol):
+    def check_ready(self) -> None: ...
+
     def put(
         self,
         *,
@@ -271,6 +273,12 @@ class S3ObjectStore:
                 },
             ),
         )
+
+    def check_ready(self) -> None:
+        try:
+            self._client.head_bucket(Bucket=self.settings.bucket)
+        except (BotoCoreError, ClientError) as exc:
+            raise ObjectStoreError("object store readiness check failed") from exc
 
     def put(
         self,

@@ -32,6 +32,15 @@ class FakeS3Client:
         }
         self.deleted: list[dict[str, str]] = []
         self.fail_put = False
+        self.fail_ready = False
+
+    def head_bucket(self, **kwargs):
+        if self.fail_ready:
+            raise ClientError(
+                {"Error": {"Code": "403", "Message": "secret provider body"}},
+                "HeadBucket",
+            )
+        return {}
 
     def put_object(self, **kwargs):
         self.put_calls.append(kwargs)
@@ -217,6 +226,14 @@ class ObjectStoreTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertNotIn("test-secret", message)
         self.assertNotIn("secret provider body", message)
+
+        self.client.fail_ready = True
+        with self.assertRaisesRegex(
+            ObjectStoreError,
+            "^object store readiness check failed$",
+        ) as readiness:
+            self.store.check_ready()
+        self.assertNotIn("secret provider body", str(readiness.exception))
 
 
 if __name__ == "__main__":

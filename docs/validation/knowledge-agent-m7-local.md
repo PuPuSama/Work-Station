@@ -102,7 +102,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 457 tests；
+- 463 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -146,6 +146,25 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - 测试对象在 `finally` 中删除；
 - MinIO API/Console 仅绑定 `127.0.0.1:59000/59001`；
 - 此镜像只作为开发兼容目标，不代表生产供应商已选定。
+
+### 部署门禁单元测试
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_deployment_readiness -v
+```
+
+结果：
+
+- 6 tests（含真实 PostgreSQL Preflight Probe）；
+- 全部显式能力、数据库、S3 和恢复演练证明齐全时才返回 ready；
+- 当前缺少正式身份、路由 Scope、Task/Job 单写或 Worker 授权时 fail closed；
+- Alembic 不是 `20260730_0009` 时阻止发布；
+- 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
+- 数据库 URL、Embedding Key、S3 Key/Secret 和供应商错误正文不进入公开报告。
+
+当前 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 的预期结果仍是 no-go。本文没有把
+Runbook 的存在描述成“备份已完成”；真实恢复证据、RPO/RTO 和生产供应商待外部环境。
 
 ## 诊断记录
 

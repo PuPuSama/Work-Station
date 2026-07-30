@@ -17,7 +17,7 @@
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
 | M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
-| M7 | 进行中：A/B/C1-C2 与 D1 对象存储边界完成 | `docs/architecture/knowledge-agent-m7.md` |
+| M7 | 进行中：A/B/C1-C2、D1 与 D2 no-go 门禁底座完成 | `docs/architecture/knowledge-agent-m7.md` |
 
 ## M0：基线与接口边界
 
@@ -125,6 +125,8 @@
   Alembic 往返升级；
 - 已实现私有 S3 兼容 ObjectStore、内容寻址 Key、M2 ArtifactStore 适配、
   产品/知识资产授权上传和短期签名下载，并通过本地真实 S3 往返测试；
+- 已实现安全输出的部署 Preflight 和备份/恢复/轮换/回滚 Runbook；当前代码能力
+  门禁明确 no-go，真实恢复演练与生产供应商仍待确定；
 - 当前单密码 Cookie 不具备 User Identity，正式身份来源也尚未确定，因此尚未把
   RBAC 接入 `app.py`；
 - 后续按“正式身份映射与 API 授权覆盖 -> 服务器单写切换
