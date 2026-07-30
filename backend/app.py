@@ -12,7 +12,7 @@ from typing import Callable
 from urllib import parse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
@@ -213,6 +213,7 @@ from knowledge_agent.http import (
     _plan_response,
     router as knowledge_agent_router,
 )
+from knowledge_agent.security import require_knowledge_project_access
 from knowledge_agent.embedding import OpenAICompatibleEmbeddingProvider
 from knowledge_agent.retrieval_plan_generation import generate_retrieval_plan
 from knowledge_agent.research_chat import LlmResearchAnswerProvider
@@ -290,6 +291,27 @@ async def app_lifespan(application: FastAPI):
         )
         prune_expired_research_details(knowledge_runtime)
         application.state.knowledge_agent_runtime = knowledge_runtime
+    if server_mode:
+        # Server Mode must never start the portable SQLite queue or its
+        # workers. Project-scoped PostgreSQL runners will be wired separately
+        # after their Actor/Project reauthorization boundary is complete.
+        application.state.job_queue = None
+        application.state.batch_runner = None
+        application.state.batch_runners = ()
+        try:
+            yield
+        finally:
+            if knowledge_runtime is not None:
+                knowledge_runtime.close()
+            if server_engine is not None:
+                server_engine.dispose()
+            application.state.knowledge_agent_runtime = None
+            application.state.knowledge_research_enqueue = None
+            application.state.server_mode_enabled = previous_server_mode
+            application.state.server_request_security = (
+                previous_server_security
+            )
+        return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
     writing_runner = BatchJobRunner(
         queue,
@@ -484,9 +506,9 @@ _AUTH_PUBLIC_PATHS = {
 }
 
 
-def request_server_mode(request: Request) -> bool:
+def application_server_mode(application: FastAPI = app) -> bool:
     configured = getattr(
-        request.app.state,
+        application.state,
         "server_mode_enabled",
         None,
     )
@@ -495,6 +517,10 @@ def request_server_mode(request: Request) -> bool:
         if configured is None
         else bool(configured)
     )
+
+
+def request_server_mode(request: Request) -> bool:
+    return application_server_mode(request.app)
 
 
 @app.middleware("http")
@@ -690,6 +716,10 @@ def config():
 
 
 def store() -> TaskStore:
+    if application_server_mode():
+        raise RuntimeError(
+            "Global local TaskStore is unavailable in server mode."
+        )
     return TaskStore(config())
 
 
@@ -698,6 +728,10 @@ def prompt_store() -> ProjectPromptRepository:
 
 
 def batch_queue() -> JobQueue:
+    if application_server_mode():
+        raise RuntimeError(
+            "Global local JobQueue is unavailable in server mode."
+        )
     queue = getattr(app.state, "job_queue", None)
     expected_path = config().data_file.with_name("job_queue.sqlite3")
     if queue is None or queue.path != expected_path:
@@ -1010,6 +1044,7 @@ def read_task(task_id: str) -> TaskRecord:
     "/api/knowledge/{project}/tasks/{task_id}/retrieval-plan",
     response_model=RetrievalPlanResponse,
     status_code=201,
+    dependencies=[Depends(require_knowledge_project_access)],
 )
 def create_task_retrieval_plan(
     project: str,

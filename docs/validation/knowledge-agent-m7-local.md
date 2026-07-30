@@ -197,6 +197,10 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   `knowledge.edit`，只读对话/覆盖率等映射 `project.view`；
 - Server Mode 下 `/api/tasks` 等未迁移旧入口返回 503；
 - WordPress、私有上传、Research Start/Resume 和本地 Raw Artifact 暂不开放；
+- Server Mode 不创建 `job_queue.sqlite3`、不启动 SQLite Runner，直接调用全局
+  `store()/batch_queue()` 也会拒绝；
+- `app.py` 直接声明的 retrieval-plan 兼容路由同样先执行 401/403 授权门，随后因
+  仍依赖旧 TaskStore 而保持 503；
 - 旧 `APP_PASSWORD` 登录在 Server Mode 返回 503；
 - 真实 Lifespan 使用 PostgreSQL Engine 构建请求安全服务并正常清理；
 - Local Mode 原密码认证测试保持通过。
@@ -273,6 +277,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 对象下载服务底层已重新授权，但现有 Raw Artifact HTTP 路由仍是本地文件实现，
   因此 Server Mode 明确阻断；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
+- 上一条只适用于本地模式；Server Mode 已停止 SQLite Queue/Worker，但新的项目级
+  PostgreSQL Worker 仍未接线；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接和 no-go 部署门禁已实现；真实备份恢复演练

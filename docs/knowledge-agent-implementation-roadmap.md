@@ -129,6 +129,8 @@
   门禁明确 no-go，真实恢复演练与生产供应商仍待确定；
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
+- Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
+  调用 fail closed，但项目级 PostgreSQL Worker 尚未接线；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以

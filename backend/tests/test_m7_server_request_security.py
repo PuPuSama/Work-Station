@@ -151,6 +151,10 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/knowledge/{project}/sources/{source_id}/"
                 "snapshots/{snapshot_id}/raw",
             ),
+            (
+                "POST",
+                "/api/knowledge/{project}/tasks/{task_id}/retrieval-plan",
+            ),
         )
         for method, path in blocked_knowledge_routes:
             with self.subTest(method=method, path=path):
@@ -219,6 +223,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 client.get("/api/knowledge/example.com").status_code,
                 401,
             )
+            self.assertEqual(
+                client.post(
+                    "/api/knowledge/example.com/tasks/task-a/retrieval-plan"
+                ).status_code,
+                401,
+            )
             client.cookies.set(
                 SERVER_AUTH_COOKIE_NAME,
                 self.codec.create(self.actor),
@@ -235,6 +245,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 ).status_code,
                 403,
             )
+            self.assertEqual(
+                client.post(
+                    "/api/knowledge/example.com/tasks/task-a/retrieval-plan"
+                ).status_code,
+                403,
+            )
             repository.facts = ProjectAccessFacts(
                 organization_role="org_admin"
             )
@@ -242,6 +258,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 client.post(
                     "/api/knowledge/example.com/research-runs",
                     json={},
+                ).status_code,
+                503,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/knowledge/example.com/tasks/task-a/retrieval-plan"
                 ).status_code,
                 503,
             )
@@ -290,6 +312,27 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 )
                 self.assertEqual(client.get("/api/health").status_code, 200)
                 self.assertEqual(client.get("/api/tasks").status_code, 503)
+                self.assertIsNone(app_module.app.state.job_queue)
+                self.assertEqual(
+                    app_module.app.state.batch_runners,
+                    (),
+                )
+                self.assertFalse(
+                    (
+                        Path(directory)
+                        / "job_queue.sqlite3"
+                    ).exists()
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "TaskStore is unavailable",
+                ):
+                    app_module.store()
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "JobQueue is unavailable",
+                ):
+                    app_module.batch_queue()
                 status = client.get("/api/auth/status")
                 self.assertEqual(status.status_code, 200)
                 self.assertEqual(status.json()["data"]["mode"], "server")

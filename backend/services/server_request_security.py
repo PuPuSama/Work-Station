@@ -60,6 +60,11 @@ def server_knowledge_route_ready(method: str, route_path: str) -> bool:
         return False
     if normalized_path.endswith("/raw"):
         return False
+    if normalized_path.endswith("/retrieval-plan"):
+        # This compatibility route still reads the legacy global TaskStore.
+        # Keep it closed until it is backed by the authorized project-scoped
+        # PostgreSQL Task repository.
+        return False
     if (
         normalized_method == "POST"
         and (

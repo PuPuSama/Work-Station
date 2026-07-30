@@ -46,6 +46,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `project.view / knowledge.edit / knowledge.publish / knowledge.delete`；
 - Server Mode 下未完成 Scope 迁移的旧 API、研究队列、上传和原始对象下载 fail closed；
 - 真实 Lifespan 中独立构建服务器安全服务，本地模式仍沿用原单密码入口。
+- Server Mode 不构造、不启动便携版 SQLite JobQueue/Worker，且全局
+  `store()/batch_queue()` 直接拒绝调用；
+- `app.py` 中兼容性的 retrieval-plan 路由也显式进入 Knowledge 授权依赖，并在
+  PostgreSQL Task Scope 接线前保持 503；
 - Alembic `20260730_0010` 的供应商无关 External Identity 映射；
 - 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
 - Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke。
@@ -208,6 +212,7 @@ with engine.begin() as connection:
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先认证再查数据库 Role、项目规范化、未迁移路由 fail closed |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
+| `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -337,9 +342,10 @@ revision / position / record_updated_at
 
 Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运行时间、取消标记、Worker 和 Lease。只有 Lease 过期的 `running` Job 才可恢复；一个 Worker 不能提交另一个 Worker 已接管的结果。
 
-当前 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。虽然 Knowledge Router 已有可信
-`ActorIdentity + project_id`，旧 Article/Task/Batch 路由和 Worker 尚未全部携带该
-Scope，因此不允许用一个全局“默认项目”强行切换 PostgreSQL。
+本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
+SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
+但项目级 PostgreSQL Article/Task/Batch 路由和 Worker 尚未接线。因此不能用一个全局
+“默认项目”强行切换 PostgreSQL，也不能把“已停止旧 Worker”描述成“新 Worker 已就绪”。
 
 ### M7-D：对象存储与部署
 
