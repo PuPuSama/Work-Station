@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import PurePath
-from typing import Mapping
+from typing import Mapping, Protocol
 
 from ..artifact_store import ArtifactStore
 from ..assets import (
@@ -23,6 +23,18 @@ from ..interfaces import KnowledgeRepository
 from .chunking import ParsedDocumentChunker
 from .contracts import DocumentInput, ParsedDocument
 from .parsers import DocumentParserRouter
+
+
+class SnapshotLookup(Protocol):
+    def find_snapshot_by_content(
+        self,
+        *,
+        project_id: str,
+        source_id: str,
+        content_hash: str,
+        parser_name: str,
+        parser_version: str,
+    ) -> SourceSnapshot | None: ...
 
 
 def _snapshot_id(
@@ -108,12 +120,14 @@ class PrivateDocumentIngestionService:
         repository: KnowledgeRepository,
         asset_repository: KnowledgeAssetRepository,
         artifact_store: ArtifactStore,
+        snapshot_lookup: SnapshotLookup | None = None,
         parser_router: DocumentParserRouter | None = None,
         chunker: ParsedDocumentChunker | None = None,
     ) -> None:
         self._repository = repository
         self._asset_repository = asset_repository
         self._artifact_store = artifact_store
+        self._snapshot_lookup = snapshot_lookup
         self._parser_router = parser_router or DocumentParserRouter()
         self._chunker = chunker or ParsedDocumentChunker()
 
@@ -129,7 +143,22 @@ class PrivateDocumentIngestionService:
         fetched_at: datetime | None = None,
     ) -> IngestionResult:
         parsed = self._parser_router.parse(document_input)
-        snapshot_id = _snapshot_id(source_id=source_id, document=parsed)
+        existing_snapshot = (
+            None
+            if self._snapshot_lookup is None
+            else self._snapshot_lookup.find_snapshot_by_content(
+                project_id=project_id,
+                source_id=source_id,
+                content_hash=parsed.content_hash,
+                parser_name=parsed.parser_name,
+                parser_version=parsed.parser_version,
+            )
+        )
+        snapshot_id = (
+            existing_snapshot.snapshot_id
+            if existing_snapshot is not None
+            else _snapshot_id(source_id=source_id, document=parsed)
+        )
         chunks = self._chunker.chunk(
             project_id=project_id,
             source_id=source_id,
@@ -173,7 +202,7 @@ class PrivateDocumentIngestionService:
             public_source=False,
             metadata=source_metadata,
         )
-        snapshot = SourceSnapshot(
+        snapshot = existing_snapshot or SourceSnapshot(
             project_id=project_id,
             source_id=source_id,
             snapshot_id=snapshot_id,

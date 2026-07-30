@@ -189,6 +189,9 @@ from workflow.state_machine import (
     reset_for_full_rewrite,
     transition_task,
 )
+from knowledge_agent.http import router as knowledge_agent_router
+from knowledge_agent.runtime import create_knowledge_runtime
+from knowledge_agent.settings import load_knowledge_agent_settings
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -198,6 +201,20 @@ load_dotenv(ROOT_DIR / "backend" / ".env")
 @asynccontextmanager
 async def app_lifespan(application: FastAPI):
     cfg = config()
+    knowledge_runtime = None
+    application.state.knowledge_agent_runtime = None
+    if cfg.knowledge_agent_enabled:
+        knowledge_settings = load_knowledge_agent_settings(enabled=True)
+        knowledge_runtime = create_knowledge_runtime(
+            database_url=knowledge_settings.database_url or "",
+            artifact_root=Path(
+                os.environ.get(
+                    "ARTICLE_AGENT_KNOWLEDGE_ROOT",
+                    str(cfg.data_file.parent / "knowledge-agent"),
+                )
+            ),
+        )
+        application.state.knowledge_agent_runtime = knowledge_runtime
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
     writing_runner = BatchJobRunner(
         queue,
@@ -235,6 +252,9 @@ async def app_lifespan(application: FastAPI):
     finally:
         product_runner.stop()
         writing_runner.stop()
+        if knowledge_runtime is not None:
+            knowledge_runtime.close()
+        application.state.knowledge_agent_runtime = None
 
 
 app = FastAPI(
@@ -242,6 +262,7 @@ app = FastAPI(
     version="0.3.0",
     lifespan=app_lifespan,
 )
+app.include_router(knowledge_agent_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

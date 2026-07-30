@@ -5,6 +5,7 @@ import re
 from hashlib import sha256
 from pathlib import Path, PurePath
 from typing import Protocol, runtime_checkable
+from urllib.parse import unquote, urlsplit
 
 
 class ArtifactStoreError(RuntimeError):
@@ -141,3 +142,21 @@ class LocalKnowledgeArtifactStore:
             if temporary.exists():
                 temporary.unlink()
         return destination.as_uri()
+
+    def resolve_local_uri(self, uri: str) -> Path:
+        """Resolve a stored file URI while proving it remains under this store."""
+
+        parsed = urlsplit(uri)
+        if parsed.scheme.lower() != "file" or parsed.netloc not in {"", "localhost"}:
+            raise ArtifactStoreError("artifact URI is not a local file")
+        path_text = unquote(parsed.path)
+        if os.name == "nt" and re.match(r"^/[A-Za-z]:/", path_text):
+            path_text = path_text[1:]
+        candidate = Path(path_text).resolve()
+        try:
+            candidate.relative_to(self._root)
+        except ValueError as exc:
+            raise ArtifactStoreError("artifact URI escaped the configured root") from exc
+        if not candidate.is_file():
+            raise ArtifactStoreError("artifact file was not found")
+        return candidate

@@ -365,6 +365,59 @@ export type PublicConfig = {
   integrations?: {
     tavily_ready: boolean;
   };
+  features?: {
+    knowledge_agent_enabled: boolean;
+  };
+};
+
+export type KnowledgeSourceSummary = {
+  project_id: string;
+  source_id: string;
+  display_name: string;
+  source_kind: string;
+  trust_tier: string;
+  status: string;
+  canonical_url: string | null;
+  current_snapshot_id: string | null;
+  snapshot_count: number;
+  chunk_count: number;
+  asset_count: number;
+  latest_fetched_at: string | null;
+  classification_reason: string;
+  raw_evidence_url: string | null;
+};
+
+export type KnowledgeProductSummary = {
+  project_id: string;
+  product_id: string;
+  name: string;
+  status: string;
+  canonical_url: string | null;
+  category_path: string[];
+};
+
+export type KnowledgeLibrary = {
+  project_id: string;
+  source_count: number;
+  inbox_count: number;
+  published_count: number;
+  product_count: number;
+  confirmed_product_count: number;
+  asset_count: number;
+  sources: KnowledgeSourceSummary[];
+  products: KnowledgeProductSummary[];
+};
+
+export type KnowledgeUploadResult = {
+  project_id: string;
+  source_id: string;
+  snapshot_id: string;
+  status: string;
+  parser_name: string;
+  parser_version: string;
+  chunk_count: number;
+  asset_count: number;
+  message: string;
 };
 
 export type BatchOperation =

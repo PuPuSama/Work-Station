@@ -2,6 +2,7 @@
 
 import {
   ArrowLeft,
+  BookOpenText,
   FileText,
   Layers3,
   PackageCheck,
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
 import { ProjectJobCenter } from "@/components/project-job-center";
@@ -38,6 +40,8 @@ import {
   SidebarSeparator,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { apiGet } from "@/lib/api";
+import type { PublicConfig } from "@/types";
 
 type ProjectShellProps = {
   customer: string;
@@ -46,18 +50,36 @@ type ProjectShellProps = {
 
 const sectionNames = {
   articles: "文章任务",
+  knowledge: "知识库",
   batches: "批量处理",
   deliveries: "交付记录",
   settings: "项目设置",
 } as const;
 
 export function ProjectShell({ customer, children }: ProjectShellProps) {
+  const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
   const section = segments[2] as keyof typeof sectionNames | undefined;
   const isDetail =
     (section === "articles" || section === "batches") && segments.length > 3;
+
+  useEffect(() => {
+    let active = true;
+    void apiGet<PublicConfig>("/api/config")
+      .then((value) => {
+        if (active) {
+          setKnowledgeEnabled(Boolean(value.features?.knowledge_agent_enabled));
+        }
+      })
+      .catch(() => {
+        // Navigation remains on the stable M0 surface when config is unavailable.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const items = [
     {
@@ -67,6 +89,17 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
       icon: FileText,
       active: section === "articles",
     },
+    ...(knowledgeEnabled
+      ? [
+          {
+            label: "知识库",
+            description: "来源、产品与证据",
+            href: `${projectPath}/knowledge`,
+            icon: BookOpenText,
+            active: section === "knowledge",
+          },
+        ]
+      : []),
     {
       label: "批量处理",
       description: "批量生成与队列",

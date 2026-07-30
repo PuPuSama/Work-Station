@@ -77,6 +77,15 @@ from .catalog import (
     ProductConfirmationError,
     ProductSourceEvidence,
 )
+from .library import (
+    KnowledgeLibrarySummary,
+    KnowledgeSourceSummary,
+    PostgresKnowledgeLibrary,
+)
+from .runtime import (
+    KnowledgeAgentRuntime,
+    create_knowledge_runtime,
+)
 from .ingestion import (
     DocumentInput,
     DocumentParseError,
@@ -123,6 +132,7 @@ __all__ = [
     "EvidencePackRequest",
     "KnowledgeAgentConfigurationError",
     "KnowledgeAgentSettings",
+    "KnowledgeAgentRuntime",
     "KnowledgeAsset",
     "KnowledgeAssetConflictError",
     "KnowledgeAssetNotFound",
@@ -136,6 +146,8 @@ __all__ = [
     "KnowledgeRepositoryError",
     "KnowledgeRetriever",
     "KnowledgeSource",
+    "KnowledgeSourceSummary",
+    "KnowledgeLibrarySummary",
     "LocalKnowledgeArtifactStore",
     "KnowledgeProduct",
     "OpenAICompatibleEmbeddingProvider",
@@ -147,6 +159,7 @@ __all__ = [
     "PgVectorKnowledgeRetriever",
     "PostgresKnowledgeRepository",
     "PostgresKnowledgeAssetRepository",
+    "PostgresKnowledgeLibrary",
     "PostgresProductCatalogRepository",
     "PRODUCT_ASSET_ROLES",
     "PRODUCT_SOURCE_RELATIONS",
@@ -172,6 +185,7 @@ __all__ = [
     "UnsupportedDocumentError",
     "Vector",
     "create_knowledge_engine",
+    "create_knowledge_runtime",
     "block_identity",
     "default_document_parsers",
     "load_knowledge_agent_settings",

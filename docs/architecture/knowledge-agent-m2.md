@@ -40,6 +40,9 @@ M2 不实现混合检索、Evidence Pack、LangGraph、RBAC 或 S3。它们分�
 | `knowledge_agent.artifact_store` | 内容寻址地保存原始、规范化和图片文件 | 不决定发布状态、不保存业务元数据 |
 | `knowledge_agent.assets` | 按项目去重不可变资产，并关联来源快照 | 不选择文章首图、不生成图片向量 |
 | `knowledge_agent.catalog` | 保存稳定产品身份和不可变来源/图片证据 | 不执行网页抓取、不直接修改文章任务 |
+| `knowledge_agent.library` | 为知识库页面提供项目级只读汇总 | 不修改来源或产品状态 |
+| `knowledge_agent.http` | 暴露入库、列表、证据打开和产品确认路由 | 不包含 SQL、不绕过 Repository |
+| `knowledge_agent.runtime` | 组装长生命周期数据库和 Artifact Store 适配器 | 不创建或迁移 Schema |
 | `knowledge_agent.embedding` | 调用独立的 Embedding Provider | 不决定资料是否可信或可发布 |
 | `knowledge_agent.retriever` | 检索已发布的当前快照 | 不检索 Inbox 或未确认资料 |
 | 现有 `services.product_*` | 任务级产品发现、官网事实提取和图片候选选择 | 不是长期知识库的权威存储 |
@@ -50,8 +53,8 @@ M2 不实现混合检索、Evidence Pack、LangGraph、RBAC 或 S3。它们分�
 |---|---|
 | `knowledge_agent.ingestion.chunking` | 将规范化块稳定地转换为 `KnowledgeChunk` |
 | `knowledge_agent.ingestion.service` | 编排上传、哈希去重、解析、快照保存和待审状态 |
-| `/api/knowledge/...` | 提供项目级入库、审阅、发布和查询 API |
-| 前端 `/projects/[customer]/knowledge` | 展示来源、版本、分类理由、产品和图片证据 |
+| `/api/knowledge/...` 后续路由 | 提供来源审阅、Embedding 和发布动作 |
+| 前端知识库后续面板 | 提供分类修订、发布确认和 WordPress 同步 |
 
 ## 4. 规范化解析契约
 
@@ -160,7 +163,8 @@ M2 本地阶段使用项目级持久目录保存资产，URI 抽象为后续迁�
 | 2026-07-30 | 统一文档解析契约与轻量解析器 | 完成 | DOCX/PDF/Excel 路由与契约测试 |
 | 2026-07-30 | 稳定切块与私有文档入库编排 | 完成 | 同一输入重试得到同一快照/块身份，默认保持 Inbox |
 | 2026-07-30 | 产品与图片资产迁移 | 完成 | 复合 FK、哈希去重、快照证据、产品确认门禁测试 |
-| 待完成 | 私有文件 API 和审阅流 | 未开始 | 上传、解析摘要、确认、发布集成测试 |
+| 2026-07-30 | 私有文件 API 和知识库只读页 | 完成 | 上传、重复幂等、来源汇总、打开原文件和前端构建 |
+| 待完成 | 来源审阅、Embedding 和发布动作 | 未开始 | 确认分类后生成向量并原子激活 |
 | 待完成 | WordPress Site Probe | 未开始 | `www.qewitfastener.com` 分类理由与原始证据 |
 | 待完成 | 项目级知识库页面 | 未开始 | 运营人员可查看来源、版本、理由和原始证据 |
 
