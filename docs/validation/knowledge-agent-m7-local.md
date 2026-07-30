@@ -113,7 +113,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 485 tests；
+- 487 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -239,6 +239,26 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 返回 0 才表示该次冻结快照可进入下一门；返回 2 表示差异。报告后 SQLite 再发生
 任何写入都会使证据失效，CLI 本身不是同步器。
 
+### Server Project Task 只读 API
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security -v
+```
+
+结果：
+
+- 9 tests；
+- 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
+- Project A 的列表只返回 Project A 的 PostgreSQL Task；
+- 用 Project A 路径请求 Project B Task 返回 404，不跨 Scope 查找；
+- 旧 `/api/tasks` 在 Server Mode 继续返回 503；
+- POST 等尚未迁移的写方法不进入 Server Project Task 白名单；
+- Local Mode 不增加这组服务器专用 API；
+- 使用不存在的本地数据目录启动并读取后，该目录仍不存在，证明没有 SQLite/JSON 回退。
+
 ### External Identity 映射与交换
 
 ```powershell
@@ -273,7 +293,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 已有 Actor Session Codec 和供应商无关 Identity Mapping，但具体 IdP Token 验证与
   登录签发入口尚未接入；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
-  旧路由和 Worker 尚未接入；
+  旧路由和 Worker 尚未接入；另有新的项目级 PostgreSQL Task 只读接口，不代表旧路由
+  或写路径已经迁移；
 - 对象下载服务底层已重新授权，但现有 Raw Artifact HTTP 路由仍是本地文件实现，
   因此 Server Mode 明确阻断；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；

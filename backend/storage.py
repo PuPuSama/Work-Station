@@ -264,7 +264,8 @@ class TaskStore:
         legacy_import_enabled: bool = True,
     ):
         self.path = config.data_file
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if repository is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         local_repository = (
             SQLiteTaskRepository(self.path) if repository is None else None
         )

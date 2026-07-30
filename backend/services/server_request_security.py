@@ -79,7 +79,8 @@ def server_knowledge_route_ready(method: str, route_path: str) -> bool:
 def server_http_route_available(method: str, path: str) -> bool:
     """Fail closed around legacy routes until their project scope is wired."""
 
-    if method.strip().upper() == "OPTIONS":
+    normalized_method = method.strip().upper()
+    if normalized_method == "OPTIONS":
         return True
     normalized_path = "/" + path.strip().lstrip("/")
     if normalized_path in {
@@ -88,6 +89,16 @@ def server_http_route_available(method: str, path: str) -> bool:
         "/api/auth/login",
         "/api/auth/logout",
     }:
+        return True
+    parts = normalized_path.rstrip("/").split("/")
+    if (
+        normalized_method == "GET"
+        and len(parts) in {5, 6}
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "tasks"
+        and (len(parts) == 5 or bool(parts[5]))
+    ):
         return True
     return normalized_path.startswith("/api/knowledge/")
 

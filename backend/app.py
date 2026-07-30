@@ -171,6 +171,7 @@ from services.server_request_security import (
     ServerRequestUnauthenticated,
     server_http_route_available,
 )
+from services.server_project_tasks import ServerProjectTaskStoreFactory
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -222,6 +223,7 @@ from knowledge_agent.runtime import create_knowledge_runtime
 from knowledge_agent.research_graph import ResearchGraphRequest
 from knowledge_agent.research_runs import ResearchRunConflictError
 from knowledge_agent.settings import load_knowledge_agent_settings
+from server_project_http import router as server_project_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -242,9 +244,15 @@ async def app_lifespan(application: FastAPI):
         "server_request_security",
         None,
     )
+    previous_server_project_task_store_factory = getattr(
+        application.state,
+        "server_project_task_store_factory",
+        None,
+    )
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.server_request_security = None
+    application.state.server_project_task_store_factory = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -265,6 +273,9 @@ async def app_lifespan(application: FastAPI):
             access=ProjectAccessService(
                 PostgresProjectAccessRepository(server_engine)
             ),
+        )
+        application.state.server_project_task_store_factory = (
+            ServerProjectTaskStoreFactory(server_engine, cfg)
         )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
@@ -310,6 +321,9 @@ async def app_lifespan(application: FastAPI):
             application.state.server_mode_enabled = previous_server_mode
             application.state.server_request_security = (
                 previous_server_security
+            )
+            application.state.server_project_task_store_factory = (
+                previous_server_project_task_store_factory
             )
         return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
@@ -482,6 +496,9 @@ async def app_lifespan(application: FastAPI):
         application.state.knowledge_research_enqueue = None
         application.state.server_mode_enabled = previous_server_mode
         application.state.server_request_security = previous_server_security
+        application.state.server_project_task_store_factory = (
+            previous_server_project_task_store_factory
+        )
 
 
 app = FastAPI(
@@ -490,6 +507,7 @@ app = FastAPI(
     lifespan=app_lifespan,
 )
 app.include_router(knowledge_agent_router)
+app.include_router(server_project_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

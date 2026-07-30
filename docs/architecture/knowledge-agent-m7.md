@@ -50,6 +50,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `store()/batch_queue()` 直接拒绝调用；
 - `app.py` 中兼容性的 retrieval-plan 路由也显式进入 Knowledge 授权依赖，并在
   PostgreSQL Task Scope 接线前保持 503；
+- 新增只在 Server Mode 开放的
+  `GET /api/projects/{project}/tasks[/{task_id}]`，请求先按 `project.view`
+  重新授权，再读取固定 Organization/Project 的 PostgreSQL TaskStore；
+- Server Task 兼容适配器禁用 JSON/SQLite Legacy Import，构造时也不创建本地数据目录；
 - Alembic `20260730_0010` 的供应商无关 External Identity 映射；
 - 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
 - Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke。
@@ -215,6 +219,8 @@ with engine.begin() as connection:
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
+| `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
+| `backend/server_project_http.py` | Server Mode 项目级 Task 只读 API | 路径必须含 Project、每次请求查数据库权限、跨项目只返回 403/404 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
@@ -252,7 +258,8 @@ with engine.begin() as connection:
    返回 503，不会退回本地全局数据；
 5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run
    Start/Resume 和原始对象打开，在 Server Mode 单独返回 503；
-6. 逐一给项目列表、文章、对象下载和 Worker 增加项目 Scope 与权限依赖；
+6. Task 列表和单条读取已新增显式 Project Scope；继续给 Project 管理、文章写入、
+   Batch、对象下载和 Worker 增加 Scope 与权限依赖；
 7. 全部项目级入口覆盖前，不开放服务器登录；
 8. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
 
@@ -344,8 +351,14 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 
 本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
-但项目级 PostgreSQL Article/Task/Batch 路由和 Worker 尚未接线。因此不能用一个全局
-“默认项目”强行切换 PostgreSQL，也不能把“已停止旧 Worker”描述成“新 Worker 已就绪”。
+项目级 PostgreSQL Task 列表/单条读取已经接线，但 Article 写入、Batch 和 Worker 尚未
+接线。因此不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把“只读已接线”描述
+成“服务器单写已完成”，或把“已停止旧 Worker”描述成“新 Worker 已就绪”。
+
+当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
+PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化
+同进程内不同项目的兼容操作，后续重构可改成 Repository 原子命令，但必须保留 Revision
+CAS、扩展字段和项目 Scope。
 
 ### M7-D：对象存储与部署
 
