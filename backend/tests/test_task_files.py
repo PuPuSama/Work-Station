@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -14,10 +13,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 from config import load_config  # noqa: E402
 from models import TaskRecord  # noqa: E402
-from services import task_files  # noqa: E402
 from services.task_files import (  # noqa: E402
     TaskDirectoryError,
-    open_task_directory,
     resolve_task_directory,
 )
 
@@ -49,25 +46,6 @@ class TaskDirectoryTests(unittest.TestCase):
             cfg = replace(load_config(), output_root=Path(output))
             with self.assertRaises(TaskDirectoryError):
                 resolve_task_directory(cfg, task_for(Path(outside)))
-
-    def test_opens_only_the_resolved_task_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            task_dir = root / "topic_001"
-            task_dir.mkdir()
-            cfg = replace(load_config(), output_root=root)
-            with (
-                patch.object(task_files.sys, "platform", "win32"),
-                patch.dict(task_files.os.environ, {"WINDIR": r"C:\Windows"}),
-                patch.object(task_files.subprocess, "Popen") as popen,
-            ):
-                opened = open_task_directory(cfg, task_for(task_dir))
-            self.assertEqual(opened, task_dir.resolve())
-            popen.assert_called_once_with(
-                [r"C:\Windows\explorer.exe", str(task_dir.resolve())],
-                close_fds=True,
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

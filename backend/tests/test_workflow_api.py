@@ -1147,46 +1147,6 @@ class WorkflowApiTests(unittest.TestCase):
             self.assertIn("generate_article", payload["allowed_actions"])
             self.assertIn("confirm_initial_ai_check", payload["allowed_actions"])
 
-    def test_open_folder_uses_the_selected_tasks_validated_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            cfg = replace(
-                load_config(),
-                output_root=root,
-                data_file=root / "tasks.json",
-                knowledge_base=root / "knowledge",
-                topic_library=root / "topics",
-            )
-            task_dir = root / "customer" / "topic_001"
-            task_dir.mkdir(parents=True)
-            task = TaskRecord(
-                id="open-folder-test",
-                week_folder=cfg.current_week_folder,
-                customer="example.com",
-                topic_index=1,
-                topic="Example Buyer Guide",
-                task_dir=str(task_dir),
-                created_at="2026-07-10T00:00:00",
-                updated_at="2026-07-10T00:00:00",
-            )
-            TaskStore(cfg).save([task])
-
-            with (
-                patch.object(app_module, "config", return_value=cfg),
-                patch.object(
-                    app_module,
-                    "open_task_directory",
-                    return_value=task_dir,
-                ) as open_directory,
-            ):
-                client = TestClient(app_module.app)
-                response = client.post("/api/tasks/open-folder-test/open-folder")
-
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.json()["data"]["path"], str(task_dir))
-            open_directory.assert_called_once()
-            self.assertEqual(open_directory.call_args.args[1].id, task.id)
-
     def test_external_humanized_article_can_skip_initial_ai_check(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

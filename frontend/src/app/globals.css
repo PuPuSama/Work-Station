@@ -4,26 +4,34 @@
 :root {
   --font-app-sans: "Segoe UI", "Microsoft YaHei UI", Arial, sans-serif;
   --font-app-mono: Consolas, "Cascadia Mono", "Courier New", monospace;
-  --radius: 0.5rem;
-  --background: oklch(0.985 0.006 95);
-  --foreground: oklch(0.19 0.02 250);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.19 0.02 250);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.19 0.02 250);
-  --primary: oklch(0.42 0.11 170);
-  --primary-foreground: oklch(0.99 0.005 95);
-  --secondary: oklch(0.94 0.035 82);
-  --secondary-foreground: oklch(0.24 0.03 72);
-  --muted: oklch(0.94 0.012 250);
-  --muted-foreground: oklch(0.48 0.025 250);
-  --accent: oklch(0.93 0.03 205);
-  --accent-foreground: oklch(0.2 0.04 240);
-  --destructive: oklch(0.58 0.2 28);
-  --destructive-foreground: oklch(0.99 0.005 95);
-  --border: oklch(0.86 0.018 250);
-  --input: oklch(0.86 0.018 250);
-  --ring: oklch(0.55 0.1 170);
+  --radius: 0.625rem;
+  --background: #f8fafc;
+  --foreground: #020617;
+  --card: #ffffff;
+  --card-foreground: #020617;
+  --popover: #ffffff;
+  --popover-foreground: #020617;
+  --primary: #0369a1;
+  --primary-foreground: #ffffff;
+  --secondary: #e8ecf1;
+  --secondary-foreground: #0f172a;
+  --muted: #eef2f6;
+  --muted-foreground: #526078;
+  --accent: #e0f2fe;
+  --accent-foreground: #075985;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e2e8f0;
+  --input: #cbd5e1;
+  --ring: #0f172a;
+  --sidebar: #0f172a;
+  --sidebar-foreground: #e2e8f0;
+  --sidebar-primary: #0284c7;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1e293b;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #334155;
+  --sidebar-ring: #38bdf8;
 }
 
 @theme inline {
@@ -46,6 +54,14 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
   --font-sans: var(--font-app-sans);
   --font-mono: var(--font-app-mono);
   --radius-sm: calc(var(--radius) - 4px);
@@ -61,6 +77,7 @@
 body {
   background: var(--background);
   color: var(--foreground);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
 button {
@@ -69,4 +86,19 @@ button {
 
 button:disabled {
   cursor: default;
+}
+
+::selection {
+  background: color-mix(in oklch, var(--primary) 20%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

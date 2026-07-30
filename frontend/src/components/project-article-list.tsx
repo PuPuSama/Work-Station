@@ -2,12 +2,22 @@
 
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { AlertCircle, ArrowRight, Loader2, Plus, RefreshCw, Search, Sparkles } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+  ListFilter,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search,
+  Sparkles,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { ProjectNavigation } from "@/components/project-navigation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,6 +28,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -73,6 +84,8 @@ const QUICK_VIEWS: Array<{ value: QuickView; label: string }> = [
   { value: "completed", label: "已完成" },
 ];
 
+const PAGE_SIZE = 20;
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "未知错误";
 }
@@ -123,6 +136,7 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
   const [query, setQuery] = useState("");
   const [quickView, setQuickView] = useState<QuickView>("all");
   const [status, setStatus] = useState<"all" | WorkflowStatus>("all");
+  const [page, setPage] = useState(1);
   const [showDirectTitles, setShowDirectTitles] = useState(false);
   const [directTopic, setDirectTopic] = useState("");
   const [directInstruction, setDirectInstruction] = useState("");
@@ -191,14 +205,19 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
         .includes(normalized);
     });
   }, [query, quickView, status, tasks]);
+  const pageCount = Math.max(1, Math.ceil(filteredTasks.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const visibleTasks = filteredTasks.slice(
+    (currentPage - 1) * PAGE_SIZE,
+    currentPage * PAGE_SIZE,
+  );
 
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <div className="border-b bg-[color-mix(in_oklch,var(--background),var(--accent)_22%)]">
+      <div className="border-b bg-card">
         <div className="mx-auto grid max-w-[1480px] gap-4 px-5 py-5">
-          <ProjectNavigation customer={customer} />
           <div className="flex flex-col gap-1 px-1 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h1 className="text-xl font-semibold">文章任务</h1>
@@ -237,8 +256,9 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
           </Alert>
         )}
 
-        {showDirectTitles && (
-          <Card className="rounded-lg">
+        <Collapsible open={showDirectTitles}>
+          <CollapsibleContent>
+          <Card className="rounded-xl border-primary/20">
             <CardHeader className="border-b">
               <CardTitle>不使用 XLSX，直接生成 10 个标题</CardTitle>
               <CardDescription>
@@ -281,47 +301,86 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
               </div>
             </CardContent>
           </Card>
-        )}
+          </CollapsibleContent>
+        </Collapsible>
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-          {QUICK_VIEWS.map((view) => (
-            <button
-              key={view.value}
-              type="button"
-              onClick={() => setQuickView(view.value)}
-              className={cn(
-                "rounded-lg border bg-card px-3 py-2.5 text-left transition-colors hover:bg-accent/40",
-                quickView === view.value && "border-primary bg-accent/50 ring-1 ring-primary/20",
-              )}
-            >
-              <span className="block text-xs text-muted-foreground">{view.label}</span>
-              <span className="mt-0.5 block text-xl font-semibold">{counts[view.value]}</span>
-            </button>
-          ))}
-        </div>
+        <div className="grid items-start gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+          <Card className="gap-0 py-0 lg:sticky lg:top-[72px]">
+            <CardHeader className="border-b px-4 py-4">
+              <CardTitle className="flex items-center gap-2">
+                <ListFilter className="size-4 text-primary" />
+                工作队列
+              </CardTitle>
+              <CardDescription>按下一步动作定位文章</CardDescription>
+            </CardHeader>
+            <CardContent className="p-2">
+              <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-1">
+                {QUICK_VIEWS.map((view) => (
+                  <button
+                    key={view.value}
+                    type="button"
+                    onClick={() => {
+                      setQuickView(view.value);
+                      setPage(1);
+                    }}
+                    aria-current={quickView === view.value ? "page" : undefined}
+                    className={cn(
+                      "flex min-h-12 items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent/55",
+                      quickView === view.value &&
+                        "bg-primary text-primary-foreground hover:bg-primary/92",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "text-sm font-medium",
+                        quickView !== view.value && "text-foreground",
+                      )}
+                    >
+                      {view.label}
+                    </span>
+                    <span
+                      className={cn(
+                        "rounded-md bg-muted px-2 py-0.5 text-xs font-semibold tabular-nums text-muted-foreground",
+                        quickView === view.value &&
+                          "bg-primary-foreground/15 text-primary-foreground",
+                      )}
+                    >
+                      {counts[view.value]}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
 
-        <Card className="rounded-lg">
+        <Card className="min-w-0 gap-0 py-0">
           <CardHeader className="border-b">
             <CardTitle>任务列表</CardTitle>
             <CardDescription>
               “生成中 / 失败”当前依据任务错误记录筛选；后端未提供运行中字段时不会误报。
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-3">
+          <CardContent className="grid gap-3 py-4">
             <div className="flex flex-col gap-2 md:flex-row md:items-center">
               <div className="relative min-w-0 flex-1">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   className="pl-8"
                   value={query}
-                  onChange={(event) => setQuery(event.target.value)}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    setPage(1);
+                  }}
                   placeholder="搜索编号、话题、标题、产品"
                   aria-label="搜索文章任务"
                 />
               </div>
               <select
                 value={status}
-                onChange={(event) => setStatus(event.target.value as "all" | WorkflowStatus)}
+                onChange={(event) => {
+                  setStatus(event.target.value as "all" | WorkflowStatus);
+                  setPage(1);
+                }}
                 aria-label="按具体状态筛选"
                 className="h-8 rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
               >
@@ -350,7 +409,7 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredTasks.map((task) => {
+                  {visibleTasks.map((task) => {
                     const href = `${projectPath}/articles/${encodeURIComponent(task.id)}?step=${stepForStatus(task.status)}`;
                     return (
                       <TableRow key={task.id}>
@@ -409,8 +468,42 @@ export function ProjectArticleList({ customer }: ProjectArticleListProps) {
                 </TableBody>
               </Table>
             </div>
+
+            {!loading && filteredTasks.length > 0 && (
+              <div className="flex flex-col gap-2 border-t pt-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-muted-foreground">
+                  显示 {(currentPage - 1) * PAGE_SIZE + 1}–
+                  {Math.min(currentPage * PAGE_SIZE, filteredTasks.length)}，共{" "}
+                  {filteredTasks.length} 篇
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="mr-1 text-xs text-muted-foreground">
+                    {currentPage} / {pageCount}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setPage(Math.max(1, currentPage - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    <ChevronLeft />
+                    上一页
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setPage(Math.min(pageCount, currentPage + 1))}
+                    disabled={currentPage === pageCount}
+                  >
+                    下一页
+                    <ChevronRight />
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
+        </div>
       </div>
     </main>
   );

@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   ExternalLink,
   FileText,
-  FolderOpen,
   Loader2,
   Package,
   RefreshCw,
@@ -21,7 +20,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BatchOutlineReview } from "@/components/batch-outline-review";
 import { BatchTitleReview } from "@/components/batch-title-review";
-import { ProjectNavigation } from "@/components/project-navigation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,7 +45,6 @@ import {
 import { apiGet, apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
-  ApiMessage,
   BatchCreateResponse,
   BatchJobRecord,
   BatchOperation,
@@ -240,7 +237,6 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
   const [retryPending, setRetryPending] = useState<Set<string>>(new Set());
   const [titleReviewOpen, setTitleReviewOpen] = useState(false);
   const [outlineReviewOpen, setOutlineReviewOpen] = useState(false);
-  const [openFolderPending, setOpenFolderPending] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const batchUpdateKey = useRef("");
@@ -511,26 +507,10 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
     );
   }
 
-  async function openTaskFolder(task: TaskRecord) {
-    setOpenFolderPending(task.id);
-    setError("");
-    try {
-      const result = await apiPost<ApiMessage>(
-        `/api/tasks/${encodeURIComponent(task.id)}/open-folder`,
-      );
-      setMessage(result.message || `已打开 topic_${String(task.topic_index).padStart(3, "0")} 文件夹。`);
-    } catch (nextError) {
-      setError(errorMessage(nextError));
-    } finally {
-      setOpenFolderPending("");
-    }
-  }
-
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <div className="border-b bg-[color-mix(in_oklch,var(--background),var(--accent)_22%)]">
+      <div className="border-b bg-card">
         <div className="mx-auto grid max-w-[1500px] gap-4 px-5 py-5">
-          <ProjectNavigation customer={projectName} />
           <div className="flex flex-col gap-3 px-1 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <h1 className="text-xl font-semibold">批量生成中心</h1>
@@ -772,19 +752,6 @@ export function ProjectBatchCenter({ customer }: { customer: string }) {
                         </TableCell>
                         <TableCell>
                           <div className="flex justify-end gap-1">
-                            <Button
-                              size="xs"
-                              variant="outline"
-                              onClick={() => void openTaskFolder(task)}
-                              disabled={openFolderPending === task.id}
-                            >
-                              {openFolderPending === task.id ? (
-                                <Loader2 className="animate-spin" />
-                              ) : (
-                                <FolderOpen />
-                              )}
-                              文件夹
-                            </Button>
                             <Button
                               size="xs"
                               variant="ghost"

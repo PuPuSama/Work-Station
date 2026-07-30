@@ -8,11 +8,12 @@ from pathlib import Path
 import re
 from threading import Lock
 from typing import Callable
+from urllib import parse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
 
@@ -21,6 +22,7 @@ from models import (
     AICheck,
     AICheckUpdateRequest,
     ApiMessage,
+    AuthLoginRequest,
     ArticleImage,
     ArticleUpdateRequest,
     ArticleVersion,
@@ -51,6 +53,7 @@ from models import (
     PromptUpdateRequest,
     ProjectBrandUpdateRequest,
     ProjectContextUpdateRequest,
+    ProjectDomainUpdateRequest,
     RevisionedRequest,
     SelectTitleRequest,
     SeoReviewRequest,
@@ -120,6 +123,14 @@ from services.project_prompts import (
     PromptInUseError,
     PromptLibraryError,
 )
+from services.auth import (
+    AUTH_COOKIE_NAME,
+    DEFAULT_SESSION_SECONDS,
+    authentication_enabled,
+    create_session_token,
+    password_matches,
+    valid_session_token,
+)
 from services.llm_settings import LlmSettingsRepository
 from services.seo_review import (
     SeoReviewError,
@@ -141,7 +152,6 @@ from services.product_asset_pipeline import enrich_product_assets
 from services.product_crawler import recommend_products
 from services.tavily import TavilyClient
 from services.tdk import TdkGenerationError, export_tdk_docx, generate_tdk_metadata
-from services.task_files import TaskDirectoryError, open_task_directory
 from services.topics import TopicWorkbookError, scan_topic_library, store_topic_workbook
 from services.task_identity import article_source_key, normalized_customer
 from storage import (
@@ -239,6 +249,99 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_AUTH_PUBLIC_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/status",
+    "/api/health",
+}
+
+
+@app.middleware("http")
+async def require_application_password(request: Request, call_next):
+    if (
+        not authentication_enabled()
+        or request.method == "OPTIONS"
+        or request.url.path in _AUTH_PUBLIC_PATHS
+    ):
+        return await call_next(request)
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    if valid_session_token(token):
+        return await call_next(request)
+
+    response = JSONResponse(
+        status_code=401,
+        content={"detail": "Authentication required."},
+    )
+    origin = request.headers.get("origin", "")
+    if origin in {"http://localhost:3000", "http://127.0.0.1:3000"}:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
+def auth_cookie_secure(request: Request) -> bool:
+    configured = os.environ.get("APP_COOKIE_SECURE", "").strip().lower()
+    if configured in {"1", "true", "yes", "on"}:
+        return True
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    return request.url.scheme == "https" or forwarded_proto.split(",", 1)[0].strip() == "https"
+
+
+@app.get("/api/auth/status", response_model=ApiMessage)
+def auth_status(request: Request) -> ApiMessage:
+    enabled = authentication_enabled()
+    authenticated = not enabled or valid_session_token(
+        request.cookies.get(AUTH_COOKIE_NAME, "")
+    )
+    return ApiMessage(
+        message="Authentication status.",
+        data={"enabled": enabled, "authenticated": authenticated},
+    )
+
+
+@app.post("/api/auth/login", response_model=ApiMessage)
+def auth_login(request: Request, payload: AuthLoginRequest):
+    if not authentication_enabled():
+        return ApiMessage(
+            message="Password protection is not configured.",
+            data={"enabled": False, "authenticated": True},
+        )
+    if not password_matches(payload.password):
+        raise HTTPException(status_code=401, detail="密码错误。")
+    response = JSONResponse(
+        content={
+            "message": "登录成功。",
+            "data": {"enabled": True, "authenticated": True},
+        }
+    )
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=create_session_token(),
+        max_age=DEFAULT_SESSION_SECONDS,
+        httponly=True,
+        secure=auth_cookie_secure(request),
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout", response_model=ApiMessage)
+def auth_logout() -> JSONResponse:
+    response = JSONResponse(
+        content={
+            "message": "已退出登录。",
+            "data": {
+                "enabled": authentication_enabled(),
+                "authenticated": False,
+            },
+        }
+    )
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return response
+
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 _PRODUCT_PROCESSING_GUARD = Lock()
@@ -615,19 +718,6 @@ def read_task(task_id: str) -> TaskRecord:
     return expose_task(get_task_or_404(task_id))
 
 
-@app.post("/api/tasks/{task_id}/open-folder", response_model=ApiMessage)
-def open_task_folder(task_id: str) -> ApiMessage:
-    task = get_task_or_404(task_id)
-    try:
-        directory = open_task_directory(config(), task)
-    except TaskDirectoryError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return ApiMessage(
-        message="Task directory opened.",
-        data={"path": str(directory)},
-    )
-
-
 def append_version(task: TaskRecord, kind: str, content: str, source_kind: str = "") -> None:
     """Append a changed snapshot without duplicating the latest entry."""
 
@@ -701,6 +791,207 @@ def require_project(customer: str) -> None:
         for task in store().load()
     ):
         raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
+
+
+def normalized_project_domain(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("Project domain is required.")
+    parsed = parse.urlparse(raw if "://" in raw else f"https://{raw}")
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Project domain must use HTTP or HTTPS.")
+    if parsed.username or parsed.password:
+        raise ValueError("Project domain cannot contain credentials.")
+    try:
+        if parsed.port is not None:
+            raise ValueError("Project domain cannot contain a port.")
+    except ValueError as exc:
+        raise ValueError("Project domain contains an invalid port.") from exc
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("Enter only the domain, without a path, query, or fragment.")
+    hostname = (parsed.hostname or "").strip(".")
+    if not hostname:
+        raise ValueError("Project domain is invalid.")
+    try:
+        domain = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("Project domain contains invalid characters.") from exc
+    if len(domain) > 253 or "." not in domain:
+        raise ValueError("Project domain must be a complete website domain.")
+    labels = domain.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or re.fullmatch(r"[a-z0-9-]+", label) is None
+        for label in labels
+    ):
+        raise ValueError("Project domain contains an invalid domain label.")
+    return domain
+
+
+def project_rename_moves(
+    cfg,
+    customer: str,
+    new_customer: str,
+    tasks: list[TaskRecord],
+) -> list[tuple[Path, Path]]:
+    """Resolve project-owned directories/files before mutating any state."""
+
+    candidates: list[tuple[Path, Path]] = []
+    output_root = cfg.output_root.resolve()
+    project_roots: set[Path] = set()
+    for task in tasks:
+        task_path = Path(task.task_dir).resolve()
+        try:
+            relative = task_path.relative_to(output_root)
+        except ValueError:
+            continue
+        if len(relative.parts) >= 2:
+            project_roots.add(output_root / relative.parts[0])
+    if len(project_roots) > 1:
+        raise ValueError("Project tasks span multiple output directories; migration was stopped.")
+    for project_root in project_roots:
+        candidates.append((project_root, output_root / new_customer))
+
+    workbooks = [
+        workbook.resolve()
+        for workbook in cfg.topic_library.glob("*.xlsx")
+        if normalized_customer(workbook.stem) == normalized_customer(customer)
+    ]
+    if len(workbooks) > 1:
+        raise ValueError("Multiple topic workbooks match this project; migration was stopped.")
+    if workbooks:
+        candidates.append(
+            (workbooks[0], cfg.topic_library.resolve() / f"{new_customer}.xlsx")
+        )
+
+    if cfg.knowledge_base.exists():
+        knowledge_directories = [
+            directory.resolve()
+            for directory in cfg.knowledge_base.iterdir()
+            if directory.is_dir()
+            and normalized_customer(directory.name) == normalized_customer(customer)
+        ]
+        if len(knowledge_directories) > 1:
+            raise ValueError("Multiple knowledge folders match this project; migration was stopped.")
+        if knowledge_directories:
+            candidates.append(
+                (knowledge_directories[0], cfg.knowledge_base.resolve() / new_customer)
+            )
+
+    moves: list[tuple[Path, Path]] = []
+    for source, destination in candidates:
+        if not source.exists():
+            continue
+        if os.path.normcase(str(source)) == os.path.normcase(str(destination)):
+            continue
+        if destination.exists():
+            raise FileExistsError(f"Target path already exists: {destination}")
+        moves.append((source, destination))
+    return moves
+
+
+@app.put("/api/projects/{customer}/domain", response_model=ApiMessage)
+def update_project_domain(
+    customer: str,
+    request: ProjectDomainUpdateRequest,
+) -> ApiMessage:
+    try:
+        new_customer = normalized_project_domain(request.new_domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    task_store = store()
+    tasks = [
+        task
+        for task in task_store.load()
+        if normalized_customer(task.customer) == normalized_customer(customer)
+    ]
+    if not tasks:
+        raise HTTPException(status_code=404, detail=f"Project not found: {customer}")
+    if normalized_customer(customer) != normalized_customer(new_customer) and any(
+        normalized_customer(task.customer) == normalized_customer(new_customer)
+        for task in task_store.load()
+        if task.id not in {project_task.id for project_task in tasks}
+    ):
+        raise HTTPException(status_code=409, detail=f"Project already exists: {new_customer}")
+    active = batch_queue().active_task_ids(task.id for task in tasks)
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Wait for or cancel the project's active jobs before changing its domain.",
+        )
+
+    cfg = config()
+    try:
+        moves = project_rename_moves(cfg, customer, new_customer, tasks)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    moved: list[tuple[Path, Path]] = []
+    renamed_tasks: list[TaskRecord] = []
+    id_mapping: dict[str, str] = {}
+    prompts_renamed = False
+    queue_renamed = False
+    try:
+        for source, destination in moves:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(destination)
+            moved.append((destination, source))
+
+        renamed_tasks, id_mapping = task_store.rename_customer(
+            customer,
+            new_customer,
+            path_replacements=moves,
+        )
+        prompt_store().rename_customer(customer, new_customer)
+        prompts_renamed = True
+        batch_queue().rename_customer(customer, new_customer, id_mapping)
+        queue_renamed = True
+    except Exception as exc:
+        if queue_renamed:
+            batch_queue().rename_customer(
+                new_customer,
+                customer,
+                {new_id: old_id for old_id, new_id in id_mapping.items()},
+            )
+        if prompts_renamed:
+            prompt_store().rename_customer(new_customer, customer)
+        if renamed_tasks:
+            task_store.rename_customer(
+                new_customer,
+                customer,
+                path_replacements=[
+                    (destination, source)
+                    for source, destination in moves
+                ],
+            )
+        for source, destination in reversed(moved):
+            if source.exists() and not destination.exists():
+                source.replace(destination)
+        status_code = 409 if isinstance(exc, (FileExistsError, PromptLibraryError)) else 500
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"Project domain could not be changed: {exc}",
+        ) from exc
+
+    return ApiMessage(
+        message=(
+            f"项目域名已从 {customer} 更新为 {new_customer}。"
+            "任务、提示词、批次和项目目录已迁移；已生成正文中的旧链接未自动改写。"
+        ),
+        data={
+            "old_domain": customer,
+            "new_domain": new_customer,
+            "updated_tasks": len(renamed_tasks),
+            "task_id_mapping": id_mapping,
+            "moved_paths": [str(destination) for _, destination in moves],
+        },
+    )
 
 
 def archive_project_sources(cfg, customer: str, tasks: list[TaskRecord]) -> list[str]:

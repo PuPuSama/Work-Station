@@ -428,6 +428,89 @@ class TaskStore:
             )
             return len(matched)
 
+    def rename_customer(
+        self,
+        customer: str,
+        new_customer: str,
+        *,
+        path_replacements: Iterable[tuple[Path, Path]] = (),
+    ) -> tuple[list[TaskRecord], dict[str, str]]:
+        """Rename one project while preserving workflow history and file references."""
+
+        current_key = normalized_customer(customer)
+        new_key = normalized_customer(new_customer)
+        replacements = list(path_replacements)
+        with _TASK_STORE_LOCK:
+            tasks = self.load()
+            matched = [
+                task
+                for task in tasks
+                if normalized_customer(task.customer) == current_key
+            ]
+            if not matched:
+                raise KeyError(customer)
+            matched_ids = {task.id for task in matched}
+            if current_key != new_key and any(
+                normalized_customer(task.customer) == new_key
+                for task in tasks
+                if task.id not in matched_ids
+            ):
+                raise ValueError(f"Project already exists: {new_customer}")
+
+            updated_at = now_iso()
+            id_mapping: dict[str, str] = {}
+            renamed: list[TaskRecord] = []
+            for task in matched:
+                payload: Any = task.model_dump(mode="json")
+                for source, destination in replacements:
+                    payload = self._remap_history_paths(
+                        payload,
+                        source,
+                        destination,
+                    )
+                candidate = TaskRecord.model_validate(payload)
+                old_id = candidate.id
+                candidate.customer = new_customer
+                candidate.source_key = (
+                    f"manual:{article_source_key(new_customer, candidate.topic, candidate.topic_index)}"
+                    if candidate.source_kind == "manual"
+                    else article_source_key(
+                        new_customer,
+                        candidate.topic,
+                        candidate.topic_index,
+                    )
+                )
+                if candidate.source_kind != "manual":
+                    candidate.id = candidate.source_key[:12]
+                id_mapping[old_id] = candidate.id
+                candidate.revision += 1
+                candidate.updated_at = updated_at
+                renamed.append(candidate)
+
+            new_ids = [task.id for task in renamed]
+            if len(new_ids) != len(set(new_ids)):
+                raise ValueError("The new domain would create duplicate task identifiers.")
+            existing_ids = {task.id for task in tasks if task.id not in matched_ids}
+            collision = existing_ids.intersection(new_ids)
+            if collision:
+                raise ValueError(
+                    f"The new domain conflicts with existing task: {sorted(collision)[0]}"
+                )
+
+            for task in renamed:
+                if task.synced_from_task_id in id_mapping:
+                    task.synced_from_task_id = id_mapping[task.synced_from_task_id]
+
+            renamed_by_old_id = {
+                old.id: new for old, new in zip(matched, renamed, strict=True)
+            }
+            next_tasks = [
+                renamed_by_old_id.get(task.id, task)
+                for task in tasks
+            ]
+            self._write_records(next_tasks)
+            return renamed, id_mapping
+
     def delete_customer(self, customer: str) -> list[TaskRecord]:
         normalized = normalized_customer(customer)
         with _TASK_STORE_LOCK:

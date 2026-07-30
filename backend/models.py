@@ -440,6 +440,14 @@ class ProjectBrandUpdateRequest(WorkflowModel):
     brand_name: str = Field(default="", max_length=120)
 
 
+class ProjectDomainUpdateRequest(WorkflowModel):
+    new_domain: str = Field(min_length=1, max_length=253)
+
+
+class AuthLoginRequest(WorkflowModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
 class ProjectContextUpdateRequest(WorkflowModel):
     project_introduction: str = Field(default="", max_length=30000)
     project_notes: str = Field(default="", max_length=30000)

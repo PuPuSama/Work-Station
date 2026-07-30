@@ -27,6 +27,8 @@ services:
       dockerfile: frontend/Dockerfile
     container_name: article-frontend
     restart: unless-stopped
+    env_file:
+      - ${ARTICLE_ENV_FILE:-.env}
     depends_on:
       backend:
         condition: service_healthy

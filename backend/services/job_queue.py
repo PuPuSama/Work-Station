@@ -177,6 +177,47 @@ class JobQueue:
                     batch_ids,
                 )
 
+    def rename_customer(
+        self,
+        customer: str,
+        new_customer: str,
+        task_id_mapping: dict[str, str],
+    ) -> None:
+        if not task_id_mapping:
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            old_ids = list(task_id_mapping)
+            placeholders = ",".join("?" for _ in old_ids)
+            batch_ids = [
+                str(row["batch_id"])
+                for row in connection.execute(
+                    f"SELECT DISTINCT batch_id FROM jobs WHERE task_id IN ({placeholders})",
+                    old_ids,
+                ).fetchall()
+            ]
+            for old_id, new_id in task_id_mapping.items():
+                connection.execute(
+                    """UPDATE jobs
+                       SET task_id = ?, customer = ?, updated_at = ?
+                       WHERE task_id = ?""",
+                    (new_id, new_customer, _now_iso(), old_id),
+                )
+            if batch_ids:
+                batch_placeholders = ",".join("?" for _ in batch_ids)
+                connection.execute(
+                    f"""UPDATE batches
+                        SET customer = ?, updated_at = ?
+                        WHERE id IN ({batch_placeholders})""",
+                    (new_customer, _now_iso(), *batch_ids),
+                )
+            connection.execute(
+                """UPDATE batches
+                   SET customer = ?, updated_at = ?
+                   WHERE customer = ?""",
+                (new_customer, _now_iso(), customer),
+            )
+
     def create_batch(
         self,
         operation: str,

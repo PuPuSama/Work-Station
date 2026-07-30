@@ -12,7 +12,6 @@ import {
   operationLabel,
   operationStep,
 } from "@/components/project-batch-center";
-import { ProjectNavigation } from "@/components/project-navigation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -113,7 +112,6 @@ export function ProjectBatchDetail({ customer, batchId }: ProjectBatchDetailProp
 
   return (
     <main className="mx-auto grid min-h-screen w-full max-w-[1680px] gap-4 p-4 xl:p-6">
-      <ProjectNavigation customer={customer} />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>

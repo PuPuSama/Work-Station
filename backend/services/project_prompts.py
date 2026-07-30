@@ -312,6 +312,36 @@ class ProjectPromptRepository:
                 (normalized_customer(customer), prompt_id),
             )
 
+    def rename_customer(self, customer: str, new_customer: str) -> None:
+        current_key = normalized_customer(customer)
+        new_key = normalized_customer(new_customer)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if current_key != new_key:
+                conflict = connection.execute(
+                    """SELECT 1 FROM project_prompts WHERE customer_key = ?
+                       UNION ALL
+                       SELECT 1 FROM project_prompt_defaults WHERE customer_key = ?
+                       LIMIT 1""",
+                    (new_key, new_key),
+                ).fetchone()
+                if conflict:
+                    raise PromptLibraryError(
+                        f"Project prompts already exist for {new_customer}."
+                    )
+            connection.execute(
+                """UPDATE project_prompts
+                   SET customer_key = ?, customer = ?
+                   WHERE customer_key = ?""",
+                (new_key, new_customer, current_key),
+            )
+            connection.execute(
+                """UPDATE project_prompt_defaults
+                   SET customer_key = ?, customer = ?
+                   WHERE customer_key = ?""",
+                (new_key, new_customer, current_key),
+            )
+
     def delete_customer(self, customer: str) -> None:
         key = normalized_customer(customer)
         with self._connection() as connection:
