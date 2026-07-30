@@ -111,8 +111,15 @@ class ArticleImage(WorkflowModel):
 
     id: str = ""
     role: str = "product"
+    # Local mode uses paths. Server mode keeps immutable object identities and
+    # leaves both path fields empty so private storage is never bypassed.
     source_path: str = ""
     prepared_path: str = ""
+    source_asset_id: str = ""
+    prepared_asset_id: str = ""
+    prepared_content_hash: str = ""
+    width: int | None = None
+    height: int | None = None
     filename: str = ""
     marker: str = ""
     product_name: str = ""
@@ -120,6 +127,10 @@ class ArticleImage(WorkflowModel):
     anchor_heading: str = ""
     anchor_text: str = ""
     anchor_after: str = ""
+    # Placement diagnostics are persisted explicitly so a later rendering
+    # refactor can reproduce why a product image was attached to this block.
+    anchor_line: int | None = None
+    anchor_match: str = ""
     status: str = "pending"
     error: str = ""
 

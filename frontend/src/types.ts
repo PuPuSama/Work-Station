@@ -74,10 +74,17 @@ export type ArticleImage = {
   id: string;
   source_path: string;
   prepared_path: string;
+  source_asset_id?: string;
+  prepared_asset_id?: string;
+  prepared_content_hash?: string;
+  width?: number | null;
+  height?: number | null;
   role: "hero" | "product" | string;
   anchor_heading: string;
   anchor_text?: string;
   anchor_after?: string;
+  anchor_line?: number | null;
+  anchor_match?: string;
   filename: string;
   marker: string;
   product_name?: string;

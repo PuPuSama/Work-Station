@@ -66,6 +66,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Current Snapshot 主详情证据的产品，再用 Revision CAS 替换 Task 产品快照；
 - Server 产品投影不接受客户端上传的名称、URL、事实或图片地址；图片只复制稳定
   `asset_id`，不复制对象 URI、源站 URL 或本地路径；
+- 新增第四个 PostgreSQL-only 受限 Task 写操作
+  `POST /api/projects/{project}/tasks/{task_id}/prepare-images`：请求只接受 Revision、
+  一个项目内 Hero Asset ID 和可选的 Product ID -> Heading 人工锚点；产品图只读取
+  Task 已保存的 `selected_asset_id`，重新授权读取私有原图，在内存中验证并生成
+  内容寻址 WebP，再用 Revision CAS 保存资产引用和锚点；
 - 新增第三个 PostgreSQL-only 受限 Task 写操作
   `PUT /api/projects/{project}/tasks/{task_id}/article/sections`：只接受当前 Revision、
   唯一 Heading Path 和已审阅的 Replacement Body；在同一次 Task CAS 中保存修改前/
@@ -282,6 +287,7 @@ with engine.begin() as connection:
 | `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
 | `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
 | `backend/knowledge_agent/object_storage.py` | M2 资产接入 S3 及授权后的知识对象服务 | 解析器适配与权限分离、下载重新授权、数据库只存 URI/证据 |
+| `backend/services/server_article_images.py` | Server 私有原图到文章 WebP 引用的准备服务 | 不使用 Task 本地路径、原图完整性复核、三图上限、视觉去重、锚点先于对象写入 |
 | `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
 | `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 非零即停止发布、备份恢复只能显式证明 |
 | `docs/runbooks/knowledge-agent-m7-server-cutover.md` | 备份、恢复、轮换、发布和回滚操作准源 | 新实例恢复、跨系统恢复点、禁止默认 Actor/Project |
@@ -562,10 +568,46 @@ organizations/{organization_id}/projects/{project_id}/...
 稳定顺序选出与产品选择投影相同的 Published Current Snapshot 首张图片，并把当前证据中的去重图片数保存为
 `asset_count`；没有图片时保留产品但标记 `asset_status=missing`，不伪造占位 URL。
 
+#### D1.1 已实现：Server 文章图片派生
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/prepare-images
+body: { revision, hero_asset_id, product_anchors? }
+  -> project.view + article.edit
+  -> Revision 预检 + ACTION_PREPARE_IMAGES
+  -> Hero 使用请求中的项目 Asset ID
+  -> Product 只使用 Task Product.selected_asset_id
+  -> Object Service 再次检查 article.edit
+  -> Bucket + Organization/Project Key 前缀
+  -> 字节数 + SHA-256 与 knowledge_assets 一致
+  -> Pillow 验证、EXIF 方向校正、首帧、像素门禁
+  -> 内存生成确定性 WebP
+  -> SHA-256 + dHash/RMS 视觉去重；含 Hero 最多三张
+  -> 自动产品锚点；失败时返回 H2/H3 候选且不写派生对象
+  -> 可选 Product ID -> Heading 人工锚点
+  -> 内容寻址私有对象 + knowledge_assets 派生记录
+  -> Task ArticleImage(source_asset_id, prepared_asset_id, hash, dimensions, anchor)
+  -> 路径字段保持空；Revision CAS
+```
+
+Task 不接收客户端提交的产品图片 Asset ID，避免把任意项目图片冒充已确认产品图。
+人工锚点只允许引用 Task 当前已选择的 Product ID；不存在、空值或未选择 Product 一律
+拒绝。未解析锚点时先返回当前文章的非 FAQ H2/H3 候选，所有锚点通过后才上传派生
+WebP。若上传后发生并发 Revision 冲突，可能留下未引用但内容寻址的可复用派生对象，
+仍由下述 orphan 对账处理，不能在请求失败时立即删除。
+
+Server `ArticleImage` 只保存源/派生 `asset_id`、派生哈希、尺寸、文件名 Marker 和文章
+锚点；`source_path/prepared_path` 固定为空。展示继续通过授权后的短期下载 URL。现有
+本地模式仍使用文件路径，不受这一 Server 契约影响。Server DOCX/交付对象化尚未迁移，
+因此本操作完成不代表全部文章写路由或 `postgres_task_single_write` 已完成。
+派生资产可能被多篇文章按内容复用，所以来源图、产品、文章角色和锚点只属于
+`ArticleImage` 关系，不写入共享 `knowledge_assets.metadata`；共享元数据只记录
+`derivative_kind` 与由字节确定的感知哈希。
+
 正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
-在签名前再校验一次，并签发最长一小时的临时下载 URL。上传要求
-`knowledge.edit`。S3 Key 和数据库查询同时锁定 Organization/Project，任一层
-Scope 不一致都拒绝。
+在签名前再校验一次，并签发最长一小时的临时下载 URL。知识源上传要求
+`knowledge.edit`，文章派生写入要求 `article.edit`。S3 Key 和数据库查询同时锁定
+Organization/Project，任一层 Scope 不一致都拒绝。
 
 现有 M2 解析器不感知 boto3。`ScopedS3ArtifactStore` 实现原来的
 `ArtifactStore.put()`，并在构造时固定 Organization/Project；后期替换存储供应商时，
@@ -593,7 +635,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-正式身份代码链和私有下载已接线；全部项目写路由、Task/Job 单写和通用 Worker
+身份代码链和私有下载已接线；全部项目写路由、Task/Job 单写和通用 Worker
 重新授权仍未接线，所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力
 标成通过。
 
@@ -621,11 +663,15 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 15. Server 产品替换是否仍只接受 Product ID，并只投影 Confirmed + Published Current
     Snapshot 证据，而不信任客户端产品字段？
 16. Task 是否只保存 `asset_id`，且图片展示仍通过重新授权的短期下载 URL？
-17. 章节重写是否仍按唯一 Heading Path 限制作用域，并拒绝同级/更高级标题注入？
-18. 修改前后 ArticleVersion、下游失效和 Task CAS 是否仍属于同一个 PostgreSQL Task
+17. Server 图片准备是否仍只从 Hero 项目资产和 Task 已选择的 Product Asset 读取，
+    并在派生前复核私有对象 Scope、字节数和 SHA-256？
+18. 锚点失败时是否仍在上传派生对象前停止，人工锚点是否只能绑定当前 Task Product？
+19. `ArticleImage` 是否仍保持 Server Asset 引用与本地 Path 两种模式显式分离？
+20. 章节重写是否仍按唯一 Heading Path 限制作用域，并拒绝同级/更高级标题注入？
+21. 修改前后 ArticleVersion、下游失效和 Task CAS 是否仍属于同一个 PostgreSQL Task
     写入，而非先写文件再更新数据库？
-19. 后续 LLM 是否仍只生成候选 Section Body，而不能绕过本命令覆盖整篇文章？
-20. 产品重新发现是否仍固定 Organization/Project/Requester，并在 Claim 与 Handler
+22. 后续 LLM 是否仍只生成候选 Section Body，而不能绕过本命令覆盖整篇文章？
+23. 产品重新发现是否仍固定 Organization/Project/Requester，并在 Claim 与 Handler
     两个阶段重新检查 `knowledge.edit`？
-21. 重新发现失败、撤权或取消时，旧 Task 产品和已发布快照是否仍继续服务？
-22. 产品抓取是否仍只写项目绑定的 S3 与不可变 Inbox 证据，且不回退到本地文件？
+24. 重新发现失败、撤权或取消时，旧 Task 产品和已发布快照是否仍继续服务？
+25. 产品抓取是否仍只写项目绑定的 S3 与不可变 Inbox 证据，且不回退到本地文件？

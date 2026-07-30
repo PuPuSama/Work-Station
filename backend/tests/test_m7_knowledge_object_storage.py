@@ -15,6 +15,7 @@ from knowledge_agent.assets import (  # noqa: E402
     KnowledgeAssetConflictError,
 )
 from knowledge_agent.object_storage import (  # noqa: E402
+    KnowledgeObjectIntegrityError,
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
     ScopedS3ArtifactStore,
@@ -41,11 +42,13 @@ class FakeStore:
     def __init__(self) -> None:
         self.put_calls: list[dict[str, object]] = []
         self.signed: list[tuple[str, int]] = []
+        self.objects: dict[str, bytes] = {}
 
     def check_ready(self):
         return None
 
     def put(self, *, key, data, content_type, metadata=None):
+        self.objects[key] = bytes(data)
         self.put_calls.append(
             {
                 "key": key,
@@ -63,7 +66,7 @@ class FakeStore:
         )
 
     def get(self, key, *, max_bytes):
-        raise AssertionError("not used")
+        return self.objects[key][: max_bytes + 1]
 
     def create_download_url(self, key, *, expires_seconds):
         self.signed.append((key, expires_seconds))
@@ -105,7 +108,9 @@ class FakeAssetRepository:
 class KnowledgeObjectStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.actor = ActorIdentity("org-a", "editor")
-        self.access = FakeAccess({"knowledge.edit", "project.view"})
+        self.access = FakeAccess(
+            {"knowledge.edit", "article.edit", "project.view"}
+        )
         self.store = FakeStore()
         self.repository = FakeAssetRepository()
         self.service = ProjectKnowledgeObjectService(
@@ -162,6 +167,33 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
                 content_type="image/webp",
             )
 
+        self.repository.assets[("project-a", "product-image-1")] = (
+            KnowledgeAsset(
+                project_id="project-a",
+                asset_id="product-image-1",
+                content_hash=stored.content_hash,
+                artifact_uri=(
+                    "s3://private-bucket/organizations/org-b/"
+                    "projects/project-a/blobs/00/mismatched"
+                ),
+                content_type=stored.content_type,
+                byte_size=stored.byte_size,
+                width=stored.width,
+                height=stored.height,
+            )
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.upload(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id="product-image-1",
+                data=b"image",
+                content_type="image/webp",
+            )
+
     def test_download_reauthorizes_and_rejects_mismatched_key_scope(self) -> None:
         asset = self.service.upload(
             actor=self.actor,
@@ -199,6 +231,65 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
                 actor=self.actor,
                 project_id="project-a",
                 asset_id="bad-scope",
+            )
+
+    def test_article_read_and_derivative_reauthorize_and_verify_bytes(
+        self,
+    ) -> None:
+        source = self.service.upload(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="source-image",
+            data=b"source-image-bytes",
+            content_type="image/png",
+            width=320,
+            height=240,
+        )
+
+        loaded = self.service.read_for_article_edit(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id=source.asset_id,
+            max_bytes=1024,
+        )
+
+        self.assertEqual(loaded.asset, source)
+        self.assertEqual(loaded.data, b"source-image-bytes")
+        self.assertEqual(self.access.calls[-1][2], "article.edit")
+
+        derived = self.service.upload_article_derivative(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="derived-webp",
+            data=b"derived-webp-bytes",
+            width=320,
+            height=240,
+            metadata={"difference_hash": "0000000000000000"},
+        )
+        self.assertEqual(derived.content_type, "image/webp")
+        self.assertEqual(
+            derived.metadata["derivative_kind"],
+            "article_image_webp",
+        )
+        self.assertEqual(
+            derived.metadata["difference_hash"],
+            "0000000000000000",
+        )
+        self.assertNotIn("source_asset_id", derived.metadata)
+        self.assertNotIn("article_image_role", derived.metadata)
+        self.assertEqual(self.access.calls[-1][2], "article.edit")
+
+        source_key = str(source.metadata["object_key"])
+        self.store.objects[source_key] = b"corrupted"
+        with self.assertRaisesRegex(
+            KnowledgeObjectIntegrityError,
+            "integrity verification failed",
+        ):
+            self.service.read_for_article_edit(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=source.asset_id,
+                max_bytes=1024,
             )
 
     def test_denied_actor_never_touches_store_or_repository(self) -> None:

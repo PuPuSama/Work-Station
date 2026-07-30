@@ -206,6 +206,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/auth/oidc/callback",
             )
         )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/projects/project-a/tasks/task-a/prepare-images",
+            )
+        )
         self.assertFalse(
             server_http_route_available(
                 "POST",

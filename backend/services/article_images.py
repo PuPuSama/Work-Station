@@ -366,6 +366,22 @@ def _match_product_override(product: object, overrides: list[object], used: set[
     return None
 
 
+def find_product_image_anchor(
+    markdown: str,
+    product_name: str,
+    product_url: str,
+    override: object | None = None,
+) -> tuple[int, str, str, str] | None:
+    """Resolve one product anchor without requiring a local image path."""
+
+    return _find_product_anchor(
+        markdown,
+        product_name,
+        product_url,
+        override,
+    )
+
+
 def _resolve_source(source: str | Path, task_dir: Path) -> Path:
     raw = Path(str(source)).expanduser()
     if raw.is_absolute():
@@ -866,6 +882,12 @@ def _has_transition_before_first_h2(markdown: str) -> tuple[int, int]:
     raise ArticleImageError(
         "H1 与第一个 H2 之间没有过渡段。请先生成并确认过渡段，再准备首图。"
     )
+
+
+def validate_hero_image_placement(markdown: str) -> None:
+    """Validate the structural slot used by both local and server images."""
+
+    _has_transition_before_first_h2(markdown)
 
 
 def resolve_image_placements(markdown: str, images: Iterable[object]) -> list[ImagePlacement]:

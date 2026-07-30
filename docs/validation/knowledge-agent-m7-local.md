@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 512 tests；
+- 518 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -160,6 +160,36 @@ $env:ARTICLE_AGENT_CONFIG = `
 - Object Store Key/Secret 不复用 LLM/Embedding Secret，`repr` 和稳定异常不泄露；
 - 上传要求 `knowledge.edit`，下载重新要求 `project.view`；
 - 数据库资产 URI 的 Bucket 或 Organization/Project 前缀不匹配时不签名。
+
+### Server 私有文章图片派生
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_article_images `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security -v
+```
+
+结果：
+
+- 25 tests，使用确定性内存图片和真实 PostgreSQL，不调用外部图片或模型服务；
+- Hero 使用请求中的项目 Asset ID；产品图只能来自 Task 当前
+  `Product.selected_asset_id`，客户端不能替换为任意项目图片；
+- 源对象读取再次要求 `article.edit`，并验证 Bucket、Organization/Project Key、
+  Byte Size 和 SHA-256；幂等写入命中已有资产时也重新验证 Key Scope；
+- Pillow 在内存完成格式验证、EXIF 方向校正、动画首帧、像素门禁和确定性 WebP 派生，
+  不创建本地图片目录；
+- SHA-256 精确去重和 dHash + RGB RMS 视觉近重复门禁生效，含 Hero 最多三张；
+- 自动锚点沿用最小 H2/H3 文章块规则；未解析时返回非 FAQ 候选且零派生上传，人工锚点
+  只能引用当前 Task Product ID；
+- 成功 Task 只保存 `source_asset_id`、`prepared_asset_id`、派生哈希、尺寸、Marker、
+  `anchor_line/anchor_match` 等可重构诊断，两个 Path 为空且不泄露对象 URI；
+- 共享派生资产元数据不保存文章角色、产品或来源关系，避免内容去重复用后残留第一次
+  使用者的关系；这些关系只保存在 Task `ArticleImage`；
+- Viewer 返回 403；旧 Revision 在对象读取前返回 409；派生对象仍经授权下载路由访问；
+- Server DOCX/Delivery 对象化、派生 orphan 对账和该写操作的事务内 Audit 尚未完成。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
 一次性随机开发凭据和专用 `article-agent-test-*` Bucket。由于该本地 MinIO
@@ -314,9 +344,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 正常资产只返回 30–3600 秒的签名 URL；缺失资产、伪造为另一 Organization Key 的
   URI 返回 404，跨项目请求返回 403；
 - 旧 `/api/tasks` 在 Server Mode 继续返回 503；
-- 原计划三条受限操作均有精确白名单：“重新发现产品”“选择已确认产品”和
-  “快照后替换一个已审阅章节”；“完全重写”是额外迁移入口，尚未迁移的其他
-  POST/PUT 写方法不进入 Server Project Task 白名单；
+- 四条受限操作均有精确白名单：“重新发现产品”“选择已确认产品”
+  “快照后替换一个已审阅章节”和“准备私有文章图片”；“完全重写”是额外迁移入口，
+  尚未迁移的其他 POST/PUT 写方法不进入 Server Project Task 白名单；
 - “完全重写”要求 `article.edit`；Viewer 返回 403，Editor 成功后 PostgreSQL Revision
   从 0 增至 1，重复提交旧 Revision 返回 409；
 - 产品替换请求只接受 Revision 和 1–3 个 Product ID，额外的客户端产品字段返回 422；
@@ -326,6 +356,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   Evidence 的 `selection_projection v1`，不会带入刷新后的名称、URL 或事实；
 - Task 不保存 S3 URI、源站图片 URL 或本地图片路径；重复 Product ID 返回 422，旧
   Revision 返回 409；
+- 图片准备只接收 Hero Asset ID 和可选产品锚点；产品图固定读取 Task 已选择 Asset，
+  派生 WebP 与视觉去重在内存完成，锚点未解析时不写对象，成功后只保存 Asset 引用；
 - 章节重写仅接受 Revision、Heading Path 和 Replacement Body；Viewer 返回 403；
 - Fence-aware Parser 忽略代码块中的 Heading，目标不存在/重复以及同级或更高级标题
   注入均拒绝；

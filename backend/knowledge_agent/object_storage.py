@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import unquote, urlsplit
 
 from services.access_control import ActorIdentity, ProjectAccessService
 from services.object_store import (
     ObjectStore,
+    ObjectStoreError,
+    ObjectTooLarge,
     ProjectObjectUploader,
 )
 
@@ -20,6 +23,18 @@ from .assets import (
 
 class KnowledgeObjectNotFound(LookupError):
     """Generic missing object error after project authorization succeeds."""
+
+
+class KnowledgeObjectIntegrityError(ObjectStoreError):
+    """Stored bytes no longer match their immutable database identity."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectKnowledgeObject:
+    """Authorized immutable asset bytes plus their persisted identity."""
+
+    asset: KnowledgeAsset
+    data: bytes
 
 
 class ScopedS3ArtifactStore:
@@ -114,6 +129,60 @@ class ProjectKnowledgeObjectService:
         metadata: Mapping[str, object] | None = None,
     ) -> KnowledgeAsset:
         self._access.require(actor, project_id, "knowledge.edit")
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type=content_type,
+            width=width,
+            height=height,
+            metadata=metadata,
+        )
+
+    def upload_article_derivative(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+        width: int,
+        height: int,
+        metadata: Mapping[str, object] | None = None,
+    ) -> KnowledgeAsset:
+        """Persist a re-creatable WebP after reauthorizing article mutation.
+
+        Metadata here must describe the immutable bytes. Article-specific
+        source, role, product, and placement relations belong on ArticleImage.
+        """
+
+        self._access.require(actor, project_id, "article.edit")
+        derivative_metadata = dict(metadata or {})
+        derivative_metadata["derivative_kind"] = "article_image_webp"
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type="image/webp",
+            width=width,
+            height=height,
+            metadata=derivative_metadata,
+        )
+
+    def _store_asset(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+        content_type: str,
+        width: int | None,
+        height: int | None,
+        metadata: Mapping[str, object] | None,
+    ) -> KnowledgeAsset:
         body = bytes(data)
         digest = hashlib.sha256(body).hexdigest()
         existing = self._repository.get_asset(project_id, asset_id)
@@ -122,6 +191,14 @@ class ProjectKnowledgeObjectService:
                 raise KnowledgeAssetConflictError(
                     "asset ID is already used by different content"
                 )
+            # Do not let an older or manually corrupted catalog row bypass the
+            # organization/project boundary merely because its content hash
+            # matches an idempotent retry.
+            self._scoped_key(
+                actor=actor,
+                project_id=project_id,
+                asset=existing,
+            )
             return existing
 
         upload = self._uploader.upload(
@@ -157,6 +234,54 @@ class ProjectKnowledgeObjectService:
             )
         )
 
+    def read_for_article_edit(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        max_bytes: int,
+    ) -> ProjectKnowledgeObject:
+        """Reauthorize and verify private bytes before article derivation."""
+
+        self._access.require(actor, project_id, "article.edit")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be greater than zero")
+        asset = self._repository.get_asset(project_id, asset_id)
+        if asset is None:
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
+        )
+        if asset.byte_size > max_bytes:
+            raise ObjectTooLarge("object exceeds the requested size limit")
+        body = self._store.get(key, max_bytes=max_bytes)
+        if (
+            len(body) != asset.byte_size
+            or hashlib.sha256(body).hexdigest() != asset.content_hash
+        ):
+            raise KnowledgeObjectIntegrityError(
+                "knowledge object integrity verification failed"
+            )
+        return ProjectKnowledgeObject(asset=asset, data=body)
+
+    def _scoped_key(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset: KnowledgeAsset,
+    ) -> str:
+        key = _s3_key(asset.artifact_uri, self._bucket)
+        expected_prefix = (
+            f"organizations/{actor.organization_id}/projects/{project_id}/"
+        )
+        if not key.startswith(expected_prefix):
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        return key
+
     def create_download_url(
         self,
         *,
@@ -169,12 +294,11 @@ class ProjectKnowledgeObjectService:
         asset = self._repository.get_asset(project_id, asset_id)
         if asset is None:
             raise KnowledgeObjectNotFound("knowledge object not found")
-        key = _s3_key(asset.artifact_uri, self._bucket)
-        expected_prefix = (
-            f"organizations/{actor.organization_id}/projects/{project_id}/"
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
         )
-        if not key.startswith(expected_prefix):
-            raise KnowledgeObjectNotFound("knowledge object not found")
         return self._store.create_download_url(
             key,
             expires_seconds=expires_seconds,
@@ -182,7 +306,9 @@ class ProjectKnowledgeObjectService:
 
 
 __all__ = [
+    "KnowledgeObjectIntegrityError",
     "KnowledgeObjectNotFound",
+    "ProjectKnowledgeObject",
     "ProjectKnowledgeObjectService",
     "ScopedS3ArtifactStore",
 ]

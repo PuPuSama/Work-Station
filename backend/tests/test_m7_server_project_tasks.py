@@ -9,11 +9,13 @@ import unittest
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
+from PIL import Image
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -61,7 +63,10 @@ from services.access_control import (  # noqa: E402
     PostgresProjectAccessRepository,
     ProjectAccessService,
 )
-from services.object_store import build_project_object_key  # noqa: E402
+from services.object_store import (  # noqa: E402
+    StoredObject,
+    build_project_object_key,
+)
 from services.job_queue import JobConflict  # noqa: E402
 from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
 from services.server_product_rediscovery import (  # noqa: E402
@@ -105,15 +110,28 @@ A: Capability affects quality and support.
 class FakeDownloadStore:
     def __init__(self) -> None:
         self.signed: list[tuple[str, int]] = []
+        self.objects: dict[str, bytes] = {}
+        self.put_calls: list[str] = []
 
     def check_ready(self):
         return None
 
     def put(self, **kwargs):
-        raise AssertionError("not used")
+        key = str(kwargs["key"])
+        data = bytes(kwargs["data"])
+        content_type = str(kwargs["content_type"])
+        self.objects[key] = data
+        self.put_calls.append(key)
+        return StoredObject(
+            key=key,
+            content_hash=hashlib.sha256(data).hexdigest(),
+            content_type=content_type,
+            byte_size=len(data),
+            etag="etag",
+        )
 
     def get(self, key, *, max_bytes):
-        raise AssertionError("not used")
+        return self.objects[key][: max_bytes + 1]
 
     def create_download_url(self, key, *, expires_seconds):
         self.signed.append((key, expires_seconds))
@@ -406,6 +424,15 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             created_at="2026-07-30T00:00:00+00:00",
             updated_at="2026-07-30T00:00:00+00:00",
         ).model_dump(mode="json")
+
+    @staticmethod
+    def _image_bytes(color: str) -> bytes:
+        output = BytesIO()
+        Image.new("RGB", (320, 240), color).save(
+            output,
+            format="PNG",
+        )
+        return output.getvalue()
 
     def _store_selectable_product(
         self,
@@ -1026,6 +1053,198 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         },
                     ).status_code,
                     409,
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_prepares_private_asset_ids_without_local_paths(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.replace(
+            "Keep the original application guidance.",
+            (
+                f"Product {self.product_a} supports the application "
+                "described in this section."
+            ),
+        )
+        hero_asset_id = f"{self.asset_a}-hero-source"
+        product_asset_id = f"{self.asset_a}-product-source"
+        record.update(
+            {
+                "status": "links_verified",
+                "selected_title": "Example Buyer Guide",
+                "linked_article": article,
+                "article": article,
+                "products": [
+                    {
+                        "product_id": self.product_a,
+                        "name": f"Product {self.product_a}",
+                        "url": (
+                            f"https://{self.project_a}/products/"
+                            f"{self.product_a}"
+                        ),
+                        "canonical_url": (
+                            f"https://{self.project_a}/products/"
+                            f"{self.product_a}"
+                        ),
+                        "selected_asset_id": product_asset_id,
+                        "asset_status": "ready",
+                    }
+                ],
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+
+        codec = ServerActorSessionCodec(b"i" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        private_store = FakeDownloadStore()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        object_service = ProjectKnowledgeObjectService(
+            store=private_store,
+            bucket="private-bucket",
+            repository=PostgresKnowledgeAssetRepository(self.engine),
+            access=access,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "i" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/prepare-images"
+                )
+                payload = {
+                    "revision": 0,
+                    "hero_asset_id": hero_asset_id,
+                }
+                self.assertEqual(
+                    client.post(path, json=payload).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                object_service.upload(
+                    actor=actor,
+                    project_id=self.project_a,
+                    asset_id=hero_asset_id,
+                    data=self._image_bytes("navy"),
+                    content_type="image/png",
+                    width=320,
+                    height=240,
+                )
+                object_service.upload(
+                    actor=actor,
+                    project_id=self.project_a,
+                    asset_id=product_asset_id,
+                    data=self._image_bytes("orange"),
+                    content_type="image/png",
+                    width=320,
+                    height=240,
+                )
+                client.app.state.server_project_object_service = (
+                    object_service
+                )
+
+                prepared = client.post(path, json=payload)
+
+                self.assertEqual(
+                    prepared.status_code,
+                    200,
+                    prepared.text,
+                )
+                saved = prepared.json()
+                self.assertEqual(saved["revision"], 1)
+                self.assertEqual(saved["status"], "images_ready")
+                self.assertEqual(len(saved["images"]), 2)
+                self.assertEqual(
+                    [
+                        item["source_asset_id"]
+                        for item in saved["images"]
+                    ],
+                    [hero_asset_id, product_asset_id],
+                )
+                for image in saved["images"]:
+                    self.assertEqual(image["source_path"], "")
+                    self.assertEqual(image["prepared_path"], "")
+                    self.assertTrue(image["prepared_asset_id"])
+                    self.assertNotIn("artifact_uri", image)
+                    self.assertNotIn("source_url", image)
+                self.assertEqual(
+                    saved["images"][0]["anchor_after"],
+                    "before_first_h2",
+                )
+                self.assertEqual(
+                    saved["images"][1]["anchor_heading"],
+                    "Confirm the application",
+                )
+                put_count = len(private_store.put_calls)
+                self.assertEqual(
+                    client.post(path, json=payload).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    len(private_store.put_calls),
+                    put_count,
+                )
+
+                derived_asset_id = saved["images"][1][
+                    "prepared_asset_id"
+                ]
+                downloaded = client.get(
+                    (
+                        f"/api/projects/{self.project_a}/assets/"
+                        f"{derived_asset_id}/download"
+                    )
+                )
+                self.assertEqual(
+                    downloaded.status_code,
+                    200,
+                    downloaded.text,
+                )
+                self.assertEqual(
+                    downloaded.json()["asset_id"],
+                    derived_asset_id,
                 )
                 self.assertFalse(local_state.exists())
 

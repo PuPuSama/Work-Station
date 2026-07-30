@@ -143,6 +143,11 @@
   可访问的 Active Project 及 Effective Role；归档 Project 立即 fail closed；
 - 已接通私有知识/产品资产的 Server Mode 下载路由：路由授权与签名前授权各执行一次，
   Bucket 和 Organization/Project Key 前缀不一致时不签名；
+- 已接通 Server 私有图片准备：Hero 由项目 Asset ID 指定，产品图只读取 Task 已确认的
+  `selected_asset_id`；对象读取再次授权并复核哈希，在内存生成内容寻址 WebP，最多三张
+  且视觉去重，Task 只保存 Asset 引用和文章锚点，不创建本地图片路径；
+- 自动锚点失败时返回非 FAQ H2/H3 候选且不上传派生对象；人工锚点只能绑定当前 Task
+  Product ID。Server DOCX/交付对象化及该写操作的事务内 Audit 仍待后续切片；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现已经实际使用这条链路，但通用 Server
   Batch API/Runner、排空证明与事务内审计尚未完成，所以整体 Preflight 能力仍保持 false；

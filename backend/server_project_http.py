@@ -14,13 +14,18 @@ from services.access_control import (
     ProjectPermission,
 )
 from services.job_queue import ActiveJobError, JobConflict
-from services.object_store import ObjectStoreError
+from services.object_store import ObjectStoreError, ObjectTooLarge
 from services.project_directory import (
     AccessibleProject,
     PostgresProjectDirectory,
     ProjectDirectoryDenied,
 )
 from services.server_auth import SERVER_AUTH_COOKIE_NAME, server_mode_enabled
+from services.server_article_images import (
+    ServerArticleImageAnchorRequired,
+    ServerArticleImageError,
+    ServerArticleImagePreparation,
+)
 from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_product_selection import (
     ConfirmedProductSelectionError,
@@ -43,6 +48,7 @@ from services.server_request_security import (
 )
 from storage import RevisionConflictError
 from workflow.state_machine import (
+    ACTION_PREPARE_IMAGES,
     ACTION_REWRITE_FROM_SCRATCH,
     ACTION_UPDATE_ARTICLE,
     ACTION_UPDATE_PRODUCTS,
@@ -93,6 +99,49 @@ class ArticleSectionRewriteRequest(BaseModel):
         normalized = [" ".join(value.split()) for value in values]
         if any(not value for value in normalized):
             raise ValueError("heading_path values must not be empty")
+        return normalized
+
+
+class PrepareProjectImagesRequest(BaseModel):
+    """Prepare one trusted hero plus Task-bound product assets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    hero_asset_id: str = Field(min_length=1, max_length=512)
+    product_anchors: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=3,
+    )
+
+    @field_validator("hero_asset_id")
+    @classmethod
+    def validate_hero_asset_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("hero asset id must not be empty")
+        return normalized
+
+    @field_validator("product_anchors")
+    @classmethod
+    def validate_product_anchors(
+        cls,
+        value: dict[str, str],
+    ) -> dict[str, str]:
+        normalized = {
+            product_id.strip(): " ".join(heading.split())
+            for product_id, heading in value.items()
+        }
+        if (
+            len(normalized) != len(value)
+            or any(
+                not product_id or not heading
+                for product_id, heading in normalized.items()
+            )
+        ):
+            raise ValueError(
+                "product anchors require unique product ids and headings"
+            )
         return normalized
 
 
@@ -529,6 +578,98 @@ def replace_project_task_products(
 
     task.products = list(products)
     invalidate_downstream(task, "products")
+    try:
+        return store.put(
+            task,
+            expected_revision=payload.revision,
+        )
+    except RevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/prepare-images",
+    response_model=TaskRecord,
+)
+def prepare_project_task_images(
+    project: str,
+    task_id: str,
+    payload: PrepareProjectImagesRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_PREPARE_IMAGES)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    try:
+        ServerArticleImagePreparation(
+            _knowledge_object_service(request)
+        ).prepare(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task=task,
+            hero_asset_id=payload.hero_asset_id,
+            product_anchors=payload.product_anchors,
+        )
+    except ServerArticleImageAnchorRequired as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(exc),
+                "unresolved": list(exc.unresolved),
+            },
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A selected image is no longer available.",
+        ) from exc
+    except ObjectTooLarge as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="A selected image exceeds the processing limit.",
+        ) from exc
+    except ServerArticleImageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Private image processing is temporarily unavailable.",
+        ) from exc
     try:
         return store.put(
             task,

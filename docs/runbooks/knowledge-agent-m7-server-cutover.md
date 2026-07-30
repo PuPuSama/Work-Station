@@ -200,6 +200,25 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 3600 秒；同时使用另一 Project 的 Actor 和一条错误 Organization Key 前缀的测试资产，
 分别确认 403 与 404。不要把签名 URL 写入长期发布证据或普通日志。
 
+文章图片准备冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/prepare-images`。至少验证：
+
+- Viewer 返回 403；Editor 的请求只含当前 Revision、一个项目内 Hero Asset ID，以及
+  可选的 `Product ID -> Heading` 人工锚点，不接受客户端产品图片 ID；
+- 产品图只读取 Task 当前 `Product.selected_asset_id`；源对象读取前重新要求
+  `article.edit`，且 Bucket、Organization/Project Key、字节数和 SHA-256 任一不一致
+  都 fail closed；
+- 源图只在内存中验证和派生；EXIF 方向、动画首帧、像素上限、确定性 WebP、内容哈希和
+  视觉近重复检查通过，含 Hero 最多三张；
+- 自动锚点无法解析时，响应返回当前文章的非 FAQ H2/H3 候选，并确认没有派生对象写入；
+  人工锚点只能引用当前 Task 已选择的 Product ID；
+- 成功后的 Task 只含源/派生 Asset ID、派生哈希、尺寸、Marker 和锚点诊断，
+  `source_path/prepared_path` 为空，且不含对象 URI 或签名 URL；
+- 旧 Revision 在读取对象前返回 409；并发 CAS 若发生在对象写入后，内容寻址的未引用
+  对象进入延迟 orphan 对账，不在失败请求中立即删除；
+- 派生 Asset 仍只能通过授权下载路由获取，Server DOCX/Delivery 尚未迁移时不得把这项
+  冒烟记成完整交付链路已切换。
+
 产品重新发现冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/product-rediscovery`，随后只使用响应中的
 Job ID 调用
