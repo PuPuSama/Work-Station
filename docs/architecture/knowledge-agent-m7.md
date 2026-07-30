@@ -46,18 +46,22 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `project.view / knowledge.edit / knowledge.publish / knowledge.delete`；
 - Server Mode 下未完成 Scope 迁移的旧 API、研究队列、上传和原始对象下载 fail closed；
 - 真实 Lifespan 中独立构建服务器安全服务，本地模式仍沿用原单密码入口。
+- Alembic `20260730_0010` 的供应商无关 External Identity 映射；
+- 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
+- Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke。
 
 当前明确未做：
 
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
-- 不在 `app.py` 中启用服务器 RBAC；
+- 不开放正式外部身份登录；现有 `app.py` 只接入服务器请求安全底座；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把 `app.py` 的 Task/Job 正式写路径切换到 PostgreSQL；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接前端成员管理；
-- 不接 S3、生产部署或密钥服务。
+- 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
+- 不接生产对象存储、生产部署或密钥服务。
 
-因此，M7-A/B/C1-C2 是可验证的服务器持久层，不代表多人服务器版已经上线。
+因此，当前结果是可验证的服务器持久层与部分请求安全底座，不代表多人服务器版已经上线。
 
 ## 3. 为什么使用 `project_ownership`
 
@@ -92,6 +96,7 @@ project_ownership -> organizations
 ```mermaid
 erDiagram
     ORGANIZATIONS ||--o{ WORKSPACE_USERS : contains
+    WORKSPACE_USERS ||--o{ EXTERNAL_IDENTITIES : maps
     ORGANIZATIONS ||--o{ TEAMS : contains
     WORKSPACE_USERS ||--o{ TEAM_MEMBERSHIPS : receives
     TEAMS ||--o{ TEAM_MEMBERSHIPS : grants
@@ -114,6 +119,9 @@ erDiagram
 5. 禁用 User、暂停 Organization 和归档 Team 不再产生继承权限。
 6. `audit_events` 的 Actor 与 Project 外键也带 `organization_id`。
 7. PostgreSQL Trigger 禁止更新或删除审计事件；保留和归档策略以后只能通过分区/受控运维设计，不允许业务代码改历史。
+8. External Identity 以 `(issuer, subject)` 全局唯一，并通过
+   `(organization_id, user_id)` 复合外键绑定 Workspace User；同一 User 在同一
+   Issuer 下最多一个 Subject。
 
 ## 5. 权限矩阵
 
@@ -195,6 +203,9 @@ with engine.begin() as connection:
 | `backend/services/access_control.py` | Actor、权限契约、纯策略和 PostgreSQL 事实查询 | 不信任客户端 Role、统一拒绝、未绑定项目 fail closed |
 | `backend/services/audit_log.py` | 业务事务内追加审计事件 | 调用方事务、稳定 Event ID、无更新/删除接口 |
 | `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、独立 Secret、默认不开启 |
+| `backend/services/external_identity.py` | 已验证外部身份到本地 Actor 的解析与 Session Exchange | 不接受原始 Token、不信任外部 Role、禁用/暂停/撤销立即失效 |
+| `backend/services/external_identity_provisioning.py` | External Identity Link/Revoke | Org Admin、Subject 哈希审计目标、业务写入与审计同事务 |
+| `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先认证再查数据库 Role、项目规范化、未迁移路由 fail closed |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
@@ -215,6 +226,7 @@ with engine.begin() as connection:
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
 | `backend/tests/test_m7_server_request_security.py` | 请求授权和真实 Lifespan 接线测试 | 旧 API 阻断、Knowledge 全局依赖、权限语义、本地兼容 |
+| `backend/tests/test_m7_external_identity.py` | Identity 映射、交换与 PostgreSQL 集成测试 | HTTPS Issuer、跨组织拒绝、状态失效、Link/Revoke 审计 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
@@ -226,7 +238,7 @@ with engine.begin() as connection:
 
 当前已完成 Actor Session、成员写服务和 Knowledge Router 请求授权底座：
 
-1. 选择正式身份来源并建立外部 Subject 到 Workspace User 的映射；
+1. 已建立供应商无关的外部 Issuer/Subject 到 Workspace User 映射；
 2. 显式 server mode 已接入应用 Lifespan；缺失/篡改 Actor 为 401，数据库拒绝为
    统一 403；
 3. Knowledge Router 已统一要求项目授权；读操作默认 `project.view`，普通写操作
@@ -242,6 +254,28 @@ with engine.begin() as connection:
 上面的最后两项仍是硬门禁。`/api/auth/login` 在 Server Mode 明确返回 503，
 因为当前没有正式 IdP；它绝不使用 `APP_PASSWORD` 签发 Actor。`/api/auth/status`
 只报告模式和当前 Cookie 是否可解析，不返回 Organization/User/Role。
+
+外部身份边界为：
+
+```text
+未来 OIDC/JWKS Adapter 验证原始 Token
+  -> VerifiedExternalIdentity(issuer, subject)
+  -> PostgresExternalIdentityRepository
+  -> ActorIdentity(organization_id, user_id)
+  -> ServerActorSessionCodec
+```
+
+`ExternalActorSessionService` 不接收原始 Bearer Token，也不解析 Email、Group 或 Role；
+这些外部 Claims 不能直接变成权限。Mapping、Organization 和 Workspace User 必须同时
+Active。撤销 Mapping、禁用 User 或暂停 Organization 后，下一次 Exchange 立即失败；
+现有短期 Actor Session 仍按其原有效期处理，直到后续实现 Session Revocation/Version。
+
+Identity Link/Revoke 只允许当前 Organization 的 Active `org_admin`，并与
+append-only Audit Event 同事务。审计 `target_id` 使用 `issuer + subject` 的 SHA-256，
+Details 只保留 Issuer 和目标本地 User，不写入原始 Subject。
+
+尚未实现具体 OIDC Discovery/JWKS 验签、Authorization Code/PKCE Callback、State/Nonce
+校验和登录 UI。因此 `trusted_identity_source` Preflight 仍保持 false。
 
 请求授权链为：
 

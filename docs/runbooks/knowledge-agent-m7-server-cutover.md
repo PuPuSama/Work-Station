@@ -75,10 +75,10 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260730_0009`；
+- `alembic_version = 20260730_0010`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
-  Task、Batch、Job 表均可读取；
+  External Identity、Task、Batch、Job 表均可读取；
 - 复合租户外键仍存在；
 - Audit Event 更新和删除仍被 Trigger 拒绝；
 - Task/Job 迁移工具的数量、状态分布和内容 SHA-256 摘要一致；

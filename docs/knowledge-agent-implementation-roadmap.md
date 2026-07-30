@@ -133,10 +133,12 @@
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以
   登录入口仍保持关闭；
-- 当前单密码 Cookie 不具备 User Identity，正式身份来源也尚未确定，因此尚未把
-  RBAC 接入 `app.py`；
-- 后续按“正式身份映射与 API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
-  -> 服务器单写切换
+- 已新增 External Identity 映射和审计化 Link/Revoke：外部 Issuer/Subject 只能映射
+  到同 Organization 的 Workspace User，外部 Role 不进入 Session；
+- 当前单密码 Cookie 不具备 User Identity；`app.py` 已接入 Server Mode 请求安全
+  底座，但具体 OIDC/JWKS 验证与登录入口仍未实现；
+- 后续按“具体 IdP 验证与剩余 API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
+  -> 服务器 PostgreSQL 单写切换
   -> 备份恢复与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。

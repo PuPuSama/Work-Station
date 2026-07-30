@@ -111,6 +111,68 @@ sa.Index(
 )
 
 
+external_identities = sa.Table(
+    "external_identities",
+    metadata,
+    sa.Column("issuer", sa.Text(), nullable=False),
+    sa.Column("subject", sa.Text(), nullable=False),
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("user_id", sa.Text(), nullable=False),
+    sa.Column(
+        "status",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("'active'"),
+    ),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "btrim(issuer) <> '' AND btrim(subject) <> ''",
+        name="ck_external_identities_identity_nonempty",
+    ),
+    sa.CheckConstraint(
+        "status IN ('active', 'revoked')",
+        name="ck_external_identities_status",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "user_id"],
+        [
+            "workspace_users.organization_id",
+            "workspace_users.user_id",
+        ],
+        name="fk_external_identities_workspace_user",
+        ondelete="RESTRICT",
+    ),
+    sa.PrimaryKeyConstraint(
+        "issuer",
+        "subject",
+        name="pk_external_identities",
+    ),
+    sa.UniqueConstraint(
+        "organization_id",
+        "user_id",
+        "issuer",
+        name="uq_external_identities_user_issuer",
+    ),
+)
+
+sa.Index(
+    "ix_external_identities_workspace_user",
+    external_identities.c.organization_id,
+    external_identities.c.user_id,
+)
+
+
 teams = sa.Table(
     "teams",
     metadata,
@@ -738,6 +800,7 @@ __all__ = [
     "article_tasks",
     "audit_events",
     "background_jobs",
+    "external_identities",
     "job_batches",
     "organizations",
     "project_memberships",

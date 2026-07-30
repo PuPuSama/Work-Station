@@ -1,4 +1,4 @@
-# Knowledge Agent M7-A/B/C1-C2/D1 本地验证记录
+# Knowledge Agent M7 持续实施本地验证记录
 
 - 日期：2026-07-30
 - 分支：`feature/knowledge-agent-m7`
@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260730_0009`
+- Alembic Head：`20260730_0010`
 
 ## 已通过验证
 
@@ -70,6 +70,17 @@ Task/Job 迁移新增后，再在四张新表均为 0 行时执行：
 
 结果为 `20260730_0009 (head)`。
 
+External Identity 迁移新增后，在测试映射均已回滚/清理时执行：
+
+```powershell
+.\.venv\Scripts\alembic.exe downgrade 20260730_0009
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe current
+```
+
+结果为 `20260730_0010 (head)`；降级和两次升级均成功。
+
 ### Task/Job PostgreSQL 定向测试
 
 ```powershell
@@ -102,7 +113,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 477 tests；
+- 485 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -159,7 +170,7 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - 6 tests（含真实 PostgreSQL Preflight Probe）；
 - 全部显式能力、数据库、S3 和恢复演练证明齐全时才返回 ready；
 - 当前缺少正式身份、路由 Scope、Task/Job 单写或 Worker 授权时 fail closed；
-- Alembic 不是 `20260730_0009` 时阻止发布；
+- Alembic 不是 `20260730_0010` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
 - 数据库 URL、Embedding Key、S3 Key/Secret 和供应商错误正文不进入公开报告。
 
@@ -224,6 +235,27 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 返回 0 才表示该次冻结快照可进入下一门；返回 2 表示差异。报告后 SQLite 再发生
 任何写入都会使证据失效，CLI 本身不是同步器。
 
+### External Identity 映射与交换
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_external_identity `
+  tests.test_m7_deployment_readiness -v
+```
+
+结果：
+
+- 14 tests；
+- Issuer 必须是 HTTPS；仅 localhost/loopback 开发 Issuer 可使用 HTTP；
+- Session Exchange 只接收已验证的 Issuer/Subject，不接收或信任外部 Role；
+- `(issuer, subject)` 不能映射到两个 Organization；
+- 复合 FK 拒绝把 Organization A 映射到 Organization B 的 User；
+- Mapping Revoked、User Disabled、Organization Suspended 均不能解析 Actor；
+- Link/Revoke 只有 Active Org Admin 可执行，且与 Audit Event 同事务；
+- 审计目标使用 Subject 哈希，审计 Details 不保存原始 Subject；
+- Preflight Head 已更新为 `20260730_0010`。
+
 ## 诊断记录
 
 第一次完整回归未指定 CI Config，2 个既有 Humanize 测试读取本机默认
@@ -234,13 +266,15 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 ## 当前未验证或未接入
 
-- 已有 Actor Session Codec，但正式身份来源与登录签发入口尚未接入；
+- 已有 Actor Session Codec 和供应商无关 Identity Mapping，但具体 IdP Token 验证与
+  登录签发入口尚未接入；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和 Worker 尚未接入；
 - 对象下载服务底层已重新授权，但现有 Raw Artifact HTTP 路由仍是本地文件实现，
   因此 Server Mode 明确阻断；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
-- SQLite Terminal Job 历史导入已实现；切换双读报告和 `app.py` 单写切换尚未实现；
+- SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
+  `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接和 no-go 部署门禁已实现；真实备份恢复演练
   与生产供应商尚未完成；
 - 本阶段未修改前端，因此没有新增 M7 前端验收项。
