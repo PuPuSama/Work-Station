@@ -1580,7 +1580,11 @@ export function ArticleWorkbench({
                 url: value,
                 product_id: "",
                 canonical_url: "",
-                image_path: "",
+                image_path: product.image_path
+                  .replaceAll("\\", "/")
+                  .startsWith("images/uploads/products/")
+                  ? product.image_path
+                  : "",
                 reference_summary: "",
                 reference_facts: [],
                 specifications: {},
@@ -2275,6 +2279,8 @@ export function ArticleWorkbench({
                   <TabsContent value="products" className="min-w-0 pt-4">
 
                     <ArticleProductsStep
+
+                      taskId={selectedTask.id}
 
                       products={products}
 
