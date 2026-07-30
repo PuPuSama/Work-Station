@@ -42,6 +42,7 @@
 | 业务操作 | Project-scoped Server 路径 | 权限 | 存储边界 | 状态 |
 |---|---|---|---|---|
 | 完全重写 | `POST .../rewrite-from-scratch` | `article.edit` | PostgreSQL CAS + Audit | Server Ready |
+| 选择当前标题候选 | `PUT .../selected-title` | `article.edit` | Server-owned Candidate + CAS + Audit | Server Ready |
 | 选择已确认产品 | `PUT .../products` | `article.edit` | Published Evidence 投影 + CAS + Audit | Server Ready |
 | 产品重新发现 | `POST .../product-rediscovery` | `knowledge.edit` | PostgreSQL Job + S3 Inbox Evidence | Server Ready |
 | 替换指定章节 | `PUT .../article/sections` | `article.edit` | Heading Scope + Version + CAS + Audit | Server Ready |
@@ -86,6 +87,12 @@
 每个 Operation 必须有可信 Requester、两阶段权限映射、Server-only Handler、私有存储
 边界和取消/重试测试。
 
+标题“生成”与标题“选择”是两个边界：`titles` Job 仍会通过
+`collect_customer_context()` 递归读取本地 `knowledge_base/<customer>`，因此仍为
+Local Only。已迁移的 `selected-title` 命令只允许客户端提交当前 Revision 和候选索引，
+服务端从 PostgreSQL Task 的当前 `title_candidates` 取值；它不接受调用方替换标题正文，
+也不表示标题生成链已经切换为服务器知识准源。
+
 ## 6. 已完成闭环：Project Job Control
 
 已只为迁移完成的 `product_rediscovery` 增加：
@@ -120,3 +127,5 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 8. 跨 Organization/Project ID 是否只在当前 Scope 查询，不扫描后再过滤？
 9. SQLite 冻结窗口证据是否仍与目标 Organization/Project/摘要绑定？
 10. Server 单写切换后，Local Mode 是否仍可独立使用 SQLite，且两种模式不会双写？
+11. 标题选择是否仍只读取当前 PostgreSQL Task 的候选并拒绝客户端标题正文？
+12. `titles` Job 是否在发布知识上下文接线前继续保持 Local Only？

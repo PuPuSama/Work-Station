@@ -98,6 +98,7 @@ from workflow.state_machine import (
     ACTION_PACKAGE_DELIVERY,
     ACTION_PREPARE_IMAGES,
     ACTION_REWRITE_FROM_SCRATCH,
+    ACTION_SELECT_TITLE,
     ACTION_UPDATE_ARTICLE,
     ACTION_UPDATE_PRODUCTS,
     WorkflowActionNotAllowed,
@@ -139,6 +140,15 @@ class ProjectRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=0)
+
+
+class ProjectTitleSelectionRequest(BaseModel):
+    """Select one server-owned candidate without accepting replacement text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    candidate_index: int = Field(ge=0, le=99)
 
 
 class ProjectMembershipUpdateRequest(BaseModel):
@@ -910,6 +920,66 @@ def rewrite_project_task_from_scratch(
         task,
         expected_revision=payload.revision,
         action="article.task.rewritten",
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/selected-title",
+    response_model=TaskRecord,
+)
+def select_project_task_title(
+    project: str,
+    task_id: str,
+    payload: ProjectTitleSelectionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_SELECT_TITLE)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    if payload.candidate_index >= len(task.title_candidates):
+        raise HTTPException(
+            status_code=422,
+            detail="Title candidate index is out of range.",
+        )
+    selected_title = task.title_candidates[payload.candidate_index].strip()
+    if not selected_title:
+        raise HTTPException(
+            status_code=409,
+            detail="The selected title candidate is unavailable.",
+        )
+    task.selected_title = selected_title
+    invalidate_downstream(task, "selected_title")
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.title.selected",
+        details={
+            "candidate_count": len(task.title_candidates),
+            "candidate_index": payload.candidate_index,
+        },
     )
 
 

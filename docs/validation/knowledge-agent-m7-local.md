@@ -521,7 +521,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 九条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx/tdk/
+- 十条 HTTP Task 写操作分别记录 rewrite/title-selection/products/section/images/docx/tdk/
   final-ai-screenshot/final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
@@ -892,6 +892,33 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 首次完整回归被一次更早的故障注入清理失败遗留的 `m7-jobctl-*` Active Test Job
   污染，目标撤权 Job 本身已正确进入 conflict；只清除该精确测试前缀的 15 条 Job 与
   14 条 Batch 后，完整回归通过。没有删除正式或其他测试 Scope 数据。
+
+### M7 Task 标题候选选择
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_selects_only_current_title_candidate_with_cas `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_task_commands `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 14 tests 全部通过；
+- `PUT /api/projects/{project}/tasks/{task_id}/selected-title` 只接受 Revision 与
+  Candidate Index，额外标题字段返回 422；
+- 服务端只从当前 PostgreSQL Task 候选取值，Viewer、跨项目、越界与旧 Revision
+  fail closed；
+- 成功选择会执行 Revision CAS、清空 Outline/Article 下游状态并追加
+  `article.title.selected`；Audit 只含 Candidate Count/Index，不含标题正文；
+- Local Mode 不挂载该接口；标题生成 `titles` Job 仍因本地客户知识目录依赖保持
+  Local Only；
+- 完整后端回归 597 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
+- Alembic Current 与 Head 均为 `20260731_0014`。
 
 ## 诊断记录
 

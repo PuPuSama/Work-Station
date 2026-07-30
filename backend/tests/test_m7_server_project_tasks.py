@@ -837,6 +837,162 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     401,
                 )
 
+    def test_server_selects_only_current_title_candidate_with_cas(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "revision": 0,
+                "status": "titles_ready",
+                "title_candidates": [
+                    "First candidate",
+                    "Second candidate",
+                ],
+                "selected_title": "",
+                "outline": "stale outline",
+                "outline_draft": "stale outline draft",
+                "article": "stale article",
+            }
+        )
+        repository.upsert(record)
+        codec = ServerActorSessionCodec(b"q" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "q" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/selected-title"
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={"revision": 0, "candidate_index": 1},
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "candidate_index": 1,
+                            "title": "Caller replacement",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={"revision": 0, "candidate_index": 9},
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_a}/selected-title"
+                        ),
+                        json={"revision": 0, "candidate_index": 1},
+                    ).status_code,
+                    403,
+                )
+                selected = client.put(
+                    path,
+                    json={"revision": 0, "candidate_index": 1},
+                )
+                self.assertEqual(selected.status_code, 200, selected.text)
+                response = selected.json()
+                self.assertEqual(
+                    response["selected_title"],
+                    "Second candidate",
+                )
+                self.assertEqual(response["status"], "title_selected")
+                self.assertEqual(response["revision"], 1)
+                self.assertEqual(response["outline"], "")
+                self.assertEqual(response["outline_draft"], "")
+                self.assertEqual(response["article"], "")
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.title.selected"],
+                )
+                self.assertEqual(
+                    audit.events[0].details,
+                    {
+                        "from_revision": 0,
+                        "to_revision": 1,
+                        "status": "title_selected",
+                        "candidate_count": 2,
+                        "candidate_index": 1,
+                    },
+                )
+                self.assertNotIn(
+                    "Second candidate",
+                    str(audit.events[0].details),
+                )
+                stale = client.put(
+                    path,
+                    json={"revision": 0, "candidate_index": 0},
+                )
+                self.assertEqual(stale.status_code, 409)
+                self.assertEqual(len(audit.events), 1)
+                stored = repository.get(self.task_a)
+                assert stored is not None
+                self.assertEqual(
+                    stored["selected_title"],
+                    "Second candidate",
+                )
+                self.assertEqual(stored["revision"], 1)
+                self.assertFalse(local_state.exists())
+
     def test_server_task_api_is_not_added_to_local_mode(self) -> None:
         import app as app_module
 
@@ -869,6 +1025,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/rewrite-from-scratch",
                     json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/selected-title",
+                    json={"revision": 0, "candidate_index": 0},
                 ).status_code,
                 404,
             )
