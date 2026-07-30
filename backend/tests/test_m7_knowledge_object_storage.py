@@ -16,6 +16,7 @@ from knowledge_agent.assets import (  # noqa: E402
 )
 from knowledge_agent.object_storage import (  # noqa: E402
     ARTICLE_DOCX_CONTENT_TYPE,
+    FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
     KnowledgeObjectIntegrityError,
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
@@ -115,6 +116,7 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
                 "knowledge.edit",
                 "article.edit",
                 "article.deliver",
+                "article.review",
                 "project.view",
             }
         )
@@ -373,6 +375,62 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             self.access.calls[-1][2],
             "article.deliver",
         )
+        screenshot = self.service.upload_final_ai_screenshot(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="final-ai-screenshot",
+            data=b"normalized-png-bytes",
+            width=640,
+            height=360,
+        )
+        self.assertEqual(screenshot.content_type, "image/png")
+        self.assertEqual(
+            screenshot.metadata["artifact_kind"],
+            FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
+        )
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.review",
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=screenshot.asset_id,
+            )
+        screenshot_url = (
+            self.service.create_final_ai_screenshot_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=screenshot.asset_id,
+                content_hash=screenshot.content_hash,
+                width=640,
+                height=360,
+                expires_seconds=90,
+            )
+        )
+        self.assertTrue(
+            screenshot_url.startswith("https://signed.example.test/")
+        )
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.review",
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_final_ai_screenshot_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=screenshot.asset_id,
+                content_hash="0" * 64,
+                width=640,
+                height=360,
+            )
 
         source_key = str(source.metadata["object_key"])
         self.store.objects[source_key] = b"corrupted"

@@ -89,7 +89,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 `GET /api/projects/{project}/tasks/{task_id}/tdk/download`：再次要求
   `article.deliver` 后才签发 TDK DOCX 短期 URL；通用 Asset 下载和文章 DOCX 专用入口
   都不能取得 `tdk_docx`；
-- 六条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 新增最终 AI-rate Review 闭环：Reviewer 通过项目级 multipart 路由上传截图，服务端
+  规范化为内容寻址 PNG；确认路由把分数/报告绑定当前 Humanized Article 哈希，且
+  confirmed=true 时必须已有截图 Asset；专用下载重新要求 `article.review`；
+- 八条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -293,13 +296,17 @@ Action 与权限固定为：
 | `article.section.replaced` | `article.edit` |
 | `article.images.prepared` | `article.edit` |
 | `article.docx.exported` | `article.deliver` |
+| `article.tdk.generated` | `article.deliver` |
+| `article.final_ai_screenshot.uploaded` | `article.review` |
+| `article.final_ai_check.updated` | `article.review` |
 
 Event ID 由 Organization、Project、Task、目标 Revision 和 Action 稳定派生。Details
-只保存 Revision、最终 Status 和产品/图片数量或 Heading 深度，不保存文章正文、
-Replacement Body、URL、对象 URI、签名 URL 或 Secret。Audit Writer 失败会让 Task CAS
-回滚并返回通用 503；撤权或 Revision 冲突不产生 Audit。S3 Put 不属于 PostgreSQL
-事务，因此图片/DOCX 若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内容寻址 orphan
-延迟对账，不能伪称跨系统原子。
+只保存 Revision、最终 Status、产品/图片/TDK 数量、Heading 深度、截图尺寸，以及
+confirmed/是否记录 score 的布尔值；不保存文章正文、Review Report、Replacement Body、
+URL、对象 URI、签名 URL 或 Secret。Audit Writer 失败会让 Task CAS 回滚并返回通用
+503；撤权或 Revision 冲突不产生 Audit。S3 Put 不属于 PostgreSQL 事务，因此图片/
+DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内容寻址 orphan 延迟对账，
+不能伪称跨系统原子。
 
 ## 8. 代码地图
 
@@ -342,6 +349,8 @@ Replacement Body、URL、对象 URI、签名 URL 或 Secret。Audit Writer 失�
 | `backend/services/server_docx_export.py` | Server ArticleImage Asset 到私有 DOCX Asset | `article.deliver`、原图身份/尺寸复核、纯内存排版、内容寻址输出、Task 不保存路径 |
 | `backend/services/tdk.py` | Local/Server 共用的 TDK 校验与 Word 排版核心 | 标题绑定当前文章、描述/关键词硬约束、内存字节输出与 Local 文件入口分离 |
 | `backend/services/server_tdk_export.py` | Server 当前文章到私有 TDK DOCX Asset | `article.deliver`、LLM 错误脱敏、纯内存 `D.docx`、内容寻址输出、Task 不保存路径 |
+| `backend/services/ai_screenshots.py` | Local/Server 共用的截图验证与 PNG 规范化核心 | 无元数据 PNG、像素门禁、Local 文件写入与 Server 对象写入分离 |
+| `backend/services/server_ai_screenshots.py` | Server 最终 AI-rate 截图到私有 Asset | `article.review`、纯内存规范化、内容寻址输出、AICheck 不保存路径 |
 | `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
 | `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 非零即停止发布、备份恢复只能显式证明 |
 | `docs/runbooks/knowledge-agent-m7-server-cutover.md` | 备份、恢复、轮换、发布和回滚操作准源 | 新实例恢复、跨系统恢复点、禁止默认 Actor/Project |
@@ -354,6 +363,7 @@ Replacement Body、URL、对象 URI、签名 URL 或 Secret。Audit Writer 失�
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
 | `backend/tests/test_m7_server_tdk_export.py` | Server TDK 纯内存导出测试 | 私有 Asset 身份、无本地路径、Provider 错误脱敏 |
+| `backend/tests/test_m7_server_ai_screenshots.py` | Server AI-rate 截图规范化测试 | PNG/尺寸/大小门禁、私有 Asset 类型、无本地路径 |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
 | `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/Sign/Delete、对象清理 |
@@ -659,8 +669,8 @@ WebP。若上传后发生并发 Revision 冲突，可能留下未引用但内容
 Server `ArticleImage` 只保存源/派生 `asset_id`、派生哈希、尺寸、文件名 Marker 和文章
 锚点；`source_path/prepared_path` 固定为空。展示继续通过授权后的短期下载 URL。现有
 本地模式仍使用文件路径，不受这一 Server 契约影响。Server 文章 DOCX 与 TDK 已由后续
-两节迁移，但最终 AI-rate 截图和 Delivery ZIP 尚未对象化，因此本操作完成不代表全部
-文章写路由或
+两节迁移，最终 AI-rate 截图也已对象化；Delivery ZIP 尚未对象化，因此本操作完成
+不代表全部文章写路由或
 `postgres_task_single_write` 已完成。
 派生资产可能被多篇文章按内容复用，所以来源图、产品、文章角色和锚点只属于
 `ArticleImage` 关系，不写入共享 `knowledge_assets.metadata`；共享元数据只记录
@@ -739,8 +749,54 @@ GET /api/projects/{project}/tasks/{task_id}/tdk/download
 
 LLM 调用发生在 PostgreSQL Task 事务前，避免长事务持锁；生成与对象写入成功后才进入
 重新授权、Task CAS 和 Audit 同事务。并发冲突或撤权可能留下内容寻址 `tdk_docx`
-orphan，继续进入延迟对账，不能在失败请求里直接删除。最终 AI-rate 截图、Delivery ZIP
-和前端 Delivery UI 仍未对象化，因此完整 Server Delivery 仍未完成。
+orphan，继续进入延迟对账，不能在失败请求里直接删除。最终 AI-rate 截图已由下一节
+迁移；Delivery ZIP 和前端 Delivery UI 仍未对象化，因此完整 Server Delivery 仍未完成。
+
+#### D1.4 已实现：Server 最终 AI-rate Review 与截图
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/checks/final-ai/screenshot
+query: revision
+multipart: file
+  -> project.view + article.review
+  -> Revision 预检 + ACTION_CONFIRM_FINAL_AI
+  -> 25 MB / 4000 万像素门禁
+  -> EXIF 校正、格式解码、纯内存无元数据 PNG
+  -> Object Service 再次检查 article.review
+  -> 内容寻址私有 final_ai_rate_screenshot Asset
+  -> AICheck(asset_id, hash, filename, width, height); screenshot_path=""
+  -> Revision CAS + article.final_ai_screenshot.uploaded Audit
+
+PUT /api/projects/{project}/tasks/{task_id}/checks/final-ai
+body: { revision, score?, report, confirmed }
+  -> project.view + article.review
+  -> Revision 预检 + ACTION_CONFIRM_FINAL_AI
+  -> confirmed=true 时必须已有 screenshot_asset_id
+  -> AICheck.article_hash 绑定当前 humanized_article
+  -> STATUS_FINAL_AI_CHECKED
+  -> Revision CAS + article.final_ai_check.updated Audit
+
+GET /api/projects/{project}/tasks/{task_id}/checks/final-ai/screenshot/download
+  -> project.view + article.review
+  -> Task Asset ID/hash/width/height 与 knowledge_assets 一致
+  -> 专用 final_ai_rate_screenshot 类型检查
+  -> 短期签名 URL
+```
+
+`services.ai_screenshots` 只负责把不可信输入解码为确定的 PNG Payload；Local 模式随后写
+`task_dir/ai-rate-screenshots`，Server 编排层则上传私有对象并保持 `screenshot_path`
+为空。这样后续替换图片解码库或对象供应商时，校验核心、授权和持久化仍可独立重构。
+
+Review 与 Delivery 权限分离：Reviewer 可以上传、确认和查看最终截图，但不能导出文章
+DOCX/TDK；Editor 同时具备 `article.review` 与 `article.deliver`。通用 `project.view`
+Asset 下载隐藏截图，只有 Task-scoped Review 路由可签名。Audit 不记录分数值和 Report
+正文，只记录截图尺寸、confirmed 与是否存在 score；Task 本身仍保存业务所需的 score/
+report，并以 `article_hash` 防止上游正文修改后继续沿用旧确认。
+
+文件读取、PNG 规范化和对象写入发生在 PostgreSQL 事务前；写入后由
+`PostgresAuditedTaskWriter` 再次锁定权限事实并执行 CAS + Audit。并发冲突或撤权可能
+留下内容寻址截图 orphan，继续进入延迟对账。Delivery ZIP 和前端 Delivery UI 尚未
+对象化，因此这一节完成后仍不能开放完整 Server Delivery。
 
 正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
 在签名前再校验一次，并签发最长一小时的临时下载 URL。知识源上传要求

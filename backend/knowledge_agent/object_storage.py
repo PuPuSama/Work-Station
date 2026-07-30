@@ -47,9 +47,11 @@ ARTICLE_DOCX_CONTENT_TYPE = (
     "wordprocessingml.document"
 )
 TDK_DOCX_ARTIFACT_KIND = "tdk_docx"
-ARTICLE_DELIVERY_ARTIFACT_KINDS = frozenset(
+FINAL_AI_SCREENSHOT_ARTIFACT_KIND = "final_ai_rate_screenshot"
+PRIVATE_TASK_ARTIFACT_KINDS = frozenset(
     {
         ARTICLE_DOCX_ARTIFACT_KIND,
+        FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
         TDK_DOCX_ARTIFACT_KIND,
     }
 )
@@ -233,6 +235,32 @@ class ProjectKnowledgeObjectService:
             metadata={"artifact_kind": TDK_DOCX_ARTIFACT_KIND},
         )
 
+    def upload_final_ai_screenshot(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+        width: int,
+        height: int,
+    ) -> KnowledgeAsset:
+        """Persist a normalized final AI-rate review screenshot."""
+
+        self._access.require(actor, project_id, "article.review")
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type="image/png",
+            width=width,
+            height=height,
+            metadata={
+                "artifact_kind": FINAL_AI_SCREENSHOT_ARTIFACT_KIND
+            },
+        )
+
     def _store_asset(
         self,
         *,
@@ -394,8 +422,8 @@ class ProjectKnowledgeObjectService:
         artifact_kind = str(
             asset.metadata.get("artifact_kind") or ""
         )
-        if artifact_kind in ARTICLE_DELIVERY_ARTIFACT_KINDS:
-            # Delivery artifacts require a dedicated article.deliver route;
+        if artifact_kind in PRIVATE_TASK_ARTIFACT_KINDS:
+            # Private Task artifacts require a dedicated authorized route;
             # knowing their Asset ID must not downgrade access to project.view.
             raise KnowledgeObjectNotFound("knowledge object not found")
         key = self._scoped_key(
@@ -466,15 +494,51 @@ class ProjectKnowledgeObjectService:
             expires_seconds=expires_seconds,
         )
 
+    def create_final_ai_screenshot_download_url(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        content_hash: str,
+        width: int,
+        height: int,
+        expires_seconds: int = 300,
+    ) -> str:
+        """Sign a final-review screenshot after fresh review permission."""
+
+        self._access.require(actor, project_id, "article.review")
+        asset = self._repository.get_asset(project_id, asset_id)
+        if (
+            asset is None
+            or str(asset.metadata.get("artifact_kind") or "")
+            != FINAL_AI_SCREENSHOT_ARTIFACT_KIND
+            or asset.content_type != "image/png"
+            or asset.content_hash != content_hash.strip().casefold()
+            or asset.width != width
+            or asset.height != height
+        ):
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
+        )
+        return self._store.create_download_url(
+            key,
+            expires_seconds=expires_seconds,
+        )
+
 
 __all__ = [
-    "ARTICLE_DELIVERY_ARTIFACT_KINDS",
     "ARTICLE_DOCX_ARTIFACT_KIND",
     "ARTICLE_DOCX_CONTENT_TYPE",
+    "FINAL_AI_SCREENSHOT_ARTIFACT_KIND",
     "KnowledgeObjectIntegrityError",
     "KnowledgeObjectNotFound",
     "ProjectKnowledgeObject",
     "ProjectKnowledgeObjectService",
+    "PRIVATE_TASK_ARTIFACT_KINDS",
     "ScopedS3ArtifactStore",
     "TDK_DOCX_ARTIFACT_KIND",
 ]

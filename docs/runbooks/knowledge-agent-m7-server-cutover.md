@@ -233,8 +233,8 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 - 通用 `GET .../assets/{asset_id}/download` 对 `article_docx` 返回 404，专用下载路由
   重新要求 `article.deliver` 并签发不超过一小时的 URL；
 - 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
-- 最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据不得写成
-  “完整 Server Delivery 已完成”。
+- 交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据不得写成“完整 Server Delivery
+  已完成”。
 
 TDK DOCX 冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/generate-tdk`，随后使用
@@ -253,21 +253,45 @@ TDK DOCX 冒烟必须通过
 - 旧 Revision 在 LLM/对象访问前返回 409；并发 CAS 后的未引用 TDK DOCX 进入内容
   寻址 orphan 对账，不在失败请求中立即删除。
 
-六条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+最终 AI-rate Review 冒烟必须依次使用：
 
-- “完全重写、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK”分别产生
+- `POST /api/projects/{project}/tasks/{task_id}/checks/final-ai/screenshot?revision=...`；
+- `PUT /api/projects/{project}/tasks/{task_id}/checks/final-ai`；
+- `GET /api/projects/{project}/tasks/{task_id}/checks/final-ai/screenshot/download`。
+
+至少验证：
+
+- Viewer 返回 403；Reviewer 可执行 Review，但不能调用 DOCX/TDK 的
+  `article.deliver` 路由；
+- 截图请求只含当前 Revision 和 multipart File，不接受 Asset ID、对象 URI 或本地路径；
+- 读取文件前先检查 Revision 和 `ACTION_CONFIRM_FINAL_AI`；旧 Revision 不读取/上传对象；
+- 输入执行 25 MB、4000 万像素、实际图片解码和 EXIF 方向门禁，输出为无元数据 PNG；
+- AICheck 只保存 `screenshot_asset_id`、哈希、文件名和尺寸，`screenshot_path` 为空；
+- confirmed=true 时没有 Screenshot Asset 必须返回 409；成功确认把 score/report 绑定
+  当前 Humanized Article 哈希并推进 `final_ai_checked`；
+- 通用 Asset 下载对 `final_ai_rate_screenshot` 返回 404；专用下载同时复核 Task 与
+  Asset 的 ID、哈希、尺寸和类型，再按 `article.review` 签发短期 URL；
+- Audit 只含截图尺寸、confirmed 和是否记录 score，不含 score 值、Report、图片字节、
+  文章正文、对象 URI 或签名 URL；
+- 并发 CAS 后的未引用 PNG 进入延迟 orphan 对账，不在失败请求中直接删除。
+
+八条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+
+- “完全重写、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+  确认最终检查”分别产生
   `article.task.rewritten`、`article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
-  `article.docx.exported`、`article.tdk.generated`；
-- Action 到 `article.edit/article.deliver` 的映射由服务端常量决定，请求不能提交或
-  覆盖 Permission；
+  `article.docx.exported`、`article.tdk.generated`、
+  `article.final_ai_screenshot.uploaded`、`article.final_ai_check.updated`；
+- Action 到 `article.edit/article.review/article.deliver` 的映射由服务端常量决定，
+  请求不能提交或覆盖 Permission；
 - Event 的 Organization/Project/Actor/Task 与请求 Scope 一致，Details 只含
   from/to Revision、Status 和安全计数/Heading 深度，不含文章正文、Replacement Body、
   URL、对象 URI、签名 URL、Token 或 Secret；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
-- Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX 已先写对象而
-  Task/Audit 后失败时，只记录内容寻址 orphan 进入延迟对账，不直接删除。
+- Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG
+  已先写对象而 Task/Audit 后失败时，只记录内容寻址 orphan 进入延迟对账，不直接删除。
 
 产品重新发现冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/product-rediscovery`，随后只使用响应中的

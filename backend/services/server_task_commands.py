@@ -31,6 +31,8 @@ ServerTaskAuditAction = Literal[
     "article.images.prepared",
     "article.docx.exported",
     "article.tdk.generated",
+    "article.final_ai_screenshot.uploaded",
+    "article.final_ai_check.updated",
 ]
 
 SERVER_TASK_ACTION_PERMISSIONS: dict[
@@ -43,6 +45,8 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.images.prepared": "article.edit",
     "article.docx.exported": "article.deliver",
     "article.tdk.generated": "article.deliver",
+    "article.final_ai_screenshot.uploaded": "article.review",
+    "article.final_ai_check.updated": "article.review",
 }
 
 SERVER_TASK_ACTION_DETAIL_KEYS: dict[
@@ -58,6 +62,18 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
         {
             "description_characters",
             "keyword_count",
+        }
+    ),
+    "article.final_ai_screenshot.uploaded": frozenset(
+        {
+            "screenshot_height",
+            "screenshot_width",
+        }
+    ),
+    "article.final_ai_check.updated": frozenset(
+        {
+            "confirmed",
+            "score_recorded",
         }
     ),
 }

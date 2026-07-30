@@ -3264,6 +3264,11 @@ def upload_ai_rate_screenshot(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     check.screenshot_path = str(output)
+    check.screenshot_asset_id = ""
+    check.screenshot_content_hash = ""
+    check.screenshot_filename = ""
+    check.screenshot_width = None
+    check.screenshot_height = None
     task.delivery_package_path = ""
     write_json_artifact(task, artifact_name, check.model_dump(mode="json"))
     return save_task(task, revision)

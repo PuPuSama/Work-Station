@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import AppConfig
@@ -8,7 +16,7 @@ from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
 )
-from models import TaskRecord
+from models import AICheck, STATUS_FINAL_AI_CHECKED, TaskRecord
 from services.access_control import (
     ActorIdentity,
     ProjectAccessDenied,
@@ -26,6 +34,11 @@ from services.server_article_images import (
     ServerArticleImageAnchorRequired,
     ServerArticleImageError,
     ServerArticleImagePreparation,
+)
+from services.server_ai_screenshots import (
+    MAX_SERVER_AI_SCREENSHOT_BYTES,
+    ServerAiScreenshotError,
+    ServerFinalAiScreenshotPreparation,
 )
 from services.server_docx_export import (
     ServerArticleDocxError,
@@ -63,8 +76,9 @@ from services.server_tdk_export import (
     ServerTdkError,
     ServerTdkUnavailable,
 )
-from storage import RevisionConflictError
+from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
+    ACTION_CONFIRM_FINAL_AI,
     ACTION_DOWNLOAD_DOCX,
     ACTION_EXPORT_DOCX,
     ACTION_GENERATE_TDK,
@@ -76,6 +90,7 @@ from workflow.state_machine import (
     ensure_action_allowed,
     invalidate_downstream,
     reset_for_full_rewrite,
+    transition_task,
 )
 
 
@@ -110,6 +125,22 @@ class ProjectRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=0)
+
+
+class FinalAiCheckUpdateRequest(BaseModel):
+    """Bind a manual final AI review to the current humanized article."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    score: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    report: str = Field(default="", max_length=30000)
+    confirmed: bool = True
 
 
 class ArticleSectionRewriteRequest(BaseModel):
@@ -668,6 +699,241 @@ def replace_project_task_products(
         expected_revision=payload.revision,
         action="article.products.confirmed",
         details={"product_count": len(task.products)},
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/checks/final-ai/screenshot",
+    response_model=TaskRecord,
+)
+def upload_project_task_final_ai_screenshot(
+    project: str,
+    task_id: str,
+    request: Request,
+    revision: int = Query(ge=0),
+    file: UploadFile = File(...),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_CONFIRM_FINAL_AI)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    content = file.file.read(MAX_SERVER_AI_SCREENSHOT_BYTES + 1)
+    if len(content) > MAX_SERVER_AI_SCREENSHOT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="AI-rate screenshot exceeds 25 MB.",
+        )
+    try:
+        ServerFinalAiScreenshotPreparation(
+            objects=_knowledge_object_service(request),
+        ).prepare(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task=task,
+            content=content,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ServerAiScreenshotError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AI-rate screenshot storage is temporarily unavailable.",
+        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=revision,
+        action="article.final_ai_screenshot.uploaded",
+        details={
+            "screenshot_height": (
+                task.final_ai_check.screenshot_height or 0
+            ),
+            "screenshot_width": (
+                task.final_ai_check.screenshot_width or 0
+            ),
+        },
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/checks/final-ai",
+    response_model=TaskRecord,
+)
+def confirm_project_task_final_ai(
+    project: str,
+    task_id: str,
+    payload: FinalAiCheckUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_CONFIRM_FINAL_AI)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    previous = task.final_ai_check
+    if payload.confirmed and not previous.screenshot_asset_id.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="Upload the final AI-rate screenshot before confirming.",
+        )
+    task.final_ai_check = AICheck(
+        confirmed=payload.confirmed,
+        score=payload.score,
+        report=payload.report,
+        screenshot_path="",
+        screenshot_asset_id=previous.screenshot_asset_id,
+        screenshot_content_hash=previous.screenshot_content_hash,
+        screenshot_filename=previous.screenshot_filename,
+        screenshot_width=previous.screenshot_width,
+        screenshot_height=previous.screenshot_height,
+        confirmed_at=now_iso() if payload.confirmed else "",
+        article_hash=content_hash(task.humanized_article),
+    )
+    if payload.confirmed:
+        transition_task(task, STATUS_FINAL_AI_CHECKED)
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.final_ai_check.updated",
+        details={
+            "confirmed": payload.confirmed,
+            "score_recorded": payload.score is not None,
+        },
+    )
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/checks/final-ai/screenshot/download",
+    response_model=ProjectAssetDownload,
+)
+def create_project_task_final_ai_screenshot_download(
+    project: str,
+    task_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectAssetDownload:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    asset_id = task.final_ai_check.screenshot_asset_id.strip()
+    if not asset_id:
+        raise HTTPException(
+            status_code=409,
+            detail="The final AI-rate screenshot has not been uploaded.",
+        )
+    try:
+        url = (
+            _knowledge_object_service(
+                request
+            ).create_final_ai_screenshot_download_url(
+                actor=authorized.actor,
+                project_id=authorized.project_id,
+                asset_id=asset_id,
+                content_hash=(
+                    task.final_ai_check.screenshot_content_hash
+                ),
+                width=task.final_ai_check.screenshot_width or 0,
+                height=task.final_ai_check.screenshot_height or 0,
+                expires_seconds=expires_seconds,
+            )
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="AI-rate screenshot was not found in the requested project.",
+        ) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AI-rate screenshot download is temporarily unavailable.",
+        ) from exc
+    return ProjectAssetDownload(
+        asset_id=asset_id,
+        url=url,
+        expires_seconds=expires_seconds,
     )
 
 

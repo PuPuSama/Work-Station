@@ -82,6 +82,11 @@ class AICheck(WorkflowModel):
     score: float | None = None
     report: str = ""
     screenshot_path: str = ""
+    screenshot_asset_id: str = ""
+    screenshot_content_hash: str = ""
+    screenshot_filename: str = ""
+    screenshot_width: int | None = None
+    screenshot_height: int | None = None
     confirmed_at: str = ""
     article_hash: str = ""
 

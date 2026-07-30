@@ -275,7 +275,14 @@ class InvalidationTests(unittest.TestCase):
         task.humanized_article = "humanized"
         task.humanized_article_hash = "humanized-hash"
         task.final_ai_check = AICheck(
-            confirmed=True, report="after", article_hash="humanized-hash"
+            confirmed=True,
+            report="after",
+            screenshot_asset_id="asset-final-ai",
+            screenshot_content_hash="f" * 64,
+            screenshot_filename="final-ai-rate.png",
+            screenshot_width=640,
+            screenshot_height=360,
+            article_hash="humanized-hash",
         )
         task.source_links = [SourceLink(anchor="site", url="https://example.com")]
         task.linked_article = "linked"
@@ -333,6 +340,10 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.source_links, [])
         self.assertEqual(task.humanized_article, "")
         self.assertFalse(task.final_ai_check.confirmed)
+        self.assertEqual(
+            task.final_ai_check.screenshot_asset_id,
+            "",
+        )
         self.assertEqual(task.linked_article, "")
         self.assertFalse(task.link_validation.passed)
         self.assertEqual(task.images, [])
@@ -369,6 +380,10 @@ class InvalidationTests(unittest.TestCase):
         self.assertTrue(task.initial_ai_check.confirmed)
         self.assertEqual(len(task.source_links), 1)
         self.assertFalse(task.final_ai_check.confirmed)
+        self.assertEqual(
+            task.final_ai_check.screenshot_asset_id,
+            "",
+        )
         self.assertEqual(task.linked_article, "")
         self.assertEqual(task.images, [])
         self.assertEqual(task.docx_path, "")

@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 530 tests；
+- 534 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -214,7 +214,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 导出/专用下载返回 403；通用 Asset 下载对 `article_docx` 返回 404；
 - 同哈希资产已属于其他访问类型时在 Task CAS 前 fail closed，不降级下载权限；
 - 旧 Revision 在对象读取/写入前返回 409，未产生额外对象；
-- 最终 AI-rate 截图、Delivery ZIP 和前端 Delivery UI 仍待后续切片。
+- Delivery ZIP 和前端 Delivery UI 仍待后续切片。
 
 ### Server 私有 TDK DOCX
 
@@ -240,7 +240,37 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 生成/专用下载返回 403；通用 Asset 下载与文章 DOCX 专用下载不能取得 TDK；
 - 旧 Revision 在 LLM 和对象写入前返回 409；成功 Task CAS 产生
   `article.tdk.generated` Audit，Details 只含字符数和关键词数量；
-- 最终 AI-rate 截图、Delivery ZIP、前端 Delivery UI 和 orphan 对账仍未完成。
+- Delivery ZIP、前端 Delivery UI 和 orphan 对账仍未完成。
+
+### Server 最终 AI-rate Review
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_ai_screenshots `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security `
+  tests.test_state_machine `
+  tests.test_workflow_api -v
+```
+
+结果：
+
+- 74 tests，包含纯内存截图规范化、本地工作流兼容和真实 PostgreSQL + FastAPI 路由；
+- `article.review` 与 `article.deliver` 分离：Reviewer 可上传、确认、查看 Review
+  Screenshot，但不能导出文章 DOCX/TDK；
+- 截图在内存执行大小、像素、解码和 EXIF 门禁，并重编码为无元数据 PNG；
+- AICheck 只保存 `screenshot_asset_id/screenshot_content_hash/screenshot_filename` 和
+  Width/Height，`screenshot_path` 为空；
+- confirmed=true 必须已有 Screenshot Asset，成功确认把分数/报告绑定当前
+  Humanized Article 哈希并推进 `final_ai_checked`；
+- 通用 Asset 下载隐藏 `final_ai_rate_screenshot`；专用下载重新授权并复核 Task/Asset
+  哈希、尺寸和访问分类；
+- 旧 Revision 在读取 multipart 字节前返回 409，跨 Project 与 Viewer 均返回 403；
+- 两个 Audit Action 只保存截图尺寸、confirmed 和是否有 score，不含 Report、score 值、
+  文章正文、图片字节或 URL；
+- Delivery ZIP、前端 Delivery UI 和 orphan 对账仍未完成。
 
 ### Server Task CAS 与事务内 Audit
 
@@ -254,17 +284,18 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 30 tests，使用真实 PostgreSQL；
+- 31 tests，使用真实 PostgreSQL；
 - `PostgresTaskRepository` 保留原 CAS 接口，并新增加入调用方事务的 CAS 边界；
 - Writer 先锁 Organization/User/Project 与现有 Project/Team Membership 撤权事实，
-  再按 Action 固定的 `article.edit/article.deliver` 权限决策；
+  再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 六条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx/tdk Action；
-- Audit Details 只含 Revision、Status、产品/图片计数、Heading 深度或 TDK 数量，
-  不含正文；
-- 图片/文章 DOCX/TDK DOCX 的 S3 Put 仍不属于 PostgreSQL 事务，失败后的内容寻址
-  orphan 由后续对账
+- 八条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx/tdk/
+  final-ai-screenshot/final-ai-check Action；
+- Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
+  或布尔门禁，不含正文、Report 或 score 值；
+- 图片/文章 DOCX/TDK DOCX/Review PNG 的 S3 Put 仍不属于 PostgreSQL 事务，失败后的
+  内容寻址 orphan 由后续对账
   延迟清理。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
@@ -502,7 +533,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX 私有对象和 no-go 部署门禁已实现；
-  最终 AI-rate 截图/Delivery ZIP 对象化、真实备份恢复演练与生产供应商尚未完成；
+  Delivery ZIP 对象化、真实备份恢复演练与生产供应商尚未完成；
 - 前端登录页已新增 Server OIDC 分支并通过 lint/build；其余 M7 管理界面尚未接入。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。
