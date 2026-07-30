@@ -385,6 +385,150 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                 previous_memberships
             )
 
+    def test_http_list_is_manage_only_scoped_bounded_and_deterministic(
+        self,
+    ) -> None:
+        import app as app_module
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.insert(),
+                (
+                    {
+                        "organization_id": self.org_a,
+                        "project_id": self.project_a,
+                        "user_id": self.lead_a,
+                        "role": "reviewer",
+                        "granted_by_user_id": self.admin_a,
+                    },
+                    {
+                        "organization_id": self.org_a,
+                        "project_id": self.project_a,
+                        "user_id": self.target_a,
+                        "role": "viewer",
+                        "granted_by_user_id": self.admin_a,
+                    },
+                    {
+                        "organization_id": self.org_b,
+                        "project_id": self.project_b,
+                        "user_id": self.admin_b,
+                        "role": "editor",
+                        "granted_by_user_id": self.admin_b,
+                    },
+                ),
+            )
+            connection.execute(
+                workspace_users.update()
+                .where(
+                    workspace_users.c.organization_id == self.org_a,
+                    workspace_users.c.user_id == self.target_a,
+                )
+                .values(status="disabled")
+            )
+
+        previous_mode = getattr(
+            app_module.app.state,
+            "server_mode_enabled",
+            None,
+        )
+        previous_security = getattr(
+            app_module.app.state,
+            "server_request_security",
+            None,
+        )
+        previous_memberships = getattr(
+            app_module.app.state,
+            "server_project_memberships",
+            None,
+        )
+        app_module.app.state.server_mode_enabled = True
+        app_module.app.state.server_request_security = self._security()
+        app_module.app.state.server_project_memberships = (
+            PostgresProjectMembershipService(self.engine)
+        )
+        client = TestClient(app_module.app)
+        path = f"/api/projects/{self.project_a}/members"
+        try:
+            self.assertEqual(client.get(path).status_code, 401)
+
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, self.editor_a),
+            )
+            self.assertEqual(client.get(path).status_code, 403)
+
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, self.lead_a),
+            )
+            listed = client.get(path)
+            self.assertEqual(listed.status_code, 200, listed.text)
+            self.assertEqual(
+                listed.json(),
+                {
+                    "items": [
+                        {
+                            "user_id": self.editor_a,
+                            "display_name": "Editor A",
+                            "status": "active",
+                            "role": "editor",
+                        },
+                        {
+                            "user_id": self.lead_a,
+                            "display_name": "Lead A",
+                            "status": "active",
+                            "role": "reviewer",
+                        },
+                        {
+                            "user_id": self.target_a,
+                            "display_name": "Target A",
+                            "status": "disabled",
+                            "role": "viewer",
+                        },
+                    ],
+                    "next_after_user_id": None,
+                },
+            )
+            first_page = client.get(path, params={"limit": 2})
+            self.assertEqual(first_page.status_code, 200, first_page.text)
+            self.assertEqual(
+                [item["user_id"] for item in first_page.json()["items"]],
+                [self.editor_a, self.lead_a],
+            )
+            self.assertEqual(
+                first_page.json()["next_after_user_id"],
+                self.lead_a,
+            )
+            second_page = client.get(
+                path,
+                params={"limit": 2, "after_user_id": self.lead_a},
+            )
+            self.assertEqual(
+                [item["user_id"] for item in second_page.json()["items"]],
+                [self.target_a],
+            )
+            self.assertIsNone(second_page.json()["next_after_user_id"])
+            self.assertEqual(
+                client.get(
+                    path,
+                    params={"after_user_id": "  "},
+                ).status_code,
+                422,
+            )
+            self.assertEqual(
+                client.get(
+                    f"/api/projects/{self.project_b}/members"
+                ).status_code,
+                403,
+            )
+        finally:
+            client.close()
+            app_module.app.state.server_mode_enabled = previous_mode
+            app_module.app.state.server_request_security = previous_security
+            app_module.app.state.server_project_memberships = (
+                previous_memberships
+            )
+
     def test_http_audit_failure_rolls_back_and_redacts_error(self) -> None:
         import app as app_module
 

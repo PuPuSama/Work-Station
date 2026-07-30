@@ -191,25 +191,30 @@ Audit 故障都必须失败；Audit 失败后旧版本必须仍有效，错误�
 成员管理命令为：
 
 ```text
+GET    /api/projects/{project}/members?limit=50&after_user_id=...
 PUT    /api/projects/{project}/members/{user_id}
 DELETE /api/projects/{project}/members/{user_id}
 ```
 
-PUT Body 只能是 `{"role":"editor"}`、`{"role":"reviewer"}` 或
+GET 只返回显式成员的 `user_id/display_name/status/role`，不会混入继承访问，也不会
+返回全组织候选用户；结果按 `user_id` 排序，`limit` 只允许 1–100。PUT Body 只能是
+`{"role":"editor"}`、`{"role":"reviewer"}` 或
 `{"role":"viewer"}`；DELETE 不接收由客户端提供的 Organization、Actor、Role 或
 Permission。冒烟至少验证：
 
 - 无 Cookie 返回 401，Editor/Reviewer/Viewer 返回统一 403；
 - 同 Organization 的 Org Admin，以及该 Project Owning Team 的 Team Lead 可以授权和
   撤销；
+- Roster 只出现本 Project 的显式成员，分页无重复/遗漏，Disabled User 的已有成员行仍
+  可见以便清理，另一 Project/Organization 的成员不出现；
 - 另一 Organization 的 Project 返回 403；PUT 指向另一 Organization 或 Disabled User
   时返回不泄露细节的 404；
 - `org_admin`、`team_lead`、未知 Role 和额外 Organization 字段返回 422；
 - PUT 成功产生 `project.membership.granted`，实际删除成功产生
   `project.membership.revoked`；重复 DELETE 返回 `revoked=false` 且不伪造 Audit；
 - 人工阻断 Audit Writer 时返回固定 503，Membership 保持原值，响应和日志不含底层异常；
-- 在事务尚未结束时并发撤销 Actor 的 Org Admin、Team Lead 或显式 ProjectMembership
-  事实会等待该事务，证明写服务没有 check-then-revoke 窗口。
+- 在读写事务尚未结束时并发撤销 Actor 的 Org Admin、Team Lead 或显式
+  ProjectMembership 事实会等待该事务，证明没有 check-then-revoke/read 窗口。
 
 当前只完成后端命令，没有成员列表、邀请、Team 管理或前端管理员界面，不能把这两条
 接口描述为完整的成员生命周期。

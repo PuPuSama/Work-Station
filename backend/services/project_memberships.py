@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from server_schema import (
     project_memberships,
@@ -65,6 +65,22 @@ class ProjectMembershipRecord:
     granted_by_user_id: str
 
 
+@dataclass(frozen=True)
+class ProjectMembershipListItem:
+    """One explicit membership; inherited access is intentionally separate."""
+
+    user_id: str
+    display_name: str
+    status: Literal["active", "disabled"]
+    role: ProjectRole
+
+
+@dataclass(frozen=True)
+class ProjectMembershipPage:
+    items: tuple[ProjectMembershipListItem, ...]
+    next_after_user_id: str | None
+
+
 class PostgresProjectMembershipService:
     """Mutate ProjectMembership and its AuditEvent atomically."""
 
@@ -77,6 +93,98 @@ class PostgresProjectMembershipService:
         self._engine = engine
         self._access = PostgresProjectAccessRepository(engine)
         self._audit = audit or PostgresAuditEventWriter()
+
+    def list_members(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        limit: int = 50,
+        after_user_id: str | None = None,
+    ) -> ProjectMembershipPage:
+        """Return a bounded, deterministic explicit-membership read model."""
+
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_limit = int(limit)
+        if normalized_limit < 1 or normalized_limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        normalized_after = (
+            _required_text(after_user_id, "after_user_id")
+            if after_user_id is not None
+            else None
+        )
+
+        try:
+            with self._engine.begin() as connection:
+                facts = self._access.lock_project_access_in_connection(
+                    connection,
+                    actor,
+                    normalized_project_id,
+                )
+                decision = decide_project_permission(
+                    facts,
+                    "project.members.manage",
+                )
+                if not decision.allowed:
+                    raise ProjectAccessDenied("project access denied")
+
+                statement = (
+                    sa.select(
+                        project_memberships.c.user_id,
+                        workspace_users.c.display_name,
+                        workspace_users.c.status,
+                        project_memberships.c.role,
+                    )
+                    .select_from(
+                        project_memberships.join(
+                            workspace_users,
+                            sa.and_(
+                                workspace_users.c.organization_id
+                                == project_memberships.c.organization_id,
+                                workspace_users.c.user_id
+                                == project_memberships.c.user_id,
+                            ),
+                        )
+                    )
+                    .where(
+                        project_memberships.c.organization_id
+                        == actor.organization_id,
+                        project_memberships.c.project_id
+                        == normalized_project_id,
+                    )
+                    .order_by(project_memberships.c.user_id)
+                    .limit(normalized_limit + 1)
+                )
+                if normalized_after is not None:
+                    statement = statement.where(
+                        project_memberships.c.user_id > normalized_after
+                    )
+                rows = connection.execute(statement).mappings().all()
+        except ProjectAccessDenied:
+            raise
+        except SQLAlchemyError as exc:
+            raise ProjectMembershipUnavailable(
+                "project membership list is unavailable"
+            ) from exc
+
+        has_more = len(rows) > normalized_limit
+        visible_rows = rows[:normalized_limit]
+        items = tuple(
+            ProjectMembershipListItem(
+                user_id=str(row["user_id"]),
+                display_name=str(row["display_name"]),
+                status=cast(
+                    Literal["active", "disabled"],
+                    row["status"],
+                ),
+                role=cast(ProjectRole, row["role"]),
+            )
+            for row in visible_rows
+        )
+        return ProjectMembershipPage(
+            items=items,
+            next_after_user_id=items[-1].user_id if has_more else None,
+        )
 
     def grant(
         self,
@@ -298,6 +406,8 @@ __all__ = [
     "PostgresProjectMembershipService",
     "ProjectMembershipConflict",
     "ProjectMembershipError",
+    "ProjectMembershipListItem",
+    "ProjectMembershipPage",
     "ProjectMembershipRecord",
     "ProjectMembershipTargetUnavailable",
     "ProjectMembershipUnavailable",

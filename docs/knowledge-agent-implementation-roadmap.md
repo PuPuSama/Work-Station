@@ -117,9 +117,10 @@
 - 已实现统一权限矩阵、PostgreSQL 事实查询和事务内 Audit Writer；
 - 已实现不携带 Role 的签名 Actor Session，以及授权/撤销/审计同事务的
   ProjectMembership Service；
-- 已接入 Project-scoped ProjectMembership HTTP 授权/撤销：请求只能提交
-  `editor/reviewer/viewer`，事务内重新检查 `project.members.manage` 并锁定全部可撤权
-  事实，跨组织目标不泄露，Audit 故障回滚；前端成员管理尚未接入；
+- 已接入 Project-scoped ProjectMembership Roster、授权和撤销：Roster 只按 SQL Scope
+  返回显式成员并稳定分页，请求只能提交 `editor/reviewer/viewer`，读写事务均重新检查
+  `project.members.manage` 并锁定全部可撤权事实；跨组织目标不泄露，Audit 故障回滚；
+  前端成员管理尚未接入；
 - 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
   写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
   Org Admin 的 Organization-scoped HTTP 命令递增目标版本并与安全 Audit 同事务，请求

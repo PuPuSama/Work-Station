@@ -55,7 +55,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 28 tests；
+- 29 tests；
+- GET Roster 只返回当前 Project 的显式成员，按 `user_id` 稳定分页，1–100 条有界；
+- Roster 不伪造继承角色，保留 Disabled User 的既有成员行供撤销；
 - PUT 只接受 `editor/reviewer/viewer` 和无额外字段的 Body，DELETE 为项目级幂等撤销；
 - 未认证 401，Editor 403，Owning Team Lead 可管理成员；
 - 跨 Organization Project 返回 403，跨 Organization Target 返回 404；
@@ -63,7 +65,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Audit Writer 故障返回脱敏 503，Membership 与 Audit 同事务回滚；
 - 成员写事务锁定 Actor 的可撤权授权事实；并发 Team Lead 降级在事务完成前因锁超时
   被拒绝，排除 check-then-revoke 竞态；
-- Server Mode 白名单只开放精确 PUT/DELETE 路径，POST 和其他未迁移变体继续拒绝。
+- Server Mode 白名单只开放精确 GET Roster 与 PUT/DELETE 成员路径，POST 和其他未迁移
+  变体继续拒绝。
 
 ### Alembic 往返和重复升级
 
@@ -178,7 +181,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 559 tests；
+- 560 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
