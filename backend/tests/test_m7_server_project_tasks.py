@@ -16,6 +16,7 @@ from zipfile import ZipFile
 
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
+from docx import Document
 from PIL import Image
 
 
@@ -109,6 +110,29 @@ A: Request samples before approval.
 
 A: Capability affects quality and support.
 """
+
+SERVER_TDK_RESPONSE = """{
+  "description": "Compare buyer requirements, product evidence, and supplier capability for a more reliable B2B sourcing decision.",
+  "keywords": [
+    "buyer requirements",
+    "product evidence",
+    "supplier capability",
+    "B2B sourcing",
+    "quality checks",
+    "purchase planning"
+  ]
+}"""
+
+
+class StubServerTdkLlm:
+    ready = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+    def chat(self, messages, temperature=0.7, max_tokens=1800):
+        del messages, temperature, max_tokens
+        return SERVER_TDK_RESPONSE
 
 
 class FakeDownloadStore:
@@ -1436,6 +1460,83 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     docx_download.json()["asset_id"],
                     delivered["docx_asset_id"],
                 )
+                tdk_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/generate-tdk"
+                )
+                with patch(
+                    "services.server_tdk_export.LLMClient",
+                    StubServerTdkLlm,
+                ):
+                    tdk_response = client.post(
+                        tdk_path,
+                        json={"revision": 2},
+                    )
+                self.assertEqual(
+                    tdk_response.status_code,
+                    200,
+                    tdk_response.text,
+                )
+                tdk_delivered = tdk_response.json()
+                self.assertEqual(tdk_delivered["revision"], 3)
+                self.assertEqual(tdk_delivered["tdk_path"], "")
+                self.assertTrue(tdk_delivered["tdk_asset_id"])
+                self.assertEqual(
+                    len(tdk_delivered["tdk_content_hash"]),
+                    64,
+                )
+                self.assertEqual(
+                    tdk_delivered["tdk_filename"],
+                    "D.docx",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.images.prepared",
+                        "article.docx.exported",
+                        "article.tdk.generated",
+                    ],
+                )
+                tdk_asset = (
+                    PostgresKnowledgeAssetRepository(
+                        self.engine
+                    ).get_asset(
+                        self.project_a,
+                        tdk_delivered["tdk_asset_id"],
+                    )
+                )
+                assert tdk_asset is not None
+                tdk_key = str(tdk_asset.metadata["object_key"])
+                tdk_document = Document(
+                    BytesIO(private_store.objects[tdk_key])
+                )
+                self.assertEqual(
+                    [paragraph.text[:3] for paragraph in tdk_document.paragraphs],
+                    ["T: ", "D: ", "K: "],
+                )
+                self.assertEqual(
+                    client.get(
+                        (
+                            f"/api/projects/{self.project_a}/assets/"
+                            f"{tdk_delivered['tdk_asset_id']}/download"
+                        )
+                    ).status_code,
+                    404,
+                )
+                tdk_download_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/tdk/download"
+                )
+                tdk_download = client.get(tdk_download_path)
+                self.assertEqual(
+                    tdk_download.status_code,
+                    200,
+                    tdk_download.text,
+                )
+                self.assertEqual(
+                    tdk_download.json()["asset_id"],
+                    tdk_delivered["tdk_asset_id"],
+                )
                 put_count = len(private_store.put_calls)
                 self.assertEqual(
                     client.post(
@@ -1444,6 +1545,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     ).status_code,
                     409,
                 )
+                self.assertEqual(
+                    len(private_store.put_calls),
+                    put_count,
+                )
+                with patch(
+                    "services.server_tdk_export.LLMClient",
+                    StubServerTdkLlm,
+                ):
+                    self.assertEqual(
+                        client.post(
+                            tdk_path,
+                            json={"revision": 2},
+                        ).status_code,
+                        409,
+                    )
                 self.assertEqual(
                     len(private_store.put_calls),
                     put_count,
@@ -1462,6 +1578,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     )
                 self.assertEqual(
                     client.get(docx_download_path).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.get(tdk_download_path).status_code,
                     403,
                 )
                 self.assertFalse(local_state.exists())

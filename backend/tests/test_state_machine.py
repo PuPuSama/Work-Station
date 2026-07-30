@@ -307,6 +307,9 @@ class InvalidationTests(unittest.TestCase):
             "keywords": ["one", "two", "three", "four", "five", "six"],
         }
         task.tdk_path = "D:/D.docx"
+        task.tdk_asset_id = "asset-tdk"
+        task.tdk_content_hash = "e" * 64
+        task.tdk_filename = "D.docx"
         task.delivery_package_path = "D:/article/example.com"
         task.legacy_export = True
         task.workflow_error = WorkflowError(code="old")
@@ -338,6 +341,9 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.docx_content_hash, "")
         self.assertEqual(task.docx_filename, "")
         self.assertEqual(task.tdk_path, "")
+        self.assertEqual(task.tdk_asset_id, "")
+        self.assertEqual(task.tdk_content_hash, "")
+        self.assertEqual(task.tdk_filename, "")
         self.assertEqual(task.tdk.title, "")
         self.assertFalse(task.legacy_export)
         self.assertIsNone(task.workflow_error)
@@ -368,6 +374,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.docx_path, "")
         self.assertEqual(task.docx_asset_id, "")
         self.assertEqual(task.tdk_path, "")
+        self.assertEqual(task.tdk_asset_id, "")
         self.assertEqual(task.delivery_package_path, "")
         self.assertEqual(
             [v.kind for v in task.article_versions],
@@ -459,6 +466,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.images, [])
         self.assertEqual(task.docx_path, "")
         self.assertEqual(task.tdk_path, "")
+        self.assertEqual(task.tdk_asset_id, "")
         self.assertEqual(task.delivery_package_path, "")
         self.assertEqual(task.zero_gpt_report, "")
         self.assertFalse(hasattr(task, "compression"))

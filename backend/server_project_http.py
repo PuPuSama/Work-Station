@@ -58,10 +58,16 @@ from services.server_task_commands import (
     ServerTaskAuditAction,
     ServerTaskCommandUnavailable,
 )
+from services.server_tdk_export import (
+    ServerTdkDocxExport,
+    ServerTdkError,
+    ServerTdkUnavailable,
+)
 from storage import RevisionConflictError
 from workflow.state_machine import (
     ACTION_DOWNLOAD_DOCX,
     ACTION_EXPORT_DOCX,
+    ACTION_GENERATE_TDK,
     ACTION_PREPARE_IMAGES,
     ACTION_REWRITE_FROM_SCRATCH,
     ACTION_UPDATE_ARTICLE,
@@ -905,6 +911,150 @@ def create_project_task_docx_download(
         raise HTTPException(
             status_code=503,
             detail="Word download is temporarily unavailable.",
+        ) from exc
+    return ProjectAssetDownload(
+        asset_id=asset_id,
+        url=url,
+        expires_seconds=expires_seconds,
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/generate-tdk",
+    response_model=TaskRecord,
+)
+def generate_project_task_tdk(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.deliver",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_GENERATE_TDK)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        ServerTdkDocxExport(
+            config=_server_app_config(request),
+            objects=_knowledge_object_service(request),
+        ).generate(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task=task,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ServerTdkError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ServerTdkUnavailable, ObjectStoreError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="TDK generation is temporarily unavailable.",
+        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.tdk.generated",
+        details={
+            "description_characters": (
+                task.tdk.description_character_count
+            ),
+            "keyword_count": len(task.tdk.keywords),
+        },
+    )
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/tdk/download",
+    response_model=ProjectAssetDownload,
+)
+def create_project_task_tdk_download(
+    project: str,
+    task_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectAssetDownload:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.deliver",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    asset_id = task.tdk_asset_id.strip()
+    if not asset_id:
+        raise HTTPException(
+            status_code=409,
+            detail="The Server TDK document has not been generated.",
+        )
+    try:
+        url = (
+            _knowledge_object_service(
+                request
+            ).create_tdk_docx_download_url(
+                actor=authorized.actor,
+                project_id=authorized.project_id,
+                asset_id=asset_id,
+                expires_seconds=expires_seconds,
+            )
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="TDK document was not found in the requested project.",
+        ) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="TDK download is temporarily unavailable.",
         ) from exc
     return ProjectAssetDownload(
         asset_id=asset_id,

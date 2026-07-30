@@ -30,6 +30,7 @@ ServerTaskAuditAction = Literal[
     "article.section.replaced",
     "article.images.prepared",
     "article.docx.exported",
+    "article.tdk.generated",
 ]
 
 SERVER_TASK_ACTION_PERMISSIONS: dict[
@@ -41,6 +42,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.section.replaced": "article.edit",
     "article.images.prepared": "article.edit",
     "article.docx.exported": "article.deliver",
+    "article.tdk.generated": "article.deliver",
 }
 
 SERVER_TASK_ACTION_DETAIL_KEYS: dict[
@@ -52,6 +54,12 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
     "article.section.replaced": frozenset({"heading_depth"}),
     "article.images.prepared": frozenset({"image_count"}),
     "article.docx.exported": frozenset({"image_count"}),
+    "article.tdk.generated": frozenset(
+        {
+            "description_characters",
+            "keyword_count",
+        }
+    ),
 }
 
 _BASE_DETAIL_KEYS = frozenset(

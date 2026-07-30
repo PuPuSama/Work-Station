@@ -151,9 +151,12 @@
 - 已接通 Server 文章 DOCX：`article.deliver` 下重新读取并复核 Task 的私有 WebP，
   复用现有排版逻辑在内存生成 Word，再保存内容寻址 DOCX Asset；Task 的
   `docx_path` 为空，专用下载路由再次授权，通用 Viewer Asset 下载不能取得交付文档；
-- TDK DOCX、最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 仍未对象化，不能把文章
-  DOCX 导出描述成完整 Server 交付链路完成；
-- 已让五条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已接通 Server TDK DOCX：从当前文章生成经过硬约束验证的 T/D/K，在内存生成
+  `D.docx` 并保存内容寻址 `tdk_docx` Asset；Task 的 `tdk_path` 为空，专用下载再次
+  授权，通用 Viewer Asset 下载与文章 DOCX 下载均不能取得 TDK；
+- 最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 仍未对象化，不能把文章 DOCX/TDK
+  导出描述成完整 Server 交付链路完成；
+- 已让六条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小

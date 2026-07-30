@@ -20,6 +20,7 @@ from knowledge_agent.object_storage import (  # noqa: E402
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
     ScopedS3ArtifactStore,
+    TDK_DOCX_ARTIFACT_KIND,
 )
 from services.access_control import (  # noqa: E402
     ActorIdentity,
@@ -328,6 +329,46 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             expires_seconds=90,
         )
         self.assertTrue(docx_url.startswith("https://signed.example.test/"))
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.deliver",
+        )
+        tdk = self.service.upload_tdk_docx(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="tdk-docx",
+            data=b"private-tdk-word-document",
+        )
+        self.assertEqual(tdk.content_type, ARTICLE_DOCX_CONTENT_TYPE)
+        self.assertEqual(
+            tdk.metadata["artifact_kind"],
+            TDK_DOCX_ARTIFACT_KIND,
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=tdk.asset_id,
+            )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_article_docx_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=tdk.asset_id,
+            )
+        tdk_url = self.service.create_tdk_docx_download_url(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id=tdk.asset_id,
+            expires_seconds=90,
+        )
+        self.assertTrue(tdk_url.startswith("https://signed.example.test/"))
         self.assertEqual(
             self.access.calls[-1][2],
             "article.deliver",

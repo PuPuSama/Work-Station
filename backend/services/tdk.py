@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -162,8 +163,8 @@ def _set_font(run, font_name: str, size_pt: float, *, bold: bool = False) -> Non
     run_fonts.set(qn("w:eastAsia"), font_name)
 
 
-def export_tdk_docx(task: TaskRecord, metadata: TdkMetadata) -> Path:
-    """Write the workflow's compact-reference TDK document as ``D.docx``."""
+def build_tdk_docx_bytes(metadata: TdkMetadata) -> bytes:
+    """Render the compact-reference TDK document without filesystem access."""
 
     document = Document()
     section = document.sections[0]
@@ -202,8 +203,16 @@ def export_tdk_docx(task: TaskRecord, metadata: TdkMetadata) -> Path:
         _set_font(paragraph.add_run(f"{label}: "), WORD_FONT_NAME, 11, bold=True)
         _set_font(paragraph.add_run(value), WORD_FONT_NAME, 11)
 
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def export_tdk_docx(task: TaskRecord, metadata: TdkMetadata) -> Path:
+    """Write the workflow's compact-reference TDK document as ``D.docx``."""
+
     output_dir = Path(task.task_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "D.docx"
-    document.save(output_path)
+    output_path.write_bytes(build_tdk_docx_bytes(metadata))
     return output_path

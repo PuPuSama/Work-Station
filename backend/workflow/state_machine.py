@@ -290,6 +290,9 @@ def _keep_versions(task: TaskRecord, maximum_phase: int) -> None:
 def _clear_tdk(task: TaskRecord) -> None:
     task.tdk = TdkMetadata()
     task.tdk_path = ""
+    task.tdk_asset_id = ""
+    task.tdk_content_hash = ""
+    task.tdk_filename = ""
     task.delivery_package_path = ""
 
 

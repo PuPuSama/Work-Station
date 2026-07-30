@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 
 from docx import Document
@@ -17,6 +18,7 @@ from config import load_config  # noqa: E402
 from models import STATUS_DOCX_EXPORTED, TaskRecord  # noqa: E402
 from services.tdk import (  # noqa: E402
     TdkGenerationError,
+    build_tdk_docx_bytes,
     export_tdk_docx,
     generate_tdk_metadata,
     parse_tdk_response,
@@ -133,6 +135,22 @@ class TdkGenerationTests(unittest.TestCase):
                     for run in paragraph.runs
                 )
             )
+
+    def test_in_memory_export_matches_local_document(self) -> None:
+        metadata = parse_tdk_response(
+            VALID_RESPONSE,
+            title="Exact Original Article Title",
+            article=ARTICLE,
+        )
+        document = Document(BytesIO(build_tdk_docx_bytes(metadata)))
+        self.assertEqual(
+            [paragraph.text for paragraph in document.paragraphs],
+            [
+                "T: Exact Original Article Title",
+                f"D: {metadata.description}",
+                f"K: {', '.join(metadata.keywords)}",
+            ],
+        )
 
 
 if __name__ == "__main__":

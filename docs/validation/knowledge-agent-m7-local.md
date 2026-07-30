@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 526 tests；
+- 530 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -189,7 +189,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 共享派生资产元数据不保存文章角色、产品或来源关系，避免内容去重复用后残留第一次
   使用者的关系；这些关系只保存在 Task `ArticleImage`；
 - Viewer 返回 403；旧 Revision 在对象读取前返回 409；派生对象仍经授权下载路由访问；
-- Server TDK/Delivery ZIP 对象化和派生 orphan 对账尚未完成；该 Task 写操作已进入
+- Server TDK 已对象化；Delivery ZIP 和派生 orphan 对账尚未完成；该 Task 写操作已进入
   事务内 Audit。
 
 ### Server 私有文章 DOCX
@@ -214,7 +214,33 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 导出/专用下载返回 403；通用 Asset 下载对 `article_docx` 返回 404；
 - 同哈希资产已属于其他访问类型时在 Task CAS 前 fail closed，不降级下载权限；
 - 旧 Revision 在对象读取/写入前返回 409，未产生额外对象；
-- TDK DOCX、最终 AI-rate 截图、Delivery ZIP 和前端 Delivery UI 仍待后续切片。
+- 最终 AI-rate 截图、Delivery ZIP 和前端 Delivery UI 仍待后续切片。
+
+### Server 私有 TDK DOCX
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_tdk `
+  tests.test_m7_server_tdk_export `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security -v
+```
+
+结果：
+
+- 29 tests，包含纯内存 TDK Word 单元测试和真实 PostgreSQL + FastAPI 路由；
+- Local `export_tdk_docx()` 与 Server `build_tdk_docx_bytes()` 复用同一排版核心；
+- Server 要求已有 `docx_asset_id`，从当前文章生成并验证 Title、Description 和六个
+  Keyword，不接受客户端 TDK、Prompt、Asset ID、对象 URI 或输出路径；
+- LLM/Provider Runtime Error 统一映射为不含供应商正文和 Key 的 503；
+- `D.docx` 在内存生成并保存为内容寻址 `tdk_docx`，Task 只保存
+  `tdk_asset_id/tdk_content_hash/tdk_filename`，`tdk_path` 为空；
+- Viewer 生成/专用下载返回 403；通用 Asset 下载与文章 DOCX 专用下载不能取得 TDK；
+- 旧 Revision 在 LLM 和对象写入前返回 409；成功 Task CAS 产生
+  `article.tdk.generated` Audit，Details 只含字符数和关键词数量；
+- 最终 AI-rate 截图、Delivery ZIP、前端 Delivery UI 和 orphan 对账仍未完成。
 
 ### Server Task CAS 与事务内 Audit
 
@@ -234,9 +260,11 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 五条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx Action；
-- Audit Details 只含 Revision、Status、产品/图片计数或 Heading 深度，不含正文；
-- 图片/DOCX 的 S3 Put 仍不属于 PostgreSQL 事务，失败后的内容寻址 orphan 由后续对账
+- 六条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx/tdk Action；
+- Audit Details 只含 Revision、Status、产品/图片计数、Heading 深度或 TDK 数量，
+  不含正文；
+- 图片/文章 DOCX/TDK DOCX 的 S3 Put 仍不属于 PostgreSQL 事务，失败后的内容寻址
+  orphan 由后续对账
   延迟清理。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
@@ -474,7 +502,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX 私有对象和 no-go 部署门禁已实现；
-  TDK/Delivery ZIP 对象化、真实备份恢复演练与生产供应商尚未完成；
+  最终 AI-rate 截图/Delivery ZIP 对象化、真实备份恢复演练与生产供应商尚未完成；
 - 前端登录页已新增 Server OIDC 分支并通过 lint/build；其余 M7 管理界面尚未接入。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

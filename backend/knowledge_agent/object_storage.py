@@ -46,6 +46,13 @@ ARTICLE_DOCX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument."
     "wordprocessingml.document"
 )
+TDK_DOCX_ARTIFACT_KIND = "tdk_docx"
+ARTICLE_DELIVERY_ARTIFACT_KINDS = frozenset(
+    {
+        ARTICLE_DOCX_ARTIFACT_KIND,
+        TDK_DOCX_ARTIFACT_KIND,
+    }
+)
 
 
 class ScopedS3ArtifactStore:
@@ -202,6 +209,28 @@ class ProjectKnowledgeObjectService:
             width=None,
             height=None,
             metadata={"artifact_kind": ARTICLE_DOCX_ARTIFACT_KIND},
+        )
+
+    def upload_tdk_docx(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+    ) -> KnowledgeAsset:
+        """Persist a content-addressed private TDK reference document."""
+
+        self._access.require(actor, project_id, "article.deliver")
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type=ARTICLE_DOCX_CONTENT_TYPE,
+            width=None,
+            height=None,
+            metadata={"artifact_kind": TDK_DOCX_ARTIFACT_KIND},
         )
 
     def _store_asset(
@@ -362,11 +391,11 @@ class ProjectKnowledgeObjectService:
         asset = self._repository.get_asset(project_id, asset_id)
         if asset is None:
             raise KnowledgeObjectNotFound("knowledge object not found")
-        if (
-            str(asset.metadata.get("artifact_kind") or "")
-            == ARTICLE_DOCX_ARTIFACT_KIND
-        ):
-            # Delivery artifacts require the dedicated article.deliver route;
+        artifact_kind = str(
+            asset.metadata.get("artifact_kind") or ""
+        )
+        if artifact_kind in ARTICLE_DELIVERY_ARTIFACT_KINDS:
+            # Delivery artifacts require a dedicated article.deliver route;
             # knowing their Asset ID must not downgrade access to project.view.
             raise KnowledgeObjectNotFound("knowledge object not found")
         key = self._scoped_key(
@@ -408,8 +437,38 @@ class ProjectKnowledgeObjectService:
             expires_seconds=expires_seconds,
         )
 
+    def create_tdk_docx_download_url(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        expires_seconds: int = 300,
+    ) -> str:
+        """Sign one TDK DOCX only after a fresh article.deliver decision."""
+
+        self._access.require(actor, project_id, "article.deliver")
+        asset = self._repository.get_asset(project_id, asset_id)
+        if (
+            asset is None
+            or str(asset.metadata.get("artifact_kind") or "")
+            != TDK_DOCX_ARTIFACT_KIND
+            or asset.content_type != ARTICLE_DOCX_CONTENT_TYPE
+        ):
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
+        )
+        return self._store.create_download_url(
+            key,
+            expires_seconds=expires_seconds,
+        )
+
 
 __all__ = [
+    "ARTICLE_DELIVERY_ARTIFACT_KINDS",
     "ARTICLE_DOCX_ARTIFACT_KIND",
     "ARTICLE_DOCX_CONTENT_TYPE",
     "KnowledgeObjectIntegrityError",
@@ -417,4 +476,5 @@ __all__ = [
     "ProjectKnowledgeObject",
     "ProjectKnowledgeObjectService",
     "ScopedS3ArtifactStore",
+    "TDK_DOCX_ARTIFACT_KIND",
 ]

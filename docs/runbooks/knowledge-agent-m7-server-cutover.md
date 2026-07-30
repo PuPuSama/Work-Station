@@ -233,15 +233,32 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 - 通用 `GET .../assets/{asset_id}/download` 对 `article_docx` 返回 404，专用下载路由
   重新要求 `article.deliver` 并签发不超过一小时的 URL；
 - 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
-- TDK DOCX、最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据
-  不得写成“完整 Server Delivery 已完成”。
+- 最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据不得写成
+  “完整 Server Delivery 已完成”。
 
-五条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+TDK DOCX 冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/generate-tdk`，随后使用
+`GET /api/projects/{project}/tasks/{task_id}/tdk/download`。至少验证：
 
-- “完全重写、确认产品、替换章节、准备图片、导出 DOCX”分别产生
+- Viewer 返回 403；具备 `article.deliver` 的 Editor 请求只含当前 Revision；
+- Task 必须已有 Server `docx_asset_id`，不能以本地 `docx_path` 冒充已导出文章；
+- TDK Title 精确绑定当前文章 H1，Description 不超过 150 字符，Keyword 恰好 6 个、
+  非空、唯一且不含逗号或换行；
+- LLM/网关异常返回统一 503，响应和日志证据不包含 Provider 正文、Token、Key 或请求
+  文章；校验失败返回 422 且不写对象；
+- `D.docx` 在内存生成，Task 只保存 `tdk`、`tdk_asset_id`、`tdk_content_hash` 和
+  `tdk_filename`，`tdk_path` 为空；
+- 通用 Asset 下载对 `tdk_docx` 返回 404，文章 DOCX 专用下载也不能签发 TDK；只有
+  Task-scoped TDK 下载重新授权后签发不超过一小时的 URL；
+- 旧 Revision 在 LLM/对象访问前返回 409；并发 CAS 后的未引用 TDK DOCX 进入内容
+  寻址 orphan 对账，不在失败请求中立即删除。
+
+六条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+
+- “完全重写、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK”分别产生
   `article.task.rewritten`、`article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
-  `article.docx.exported`；
+  `article.docx.exported`、`article.tdk.generated`；
 - Action 到 `article.edit/article.deliver` 的映射由服务端常量决定，请求不能提交或
   覆盖 Permission；
 - Event 的 Organization/Project/Actor/Task 与请求 Scope 一致，Details 只含
@@ -249,8 +266,8 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
   URL、对象 URI、签名 URL、Token 或 Secret；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
-- Audit Event 更新/删除仍被 Trigger 拒绝；图片/DOCX 已先写对象而 Task/Audit 后失败时，
-  只记录内容寻址 orphan 进入延迟对账，不直接删除。
+- Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX 已先写对象而
+  Task/Audit 后失败时，只记录内容寻址 orphan 进入延迟对账，不直接删除。
 
 产品重新发现冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/product-rediscovery`，随后只使用响应中的

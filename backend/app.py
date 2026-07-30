@@ -3690,6 +3690,9 @@ def perform_generate_tdk(
 
     task.tdk = metadata
     task.tdk_path = str(output)
+    task.tdk_asset_id = ""
+    task.tdk_content_hash = ""
+    task.tdk_filename = ""
     task.delivery_package_path = ""
     task.workflow_error = None
     write_json_artifact(task, "08_tdk.json", metadata.model_dump(mode="json"))

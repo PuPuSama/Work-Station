@@ -386,6 +386,9 @@ class TaskRecord(WorkflowModel):
     docx_filename: str = ""
     tdk: TdkMetadata = Field(default_factory=TdkMetadata)
     tdk_path: str = ""
+    tdk_asset_id: str = ""
+    tdk_content_hash: str = ""
+    tdk_filename: str = ""
     delivery_package_path: str = ""
     legacy_export: bool = False
     zero_gpt_report: str = ""
