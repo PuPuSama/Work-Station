@@ -349,6 +349,8 @@ export type AuthStatus = {
     authenticated?: boolean;
     mode?: "server";
     login_available?: boolean;
+    organization_id?: string | null;
+    user_id?: string | null;
   };
 };
 
@@ -380,6 +382,54 @@ export type ProjectMembershipCandidate = {
 
 export type ProjectMembershipCandidatePage = {
   items: ProjectMembershipCandidate[];
+  next_after_user_id: string | null;
+};
+
+export type WorkspaceUserStatus = "active" | "disabled";
+export type WorkspaceOrganizationRole = "org_admin" | "member";
+
+export type WorkspaceUser = {
+  user_id: string;
+  display_name: string;
+  status: WorkspaceUserStatus;
+  organization_role: WorkspaceOrganizationRole;
+  team_membership_count: number;
+  project_membership_count: number;
+  login_linked: boolean;
+};
+
+export type WorkspaceUserPage = {
+  items: WorkspaceUser[];
+  next_after_user_id: string | null;
+};
+
+export type TeamStatus = "active" | "archived";
+export type TeamMembershipRole = "team_lead" | "member";
+
+export type WorkspaceTeam = {
+  team_id: string;
+  name: string;
+  manager_user_id: string | null;
+  status: TeamStatus;
+  member_count: number;
+  team_lead_count: number;
+  project_count: number;
+};
+
+export type WorkspaceTeamPage = {
+  items: WorkspaceTeam[];
+  next_after_team_id: string | null;
+};
+
+export type WorkspaceTeamMember = {
+  user_id: string;
+  display_name: string;
+  user_status: WorkspaceUserStatus;
+  role: TeamMembershipRole;
+};
+
+export type WorkspaceTeamMemberPage = {
+  items: WorkspaceTeamMember[];
   next_after_user_id: string | null;
 };
 

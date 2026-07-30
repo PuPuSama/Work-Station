@@ -167,8 +167,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
-- 不接邀请或 Organization 级管理员前端控制台；Workspace User 与 Team/TeamMembership
-  后端命令已完成，但尚未做邀请、外部身份关联和组织管理 UI；
+- 不接邀请或外部身份关联 UI；Organization Admin Console 已接入 Workspace User、
+  全会话撤销、Team 与 TeamMembership，但生产 IdP 管理仍不在本地应用内；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
 - 不接生产对象存储、生产部署或密钥服务。
 
@@ -397,6 +397,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口；仅 `org_admin/team_lead` 显示成员入口，不启动 Local Job Center |
 | `frontend/src/components/project-settings-entry.tsx` | Local Project Settings 与 Server Project Members 组件树分流 | `/api/auth/status` 失败不降级到 Local，不让 Server 页面发起旧设置 API |
 | `frontend/src/components/server-project-members.tsx` | Server 显式成员 Roster/Candidate、角色更新与撤销 UI | 只消费 Project-scoped API、Disabled 只允许撤销、分页、就近反馈、前端角色不作为安全边界 |
+| `frontend/src/components/organization-admin-entry.tsx` | `/organization` 的 Server 身份与组织边界入口 | Auth Status 必须明确为 Server 且返回已认证 Organization；失败不降级到 Local |
+| `frontend/src/components/organization-admin-console.tsx` | Workspace User/Session 与 Team/TeamMembership 管理控制台 | 只传字段白名单、后端游标分页、危险操作确认、Manager/Lead 文案分离、前端状态不作为授权 |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
@@ -1160,3 +1162,9 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     旧成员行仍可被管理员看见和撤销？
 45. Team 与 TeamMembership 的创建、更新、归档和撤销是否仍与固定 Action 的 Audit
     Event 同事务，失败时不留下部分写入？
+46. `/organization` 是否仍先从已验签且版本有效的 Server Auth Status 取得
+    Organization/User 身份，并在失败时停止而不是回退到 Local 管理 API？
+47. Organization Console 是否仍把账号停用、全会话撤销、Team 归档和成员撤销作为需
+    确认的独立命令，并在 Pending 时禁止重复提交？
+48. Console 是否仍按服务端 Cursor 分页，不把前端已加载列表误当作完整组织目录或权限
+    准源？

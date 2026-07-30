@@ -830,9 +830,10 @@ def auth_status(request: Request) -> ApiMessage:
             None,
         )
         authenticated = False
+        actor = None
         if isinstance(security, ServerRequestSecurity):
             try:
-                security.authenticate(
+                actor = security.authenticate(
                     request.cookies.get(SERVER_AUTH_COOKIE_NAME, "")
                 )
                 authenticated = True
@@ -852,6 +853,10 @@ def auth_status(request: Request) -> ApiMessage:
                     ),
                     OidcLoginService,
                 ),
+                "organization_id": (
+                    actor.organization_id if actor is not None else None
+                ),
+                "user_id": actor.user_id if actor is not None else None,
             },
         )
     enabled = authentication_enabled()

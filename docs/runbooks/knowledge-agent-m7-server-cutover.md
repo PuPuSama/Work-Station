@@ -179,8 +179,8 @@ Snapshot Asset 与 Task `*_asset_id` 三类引用都在当前 Schema 中。
 开始签发 v2。全会话撤销命令为
 `POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke`，Body 必须是
 空 JSON 对象。命令不接受版本、角色或目标 Organization 字段，成功响应也不返回内部版本。
-当前 Project Membership Console 不包含这条 Organization-scoped 命令，因此还不能描述
-成完整的管理员控制台。
+Organization Admin Console 已接入这条 Organization-scoped 命令，但生产 IdP 的登录
+关联、邀请与供应商侧会话仍是独立边界，因此不能描述成完整身份生命周期能力。
 
 撤销动作必须由同 Organization 的 Active Org Admin 发起，并验证版本递增与
 `workspace_user.sessions.revoked` Audit 同事务。跨组织目标、非 Admin、目标不存在或
@@ -221,9 +221,9 @@ Permission。冒烟至少验证：
 - 在读写事务尚未结束时并发撤销 Actor 的 Org Admin、Team Lead 或显式
   ProjectMembership 事实会等待该事务，证明没有 check-then-revoke/read 窗口。
 
-Project Membership Console 已完成显式成员列表、候选、授权、改角色和撤销；仍没有邀请、
-Workspace User 创建、Team 管理或 Organization-scoped Session 撤销界面，不能把当前
-页面描述为完整的成员生命周期。
+Project Membership Console 已完成显式项目成员管理，Organization Admin Console 已完成
+Workspace User、Team/TeamMembership 与全会话撤销；邀请、外部身份关联和生产 IdP 管理
+仍未实现，不能把当前页面描述为完整身份平台。
 
 前端冒烟从 `/projects/{project}/settings` 开始，至少验证：
 

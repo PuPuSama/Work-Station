@@ -144,6 +144,32 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Server Mode 白名单只开放精确 Team GET/POST、Team PATCH、Member GET 与
   PUT/DELETE 路径。
 
+### Organization Admin Console
+
+```powershell
+Set-Location D:\Project\article\article-agent-formal\frontend
+node .\node_modules\eslint\bin\eslint.js .
+node .\node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- ESLint、TypeScript 与 Next.js 16.2.10 production build 通过；
+- 新增 `/organization` 静态入口；只有 Auth Status 明确返回已认证 Server
+  Organization 时才挂载控制台，失败不回退到 Local API；
+- 项目侧栏和 Server Project Directory 只在 SQL Project Role 明确为 `org_admin` 时
+  显示组织管理入口；直接访问仍由后端逐请求授权；
+- 账号页支持创建本地账号、修改显示名/组织角色、停用/恢复和撤销全部会话；
+- Team 页支持创建/归档/恢复、成员 Roster、授予/修改 `team_lead/member` 与撤销；
+- Manager 与 Team Lead 文案及操作分离；停用、撤销会话、归档和成员撤销均使用确认
+  Dialog，Pending 时禁重，表单均有可见 Label，关键控件至少 44px；
+- User/Team/Member 列表继续使用服务端稳定 Cursor 分页，不把前端已加载集合当作完整准源。
+
+当前受控浏览器策略仍会拦截本机 `/api/*`，因此本轮没有把 375px 真实数据态、Dark Mode
+对比度或账号/团队完整点击链路记为浏览器实测通过；已确认的是响应式源码审查、
+ESLint、TypeScript、production build，以及对应 Organization API 的真实 PostgreSQL
+集成回归。正式会话仍需按本 Runbook 冒烟。
+
 ### Alembic 往返和重复升级
 
 在确认 M7 新表均为 0 行后执行：
@@ -778,8 +804,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
   已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
   Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成；Workspace User
-  和 Team/TeamMembership 后端目录、创建与生命周期命令也已完成，但邀请、账号/Team
-  管理前端、Session 撤销前端、具体生产 Provider 注册、Client Secret 轮换和
+  和 Team/TeamMembership 后端目录、创建与生命周期命令及 Organization Admin Console
+  也已完成，但邀请、外部身份关联 UI、具体生产 Provider 注册、Client Secret 轮换和
   Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、

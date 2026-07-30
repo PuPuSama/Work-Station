@@ -3,6 +3,7 @@
 import {
   ArrowLeft,
   BookOpenText,
+  Building2,
   FileText,
   Layers3,
   PackageCheck,
@@ -224,6 +225,17 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
 
         <SidebarFooter className="px-3 pb-3">
           <SidebarMenu>
+            {serverMode === true && serverRole === "org_admin" && (
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  tooltip="组织管理"
+                  render={<Link href="/organization" />}
+                >
+                  <Building2 />
+                  <span>组织管理</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            )}
             {(serverMode === false || canManageServerMembers) && (
               <SidebarMenuItem>
                 <SidebarMenuButton

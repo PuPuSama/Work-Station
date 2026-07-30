@@ -184,8 +184,12 @@
   Revision 打包，并通过专用接口取得短期下载 URL；未迁移导航不挂载，Local UI 不变；
 - 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不
-  降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；账号与 Team
-  后端命令已完成，但邀请、账号/Team 与 Session 撤销的组织级 UI 尚未实现；
+  降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；
+- 已接入 `/organization` Organization Admin Console：仅 Server Auth Status 能提供
+  已认证 Organization 时挂载；账号创建/资料/角色/状态、全会话撤销、Team 创建/归档、
+  TeamMembership 授权/改角色/撤销均调用已验证的 Organization-scoped API；危险操作
+  使用确认 Dialog，加载与分页状态有界，Manager 与 Team Lead 明确分离；邀请与外部身份
+  关联 UI 仍未实现；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
 - 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定

@@ -250,6 +250,15 @@ class WorkspaceUserHttpTests(unittest.TestCase):
                 SERVER_AUTH_COOKIE_NAME,
                 self._token(self.org_a, self.admin_a),
             )
+            auth_status = client.get("/api/auth/status")
+            self.assertEqual(
+                auth_status.json()["data"]["organization_id"],
+                self.org_a,
+            )
+            self.assertEqual(
+                auth_status.json()["data"]["user_id"],
+                self.admin_a,
+            )
             first = client.get(path, params={"limit": 2})
             self.assertEqual(first.status_code, 200, first.text)
             self.assertEqual(len(first.json()["items"]), 2)

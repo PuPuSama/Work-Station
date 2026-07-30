@@ -60,6 +60,9 @@ export function ServerProjectSelector() {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
+  const canManageOrganization = projects.some(
+    (project) => project.effective_role === "org_admin",
+  );
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -79,6 +82,16 @@ export function ServerProjectSelector() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {canManageOrganization && (
+              <Button
+                nativeButton={false}
+                variant="outline"
+                render={<Link href="/organization" />}
+              >
+                <Building2 />
+                组织管理
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"

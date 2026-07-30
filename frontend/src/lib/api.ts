@@ -108,6 +108,19 @@ export async function apiPut<T>(
   return readJson<T>(response);
 }
 
+export async function apiPatch<T>(
+  path: string,
+  body: unknown,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  const response = await fetchWithTimeout(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, timeoutMs);
+  return readJson<T>(response);
+}
+
 export async function apiDelete<T>(path: string): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
     method: "DELETE",
