@@ -13,7 +13,7 @@ class TaskStoreMigrationConflict(RuntimeError):
     """Raised when a non-empty target differs from the SQLite source."""
 
 
-def _scoped_records(
+def scope_task_records(
     records: list[dict[str, Any]],
     target: PostgresTaskRepository,
 ) -> list[dict[str, Any]]:
@@ -26,7 +26,7 @@ def _scoped_records(
     return scoped
 
 
-def _digest(records: list[dict[str, Any]]) -> str:
+def task_records_digest(records: list[dict[str, Any]]) -> str:
     canonical = json.dumps(
         records,
         ensure_ascii=False,
@@ -57,10 +57,10 @@ def migrate_task_store(
 ) -> TaskStoreMigrationReport:
     """Copy once, compare exactly, and never overwrite a divergent target."""
 
-    source_records = _scoped_records(source.load_all(), target)
+    source_records = scope_task_records(source.load_all(), target)
     target_before = target.load_all()
-    source_digest = _digest(source_records)
-    target_before_digest = _digest(target_before)
+    source_digest = task_records_digest(source_records)
+    target_before_digest = task_records_digest(target_before)
 
     if target_before:
         if source_digest != target_before_digest:
@@ -82,7 +82,7 @@ def migrate_task_store(
     if not dry_run:
         target.replace_all(source_records)
         target_after = target.load_all()
-        target_after_digest = _digest(target_after)
+        target_after_digest = task_records_digest(target_after)
         if target_after_digest != source_digest:
             raise TaskStoreMigrationConflict(
                 "PostgreSQL task verification digest does not match source"
@@ -108,4 +108,6 @@ __all__ = [
     "TaskStoreMigrationConflict",
     "TaskStoreMigrationReport",
     "migrate_task_store",
+    "scope_task_records",
+    "task_records_digest",
 ]

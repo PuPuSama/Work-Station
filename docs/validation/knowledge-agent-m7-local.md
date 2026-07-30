@@ -102,7 +102,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 470 tests；
+- 477 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -189,6 +189,40 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 旧 `APP_PASSWORD` 登录在 Server Mode 返回 503；
 - 真实 Lifespan 使用 PostgreSQL Engine 构建请求安全服务并正常清理；
 - Local Mode 原密码认证测试保持通过。
+
+### Task/Job C3 只读双读报告
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_cutover_report `
+  tests.test_m7_postgres_tasks -v
+```
+
+结果：
+
+- 20 tests；
+- Read-only SQLite Source 与现有 Repository 导出语义一致；
+- 匹配时只各读取一次，不执行 Import、Claim、Recover 或状态变更；
+- Task 顺序变化、仅源/仅目标 ID、内容变化、空 ID 和重复 ID 均可定位；
+- Active SQLite Job 即使两边数据相同也阻止切换；
+- Task Target 与 Job Target 的 Organization/Project 不一致直接拒绝；
+- 真实 PostgreSQL 测试先证明 matched，再只修改 PG Task，报告准确定位
+  `changed_ids`；
+- 对外报告不包含测试用文章正文。
+
+冻结窗口 CLI：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_agent.m7_cutover_report `
+  --organization-id '<organization_id>' `
+  --project-id '<project_id>' `
+  --task-database '<tasks.sqlite3>' `
+  --job-database '<job_queue.sqlite3>'
+```
+
+返回 0 才表示该次冻结快照可进入下一门；返回 2 表示差异。报告后 SQLite 再发生
+任何写入都会使证据失效，CLI 本身不是同步器。
 
 ## 诊断记录
 

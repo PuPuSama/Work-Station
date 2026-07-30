@@ -45,6 +45,9 @@ from services.task_store_migration import (  # noqa: E402
     TaskStoreMigrationConflict,
     migrate_task_store,
 )
+from services.server_cutover_report import (  # noqa: E402
+    build_server_cutover_report,
+)
 from storage import RevisionConflictError, TaskStore  # noqa: E402
 
 
@@ -739,6 +742,54 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
                 "still contains active jobs",
             ):
                 migrate_terminal_job_history(source, target)
+
+    def test_real_dual_read_report_proves_then_detects_divergence(self) -> None:
+        target_jobs = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            task_source = SQLiteTaskRepository(
+                Path(directory) / "tasks.json"
+            )
+            task_source.replace_all((self._record("dual-read-task"),))
+            migrate_task_store(task_source, self.repository_a)
+
+            job_source = JobQueue(Path(directory) / "jobs.sqlite3")
+            job_source.create_batch(
+                "outline",
+                [
+                    {
+                        "task_id": "dual-read-task",
+                        "source_revision": 0,
+                    }
+                ],
+            )
+            claimed = job_source.claim_jobs(1)[0]
+            job_source.mark_succeeded(claimed["id"], 1)
+            migrate_terminal_job_history(job_source, target_jobs)
+
+            matched = build_server_cutover_report(
+                task_source=task_source,
+                task_target=self.repository_a,
+                job_source=job_source,
+                job_target=target_jobs,
+            )
+            self.assertTrue(matched.ready_for_single_write)
+
+            divergent = self.repository_a.get("dual-read-task")
+            divergent["topic"] = "changed only in PostgreSQL"  # type: ignore[index]
+            self.repository_a.upsert(divergent)  # type: ignore[arg-type]
+            mismatch = build_server_cutover_report(
+                task_source=task_source,
+                task_target=self.repository_a,
+                job_source=job_source,
+                job_target=target_jobs,
+            )
+
+        self.assertFalse(mismatch.ready_for_single_write)
+        self.assertEqual(mismatch.tasks.changed_ids, ("dual-read-task",))
 
 
 if __name__ == "__main__":

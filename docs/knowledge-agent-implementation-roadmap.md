@@ -129,11 +129,14 @@
   门禁明确 no-go，真实恢复演练与生产供应商仍待确定；
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
+- 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
+  Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以
   登录入口仍保持关闭；
 - 当前单密码 Cookie 不具备 User Identity，正式身份来源也尚未确定，因此尚未把
   RBAC 接入 `app.py`；
-- 后续按“正式身份映射与 API 授权覆盖 -> 服务器单写切换
+- 后续按“正式身份映射与 API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
+  -> 服务器单写切换
   -> 备份恢复与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。

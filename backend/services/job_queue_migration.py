@@ -39,7 +39,9 @@ class JobQueueMigrationReport:
     already_matched: bool
 
 
-def _summary(batches: list[dict[str, Any]]) -> JobHistorySummary:
+def summarize_job_history(
+    batches: list[dict[str, Any]],
+) -> JobHistorySummary:
     jobs = [
         dict(job)
         for batch in batches
@@ -106,7 +108,7 @@ def migrate_terminal_job_history(
     dry_run: bool = False,
 ) -> JobQueueMigrationReport:
     source_batches = source.export_batches()
-    source_summary = _summary(source_batches)
+    source_summary = summarize_job_history(source_batches)
     active_ids = tuple(
         str(job.get("id") or "")
         for batch in source_batches
@@ -119,7 +121,7 @@ def migrate_terminal_job_history(
         )
 
     target_before_batches = target.export_batches()
-    target_before = _summary(target_before_batches)
+    target_before = summarize_job_history(target_before_batches)
     if target_before.job_count or target_before.batch_count:
         if target_before != source_summary:
             raise JobQueueMigrationConflict(
@@ -142,7 +144,7 @@ def migrate_terminal_job_history(
             raise JobQueueMigrationConflict(
                 "PostgreSQL job history import failed validation"
             ) from exc
-        target_after = _summary(target.export_batches())
+        target_after = summarize_job_history(target.export_batches())
         if target_after != source_summary:
             raise JobQueueMigrationConflict(
                 "PostgreSQL job history verification differs from source"
@@ -166,4 +168,5 @@ __all__ = [
     "JobQueueMigrationConflict",
     "JobQueueMigrationReport",
     "migrate_terminal_job_history",
+    "summarize_job_history",
 ]

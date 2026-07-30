@@ -141,11 +141,13 @@ KMS Key 轮换遵循供应商策略；先验证旧对象仍可解密。不得把
 
 1. 备份与恢复演练；
 2. `alembic upgrade head`；
-3. 只读 Preflight；
-4. API/Worker 部署但保持流量关闭；
-5. 身份、项目 Scope、对象下载、Retriever、Task/Job 冒烟；
-6. 小流量开放；
-7. 观察期结束后才关闭旧服务器写路径。
+3. 停止 SQLite 写入口和 Worker，完成一次性迁移；
+4. 对每个项目运行 `m7_cutover_report` 并保存 matched JSON；
+5. 只读 Preflight；
+6. API/Worker 部署但保持流量关闭；
+7. 身份、项目 Scope、对象下载、Retriever、Task/Job 冒烟；
+8. 小流量开放；
+9. 观察期结束后才关闭旧服务器写路径。
 
 回滚原则：
 

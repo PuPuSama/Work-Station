@@ -202,6 +202,8 @@ with engine.begin() as connection:
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
+| `backend/services/server_cutover_report.py` | SQLite/PG Task 与 Job 只读双读报告 | 只读连接、同一 Scope、顺序/ID/摘要、正文不出报告 |
+| `backend/knowledge_agent/m7_cutover_report.py` | C3 冻结窗口比对 CLI | ready 为 0、差异为 2、数据库 URL 只读环境注入 |
 | `backend/services/task_repository.py` | 本地/服务器 Task Repository Protocol 与 SQLite 实现 | 本地模式保持可用 |
 | `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
 | `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
@@ -269,10 +271,24 @@ Router 级依赖保证后续新增 Knowledge 路由默认也进入授权层；�
 6. SQLite 全量 Batch 导出和 Active Job 排空门；
 7. Terminal Job 历史导入，保留 Batch/Job ID 并验证数量、状态分布和内容摘要。
 
+C3 第 1 步已经实现：
+
+1. `ReadOnlySQLiteTaskSource` 和 `ReadOnlySQLiteJobSource` 使用 SQLite
+   `mode=ro + query_only`，不初始化 Schema、不恢复 Running Job；
+2. Task 同时比较数量、列表顺序、全内容摘要、仅源/仅目标/内容变化 ID；
+3. 空 ID、重复 ID、Task/Job 目标 Scope 不一致都会阻止切换；
+4. Job 同时比较 Batch/Job 数量、状态分布、稳定 ID 和内容摘要；
+5. SQLite 仍有 `queued/running/retry_wait` Job 时，即使两边历史相同也不允许切换；
+6. `public_values()` 只返回 Scope、数量、ID 和 SHA-256，不返回文章正文或 Job Request。
+
+执行双读必须在冻结窗口：先停止旧写入口和 Worker、完成一次迁移/同步，再立即运行
+`m7_cutover_report`。它不是持续复制器；旧 SQLite 在报告后又产生写入，报告立即失效，
+必须重新冻结、同步和比对。
+
 后续 C3 顺序：
 
-1. 先做只读双读比对，仍由旧路径写入；
-2. 正式身份和项目路由覆盖后，切换服务器模式为 PostgreSQL 单写；
+1. 为每个正式 Organization/Project 保存带时间和 Commit 的 matched 报告；
+2. 正式身份和 Project/Article/Worker 路由覆盖后，切换服务器模式为 PostgreSQL 单写；
 3. 观察并验证后移除服务器 SQLite 写入；
 4. 本地模式继续保留 SQLite，不做双向同步。
 
@@ -287,8 +303,9 @@ revision / position / record_updated_at
 
 Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运行时间、取消标记、Worker 和 Lease。只有 Lease 过期的 `running` Job 才可恢复；一个 Worker 不能提交另一个 Worker 已接管的结果。
 
-当前 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。在请求还没有可信
-`ActorIdentity + project_id` 前，不允许用一个全局“默认项目”强行切换 PostgreSQL。
+当前 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。虽然 Knowledge Router 已有可信
+`ActorIdentity + project_id`，旧 Article/Task/Batch 路由和 Worker 尚未全部携带该
+Scope，因此不允许用一个全局“默认项目”强行切换 PostgreSQL。
 
 ### M7-D：对象存储与部署
 
