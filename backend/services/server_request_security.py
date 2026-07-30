@@ -104,6 +104,16 @@ def server_http_route_available(method: str, path: str) -> bool:
         and (len(parts) == 5 or bool(parts[5]))
     ):
         return True
+    if (
+        normalized_method == "GET"
+        and len(parts) == 7
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "assets"
+        and bool(parts[5])
+        and parts[6] == "download"
+    ):
+        return True
     return normalized_path.startswith("/api/knowledge/")
 
 

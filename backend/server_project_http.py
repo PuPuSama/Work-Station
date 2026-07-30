@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 
+from knowledge_agent.object_storage import (
+    KnowledgeObjectNotFound,
+    ProjectKnowledgeObjectService,
+)
 from models import TaskRecord
-from services.access_control import ActorIdentity
+from services.access_control import ActorIdentity, ProjectAccessDenied
+from services.object_store import ObjectStoreError
 from services.project_directory import (
     AccessibleProject,
     PostgresProjectDirectory,
@@ -17,6 +23,12 @@ from services.server_request_security import (
     ServerRequestSecurity,
     ServerRequestUnauthenticated,
 )
+
+
+class ProjectAssetDownload(BaseModel):
+    asset_id: str
+    url: str
+    expires_seconds: int
 
 
 def require_server_project_access(
@@ -137,9 +149,25 @@ def _task_store(
     return factory.create(authorized).store
 
 
+def _knowledge_object_service(
+    request: Request,
+) -> ProjectKnowledgeObjectService:
+    service = getattr(
+        request.app.state,
+        "server_project_object_service",
+        None,
+    )
+    if not isinstance(service, ProjectKnowledgeObjectService):
+        raise HTTPException(
+            status_code=503,
+            detail="Server project object storage is not available.",
+        )
+    return service
+
+
 router = APIRouter(
     prefix="/api/projects",
-    tags=["server-project-tasks"],
+    tags=["server-projects"],
 )
 
 
@@ -204,7 +232,53 @@ def read_project_task(
         ) from None
 
 
+@router.get(
+    "/{project}/assets/{asset_id}/download",
+    response_model=ProjectAssetDownload,
+)
+def create_project_asset_download(
+    project: str,
+    asset_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectAssetDownload:
+    del project
+    try:
+        url = _knowledge_object_service(request).create_download_url(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            asset_id=asset_id,
+            expires_seconds=expires_seconds,
+        )
+    except ProjectAccessDenied as exc:
+        # The service reauthorizes immediately before signing. Membership may
+        # have changed after the route dependency ran.
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Knowledge object was not found in the requested project.",
+        ) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Object download is temporarily unavailable.",
+        ) from exc
+    return ProjectAssetDownload(
+        asset_id=asset_id,
+        url=url,
+        expires_seconds=expires_seconds,
+    )
+
+
 __all__ = [
+    "ProjectAssetDownload",
     "require_server_actor",
     "require_server_project_access",
     "router",

@@ -135,6 +135,7 @@ from services.auth import (
     valid_session_token,
 )
 from services.llm_settings import LlmSettingsRepository
+from services.object_store import S3ObjectStore, S3ObjectStoreSettings
 from services.seo_review import (
     SeoReviewError,
     build_review_candidate,
@@ -209,6 +210,7 @@ from workflow.state_machine import (
     transition_task,
 )
 from knowledge_agent.contracts import KnowledgeProject
+from knowledge_agent.assets import PostgresKnowledgeAssetRepository
 from knowledge_agent.evidence_repository import EvidenceRepositoryError
 from knowledge_agent.http import (
     RetrievalPlanResponse,
@@ -217,6 +219,7 @@ from knowledge_agent.http import (
 )
 from knowledge_agent.security import require_knowledge_project_access
 from knowledge_agent.embedding import OpenAICompatibleEmbeddingProvider
+from knowledge_agent.object_storage import ProjectKnowledgeObjectService
 from knowledge_agent.retrieval_plan_generation import generate_retrieval_plan
 from knowledge_agent.research_chat import LlmResearchAnswerProvider
 from knowledge_agent.retention import prune_expired_research_details
@@ -255,11 +258,17 @@ async def app_lifespan(application: FastAPI):
         "server_project_directory",
         None,
     )
+    previous_server_project_object_service = getattr(
+        application.state,
+        "server_project_object_service",
+        None,
+    )
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_directory = None
+    application.state.server_project_object_service = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -275,11 +284,12 @@ async def app_lifespan(application: FastAPI):
             database_url,
             pool_pre_ping=True,
         )
+        server_access = ProjectAccessService(
+            PostgresProjectAccessRepository(server_engine)
+        )
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
-            access=ProjectAccessService(
-                PostgresProjectAccessRepository(server_engine)
-            ),
+            access=server_access,
         )
         application.state.server_project_task_store_factory = (
             ServerProjectTaskStoreFactory(server_engine, cfg)
@@ -287,6 +297,21 @@ async def app_lifespan(application: FastAPI):
         application.state.server_project_directory = (
             PostgresProjectDirectory(server_engine)
         )
+        if os.environ.get(
+            "ARTICLE_AGENT_OBJECT_STORE_BUCKET",
+            "",
+        ).strip():
+            object_settings = S3ObjectStoreSettings.from_environment()
+            application.state.server_project_object_service = (
+                ProjectKnowledgeObjectService(
+                    store=S3ObjectStore(object_settings),
+                    bucket=object_settings.bucket,
+                    repository=PostgresKnowledgeAssetRepository(
+                        server_engine
+                    ),
+                    access=server_access,
+                )
+            )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -337,6 +362,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_directory = (
                 previous_server_project_directory
+            )
+            application.state.server_project_object_service = (
+                previous_server_project_object_service
             )
         return
     queue = JobQueue(cfg.data_file.with_name("job_queue.sqlite3"))
@@ -514,6 +542,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_directory = (
             previous_server_project_directory
+        )
+        application.state.server_project_object_service = (
+            previous_server_project_object_service
         )
 
 

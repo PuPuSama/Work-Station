@@ -13,6 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.deployment_readiness import (  # noqa: E402
+    CURRENT_SERVER_CUTOVER_CAPABILITIES,
     DatabaseReadiness,
     ServerCutoverCapabilities,
     postgres_database_probe,
@@ -81,6 +82,9 @@ class DeploymentReadinessTests(unittest.TestCase):
             self.assertNotIn(secret, public)
 
     def test_current_capabilities_and_missing_attestation_fail_closed(self) -> None:
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.object_download_reauthorizes
+        )
         report = run_deployment_preflight(
             environment=COMPLETE_ENVIRONMENT,
             database_probe=lambda: DatabaseReadiness(

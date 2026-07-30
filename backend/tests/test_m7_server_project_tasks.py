@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -18,7 +19,14 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from knowledge_agent.database import create_knowledge_engine  # noqa: E402
-from knowledge_agent.schema import projects  # noqa: E402
+from knowledge_agent.assets import (  # noqa: E402
+    KnowledgeAsset,
+    PostgresKnowledgeAssetRepository,
+)
+from knowledge_agent.object_storage import (  # noqa: E402
+    ProjectKnowledgeObjectService,
+)
+from knowledge_agent.schema import knowledge_assets, projects  # noqa: E402
 from models import TaskRecord  # noqa: E402
 from server_schema import (  # noqa: E402
     article_tasks,
@@ -35,7 +43,33 @@ from services.server_auth import (  # noqa: E402
     SERVER_AUTH_COOKIE_NAME,
     ServerActorSessionCodec,
 )
-from services.access_control import ActorIdentity  # noqa: E402
+from services.access_control import (  # noqa: E402
+    ActorIdentity,
+    PostgresProjectAccessRepository,
+    ProjectAccessService,
+)
+from services.object_store import build_project_object_key  # noqa: E402
+
+
+class FakeDownloadStore:
+    def __init__(self) -> None:
+        self.signed: list[tuple[str, int]] = []
+
+    def check_ready(self):
+        return None
+
+    def put(self, **kwargs):
+        raise AssertionError("not used")
+
+    def get(self, key, *, max_bytes):
+        raise AssertionError("not used")
+
+    def create_download_url(self, key, *, expires_seconds):
+        self.signed.append((key, expires_seconds))
+        return f"https://signed.example.test/{key}"
+
+    def delete(self, key):
+        raise AssertionError("not used")
 
 
 @unittest.skipUnless(
@@ -63,6 +97,8 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         self.project_b = f"{prefix}.b.example.test"
         self.task_a = f"{prefix}-task-a"
         self.task_b = f"{prefix}-task-b"
+        self.asset_a = f"{prefix}-asset-a"
+        self.bad_asset = f"{prefix}-bad-asset"
         with self.engine.begin() as connection:
             connection.execute(
                 organizations.insert(),
@@ -141,9 +177,48 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             organization_id=self.org_b,
             project_id=self.project_b,
         ).upsert(self._task(self.task_b, self.project_b, 1))
+        asset_repository = PostgresKnowledgeAssetRepository(self.engine)
+        content_hash = hashlib.sha256(b"asset-a").hexdigest()
+        object_key = build_project_object_key(
+            self.org_a,
+            self.project_a,
+            content_hash,
+        )
+        asset_repository.put_asset(
+            KnowledgeAsset(
+                project_id=self.project_a,
+                asset_id=self.asset_a,
+                content_hash=content_hash,
+                artifact_uri=f"s3://private-bucket/{object_key}",
+                content_type="image/webp",
+                byte_size=7,
+            )
+        )
+        bad_hash = hashlib.sha256(b"bad-asset").hexdigest()
+        asset_repository.put_asset(
+            KnowledgeAsset(
+                project_id=self.project_a,
+                asset_id=self.bad_asset,
+                content_hash=bad_hash,
+                artifact_uri=(
+                    "s3://private-bucket/organizations/"
+                    f"{self.org_b}/projects/{self.project_a}/"
+                    f"blobs/{bad_hash[:2]}/{bad_hash}"
+                ),
+                content_type="image/webp",
+                byte_size=9,
+            )
+        )
 
     def tearDown(self) -> None:
         with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_assets.delete().where(
+                    knowledge_assets.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
             connection.execute(
                 article_tasks.delete().where(
                     article_tasks.c.organization_id.in_(
@@ -260,6 +335,19 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     SERVER_AUTH_COOKIE_NAME,
                     codec.create(actor),
                 )
+                download_store = FakeDownloadStore()
+                app_module.app.state.server_project_object_service = (
+                    ProjectKnowledgeObjectService(
+                        store=download_store,  # type: ignore[arg-type]
+                        bucket="private-bucket",
+                        repository=PostgresKnowledgeAssetRepository(
+                            self.engine
+                        ),
+                        access=ProjectAccessService(
+                            PostgresProjectAccessRepository(self.engine)
+                        ),
+                    )
+                )
                 directory = client.get("/api/projects")
                 self.assertEqual(directory.status_code, 200)
                 self.assertEqual(
@@ -302,6 +390,50 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     client.get("/api/tasks").status_code,
                     503,
+                )
+                download = client.get(
+                    f"/api/projects/{self.project_a}/assets/"
+                    f"{self.asset_a}/download",
+                    params={"expires_seconds": 120},
+                )
+                self.assertEqual(download.status_code, 200)
+                self.assertEqual(
+                    download.json()["asset_id"],
+                    self.asset_a,
+                )
+                self.assertEqual(
+                    download_store.signed,
+                    [
+                        (
+                            build_project_object_key(
+                                self.org_a,
+                                self.project_a,
+                                hashlib.sha256(b"asset-a").hexdigest(),
+                            ),
+                            120,
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    client.get(
+                        f"/api/projects/{self.project_a}/assets/"
+                        "missing/download"
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.get(
+                        f"/api/projects/{self.project_a}/assets/"
+                        f"{self.bad_asset}/download"
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.get(
+                        f"/api/projects/{self.project_b}/assets/"
+                        f"{self.asset_a}/download"
+                    ).status_code,
+                    403,
                 )
                 self.assertFalse(local_state.exists())
 
@@ -359,6 +491,13 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             self.assertEqual(
                 TestClient(app_module.app).get(
                     "/api/projects"
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/assets/"
+                    f"{self.asset_a}/download"
                 ).status_code,
                 404,
             )

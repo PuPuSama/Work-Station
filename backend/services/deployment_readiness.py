@@ -69,7 +69,9 @@ class ServerCutoverCapabilities:
         )
 
 
-CURRENT_SERVER_CUTOVER_CAPABILITIES = ServerCutoverCapabilities()
+CURRENT_SERVER_CUTOVER_CAPABILITIES = ServerCutoverCapabilities(
+    object_download_reauthorizes=True,
+)
 
 
 @dataclass(frozen=True, slots=True)

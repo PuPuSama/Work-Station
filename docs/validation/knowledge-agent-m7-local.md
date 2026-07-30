@@ -171,6 +171,8 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - 6 tests（含真实 PostgreSQL Preflight Probe）；
 - 全部显式能力、数据库、S3 和恢复演练证明齐全时才返回 ready；
 - 当前缺少正式身份、路由 Scope、Task/Job 单写或 Worker 授权时 fail closed；
+- `object_download_reauthorizes` 已由真实 HTTP 路由与签名前二次授权支撑为 true，
+  不再只是未接线的底层 Service；
 - Alembic 不是 `20260730_0010` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
 - 数据库 URL、Embedding Key、S3 Key/Secret 和供应商错误正文不进入公开报告。
@@ -259,6 +261,10 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 用 Project A 路径请求 Project B Task 返回 404，不跨 Scope 查找；
 - 归档 Project 从 Directory 消失且 Task 路由返回 403；禁用 User 的 Directory
   请求返回 403；
+- 私有资产下载同时验证 Actor、Project、数据库 Asset Scope、Bucket 和对象 Key
+  的 Organization/Project 前缀；
+- 正常资产只返回 30–3600 秒的签名 URL；缺失资产、伪造为另一 Organization Key 的
+  URI 返回 404，跨项目请求返回 403；
 - 旧 `/api/tasks` 在 Server Mode 继续返回 503；
 - POST 等尚未迁移的写方法不进入 Server Project Task 白名单；
 - Local Mode 不增加这组服务器专用 API；
@@ -300,8 +306,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和 Worker 尚未接入；另有新的项目级 PostgreSQL Task 只读接口，不代表旧路由
   或写路径已经迁移；
-- 对象下载服务底层已重新授权，但现有 Raw Artifact HTTP 路由仍是本地文件实现，
-  因此 Server Mode 明确阻断；
+- 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
+  路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
 - 上一条只适用于本地模式；Server Mode 已停止 SQLite Queue/Worker，但新的项目级
   PostgreSQL Worker 仍未接线；

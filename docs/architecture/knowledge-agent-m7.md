@@ -56,6 +56,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 `GET /api/projects` Project Directory：只在 SQL 中返回 Actor 可见的 Active
   Project，并给出按既有优先级计算的 Effective Role；
 - Server Task 兼容适配器禁用 JSON/SQLite Legacy Import，构造时也不创建本地数据目录；
+- 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
+  Object Service 在签名前再次读取 `project.view`，核对数据库 URI 的 Bucket 与
+  Organization/Project Key 前缀，并签发最长一小时的临时 URL；
 - Alembic `20260730_0010` 的供应商无关 External Identity 映射；
 - 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
 - Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke。
@@ -222,7 +225,7 @@ with engine.begin() as connection:
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
-| `backend/server_project_http.py` | Server Mode 项目级 Task 只读 API | 路径必须含 Project、每次请求查数据库权限、跨项目只返回 403/404 |
+| `backend/server_project_http.py` | Server Mode Project Directory、Task 只读与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
@@ -393,8 +396,9 @@ organizations/{organization_id}/projects/{project_id}/...
 2. `snapshot_assets` 保留图片出现在哪个网页快照、顺序、源 URL、alt、caption；
 3. `knowledge_product_asset_evidence` 记录它与产品的 `primary/gallery/...` 证据关系。
 
-文章或前端只保存 `asset_id`/证据选择。真正展示时先校验
-`project.view`，再签发最长一小时的临时下载 URL。上传要求
+文章或前端只保存 `asset_id`/证据选择。正式 Server Mode 下载路由已经接线：真正展示时
+先在路由校验 `project.view`，对象服务在签名前再校验一次，并签发最长一小时的临时下载
+URL。上传要求
 `knowledge.edit`。S3 Key 和数据库查询同时锁定 Organization/Project，任一层
 Scope 不一致都拒绝。
 
@@ -422,9 +426,10 @@ S3 契约验证，不是生产供应商选择。
 Alembic/pgvector、S3 Bucket、代码切换能力和备份恢复证明拆成稳定 Check ID。报告不返回
 URL、密钥或供应商错误正文。
 
-`CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。当前正式身份、
-项目路由、Task/Job 单写和 Worker 重新授权尚未接线，所以它明确保持 no-go；不能靠设置
-一个环境变量把未实现能力标成通过。
+`CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
+HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
+身份、全部项目写路由、Task/Job 单写和 Worker 重新授权尚未接线，所以整体仍明确保持
+no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
 `docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、

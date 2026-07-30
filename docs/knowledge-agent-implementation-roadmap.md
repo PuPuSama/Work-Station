@@ -135,6 +135,8 @@
   RBAC 事实，跨项目不扫描全量数据，本地模式不增加该 API；
 - 已开放 SQL-scoped Project Directory，只返回 Active Actor 在当前 Organization
   可访问的 Active Project 及 Effective Role；归档 Project 立即 fail closed；
+- 已接通私有知识/产品资产的 Server Mode 下载路由：路由授权与签名前授权各执行一次，
+  Bucket 和 Organization/Project Key 前缀不一致时不签名；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以
