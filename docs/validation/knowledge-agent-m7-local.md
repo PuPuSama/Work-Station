@@ -96,6 +96,30 @@ node .\node_modules\next\dist\bin\next build
 Dark Mode 记为浏览器实测通过。这些仍需在允许同源 API 的真实 Server 会话中按 Runbook
 冒烟；当前已确认的是静态源码审查、ESLint、TypeScript 和 production build。
 
+### Workspace User Directory 与生命周期命令
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_workspace_user_http -v
+```
+
+结果：
+
+- 5 tests；
+- GET/POST/PATCH 只对同 Organization 的 Active Org Admin 开放，未认证为 401、普通
+  Member 与跨 Organization 路径为统一 403；
+- Directory 按 `user_id` 稳定游标分页，返回 Active/Disabled User、Team/Project
+  显式成员计数与 `login_linked` 布尔值，不返回 Session Version 或外部身份内容；
+- 创建只接受 User ID、显示名和组织角色，并固定建立 Active 本地 User；重复 ID 为
+  409，客户端提交 Session Version 等额外字段为 422；
+- 更新显示名、状态和组织角色；禁用与恢复均递增 Session Version，禁用前 Cookie 在
+  恢复后仍不能重新使用；
+- 最后一个 Active Org Admin 不能被禁用或降级；
+- 创建/更新与 Audit Event 同事务；Audit Writer 故障返回脱敏 503，User 状态与版本
+  一并回滚，审计 Details 不保存显示名或内部版本；
+- Server Mode 白名单只开放精确 Directory GET/POST 与 User PATCH 路径。
+
 ### Alembic 往返和重复升级
 
 在确认 M7 新表均为 0 行后执行：
@@ -209,7 +233,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 561 tests；
+- 566 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -729,8 +753,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
   已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
-  Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成，但邀请、账号/
-  Team 管理、Session 撤销前端、具体生产 Provider 注册、Client Secret 轮换和
+  Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成；Workspace User
+  后端目录、创建和生命周期命令也已完成，但邀请、账号/Team 管理前端、Session 撤销
+  前端、具体生产 Provider 注册、Client Secret 轮换和
   Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、

@@ -129,6 +129,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 Organization-scoped 全会话撤销 HTTP 命令：路径固定 Organization/User，Body
   必须是空对象；Actor、Organization、当前版本和 Org Admin 权限全部来自 Cookie 与
   PostgreSQL，响应不返回内部版本。
+- 新增 Organization-scoped Workspace User Directory 与创建/更新 HTTP：只有同组织
+  Active Org Admin 可读取或写入；列表稳定分页并只公开登录是否已关联及成员关系数量；
+  创建只建立 Active 本地账号事实，不自动创建邀请或 OIDC 映射；禁用和恢复都会递增
+  `session_version`，最后一个 Active Org Admin 不可禁用或降级，业务变更与 Audit
+  同事务。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -158,7 +163,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
-- 不接邀请、Workspace User 创建、Team 管理或 Organization 级管理员控制台；
+- 不接邀请、Team 管理或 Organization 级管理员前端控制台；Workspace User 后端目录与
+  生命周期命令已完成，但尚未做邀请和外部身份关联 UI；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
 - 不接生产对象存储、生产部署或密钥服务。
 
@@ -389,7 +395,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/server-project-members.tsx` | Server 显式成员 Roster/Candidate、角色更新与撤销 UI | 只消费 Project-scoped API、Disabled 只允许撤销、分页、就近反馈、前端角色不作为安全边界 |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
-| `backend/server_admin_http.py` | Organization-scoped Actor Session 撤销 API | 只接受空 Body、Cookie Actor 与路径 Organization 一致、统一 401/403/503、安全响应 |
+| `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
+| `backend/services/workspace_users.py` | Workspace User 目录、创建与生命周期事务服务 | Active Org Admin、组织内稳定游标、精确关联计数、最后管理员保护、状态切换递增 Session Version、业务写入与 Audit 同事务 |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权的显式成员/可授权候选分页读模型，以及带审计的 ProjectMembership 变更 | SQL 内 Project Scope、候选不复制继承访问、稳定游标、授权/写入/审计同事务、跨组织目标不泄露 |
@@ -442,6 +449,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
 | `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/List/Sign/Delete、对象清理 |
 | `backend/tests/test_m7_project_membership_http.py` | ProjectMembership HTTP 与并发授权测试 | Body/角色边界、跨组织拒绝、Audit 回滚、授权事实行锁 |
+| `backend/tests/test_m7_workspace_user_http.py` | Workspace User HTTP 与 PostgreSQL 集成测试 | 组织隔离、分页/关联计数、最后管理员保护、会话失效、Audit 回滚与响应脱敏 |
 
 ## 9. 后续 M7 迁移顺序
 
@@ -1129,3 +1137,11 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     未经授权的 Organization 用户目录？
 37. `/settings` 是否仍先按 Auth Status 分流 Local/Server 组件树，Server 成员导航是否
     只作可用性提示，而所有 Roster/Candidate/PUT/DELETE 仍以后端实时授权为准？
+38. Workspace User 列表是否仍只允许同组织 Active Org Admin，并且不返回
+    `session_version`、Issuer、Subject 或其他登录凭据？
+39. 禁用和恢复 Workspace User 是否都递增 Session Version，使禁用前 Cookie 永远不能
+    因恢复账号而重新生效？
+40. 最后一个 Active Org Admin 是否仍不可禁用或降级，且该判断与用户更新在同一串行化
+    事务边界内？
+41. Workspace User 创建/更新是否仍与安全 Audit 同事务，Audit 是否只记录状态、角色和
+    字段变化标记而不记录显示名或内部版本？

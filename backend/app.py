@@ -190,6 +190,7 @@ from services.oidc_login import (
 )
 from services.project_directory import PostgresProjectDirectory
 from services.project_memberships import PostgresProjectMembershipService
+from services.workspace_users import PostgresWorkspaceUserService
 from services.server_auth import (
     SERVER_AUTH_COOKIE_NAME,
     load_server_actor_session_codec,
@@ -324,6 +325,11 @@ async def app_lifespan(application: FastAPI):
         "server_actor_session_revocation",
         None,
     )
+    previous_server_workspace_users = getattr(
+        application.state,
+        "server_workspace_users",
+        None,
+    )
     server_product_rediscovery = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
@@ -337,6 +343,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_product_rediscovery = None
     application.state.server_oidc_login = None
     application.state.server_actor_session_revocation = None
+    application.state.server_workspace_users = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -358,6 +365,9 @@ async def app_lifespan(application: FastAPI):
         server_actor_sessions = PostgresActorSessionRepository(server_engine)
         application.state.server_actor_session_revocation = (
             PostgresActorSessionRevocationService(server_engine)
+        )
+        application.state.server_workspace_users = (
+            PostgresWorkspaceUserService(server_engine)
         )
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
@@ -497,6 +507,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_actor_session_revocation = (
                 previous_server_actor_session_revocation
+            )
+            application.state.server_workspace_users = (
+                previous_server_workspace_users
             )
             if shutdown_error is not None:
                 raise shutdown_error
@@ -696,6 +709,9 @@ async def app_lifespan(application: FastAPI):
         application.state.server_oidc_login = previous_server_oidc_login
         application.state.server_actor_session_revocation = (
             previous_server_actor_session_revocation
+        )
+        application.state.server_workspace_users = (
+            previous_server_workspace_users
         )
 
 
