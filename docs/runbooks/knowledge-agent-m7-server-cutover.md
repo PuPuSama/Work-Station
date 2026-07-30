@@ -236,6 +236,22 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 - TDK DOCX、最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据
   不得写成“完整 Server Delivery 已完成”。
 
+五条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+
+- “完全重写、确认产品、替换章节、准备图片、导出 DOCX”分别产生
+  `article.task.rewritten`、`article.products.confirmed`、
+  `article.section.replaced`、`article.images.prepared`、
+  `article.docx.exported`；
+- Action 到 `article.edit/article.deliver` 的映射由服务端常量决定，请求不能提交或
+  覆盖 Permission；
+- Event 的 Organization/Project/Actor/Task 与请求 Scope 一致，Details 只含
+  from/to Revision、Status 和安全计数/Heading 深度，不含文章正文、Replacement Body、
+  URL、对象 URI、签名 URL、Token 或 Secret；
+- 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
+  或事务内撤权也不产生 Audit；
+- Audit Event 更新/删除仍被 Trigger 拒绝；图片/DOCX 已先写对象而 Task/Audit 后失败时，
+  只记录内容寻址 orphan 进入延迟对账，不直接删除。
+
 产品重新发现冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/product-rediscovery`，随后只使用响应中的
 Job ID 调用

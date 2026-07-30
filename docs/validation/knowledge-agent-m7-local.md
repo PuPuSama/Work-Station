@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 522 tests；
+- 526 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -189,7 +189,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 共享派生资产元数据不保存文章角色、产品或来源关系，避免内容去重复用后残留第一次
   使用者的关系；这些关系只保存在 Task `ArticleImage`；
 - Viewer 返回 403；旧 Revision 在对象读取前返回 409；派生对象仍经授权下载路由访问；
-- Server TDK/Delivery ZIP 对象化、派生 orphan 对账和该写操作的事务内 Audit 尚未完成。
+- Server TDK/Delivery ZIP 对象化和派生 orphan 对账尚未完成；该 Task 写操作已进入
+  事务内 Audit。
 
 ### Server 私有文章 DOCX
 
@@ -213,8 +214,30 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Viewer 导出/专用下载返回 403；通用 Asset 下载对 `article_docx` 返回 404；
 - 同哈希资产已属于其他访问类型时在 Task CAS 前 fail closed，不降级下载权限；
 - 旧 Revision 在对象读取/写入前返回 409，未产生额外对象；
-- TDK DOCX、最终 AI-rate 截图、Delivery ZIP、前端 Delivery UI 和事务内 Audit
-  仍待后续切片。
+- TDK DOCX、最终 AI-rate 截图、Delivery ZIP 和前端 Delivery UI 仍待后续切片。
+
+### Server Task CAS 与事务内 Audit
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_task_commands `
+  tests.test_m7_postgres_tasks `
+  tests.test_m7_server_project_tasks -v
+```
+
+结果：
+
+- 30 tests，使用真实 PostgreSQL；
+- `PostgresTaskRepository` 保留原 CAS 接口，并新增加入调用方事务的 CAS 边界；
+- Writer 先锁 Organization/User/Project 与现有 Project/Team Membership 撤权事实，
+  再按 Action 固定的 `article.edit/article.deliver` 权限决策；
+- Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
+- 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
+- 五条 HTTP Task 写操作分别记录 rewrite/products/section/images/docx Action；
+- Audit Details 只含 Revision、Status、产品/图片计数或 Heading 深度，不含正文；
+- 图片/DOCX 的 S3 Put 仍不属于 PostgreSQL 事务，失败后的内容寻址 orphan 由后续对账
+  延迟清理。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
 一次性随机开发凭据和专用 `article-agent-test-*` Bucket。由于该本地 MinIO

@@ -82,6 +82,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 `GET /api/projects/{project}/tasks/{task_id}/docx/download`：再次要求
   `article.deliver` 后签发 DOCX 短期 URL；通用 `project.view` Asset 下载入口显式隐藏
   `article_docx`，避免只知道 Asset ID 就绕过交付权限；
+- 五条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+  事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
+  任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
   Object Service 在签名前再次读取 `project.view`，核对数据库 URI 的 Bucket 与
   Organization/Project Key 前缀，并签发最长一小时的临时 URL；
@@ -244,13 +247,15 @@ with engine.begin() as connection:
     audit_writer.append(connection, event)
 ```
 
-这样“成员授权”和“审计事件”要么同时提交，要么同时回滚。未来禁止出现：
+这样“业务变更”和“审计事件”要么同时提交，要么同时回滚。未来禁止出现：
 
 ```text
 先提交权限修改 -> 再单独写审计
 ```
 
-当前尚未提供正式 Membership 写 API，所以还不存在绕过审计的业务写入口。测试夹具可直接插入，但生产代码新增权限写操作时必须组合 Audit Writer。
+当前尚未提供 Membership HTTP 写 API；`PostgresProjectMembershipService` 仍是唯一正式
+成员写服务。测试夹具可直接插入，但生产代码新增权限或业务写操作时必须组合 Audit
+Writer。
 
 `PostgresProjectMembershipService` 已提供两层接口：
 
@@ -258,6 +263,36 @@ with engine.begin() as connection:
 - `grant_in_transaction/revoke_in_transaction`：加入调用方已有业务事务。
 
 稳定 `event_id` 若重复会触发唯一约束；数据库错误会使同一事务内的成员变更一起回滚，不会出现“权限已变但审计没写”的状态。
+
+已迁移的 Server Task 命令使用同一原则：
+
+```text
+HTTP 路由初次授权
+  -> 业务计算（对象输出可能先形成内容寻址 orphan）
+  -> PostgresAuditedTaskWriter
+       -> 锁 Organization/User/Project/现有 Membership 可撤权事实
+       -> Audit Action -> 固定最小 Permission
+       -> Task Revision CAS
+       -> AuditEvent(scope + task + from/to Revision + status + 安全计数)
+  -> 同一 PostgreSQL Transaction 提交
+```
+
+Action 与权限固定为：
+
+| Audit Action | Permission |
+|---|---|
+| `article.task.rewritten` | `article.edit` |
+| `article.products.confirmed` | `article.edit` |
+| `article.section.replaced` | `article.edit` |
+| `article.images.prepared` | `article.edit` |
+| `article.docx.exported` | `article.deliver` |
+
+Event ID 由 Organization、Project、Task、目标 Revision 和 Action 稳定派生。Details
+只保存 Revision、最终 Status 和产品/图片数量或 Heading 深度，不保存文章正文、
+Replacement Body、URL、对象 URI、签名 URL 或 Secret。Audit Writer 失败会让 Task CAS
+回滚并返回通用 503；撤权或 Revision 冲突不产生 Audit。S3 Put 不属于 PostgreSQL
+事务，因此图片/DOCX 若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内容寻址 orphan
+延迟对账，不能伪称跨系统原子。
 
 ## 8. 代码地图
 
@@ -280,6 +315,7 @@ with engine.begin() as connection:
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
+| `backend/services/server_task_commands.py` | 五条 Server Task 写操作的事务命令 | 锁定可撤权事实、Action 固定权限、CAS 与 Audit 同事务、审计不含正文 |
 | `backend/server_project_http.py` | Server Mode Project Directory、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、写入用 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -307,6 +343,7 @@ with engine.begin() as connection:
 | `backend/tests/test_m7_external_identity.py` | Identity 映射、交换与 PostgreSQL 集成测试 | HTTPS Issuer、跨组织拒绝、状态失效、Link/Revoke 审计 |
 | `backend/tests/test_m7_oidc_identity.py` | OIDC/JWKS 与浏览器登录流测试 | RSA 签名、Claim/Nonce/PKCE/State、Kid 轮换、重放/开放重定向拒绝、Secret 不泄露 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
+| `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
 | `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/Sign/Delete、对象清理 |
@@ -439,9 +476,10 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 
 本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
-项目级 PostgreSQL Task 列表/单条读取和不依赖 Artifact 的“完全重写”“选择已确认产品”
-以及“快照后替换一个已审阅章节”已经接线；此外，`product_rediscovery` 已有独立
-PostgreSQL Job API/Runner。其余 Article 写入、通用 Batch 和 Worker 尚未接线。因此
+项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
+已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
+`product_rediscovery` 已有独立 PostgreSQL Job API/Runner。其余 Article 写入、通用
+Batch 和 Worker 尚未接线。因此
 不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
 Runner 描述成“服务器 Job 单写已完成”。
 
@@ -511,8 +549,9 @@ body: { revision, product_ids[1..3] }
 不能回退到可变目录 Metadata。图片也只从同一个 Source/Snapshot 的
 `knowledge_product_asset_evidence` 中选择。
 
-该操作目前还没有事务内 Audit Event，因此它仍属于 M7 迁移切片，不足以把
-全部项目写路由或 `postgres_task_single_write` 标为完成。
+该操作提交 `article.products.confirmed` Audit Event；Task CAS 与 Audit 同事务，事件
+只含 Revision、Status 和产品数量。其他未迁移项目写路由仍使
+`postgres_task_single_write` 保持 false。
 
 Server 章节替换同样采用“生成/审阅”和“提交”分离的接口：
 
@@ -541,7 +580,9 @@ code block 中的 `#`，Replacement Body 可以保留更深层子标题，但不
 当前接口提交的是操作者或上游 Agent 已审阅的 Replacement Body，本身不调用 LLM，也不
 开放 Server Batch Runner。后续接对话式章节生成时，模型只能产出候选 Body，最终仍必须
 经过本命令的 Scope、版本快照、验证和 Revision CAS；不能让模型直接覆盖完整文章。
-该写操作同样尚未补事务内 Audit Event，因此整体 Task 单写能力继续为 false。
+该写操作提交 `article.section.replaced` Audit Event；Details 只保存 Heading 深度，
+不保存 Heading 文本或 Replacement Body。其余未迁移 Task 路由仍使整体单写能力为
+false。
 
 ### M7-D：对象存储与部署
 

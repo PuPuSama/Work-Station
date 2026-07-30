@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from sqlalchemy.engine import Engine
 
 from config import AppConfig
+from services.audit_log import AuditEventWriter
 from services.postgres_task_repository import PostgresTaskRepository
 from services.server_request_security import AuthorizedProjectRequest
+from services.server_task_commands import PostgresAuditedTaskWriter
 from storage import TaskStore
 
 
@@ -24,6 +26,7 @@ class ServerProjectTaskRuntime:
 
     scope: ServerProjectTaskScope
     store: TaskStore
+    audited_writer: PostgresAuditedTaskWriter
 
 
 class ServerProjectTaskStoreFactory:
@@ -34,9 +37,16 @@ class ServerProjectTaskStoreFactory:
     or SQLite import and therefore cannot fall back to local application data.
     """
 
-    def __init__(self, engine: Engine, config: AppConfig) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        config: AppConfig,
+        *,
+        audit: AuditEventWriter | None = None,
+    ) -> None:
         self._engine = engine
         self._config = config
+        self._audit = audit
 
     @property
     def config(self) -> AppConfig:
@@ -63,6 +73,12 @@ class ServerProjectTaskStoreFactory:
                 self._config,
                 repository=repository,
                 legacy_import_enabled=False,
+            ),
+            audited_writer=PostgresAuditedTaskWriter(
+                self._engine,
+                organization_id=scope.organization_id,
+                project_id=scope.project_id,
+                audit=self._audit,
             ),
         )
 

@@ -301,6 +301,97 @@ class PostgresProjectAccessRepository:
             project_role=cast(ProjectRole | None, row["project_role"]),
         )
 
+    def lock_project_access_in_connection(
+        self,
+        connection: Connection,
+        actor: ActorIdentity,
+        project_id: str,
+    ) -> ProjectAccessFacts | None:
+        """Lock every existing row that can revoke this access decision."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "project access locking requires a business transaction"
+            )
+        normalized_project_id = _required_text(project_id, "project_id")
+        base = connection.execute(
+            sa.select(project_ownership.c.owning_team_id)
+            .select_from(
+                project_ownership.join(
+                    projects,
+                    projects.c.project_id
+                    == project_ownership.c.project_id,
+                )
+                .join(
+                    organizations,
+                    organizations.c.organization_id
+                    == project_ownership.c.organization_id,
+                )
+                .join(
+                    workspace_users,
+                    sa.and_(
+                        workspace_users.c.organization_id
+                        == project_ownership.c.organization_id,
+                        workspace_users.c.user_id == actor.user_id,
+                    ),
+                )
+            )
+            .where(
+                project_ownership.c.project_id == normalized_project_id,
+                project_ownership.c.organization_id
+                == actor.organization_id,
+            )
+            .with_for_update(
+                read=True,
+                of=(
+                    project_ownership,
+                    projects,
+                    organizations,
+                    workspace_users,
+                ),
+            )
+        ).one_or_none()
+        if base is None:
+            return None
+
+        connection.execute(
+            sa.select(project_memberships.c.user_id)
+            .where(
+                project_memberships.c.organization_id
+                == actor.organization_id,
+                project_memberships.c.project_id
+                == normalized_project_id,
+                project_memberships.c.user_id == actor.user_id,
+            )
+            .with_for_update(read=True)
+        ).all()
+        owning_team_id = base.owning_team_id
+        if owning_team_id is not None:
+            connection.execute(
+                sa.select(teams.c.team_id)
+                .where(
+                    teams.c.organization_id
+                    == actor.organization_id,
+                    teams.c.team_id == owning_team_id,
+                )
+                .with_for_update(read=True)
+            ).all()
+            connection.execute(
+                sa.select(team_memberships.c.user_id)
+                .where(
+                    team_memberships.c.organization_id
+                    == actor.organization_id,
+                    team_memberships.c.team_id == owning_team_id,
+                    team_memberships.c.user_id == actor.user_id,
+                )
+                .with_for_update(read=True)
+            ).all()
+        return self.resolve_project_access_in_connection(
+            connection,
+            actor,
+            normalized_project_id,
+        )
+
 
 __all__ = [
     "ALL_PROJECT_PERMISSIONS",

@@ -76,6 +76,9 @@ from services.server_product_rediscovery import (  # noqa: E402
     ServerProductRediscoveryHandler,
     ServerProductRediscoveryRegistry,
 )
+from services.server_project_tasks import (  # noqa: E402
+    ServerProjectTaskStoreFactory,
+)
 
 
 SERVER_ARTICLE = """# Example Buyer Guide
@@ -140,6 +143,16 @@ class FakeDownloadStore:
 
     def delete(self, key):
         raise AssertionError("not used")
+
+
+class RecordingAuditWriter:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def append(self, connection, event) -> None:
+        if not connection.in_transaction():
+            raise AssertionError("audit must share the Task transaction")
+        self.events.append(event)
 
 
 @unittest.skipUnless(
@@ -411,6 +424,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             project_id=project_id,
         )
 
+    def _install_recording_audit(
+        self,
+        application,
+        config,
+    ) -> RecordingAuditWriter:
+        audit = RecordingAuditWriter()
+        application.state.server_project_task_store_factory = (
+            ServerProjectTaskStoreFactory(
+                self.engine,
+                config,
+                audit=audit,
+            )
+        )
+        return audit
+
     @staticmethod
     def _task(task_id: str, project_id: str, topic_index: int) -> dict:
         return TaskRecord(
@@ -587,6 +615,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ),
                 TestClient(app_module.app) as client,
             ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
                 self.assertEqual(
                     client.get("/api/projects").status_code,
                     401,
@@ -730,6 +762,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertEqual(rewritten.status_code, 200)
                 self.assertEqual(rewritten.json()["revision"], 1)
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.task.rewritten"],
+                )
                 self.assertEqual(
                     client.post(
                         rewrite_path,
@@ -927,6 +963,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ),
                 TestClient(app_module.app) as client,
             ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
                 client.cookies.set(
                     SERVER_AUTH_COOKIE_NAME,
                     codec.create(actor),
@@ -1027,6 +1067,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 saved = response.json()
                 self.assertEqual(saved["revision"], 1)
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.products.confirmed"],
+                )
                 self.assertEqual(
                     [item["product_id"] for item in saved["products"]],
                     [self.product_a],
@@ -1152,6 +1196,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ),
                 TestClient(app_module.app) as client,
             ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
                 client.cookies.set(
                     SERVER_AUTH_COOKIE_NAME,
                     codec.create(actor),
@@ -1212,6 +1260,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 saved = prepared.json()
                 self.assertEqual(saved["revision"], 1)
                 self.assertEqual(saved["status"], "images_ready")
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.images.prepared"],
+                )
                 self.assertEqual(len(saved["images"]), 2)
                 self.assertEqual(
                     [
@@ -1313,6 +1365,13 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     delivered["status"],
                     "docx_exported",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.images.prepared",
+                        "article.docx.exported",
+                    ],
                 )
                 self.assertEqual(delivered["docx_path"], "")
                 self.assertTrue(delivered["docx_asset_id"])
@@ -1875,6 +1934,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ),
                 TestClient(app_module.app) as client,
             ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
                 client.cookies.set(
                     SERVER_AUTH_COOKIE_NAME,
                     codec.create(actor),
@@ -1972,6 +2035,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     saved["article_versions"][0]["content"],
                     SERVER_ARTICLE,
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.section.replaced"],
                 )
                 self.assertEqual(
                     client.put(path, json=request).status_code,

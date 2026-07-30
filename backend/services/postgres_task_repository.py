@@ -244,6 +244,26 @@ class PostgresTaskRepository:
     ) -> bool:
         """Insert a new task or update only the exact persisted revision."""
 
+        with self._engine.begin() as connection:
+            return self.put_if_revision_in_transaction(
+                connection,
+                record,
+                expected_revision=expected_revision,
+            )
+
+    def put_if_revision_in_transaction(
+        self,
+        connection: Connection,
+        record: Mapping[str, Any],
+        *,
+        expected_revision: int | None,
+    ) -> bool:
+        """CAS one Task inside a caller-owned business transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "task CAS requires a business transaction"
+            )
         (
             task_id,
             customer,
@@ -252,60 +272,79 @@ class PostgresTaskRepository:
             record_updated_at,
             payload,
         ) = self._serialized(record)
-        with self._engine.begin() as connection:
-            self._lock_state(connection)
-            if expected_revision is None:
-                position = int(
-                    connection.execute(
-                        sa.select(
-                            sa.func.coalesce(
-                                sa.func.max(article_tasks.c.position),
-                                -1,
-                            )
-                        ).where(*self._scope())
-                    ).scalar_one()
-                ) + 1
-                statement = insert(article_tasks).values(
-                    organization_id=self.organization_id,
-                    project_id=self.project_id,
-                    task_id=task_id,
+        self._lock_state(connection)
+        if expected_revision is None:
+            position = int(
+                connection.execute(
+                    sa.select(
+                        sa.func.coalesce(
+                            sa.func.max(article_tasks.c.position),
+                            -1,
+                        )
+                    ).where(*self._scope())
+                ).scalar_one()
+            ) + 1
+            statement = insert(article_tasks).values(
+                organization_id=self.organization_id,
+                project_id=self.project_id,
+                task_id=task_id,
+                customer=customer,
+                topic_index=topic_index,
+                revision=revision,
+                position=position,
+                record_updated_at=record_updated_at,
+                payload=payload,
+            )
+            result = connection.execute(
+                statement.on_conflict_do_nothing(
+                    index_elements=[
+                        article_tasks.c.organization_id,
+                        article_tasks.c.project_id,
+                        article_tasks.c.task_id,
+                    ]
+                )
+            )
+        else:
+            result = connection.execute(
+                article_tasks.update()
+                .where(
+                    *self._scope(),
+                    article_tasks.c.task_id == task_id,
+                    article_tasks.c.revision == int(expected_revision),
+                )
+                .values(
                     customer=customer,
                     topic_index=topic_index,
                     revision=revision,
-                    position=position,
                     record_updated_at=record_updated_at,
                     payload=payload,
+                    updated_at=sa.func.now(),
                 )
-                result = connection.execute(
-                    statement.on_conflict_do_nothing(
-                        index_elements=[
-                            article_tasks.c.organization_id,
-                            article_tasks.c.project_id,
-                            article_tasks.c.task_id,
-                        ]
-                    )
-                )
-            else:
-                result = connection.execute(
-                    article_tasks.update()
-                    .where(
-                        *self._scope(),
-                        article_tasks.c.task_id == task_id,
-                        article_tasks.c.revision == int(expected_revision),
-                    )
-                    .values(
-                        customer=customer,
-                        topic_index=topic_index,
-                        revision=revision,
-                        record_updated_at=record_updated_at,
-                        payload=payload,
-                        updated_at=sa.func.now(),
-                    )
-                )
-            if result.rowcount:
-                self._mark_initialized(connection)
-                return True
+            )
+        if result.rowcount:
+            self._mark_initialized(connection)
+            return True
         return False
+
+    def current_revision_in_transaction(
+        self,
+        connection: Connection,
+        task_id: str,
+    ) -> int | None:
+        """Read the scoped Revision inside an existing transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "task revision read requires a business transaction"
+            )
+        normalized_task_id = _required_text(task_id, "task_id")
+        value = connection.execute(
+            sa.select(article_tasks.c.revision).where(
+                *self._scope(),
+                article_tasks.c.task_id == normalized_task_id,
+            )
+        ).scalar_one_or_none()
+        return int(value) if value is not None else None
 
     def upsert_many(self, records: Iterable[Mapping[str, Any]]) -> None:
         serialized = [self._serialized(record) for record in records]

@@ -8,7 +8,7 @@ from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
 )
-from models import RevisionedRequest, TaskRecord
+from models import TaskRecord
 from services.access_control import (
     ActorIdentity,
     ProjectAccessDenied,
@@ -31,7 +31,10 @@ from services.server_docx_export import (
     ServerArticleDocxError,
     ServerArticleDocxExport,
 )
-from services.server_project_tasks import ServerProjectTaskStoreFactory
+from services.server_project_tasks import (
+    ServerProjectTaskRuntime,
+    ServerProjectTaskStoreFactory,
+)
 from services.server_product_selection import (
     ConfirmedProductSelectionError,
     PostgresConfirmedProductSelection,
@@ -50,6 +53,10 @@ from services.server_request_security import (
     ServerRequestForbidden,
     ServerRequestSecurity,
     ServerRequestUnauthenticated,
+)
+from services.server_task_commands import (
+    ServerTaskAuditAction,
+    ServerTaskCommandUnavailable,
 )
 from storage import RevisionConflictError
 from workflow.state_machine import (
@@ -89,6 +96,14 @@ class ConfirmedProductsUpdateRequest(BaseModel):
         if len(set(normalized)) != len(normalized):
             raise ValueError("product ids must be unique")
         return normalized
+
+
+class ProjectRevisionRequest(BaseModel):
+    """Require an explicit optimistic Revision for a Server Task command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
 
 
 class ArticleSectionRewriteRequest(BaseModel):
@@ -150,14 +165,6 @@ class PrepareProjectImagesRequest(BaseModel):
                 "product anchors require unique product ids and headings"
             )
         return normalized
-
-
-class ExportProjectDocxRequest(BaseModel):
-    """Export the current Revision without caller-supplied file inputs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    revision: int = Field(ge=0)
 
 
 class ProductRediscoveryRequest(BaseModel):
@@ -293,6 +300,13 @@ def _task_store(
     request: Request,
     authorized: AuthorizedProjectRequest,
 ):
+    return _task_runtime(request, authorized).store
+
+
+def _task_runtime(
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+) -> ServerProjectTaskRuntime:
     factory = getattr(
         request.app.state,
         "server_project_task_store_factory",
@@ -303,7 +317,44 @@ def _task_store(
             status_code=503,
             detail="Server project task storage is not available.",
         )
-    return factory.create(authorized).store
+    return factory.create(authorized)
+
+
+def _save_audited_task(
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+    task: TaskRecord,
+    *,
+    expected_revision: int,
+    action: ServerTaskAuditAction,
+    details: dict[str, object] | None = None,
+) -> TaskRecord:
+    try:
+        return _task_runtime(
+            request,
+            authorized,
+        ).audited_writer.put(
+            task,
+            expected_revision=expected_revision,
+            actor=authorized.actor,
+            action=action,
+            details=details,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except RevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    except ServerTaskCommandUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Task update is temporarily unavailable.",
+        ) from exc
 
 
 def _server_app_config(request: Request) -> AppConfig:
@@ -520,7 +571,7 @@ def create_project_asset_download(
 def rewrite_project_task_from_scratch(
     project: str,
     task_id: str,
-    payload: RevisionedRequest,
+    payload: ProjectRevisionRequest,
     request: Request,
     authorized: AuthorizedProjectRequest = Depends(
         require_server_project_access
@@ -551,16 +602,13 @@ def rewrite_project_task_from_scratch(
             detail=str(exc),
         ) from exc
     reset_for_full_rewrite(task)
-    try:
-        return store.put(
-            task,
-            expected_revision=payload.revision,
-        )
-    except RevisionConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.task.rewritten",
+    )
 
 
 @router.put(
@@ -607,16 +655,14 @@ def replace_project_task_products(
 
     task.products = list(products)
     invalidate_downstream(task, "products")
-    try:
-        return store.put(
-            task,
-            expected_revision=payload.revision,
-        )
-    except RevisionConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.products.confirmed",
+        details={"product_count": len(task.products)},
+    )
 
 
 @router.post(
@@ -704,16 +750,14 @@ def prepare_project_task_images(
             status_code=503,
             detail="Private image processing is temporarily unavailable.",
         ) from exc
-    try:
-        return store.put(
-            task,
-            expected_revision=payload.revision,
-        )
-    except RevisionConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.images.prepared",
+        details={"image_count": len(task.images)},
+    )
 
 
 @router.post(
@@ -723,7 +767,7 @@ def prepare_project_task_images(
 def export_project_task_docx(
     project: str,
     task_id: str,
-    payload: ExportProjectDocxRequest,
+    payload: ProjectRevisionRequest,
     request: Request,
     authorized: AuthorizedProjectRequest = Depends(
         require_server_project_access
@@ -789,13 +833,14 @@ def export_project_task_docx(
             status_code=503,
             detail="Word export is temporarily unavailable.",
         ) from exc
-    try:
-        return store.put(
-            task,
-            expected_revision=payload.revision,
-        )
-    except RevisionConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.docx.exported",
+        details={"image_count": len(task.images)},
+    )
 
 
 @router.get(
@@ -910,16 +955,14 @@ def rewrite_project_task_article_section(
         )
     except SectionRewriteError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    try:
-        return store.put(
-            task,
-            expected_revision=payload.revision,
-        )
-    except RevisionConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.section.replaced",
+        details={"heading_depth": len(payload.heading_path)},
+    )
 
 
 @router.post(
