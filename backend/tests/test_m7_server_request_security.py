@@ -215,6 +215,20 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/projects/example.com/assets/asset-a/download",
             )
         )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/projects/example.com/tasks/task-a/"
+                "rewrite-from-scratch",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/tasks/task-a/"
+                "rewrite-from-scratch",
+            )
+        )
         self.assertFalse(
             server_http_route_available("GET", "/api/tasks")
         )

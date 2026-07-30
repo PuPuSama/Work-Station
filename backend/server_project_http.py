@@ -7,8 +7,12 @@ from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
 )
-from models import TaskRecord
-from services.access_control import ActorIdentity, ProjectAccessDenied
+from models import RevisionedRequest, TaskRecord
+from services.access_control import (
+    ActorIdentity,
+    ProjectAccessDenied,
+    ProjectPermission,
+)
 from services.object_store import ObjectStoreError
 from services.project_directory import (
     AccessibleProject,
@@ -22,6 +26,13 @@ from services.server_request_security import (
     ServerRequestForbidden,
     ServerRequestSecurity,
     ServerRequestUnauthenticated,
+)
+from storage import RevisionConflictError
+from workflow.state_machine import (
+    ACTION_REWRITE_FROM_SCRATCH,
+    WorkflowActionNotAllowed,
+    ensure_action_allowed,
+    reset_for_full_rewrite,
 )
 
 
@@ -165,6 +176,39 @@ def _knowledge_object_service(
     return service
 
 
+def _require_project_permission(
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+    permission: ProjectPermission,
+) -> AuthorizedProjectRequest:
+    security = getattr(
+        request.app.state,
+        "server_request_security",
+        None,
+    )
+    if not isinstance(security, ServerRequestSecurity):
+        raise HTTPException(
+            status_code=503,
+            detail="Server security is not available.",
+        )
+    try:
+        return security.authorize_project(
+            token=request.cookies.get(SERVER_AUTH_COOKIE_NAME, ""),
+            project=authorized.project_id,
+            permission=permission,
+        )
+    except ServerRequestUnauthenticated as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required.",
+        ) from exc
+    except ServerRequestForbidden as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+
+
 router = APIRouter(
     prefix="/api/projects",
     tags=["server-projects"],
@@ -275,6 +319,56 @@ def create_project_asset_download(
         url=url,
         expires_seconds=expires_seconds,
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/rewrite-from-scratch",
+    response_model=TaskRecord,
+)
+def rewrite_project_task_from_scratch(
+    project: str,
+    task_id: str,
+    payload: RevisionedRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(
+            task,
+            ACTION_REWRITE_FROM_SCRATCH,
+        )
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    reset_for_full_rewrite(task)
+    try:
+        return store.put(
+            task,
+            expected_revision=payload.revision,
+        )
+    except RevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
 
 __all__ = [

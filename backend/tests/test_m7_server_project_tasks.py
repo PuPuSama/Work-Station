@@ -435,6 +435,42 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     ).status_code,
                     403,
                 )
+                rewrite_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/rewrite-from-scratch"
+                )
+                self.assertEqual(
+                    client.post(
+                        rewrite_path,
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                rewritten = client.post(
+                    rewrite_path,
+                    json={"revision": 0},
+                )
+                self.assertEqual(rewritten.status_code, 200)
+                self.assertEqual(rewritten.json()["revision"], 1)
+                self.assertEqual(
+                    client.post(
+                        rewrite_path,
+                        json={"revision": 0},
+                    ).status_code,
+                    409,
+                )
                 self.assertFalse(local_state.exists())
 
                 with self.engine.begin() as connection:
@@ -498,6 +534,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_a}/assets/"
                     f"{self.asset_a}/download"
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/rewrite-from-scratch",
+                    json={"revision": 0},
                 ).status_code,
                 404,
             )

@@ -56,6 +56,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 `GET /api/projects` Project Directory：只在 SQL 中返回 Actor 可见的 Active
   Project，并给出按既有优先级计算的 Effective Role；
 - Server Task 兼容适配器禁用 JSON/SQLite Legacy Import，构造时也不创建本地数据目录；
+- 新增第一个 PostgreSQL-only Task 写操作
+  `POST /api/projects/{project}/tasks/{task_id}/rewrite-from-scratch`：
+  `article.edit`、Project Scope 与 Revision CAS 全部通过后才清空下游派生状态，不写
+  本地 Artifact；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
   Object Service 在签名前再次读取 `project.view`，核对数据库 URI 的 Bucket 与
   Organization/Project Key 前缀，并签发最长一小时的临时 URL；
@@ -230,7 +234,7 @@ with engine.begin() as connection:
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
-| `backend/server_project_http.py` | Server Mode Project Directory、Task 只读与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、跨项目只返回 403/404、URL 短期有效 |
+| `backend/server_project_http.py` | Server Mode Project Directory、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、写入用 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
@@ -271,8 +275,8 @@ with engine.begin() as connection:
    返回 503，不会退回本地全局数据；
 5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run
    Start/Resume 和原始对象打开，在 Server Mode 单独返回 503；
-6. Project Directory、Task 列表和单条读取已新增显式 Actor/Project Scope；继续给
-   Project 管理写入、文章写入、
+6. Project Directory、Task 列表/单条读取和完全重写已新增显式 Actor/Project
+   Scope；继续给 Project 管理写入、其他文章写入、
    Batch、对象下载和 Worker 增加 Scope 与权限依赖；
 7. 全部项目级入口覆盖前，不开放服务器登录；
 8. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
@@ -365,9 +369,10 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 
 本地模式的 `app.py` 仍构造 SQLite `TaskStore/JobQueue`。Server Mode 已明确不创建
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
-项目级 PostgreSQL Task 列表/单条读取已经接线，但 Article 写入、Batch 和 Worker 尚未
-接线。因此不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把“只读已接线”描述
-成“服务器单写已完成”，或把“已停止旧 Worker”描述成“新 Worker 已就绪”。
+项目级 PostgreSQL Task 列表/单条读取和不依赖 Artifact 的“完全重写”已经接线，但其余
+Article 写入、Batch 和 Worker 尚未接线。因此不能用一个全局“默认项目”强行切换
+PostgreSQL，也不能把“一个确定性写操作已接线”描述成“服务器单写已完成”，或把
+“已停止旧 Worker”描述成“新 Worker 已就绪”。
 
 Worker 授权组件已完成但尚未进入 Server Mode Lifespan：新 Job 可在数据库中保存
 `requested_by_user_id`，Claim Adapter 在返回私有 Request 前按 Operation 权限检查，

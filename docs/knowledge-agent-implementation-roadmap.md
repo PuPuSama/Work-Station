@@ -133,6 +133,8 @@
   调用 fail closed，但项目级 PostgreSQL Worker 尚未接线；
 - 已开放显式 Project 路径的 PostgreSQL Task 只读列表/单条接口；每个请求重新读取
   RBAC 事实，跨项目不扫描全量数据，本地模式不增加该 API；
+- 已接通首个 PostgreSQL-only Task 写操作“完全重写”：仅 `article.edit` 可执行，
+  使用 Revision CAS，且不创建本地 JSON/SQLite/Artifact；其他写路径仍关闭；
 - 已开放 SQL-scoped Project Directory，只返回 Active Actor 在当前 Organization
   可访问的 Active Project 及 Effective Role；归档 Project 立即 fail closed；
 - 已接通私有知识/产品资产的 Server Mode 下载路由：路由授权与签名前授权各执行一次，
