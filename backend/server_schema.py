@@ -669,6 +669,7 @@ background_jobs = sa.Table(
     sa.Column("job_id", sa.Text(), nullable=False),
     sa.Column("batch_id", sa.Text(), nullable=False),
     sa.Column("task_id", sa.Text(), nullable=False),
+    sa.Column("requested_by_user_id", sa.Text(), nullable=True),
     sa.Column("customer", sa.Text(), nullable=False, server_default=sa.text("''")),
     sa.Column("topic_index", sa.Integer(), nullable=False, server_default=sa.text("0")),
     sa.Column("topic", sa.Text(), nullable=False, server_default=sa.text("''")),
@@ -723,6 +724,11 @@ background_jobs = sa.Table(
         name="ck_background_jobs_identity_nonempty",
     ),
     sa.CheckConstraint(
+        "requested_by_user_id IS NULL "
+        "OR btrim(requested_by_user_id) <> ''",
+        name="ck_background_jobs_requester_nonempty",
+    ),
+    sa.CheckConstraint(
         "status IN "
         "('queued', 'running', 'retry_wait', 'succeeded', "
         "'failed', 'cancelled', 'conflict')",
@@ -761,6 +767,15 @@ background_jobs = sa.Table(
         name="fk_background_jobs_task",
         ondelete="RESTRICT",
     ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "requested_by_user_id"],
+        [
+            "workspace_users.organization_id",
+            "workspace_users.user_id",
+        ],
+        name="fk_background_jobs_requester",
+        ondelete="RESTRICT",
+    ),
     sa.PrimaryKeyConstraint(
         "organization_id",
         "project_id",
@@ -782,6 +797,13 @@ sa.Index(
     background_jobs.c.project_id,
     background_jobs.c.status,
     background_jobs.c.available_at,
+    background_jobs.c.created_at,
+)
+sa.Index(
+    "ix_background_jobs_requester",
+    background_jobs.c.organization_id,
+    background_jobs.c.project_id,
+    background_jobs.c.requested_by_user_id,
     background_jobs.c.created_at,
 )
 sa.Index(

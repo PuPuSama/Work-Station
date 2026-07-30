@@ -137,6 +137,9 @@
   可访问的 Active Project 及 Effective Role；归档 Project 立即 fail closed；
 - 已接通私有知识/产品资产的 Server Mode 下载路由：路由授权与签名前授权各执行一次，
   Bucket 和 Organization/Project Key 前缀不一致时不签名；
+- 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
+  元数据授权与 Handler 前二次授权；Server Batch API/Runner 尚未接线，所以相关
+  Preflight 能力仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以

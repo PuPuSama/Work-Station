@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 from uuid import uuid4
@@ -57,6 +58,15 @@ def _timestamp(value: object, *, fallback: datetime | None = None) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True, slots=True)
+class PendingJobAuthorization:
+    """Minimal metadata safe to inspect before a Worker receives Job input."""
+
+    job_id: str
+    operation: str
+    requested_by_user_id: str | None
 
 
 class PostgresJobQueue:
@@ -208,8 +218,17 @@ class PostgresJobQueue:
         items: list[dict[str, Any]],
         *,
         customer: str = "",
+        requested_by_user_id: str | None = None,
     ) -> dict[str, Any]:
         normalized_operation = _required_text(operation, "operation")
+        normalized_requester = (
+            _required_text(
+                requested_by_user_id,
+                "requested_by_user_id",
+            )
+            if requested_by_user_id is not None
+            else None
+        )
         if not items:
             raise ValueError("A batch requires at least one job.")
         task_ids = tuple(_required_text(str(item["task_id"]), "task_id") for item in items)
@@ -267,6 +286,7 @@ class PostgresJobQueue:
                             "job_id": uuid4().hex,
                             "batch_id": batch_id,
                             "task_id": task_id,
+                            "requested_by_user_id": normalized_requester,
                             "customer": str(item.get("customer", "")),
                             "topic_index": int(item.get("topic_index", 0)),
                             "topic": str(item.get("topic", "")),
@@ -324,6 +344,116 @@ class PostgresJobQueue:
                     .where(
                         *self._job_scope(),
                         background_jobs.c.job_id == row["job_id"],
+                        background_jobs.c.status.in_(
+                            ("queued", "retry_wait")
+                        ),
+                    )
+                    .values(
+                        status="running",
+                        attempts=background_jobs.c.attempts + 1,
+                        started_at=current,
+                        worker_id=self.worker_id,
+                        lease_expires_at=current
+                        + timedelta(seconds=self.lease_seconds),
+                        updated_at=current,
+                    )
+                    .returning(background_jobs)
+                ).mappings().one_or_none()
+                if current_row is not None:
+                    claimed.append(self._job_dict(current_row))
+        return claimed
+
+    def list_claim_candidates(
+        self,
+        limit: int,
+        operations: Iterable[str] | None = None,
+    ) -> list[PendingJobAuthorization]:
+        if limit <= 0:
+            return []
+        selected_operations = tuple(dict.fromkeys(operations or ()))
+        current = _now()
+        conditions: list[sa.ColumnElement[bool]] = [
+            *self._job_scope(),
+            background_jobs.c.status.in_(("queued", "retry_wait")),
+            background_jobs.c.available_at <= current,
+            background_jobs.c.cancel_requested.is_(False),
+        ]
+        if selected_operations:
+            conditions.append(
+                background_jobs.c.operation.in_(selected_operations)
+            )
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(
+                    background_jobs.c.job_id,
+                    background_jobs.c.operation,
+                    background_jobs.c.requested_by_user_id,
+                )
+                .where(*conditions)
+                .order_by(
+                    background_jobs.c.available_at,
+                    background_jobs.c.created_at,
+                    background_jobs.c.topic_index,
+                    background_jobs.c.job_id,
+                )
+                .limit(limit)
+            ).mappings().all()
+        return [
+            PendingJobAuthorization(
+                job_id=str(row["job_id"]),
+                operation=str(row["operation"]),
+                requested_by_user_id=(
+                    str(row["requested_by_user_id"])
+                    if row["requested_by_user_id"] is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+
+    def claim_jobs_by_id(
+        self,
+        job_ids: Iterable[str],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        values = tuple(
+            dict.fromkeys(
+                _required_text(str(job_id), "job_id")
+                for job_id in job_ids
+            )
+        )
+        if limit <= 0 or not values:
+            return []
+        current = _now()
+        with self._engine.begin() as connection:
+            rows = connection.execute(
+                sa.select(background_jobs)
+                .where(
+                    *self._job_scope(),
+                    background_jobs.c.job_id.in_(values),
+                    background_jobs.c.status.in_(
+                        ("queued", "retry_wait")
+                    ),
+                    background_jobs.c.available_at <= current,
+                    background_jobs.c.cancel_requested.is_(False),
+                )
+                .order_by(
+                    background_jobs.c.available_at,
+                    background_jobs.c.created_at,
+                    background_jobs.c.topic_index,
+                    background_jobs.c.job_id,
+                )
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            ).mappings().all()
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                current_row = connection.execute(
+                    background_jobs.update()
+                    .where(
+                        *self._job_scope(),
+                        background_jobs.c.job_id == row["job_id"],
                         background_jobs.c.status.in_(("queued", "retry_wait")),
                     )
                     .values(
@@ -340,6 +470,36 @@ class PostgresJobQueue:
                 if current_row is not None:
                     claimed.append(self._job_dict(current_row))
         return claimed
+
+    def reject_pending_authorization(
+        self,
+        job_id: str,
+    ) -> bool:
+        """Reject a pending Job without reading its private request payload."""
+
+        current = _now()
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                background_jobs.update()
+                .where(
+                    *self._job_scope(),
+                    background_jobs.c.job_id == job_id,
+                    background_jobs.c.status.in_(
+                        ("queued", "retry_wait")
+                    ),
+                )
+                .values(
+                    status="conflict",
+                    error="job actor is not authorized",
+                    finished_at=current,
+                    worker_id=None,
+                    lease_expires_at=None,
+                    updated_at=current,
+                )
+            )
+            if result.rowcount:
+                self._touch_batch(connection, job_id, current)
+        return bool(result.rowcount)
 
     def renew_lease(self, job_id: str) -> bool:
         current = _now()
@@ -842,6 +1002,10 @@ class PostgresJobQueue:
                                 str(job.get("task_id") or ""),
                                 "task_id",
                             ),
+                            # SQLite history has no trusted Actor boundary.
+                            # Never promote an extension field from the legacy
+                            # payload into a server identity.
+                            "requested_by_user_id": None,
                             "customer": str(job.get("customer") or ""),
                             "topic_index": int(job.get("topic_index") or 0),
                             "topic": str(job.get("topic") or ""),
@@ -924,6 +1088,11 @@ class PostgresJobQueue:
             "id": str(row["job_id"]),
             "batch_id": str(row["batch_id"]),
             "task_id": str(row["task_id"]),
+            "requested_by_user_id": (
+                str(row["requested_by_user_id"])
+                if row["requested_by_user_id"] is not None
+                else None
+            ),
             "customer": str(row["customer"]),
             "topic_index": int(row["topic_index"]),
             "topic": str(row["topic"]),
@@ -986,4 +1155,4 @@ class PostgresJobQueue:
         }
 
 
-__all__ = ["PostgresJobQueue"]
+__all__ = ["PendingJobAuthorization", "PostgresJobQueue"]

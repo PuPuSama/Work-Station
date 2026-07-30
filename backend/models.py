@@ -571,6 +571,7 @@ class BatchJobRecord(WorkflowModel):
     id: str
     batch_id: str
     task_id: str
+    requested_by_user_id: str | None = None
     customer: str
     topic_index: int
     topic: str

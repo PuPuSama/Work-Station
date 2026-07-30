@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260730_0010`；
+- `alembic_version = 20260730_0011`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；

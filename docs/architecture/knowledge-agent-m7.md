@@ -62,6 +62,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - Alembic `20260730_0010` 的供应商无关 External Identity 映射；
 - 只接收“已验证 issuer/subject”的本地 Actor 映射和 Session Exchange；
 - Org Admin 才能执行且与 Audit Event 同事务的 Identity Link/Revoke。
+- Alembic `20260730_0011` 为新 PostgreSQL Job 增加同 Organization 复合外键约束的
+  `requested_by_user_id`；旧 SQLite 历史迁移时允许为空；
+- `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
+  Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
+- `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态。
 
 当前明确未做：
 
@@ -229,6 +234,8 @@ with engine.begin() as connection:
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、旧返回契约 |
+| `backend/services/authorized_job_queue.py` | Server Worker 的两阶段重新授权适配器 | Claim 前只看最小元数据、Handler 前二次授权、无可信 Requester 不读取 Payload |
+| `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/server_cutover_report.py` | SQLite/PG Task 与 Job 只读双读报告 | 只读连接、同一 Scope、顺序/ID/摘要、正文不出报告 |
 | `backend/knowledge_agent/m7_cutover_report.py` | C3 冻结窗口比对 CLI | ready 为 0、差异为 2、数据库 URL 只读环境注入 |
@@ -361,6 +368,14 @@ SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fai
 项目级 PostgreSQL Task 列表/单条读取已经接线，但 Article 写入、Batch 和 Worker 尚未
 接线。因此不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把“只读已接线”描述
 成“服务器单写已完成”，或把“已停止旧 Worker”描述成“新 Worker 已就绪”。
+
+Worker 授权组件已完成但尚未进入 Server Mode Lifespan：新 Job 可在数据库中保存
+`requested_by_user_id`，Claim Adapter 在返回私有 Request 前按 Operation 权限检查，
+Handler Adapter 在业务执行前再次检查。旧历史 Job 的 Requester 为空是有意的迁移兼容；
+SQLite 扩展字段也不会被提升为可信 Requester。它们只能作为 Terminal History 保留，
+不能被服务器 Worker 重新执行。只有 Server Batch
+API 强制写入 Requester 且 Lifespan 启动 PostgreSQL Runner 后，才能把
+`worker_reauthorizes` 与 `postgres_job_single_write` 标为 true。
 
 当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
 PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化

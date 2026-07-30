@@ -35,7 +35,20 @@ from server_schema import (  # noqa: E402
 )
 from services.postgres_task_repository import PostgresTaskRepository  # noqa: E402
 from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
-from services.job_queue import ActiveJobError, JobQueue  # noqa: E402
+from services.job_queue import (  # noqa: E402
+    ActiveJobError,
+    JobConflict,
+    JobQueue,
+)
+from services.access_control import (  # noqa: E402
+    PostgresProjectAccessRepository,
+    ProjectAccessService,
+)
+from services.authorized_job_queue import (  # noqa: E402
+    AuthorizedPostgresJobQueue,
+    ReauthorizingJobHandler,
+    worker_permission_for,
+)
 from services.job_queue_migration import (  # noqa: E402
     JobQueueMigrationConflict,
     migrate_terminal_job_history,
@@ -500,6 +513,149 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
                 [{"task_id": "missing-task", "source_revision": 0}],
             )
 
+    def test_authorized_worker_rejects_missing_or_disabled_requester(
+        self,
+    ) -> None:
+        self.repository_a.replace_all(
+            (
+                self._record("actor-job", topic_index=1),
+                self._record("legacy-job", topic_index=2),
+            )
+        )
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+            worker_id=f"{self.prefix}-authorized-worker",
+        )
+        authorized_batch = raw_queue.create_batch(
+            "outline",
+            [{"task_id": "actor-job", "source_revision": 0}],
+            requested_by_user_id=self.admin_id,
+        )
+        legacy_batch = raw_queue.create_batch(
+            "outline",
+            [{"task_id": "legacy-job", "source_revision": 0}],
+        )
+        queue = AuthorizedPostgresJobQueue(
+            raw_queue,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+        )
+
+        claimed = queue.claim_jobs(2)
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(
+            claimed[0]["requested_by_user_id"],
+            self.admin_id,
+        )
+        legacy_job = raw_queue.get_batch(legacy_batch["id"])["jobs"][0]
+        self.assertEqual(legacy_job["status"], "conflict")
+        self.assertEqual(
+            legacy_job["error"],
+            "job actor is not authorized",
+        )
+        queue.mark_cancelled(claimed[0]["id"])
+
+        self.repository_a.upsert(self._record("disabled-job"))
+        disabled_batch = raw_queue.create_batch(
+            "outline",
+            [{"task_id": "disabled-job", "source_revision": 0}],
+            requested_by_user_id=self.admin_id,
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                workspace_users.update()
+                .where(
+                    workspace_users.c.organization_id
+                    == self.organization_id,
+                    workspace_users.c.user_id == self.admin_id,
+                )
+                .values(status="disabled")
+            )
+        self.assertEqual(queue.claim_jobs(1), [])
+        disabled_job = raw_queue.get_batch(
+            disabled_batch["id"]
+        )["jobs"][0]
+        self.assertEqual(disabled_job["status"], "conflict")
+        self.assertEqual(
+            raw_queue.get_batch(authorized_batch["id"])["jobs"][0][
+                "requested_by_user_id"
+            ],
+            self.admin_id,
+        )
+
+    def test_job_handler_reauthorizes_immediately_before_execution(
+        self,
+    ) -> None:
+        self.repository_a.replace_all(
+            (self._record("execution-job"),)
+        )
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+            worker_id=f"{self.prefix}-execution-worker",
+        )
+        raw_queue.create_batch(
+            "export_docx",
+            [{"task_id": "execution-job", "source_revision": 0}],
+            requested_by_user_id=self.admin_id,
+        )
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        queue = AuthorizedPostgresJobQueue(
+            raw_queue,
+            access=access,
+        )
+        job = queue.claim_jobs(1)[0]
+        with self.engine.begin() as connection:
+            connection.execute(
+                workspace_users.update()
+                .where(
+                    workspace_users.c.organization_id
+                    == self.organization_id,
+                    workspace_users.c.user_id == self.admin_id,
+                )
+                .values(status="disabled")
+            )
+        calls: list[str] = []
+        handler = ReauthorizingJobHandler(
+            lambda current, cancelled: (
+                calls.append(str(current["id"])) or 1
+            ),
+            access=access,
+        )
+
+        with self.assertRaisesRegex(
+            JobConflict,
+            "^job actor is not authorized$",
+        ):
+            handler(job, lambda: False)
+        self.assertEqual(calls, [])
+        raw_queue.mark_conflict(
+            job["id"],
+            "job actor is not authorized",
+        )
+        self.assertEqual(
+            worker_permission_for("outline"),
+            "article.edit",
+        )
+        self.assertEqual(
+            worker_permission_for("seo_review"),
+            "article.review",
+        )
+        self.assertEqual(
+            worker_permission_for("export_docx"),
+            "article.deliver",
+        )
+        self.assertEqual(
+            worker_permission_for("knowledge_research"),
+            "knowledge.edit",
+        )
+
     def test_concurrent_workers_claim_disjoint_jobs(self) -> None:
         task_ids = tuple(f"concurrent-{index}" for index in range(4))
         self.repository_a.replace_all(
@@ -534,6 +690,72 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         barrier = Barrier(2)
 
         def claim(queue: PostgresJobQueue) -> list[dict[str, object]]:
+            barrier.wait(timeout=10)
+            return queue.claim_jobs(2)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(claim, first_worker)
+            second_future = executor.submit(claim, second_worker)
+            first_claim = first_future.result(timeout=20)
+            second_claim = second_future.result(timeout=20)
+
+        first_ids = {str(job["id"]) for job in first_claim}
+        second_ids = {str(job["id"]) for job in second_claim}
+        self.assertEqual(len(first_ids), 2)
+        self.assertEqual(len(second_ids), 2)
+        self.assertFalse(first_ids.intersection(second_ids))
+        self.assertEqual(len(first_ids.union(second_ids)), 4)
+
+    def test_concurrent_authorized_workers_claim_disjoint_jobs(
+        self,
+    ) -> None:
+        task_ids = tuple(f"authorized-{index}" for index in range(4))
+        self.repository_a.replace_all(
+            tuple(
+                self._record(task_id, topic_index=index)
+                for index, task_id in enumerate(task_ids)
+            )
+        )
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        first_raw = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+            worker_id=f"{self.prefix}-authorized-concurrent-1",
+        )
+        second_raw = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_a,
+            worker_id=f"{self.prefix}-authorized-concurrent-2",
+        )
+        first_raw.create_batch(
+            "outline",
+            [
+                {
+                    "task_id": task_id,
+                    "topic_index": index,
+                    "source_revision": 0,
+                }
+                for index, task_id in enumerate(task_ids)
+            ],
+            requested_by_user_id=self.admin_id,
+        )
+        first_worker = AuthorizedPostgresJobQueue(
+            first_raw,
+            access=access,
+        )
+        second_worker = AuthorizedPostgresJobQueue(
+            second_raw,
+            access=access,
+        )
+        barrier = Barrier(2)
+
+        def claim(
+            queue: AuthorizedPostgresJobQueue,
+        ) -> list[dict[str, object]]:
             barrier.wait(timeout=10)
             return queue.claim_jobs(2)
 
@@ -599,9 +821,18 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
                 "pk_background_jobs",
                 "fk_background_jobs_batch",
                 "fk_background_jobs_task",
+                "fk_background_jobs_requester",
                 "ck_background_jobs_status",
                 "ck_background_jobs_lease_state",
+                "ck_background_jobs_requester_nonempty",
             }.issubset(constraint_names)
+        )
+        self.assertIn(
+            "ix_background_jobs_requester",
+            {
+                item["name"]
+                for item in inspector.get_indexes("background_jobs")
+            },
         )
         self.assertIn(
             "WHERE (status = ANY",
@@ -690,6 +921,11 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         self.assertEqual(
             target.get_batch(succeeded_batch["id"])["status"],
             "succeeded",
+        )
+        self.assertIsNone(
+            target.get_batch(succeeded_batch["id"])["jobs"][0][
+                "requested_by_user_id"
+            ]
         )
 
         with self.engine.begin() as connection:
