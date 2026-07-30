@@ -216,8 +216,25 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
   `source_path/prepared_path` 为空，且不含对象 URI 或签名 URL；
 - 旧 Revision 在读取对象前返回 409；并发 CAS 若发生在对象写入后，内容寻址的未引用
   对象进入延迟 orphan 对账，不在失败请求中立即删除；
-- 派生 Asset 仍只能通过授权下载路由获取，Server DOCX/Delivery 尚未迁移时不得把这项
-  冒烟记成完整交付链路已切换。
+- 派生 Asset 仍只能通过授权下载路由获取；图片准备本身不等于完整交付链路已切换。
+
+文章 DOCX 冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/export-docx`，随后使用
+`GET /api/projects/{project}/tasks/{task_id}/docx/download`。至少验证：
+
+- Viewer 返回 403；Editor 具备 `article.deliver` 时请求只含当前 Revision，不接受
+  文件字节、图片 Asset ID、对象 URI 或输出路径；
+- 导出只读取 Task 的 `prepared_asset_id`，对象读取前再次授权，并复核 Key Scope、
+  Byte Size、SHA-256、`image/webp` 类型、数据库/Task/实际尺寸和像素上限；
+- 现有 Word 排版逻辑接收内存 WebP 并返回 DOCX 字节；整个过程不创建 Task 目录、
+  临时图片、Markdown 审计文件或本地 DOCX；
+- 成功 Task 只保存 `docx_asset_id/docx_content_hash/docx_filename`，
+  `docx_path` 为空；旧 Revision 在对象读取前返回 409；
+- 通用 `GET .../assets/{asset_id}/download` 对 `article_docx` 返回 404，专用下载路由
+  重新要求 `article.deliver` 并签发不超过一小时的 URL；
+- 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
+- TDK DOCX、最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 尚未对象化，发布证据
+  不得写成“完整 Server Delivery 已完成”。
 
 产品重新发现冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/product-rediscovery`，随后只使用响应中的

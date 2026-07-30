@@ -212,6 +212,24 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/projects/project-a/tasks/task-a/prepare-images",
             )
         )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/projects/project-a/tasks/task-a/export-docx",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/projects/project-a/tasks/task-a/docx/download",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "POST",
+                "/api/projects/project-a/tasks/task-a/docx/download",
+            )
+        )
         self.assertFalse(
             server_http_route_available(
                 "POST",

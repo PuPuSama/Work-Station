@@ -295,6 +295,9 @@ def _clear_tdk(task: TaskRecord) -> None:
 
 def _clear_export(task: TaskRecord) -> None:
     task.docx_path = ""
+    task.docx_asset_id = ""
+    task.docx_content_hash = ""
+    task.docx_filename = ""
     task.legacy_export = False
     _clear_tdk(task)
 
@@ -464,6 +467,10 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
             image.status = "pending"
             image.error = ""
             image.prepared_path = ""
+            image.prepared_asset_id = ""
+            image.prepared_content_hash = ""
+            image.width = None
+            image.height = None
             image.filename = ""
             image.marker = ""
         task.final_article = ""

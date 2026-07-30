@@ -15,6 +15,7 @@ from knowledge_agent.assets import (  # noqa: E402
     KnowledgeAssetConflictError,
 )
 from knowledge_agent.object_storage import (  # noqa: E402
+    ARTICLE_DOCX_CONTENT_TYPE,
     KnowledgeObjectIntegrityError,
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
@@ -109,7 +110,12 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.actor = ActorIdentity("org-a", "editor")
         self.access = FakeAccess(
-            {"knowledge.edit", "article.edit", "project.view"}
+            {
+                "knowledge.edit",
+                "article.edit",
+                "article.deliver",
+                "project.view",
+            }
         )
         self.store = FakeStore()
         self.repository = FakeAssetRepository()
@@ -278,6 +284,54 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
         self.assertNotIn("source_asset_id", derived.metadata)
         self.assertNotIn("article_image_role", derived.metadata)
         self.assertEqual(self.access.calls[-1][2], "article.edit")
+
+        delivery_image = self.service.read_for_article_delivery(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id=derived.asset_id,
+            max_bytes=1024,
+        )
+        self.assertEqual(delivery_image.data, b"derived-webp-bytes")
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.deliver",
+        )
+
+        docx = self.service.upload_article_docx(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="article-docx",
+            data=b"private-word-document",
+        )
+        self.assertEqual(docx.content_type, ARTICLE_DOCX_CONTENT_TYPE)
+        self.assertEqual(
+            docx.metadata["artifact_kind"],
+            "article_docx",
+        )
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.deliver",
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=docx.asset_id,
+            )
+        docx_url = self.service.create_article_docx_download_url(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id=docx.asset_id,
+            expires_seconds=90,
+        )
+        self.assertTrue(docx_url.startswith("https://signed.example.test/"))
+        self.assertEqual(
+            self.access.calls[-1][2],
+            "article.deliver",
+        )
 
         source_key = str(source.metadata["object_key"])
         self.store.objects[source_key] = b"corrupted"

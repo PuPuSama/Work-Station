@@ -378,7 +378,12 @@ class TaskRecord(WorkflowModel):
     source_links: list[SourceLink] = Field(default_factory=list)
     link_validation: LinkValidation = Field(default_factory=LinkValidation)
 
+    # Local mode stores a path. Server mode stores an immutable private Asset
+    # identity and leaves docx_path empty.
     docx_path: str = ""
+    docx_asset_id: str = ""
+    docx_content_hash: str = ""
+    docx_filename: str = ""
     tdk: TdkMetadata = Field(default_factory=TdkMetadata)
     tdk_path: str = ""
     delivery_package_path: str = ""

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import unquote, urlsplit
 
-from services.access_control import ActorIdentity, ProjectAccessService
+from services.access_control import (
+    ActorIdentity,
+    ProjectAccessService,
+    ProjectPermission,
+)
 from services.object_store import (
     ObjectStore,
     ObjectStoreError,
@@ -35,6 +39,13 @@ class ProjectKnowledgeObject:
 
     asset: KnowledgeAsset
     data: bytes
+
+
+ARTICLE_DOCX_ARTIFACT_KIND = "article_docx"
+ARTICLE_DOCX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.document"
+)
 
 
 class ScopedS3ArtifactStore:
@@ -171,6 +182,28 @@ class ProjectKnowledgeObjectService:
             metadata=derivative_metadata,
         )
 
+    def upload_article_docx(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+    ) -> KnowledgeAsset:
+        """Persist a content-addressed private Word document."""
+
+        self._access.require(actor, project_id, "article.deliver")
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type=ARTICLE_DOCX_CONTENT_TYPE,
+            width=None,
+            height=None,
+            metadata={"artifact_kind": ARTICLE_DOCX_ARTIFACT_KIND},
+        )
+
     def _store_asset(
         self,
         *,
@@ -244,7 +277,42 @@ class ProjectKnowledgeObjectService:
     ) -> ProjectKnowledgeObject:
         """Reauthorize and verify private bytes before article derivation."""
 
-        self._access.require(actor, project_id, "article.edit")
+        return self._read_verified(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            max_bytes=max_bytes,
+            permission="article.edit",
+        )
+
+    def read_for_article_delivery(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        max_bytes: int,
+    ) -> ProjectKnowledgeObject:
+        """Reauthorize and verify private bytes before delivery rendering."""
+
+        return self._read_verified(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            max_bytes=max_bytes,
+            permission="article.deliver",
+        )
+
+    def _read_verified(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        max_bytes: int,
+        permission: ProjectPermission,
+    ) -> ProjectKnowledgeObject:
+        self._access.require(actor, project_id, permission)
         if max_bytes <= 0:
             raise ValueError("max_bytes must be greater than zero")
         asset = self._repository.get_asset(project_id, asset_id)
@@ -294,6 +362,42 @@ class ProjectKnowledgeObjectService:
         asset = self._repository.get_asset(project_id, asset_id)
         if asset is None:
             raise KnowledgeObjectNotFound("knowledge object not found")
+        if (
+            str(asset.metadata.get("artifact_kind") or "")
+            == ARTICLE_DOCX_ARTIFACT_KIND
+        ):
+            # Delivery artifacts require the dedicated article.deliver route;
+            # knowing their Asset ID must not downgrade access to project.view.
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
+        )
+        return self._store.create_download_url(
+            key,
+            expires_seconds=expires_seconds,
+        )
+
+    def create_article_docx_download_url(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        expires_seconds: int = 300,
+    ) -> str:
+        """Sign one DOCX only after a fresh article.deliver decision."""
+
+        self._access.require(actor, project_id, "article.deliver")
+        asset = self._repository.get_asset(project_id, asset_id)
+        if (
+            asset is None
+            or str(asset.metadata.get("artifact_kind") or "")
+            != ARTICLE_DOCX_ARTIFACT_KIND
+            or asset.content_type != ARTICLE_DOCX_CONTENT_TYPE
+        ):
+            raise KnowledgeObjectNotFound("knowledge object not found")
         key = self._scoped_key(
             actor=actor,
             project_id=project_id,
@@ -306,6 +410,8 @@ class ProjectKnowledgeObjectService:
 
 
 __all__ = [
+    "ARTICLE_DOCX_ARTIFACT_KIND",
+    "ARTICLE_DOCX_CONTENT_TYPE",
     "KnowledgeObjectIntegrityError",
     "KnowledgeObjectNotFound",
     "ProjectKnowledgeObject",

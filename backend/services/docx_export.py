@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +23,11 @@ from config import AppConfig
 from models import TaskRecord
 from services.article_images import (
     ImagePlacement,
+    ImageValidationError,
     build_image_audit_markdown,
     image_pixel_size,
     prepare_task_images,
+    resolve_asset_image_placements,
     resolve_image_placements,
     sanitize_image_stem,
 )
@@ -40,6 +45,17 @@ BLACK_HEX = "000000"
 TABLE_HEADER_FILL_HEX = "E7E6E6"
 TABLE_CELL_MARGINS_DXA = {"top": 80, "bottom": 80, "start": 120, "end": 120}
 TABLE_INDENT_DXA = TABLE_CELL_MARGINS_DXA["start"]
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddedArticleImage:
+    """Verified private WebP bytes used by the Server DOCX renderer."""
+
+    asset_id: str
+    data: bytes
+    filename: str
+    width: int
+    height: int
 
 
 def _value(item: object, *names: str, default: Any = "") -> Any:
@@ -106,17 +122,93 @@ def _prepared_images(task: object, markdown: str) -> list[object]:
     return prepare_task_images(task, markdown, require_hero=True)
 
 
-def export_task_docx(config: AppConfig, task: TaskRecord) -> Path:
+def _validate_embedded_images(
+    images: list[object],
+    embedded_images: Mapping[str, EmbeddedArticleImage],
+) -> None:
+    expected_ids = {
+        str(_value(image, "prepared_asset_id", default="") or "").strip()
+        for image in images
+    }
+    if "" in expected_ids or expected_ids != set(embedded_images):
+        raise ImageValidationError(
+            "Server DOCX image bytes do not match the Task image assets."
+        )
+    for image in images:
+        asset_id = str(
+            _value(image, "prepared_asset_id", default="") or ""
+        ).strip()
+        payload = embedded_images[asset_id]
+        expected_hash = str(
+            _value(image, "prepared_content_hash", default="") or ""
+        ).casefold()
+        expected_filename = str(
+            _value(image, "filename", default="") or ""
+        )
+        expected_width = _value(image, "width", default=None)
+        expected_height = _value(image, "height", default=None)
+        if (
+            payload.asset_id != asset_id
+            or hashlib.sha256(payload.data).hexdigest() != expected_hash
+            or payload.filename != expected_filename
+            or payload.width != expected_width
+            or payload.height != expected_height
+        ):
+            raise ImageValidationError(
+                "Server DOCX image bytes do not match the Task image assets."
+            )
+
+
+def _build_task_document(
+    config: AppConfig,
+    task: TaskRecord,
+    *,
+    embedded_images: Mapping[str, EmbeddedArticleImage] | None = None,
+) -> tuple[Document, str, list[object]]:
     title = task.selected_title or task.topic or "Article"
     markdown = _current_article(task, title)
     markdown = enforce_homepage_brand_link(markdown, task)
     validate_article_layout(markdown)
-    images = _prepared_images(task, markdown)
+    if embedded_images is None:
+        images = _prepared_images(task, markdown)
+    else:
+        images = list(task.images)
+        _validate_embedded_images(images, embedded_images)
 
     document = Document()
     configure_styles(document, config)
-    render_markdown(document, markdown, config, images=images)
+    render_markdown(
+        document,
+        markdown,
+        config,
+        images=images,
+        embedded_images=embedded_images,
+    )
     enforce_document_typography(document)
+    return document, markdown, images
+
+
+def build_task_docx_bytes(
+    config: AppConfig,
+    task: TaskRecord,
+    *,
+    embedded_images: Mapping[str, EmbeddedArticleImage],
+) -> bytes:
+    """Render a Server article DOCX without creating local task files."""
+
+    document, _markdown, _images = _build_task_document(
+        config,
+        task,
+        embedded_images=embedded_images,
+    )
+    output = BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def export_task_docx(config: AppConfig, task: TaskRecord) -> Path:
+    document, markdown, images = _build_task_document(config, task)
+    title = task.selected_title or task.topic or "Article"
 
     output_dir = Path(task.task_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -385,9 +477,18 @@ def render_markdown(
     config: AppConfig,
     *,
     images: Iterable[object] | None = None,
+    embedded_images: Mapping[str, EmbeddedArticleImage] | None = None,
 ) -> None:
     image_list = list(images or [])
-    placements = resolve_image_placements(markdown, image_list) if image_list else []
+    placements = (
+        (
+            resolve_asset_image_placements(markdown, image_list)
+            if embedded_images is not None
+            else resolve_image_placements(markdown, image_list)
+        )
+        if image_list
+        else []
+    )
     before: dict[int, list[ImagePlacement]] = defaultdict(list)
     after: dict[int, list[ImagePlacement]] = defaultdict(list)
     for placement in placements:
@@ -417,16 +518,31 @@ def render_markdown(
             table_rows, alignments, next_index = parsed_table
             for consumed_index in range(line_index, next_index):
                 for placement in before.get(consumed_index, []):
-                    add_inline_image(document, placement.image, config)
+                    add_inline_image(
+                        document,
+                        placement.image,
+                        config,
+                        embedded_images=embedded_images,
+                    )
             add_markdown_table(document, table_rows, alignments, config)
             for consumed_index in range(line_index, next_index):
                 for placement in after.get(consumed_index, []):
-                    add_inline_image(document, placement.image, config)
+                    add_inline_image(
+                        document,
+                        placement.image,
+                        config,
+                        embedded_images=embedded_images,
+                    )
             line_index = next_index
             continue
 
         for placement in before.get(line_index, []):
-            add_inline_image(document, placement.image, config)
+            add_inline_image(
+                document,
+                placement.image,
+                config,
+                embedded_images=embedded_images,
+            )
 
         raw_line = lines[line_index]
         line = raw_line.rstrip()
@@ -439,7 +555,12 @@ def render_markdown(
 
             for consumed_index in range(line_index + 1, consumed_until):
                 for placement in before.get(consumed_index, []):
-                    add_inline_image(document, placement.image, config)
+                    add_inline_image(
+                        document,
+                        placement.image,
+                        config,
+                        embedded_images=embedded_images,
+                    )
 
             prose = " ".join(prose_lines)
             paragraph = document.add_paragraph()
@@ -478,7 +599,12 @@ def render_markdown(
         if after_line and line and document.paragraphs:
             document.paragraphs[-1].paragraph_format.keep_with_next = True
         for placement in after_line:
-            add_inline_image(document, placement.image, config)
+            add_inline_image(
+                document,
+                placement.image,
+                config,
+                embedded_images=embedded_images,
+            )
         line_index = consumed_until
 
 
@@ -503,14 +629,34 @@ def add_markdown_heading(
     )
 
 
-def add_inline_image(document: Document, image: Mapping[str, Any], config: AppConfig) -> None:
-    path = Path(str(image["prepared_path"]))
+def add_inline_image(
+    document: Document,
+    image: Mapping[str, Any],
+    config: AppConfig,
+    *,
+    embedded_images: Mapping[str, EmbeddedArticleImage] | None = None,
+) -> None:
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.keep_with_next = True
     run = paragraph.add_run()
-    add_webp_picture(run, path)
+    if embedded_images is None:
+        add_webp_picture(run, Path(str(image["prepared_path"])))
+    else:
+        asset_id = str(image["prepared_asset_id"])
+        payload = embedded_images.get(asset_id)
+        if payload is None:
+            raise ImageValidationError(
+                "Server DOCX image bytes do not match the Task image assets."
+            )
+        add_webp_picture_bytes(
+            run,
+            data=payload.data,
+            filename=payload.filename,
+            width_px=payload.width,
+            height_px=payload.height,
+        )
 
     description = str(image.get("product_name") or image.get("filename") or "Article image")
     for doc_properties in paragraph._p.xpath(".//wp:docPr"):
@@ -533,6 +679,25 @@ def add_webp_picture(run, path: Path) -> None:
     """
 
     width_px, height_px = image_pixel_size(path)
+    add_webp_picture_bytes(
+        run,
+        data=path.read_bytes(),
+        filename=path.name,
+        width_px=width_px,
+        height_px=height_px,
+    )
+
+
+def add_webp_picture_bytes(
+    run,
+    *,
+    data: bytes,
+    filename: str,
+    width_px: int,
+    height_px: int,
+) -> None:
+    """Embed already verified WebP bytes as an inline OOXML image part."""
+
     max_width_inches = 5.8
     max_height_inches = 6.4
     scale = min(max_width_inches / width_px, max_height_inches / height_px)
@@ -541,7 +706,7 @@ def add_webp_picture(run, path: Path) -> None:
 
     package = run.part.package
     partname = package.next_partname("/word/media/image%d.webp")
-    image_part = Part(partname, "image/webp", path.read_bytes(), package)
+    image_part = Part(partname, "image/webp", bytes(data), package)
     relationship_id = run.part.relate_to(
         image_part,
         RELATIONSHIP_TYPE.IMAGE,
@@ -549,7 +714,7 @@ def add_webp_picture(run, path: Path) -> None:
     inline = CT_Inline.new_pic_inline(
         run.part.next_id,
         relationship_id,
-        path.name,
+        filename,
         width,
         height,
     )

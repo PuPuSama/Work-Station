@@ -134,7 +134,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 518 tests；
+- 522 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -189,7 +189,32 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 共享派生资产元数据不保存文章角色、产品或来源关系，避免内容去重复用后残留第一次
   使用者的关系；这些关系只保存在 Task `ArticleImage`；
 - Viewer 返回 403；旧 Revision 在对象读取前返回 409；派生对象仍经授权下载路由访问；
-- Server DOCX/Delivery 对象化、派生 orphan 对账和该写操作的事务内 Audit 尚未完成。
+- Server TDK/Delivery ZIP 对象化、派生 orphan 对账和该写操作的事务内 Audit 尚未完成。
+
+### Server 私有文章 DOCX
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_docx_export `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security -v
+```
+
+结果：
+
+- 25 tests，含纯内存 DOCX 单元测试和真实 PostgreSQL + FastAPI 路由；
+- `article.deliver` 在路由、私有 WebP 读取、DOCX 写入和专用下载签名前重新检查；
+- Task 图片 Asset 的对象 Key、大小、哈希、类型、数据库/Task/实际尺寸全部复核；
+- 现有 Word 排版器新增内存 WebP/字节输出边界，本地文件导出测试保持通过；
+- 生成的 DOCX ZIP 结构含两张 WebP、正文和 Marker，Task 目录始终未创建；
+- Task 只保存 `docx_asset_id/docx_content_hash/docx_filename`，`docx_path` 为空；
+- Viewer 导出/专用下载返回 403；通用 Asset 下载对 `article_docx` 返回 404；
+- 同哈希资产已属于其他访问类型时在 Task CAS 前 fail closed，不降级下载权限；
+- 旧 Revision 在对象读取/写入前返回 409，未产生额外对象；
+- TDK DOCX、最终 AI-rate 截图、Delivery ZIP、前端 Delivery UI 和事务内 Audit
+  仍待后续切片。
 
 真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
 一次性随机开发凭据和专用 `article-agent-test-*` Bucket。由于该本地 MinIO
@@ -270,7 +295,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 15 tests；
+- 16 tests；
 - Actor Cookie 篡改/缺失统一为未认证；
 - Project 按官网域名规则规范化后才查询 PostgreSQL 权限事实；
 - Viewer 可通过 Knowledge GET，但不能发布来源；
@@ -331,7 +356,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 15 tests；
+- 16 tests；
 - 无 Actor Cookie 返回 401，跨 Organization Project 返回统一 403；
 - Project Directory 只返回 Actor 在当前 Organization 可见的 Active Project 和
   Effective Role；普通 Team Member 不会看到同 Team Project；
@@ -344,9 +369,10 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 正常资产只返回 30–3600 秒的签名 URL；缺失资产、伪造为另一 Organization Key 的
   URI 返回 404，跨项目请求返回 403；
 - 旧 `/api/tasks` 在 Server Mode 继续返回 503；
-- 四条受限操作均有精确白名单：“重新发现产品”“选择已确认产品”
-  “快照后替换一个已审阅章节”和“准备私有文章图片”；“完全重写”是额外迁移入口，
-  尚未迁移的其他 POST/PUT 写方法不进入 Server Project Task 白名单；
+- 五条受限操作均有精确白名单：“重新发现产品”“选择已确认产品”
+  “快照后替换一个已审阅章节”“准备私有文章图片”和“导出私有文章 DOCX”；
+  “完全重写”是额外迁移入口，尚未迁移的其他 POST/PUT 写方法不进入
+  Server Project Task 白名单；
 - “完全重写”要求 `article.edit`；Viewer 返回 403，Editor 成功后 PostgreSQL Revision
   从 0 增至 1，重复提交旧 Revision 返回 409；
 - 产品替换请求只接受 Revision 和 1–3 个 Product ID，额外的客户端产品字段返回 422；
@@ -358,6 +384,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   Revision 返回 409；
 - 图片准备只接收 Hero Asset ID 和可选产品锚点；产品图固定读取 Task 已选择 Asset，
   派生 WebP 与视觉去重在内存完成，锚点未解析时不写对象，成功后只保存 Asset 引用；
+- DOCX 导出只接收 Revision，读取 Task 已确认 WebP 后在内存排版；Task 不保存 DOCX
+  路径，通用 Viewer 下载入口也不能绕过 `article.deliver`；
 - 章节重写仅接受 Revision、Heading Path 和 Replacement Body；Viewer 返回 403；
 - Fence-aware Parser 忽略代码块中的 Heading，目标不存在/重复以及同级或更高级标题
   注入均拒绝；
@@ -411,8 +439,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   已接入；具体生产 Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
-  “完全重写”“从正式目录选择已确认产品”和“快照后替换一个已审阅章节”，但不代表
-  其余旧路由、对话式章节生成或完整写路径已经迁移；
+  “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备
+  和文章 DOCX 导出/下载，但不代表其余旧路由、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
@@ -422,8 +450,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
-- S3 对象存储底层、产品资产桥接和 no-go 部署门禁已实现；真实备份恢复演练
-  与生产供应商尚未完成；
+- S3 对象存储底层、产品资产桥接、文章 DOCX 私有对象和 no-go 部署门禁已实现；
+  TDK/Delivery ZIP 对象化、真实备份恢复演练与生产供应商尚未完成；
 - 前端登录页已新增 Server OIDC 分支并通过 lint/build；其余 M7 管理界面尚未接入。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

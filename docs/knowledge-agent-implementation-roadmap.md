@@ -147,7 +147,12 @@
   `selected_asset_id`；对象读取再次授权并复核哈希，在内存生成内容寻址 WebP，最多三张
   且视觉去重，Task 只保存 Asset 引用和文章锚点，不创建本地图片路径；
 - 自动锚点失败时返回非 FAQ H2/H3 候选且不上传派生对象；人工锚点只能绑定当前 Task
-  Product ID。Server DOCX/交付对象化及该写操作的事务内 Audit 仍待后续切片；
+  Product ID；该写操作的事务内 Audit 仍待后续切片；
+- 已接通 Server 文章 DOCX：`article.deliver` 下重新读取并复核 Task 的私有 WebP，
+  复用现有排版逻辑在内存生成 Word，再保存内容寻址 DOCX Asset；Task 的
+  `docx_path` 为空，专用下载路由再次授权，通用 Viewer Asset 下载不能取得交付文档；
+- TDK DOCX、最终 AI-rate 截图、交付 ZIP 和前端 Delivery UI 仍未对象化，不能把文章
+  DOCX 导出描述成完整 Server 交付链路完成；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现已经实际使用这条链路，但通用 Server
   Batch API/Runner、排空证明与事务内审计尚未完成，所以整体 Preflight 能力仍保持 false；

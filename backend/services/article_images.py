@@ -813,6 +813,14 @@ def _normalise_prepared_image(image: object) -> dict[str, Any]:
         "role": role,
         "source_path": str(_value(image, "source_path", default="") or ""),
         "prepared_path": prepared_path,
+        "prepared_asset_id": str(
+            _value(image, "prepared_asset_id", default="") or ""
+        ),
+        "prepared_content_hash": str(
+            _value(image, "prepared_content_hash", default="") or ""
+        ).casefold(),
+        "width": _value(image, "width", default=None),
+        "height": _value(image, "height", default=None),
         "filename": filename,
         "marker": f"img.{filename}" if filename else "",
         "product_name": str(_value(image, "product_name", default="") or ""),
@@ -857,6 +865,58 @@ def _validate_prepared_image_set(images: list[dict[str, Any]]) -> None:
         labels.append(label)
 
 
+def _validate_prepared_asset_image_set(
+    images: list[dict[str, Any]],
+) -> None:
+    """Validate Server image identities without accepting local file paths."""
+
+    if not images:
+        raise ImageValidationError(
+            "Server DOCX export requires prepared article image assets."
+        )
+    if len(images) > MAX_ARTICLE_IMAGES:
+        raise ImageValidationError(
+            f"每篇文章最多使用 {MAX_ARTICLE_IMAGES} 张图片（包含首图）；当前有 {len(images)} 张。"
+        )
+
+    asset_ids: set[str] = set()
+    content_hashes: set[str] = set()
+    for image in images:
+        asset_id = str(image["prepared_asset_id"] or "").strip()
+        content_digest = str(
+            image["prepared_content_hash"] or ""
+        ).strip()
+        filename = str(image["filename"] or "").strip()
+        width = image["width"]
+        height = image["height"]
+        if image["prepared_path"]:
+            raise ImageValidationError(
+                "Server article images must not contain local prepared paths."
+            )
+        if (
+            not asset_id
+            or not re.fullmatch(r"[0-9a-f]{64}", content_digest)
+            or not filename
+            or Path(filename).name != filename
+            or Path(filename).suffix.casefold() != ".webp"
+            or not isinstance(width, int)
+            or isinstance(width, bool)
+            or width <= 0
+            or not isinstance(height, int)
+            or isinstance(height, bool)
+            or height <= 0
+        ):
+            raise ImageValidationError(
+                "Server article image asset metadata is incomplete."
+            )
+        if asset_id in asset_ids or content_digest in content_hashes:
+            raise ImageValidationError(
+                "Server article image assets must be unique."
+            )
+        asset_ids.add(asset_id)
+        content_hashes.add(content_digest)
+
+
 def _has_transition_before_first_h2(markdown: str) -> tuple[int, int]:
     lines = (markdown or "").splitlines()
     h1_indices = [index for index, line in enumerate(lines) if re.match(r"^\s*#\s+\S", line)]
@@ -890,13 +950,10 @@ def validate_hero_image_placement(markdown: str) -> None:
     _has_transition_before_first_h2(markdown)
 
 
-def resolve_image_placements(markdown: str, images: Iterable[object]) -> list[ImagePlacement]:
-    """Resolve prepared images to deterministic Markdown line positions."""
-
-    normalised = [_normalise_prepared_image(image) for image in images]
-    if not normalised:
-        return []
-    _validate_prepared_image_set(normalised)
+def _resolve_normalised_image_placements(
+    markdown: str,
+    normalised: list[dict[str, Any]],
+) -> list[ImagePlacement]:
     lines = (markdown or "").splitlines()
     placements: list[ImagePlacement] = []
     unresolved: list[dict[str, Any]] = []
@@ -930,6 +987,30 @@ def resolve_image_placements(markdown: str, images: Iterable[object]) -> list[Im
     if unresolved:
         raise ImageAnchorRequiredError(unresolved)
     return placements
+
+
+def resolve_image_placements(
+    markdown: str,
+    images: Iterable[object],
+) -> list[ImagePlacement]:
+    """Resolve local prepared files to deterministic Markdown positions."""
+
+    normalised = [_normalise_prepared_image(image) for image in images]
+    if not normalised:
+        return []
+    _validate_prepared_image_set(normalised)
+    return _resolve_normalised_image_placements(markdown, normalised)
+
+
+def resolve_asset_image_placements(
+    markdown: str,
+    images: Iterable[object],
+) -> list[ImagePlacement]:
+    """Resolve trusted Server Asset identities without filesystem fallback."""
+
+    normalised = [_normalise_prepared_image(image) for image in images]
+    _validate_prepared_asset_image_set(normalised)
+    return _resolve_normalised_image_placements(markdown, normalised)
 
 
 def build_image_audit_markdown(markdown: str, images: Iterable[object]) -> str:

@@ -147,6 +147,9 @@ V2_DEFAULTS: dict[str, Any] = {
     },
     "images": [],
     "transition_added": False,
+    "docx_asset_id": "",
+    "docx_content_hash": "",
+    "docx_filename": "",
     "legacy_export": False,
 }
 

@@ -3656,6 +3656,9 @@ def perform_export_docx(task_id: str, request: RevisionedRequest) -> TaskRecord:
     except (ArticleImageError, ArticleStructureError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     task.docx_path = str(output)
+    task.docx_asset_id = ""
+    task.docx_content_hash = ""
+    task.docx_filename = ""
     task.delivery_package_path = ""
     task.workflow_error = None
     advance(task, STATUS_DOCX_EXPORTED)

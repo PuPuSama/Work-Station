@@ -38,6 +38,12 @@ class ServerProjectTaskStoreFactory:
         self._engine = engine
         self._config = config
 
+    @property
+    def config(self) -> AppConfig:
+        """Formatting/runtime config shared by project-scoped commands."""
+
+        return self._config
+
     def create(
         self,
         authorized: AuthorizedProjectRequest,

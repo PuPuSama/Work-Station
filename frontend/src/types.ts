@@ -320,6 +320,9 @@ export type TaskRecord = {
   initial_article_issues?: string[];
   legacy_export?: boolean;
   docx_path: string;
+  docx_asset_id?: string;
+  docx_content_hash?: string;
+  docx_filename?: string;
   tdk?: TdkMetadata;
   tdk_path?: string;
   delivery_package_path?: string;

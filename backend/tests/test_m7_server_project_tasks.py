@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
@@ -846,6 +847,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 ).status_code,
                 404,
             )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/export-docx",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/docx/download",
+                ).status_code,
+                404,
+            )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
 
@@ -1245,6 +1261,149 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     downloaded.json()["asset_id"],
                     derived_asset_id,
+                )
+
+                export_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/export-docx"
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="viewer")
+                    )
+                self.assertEqual(
+                    client.post(
+                        export_path,
+                        json={"revision": 1},
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                put_count = len(private_store.put_calls)
+                exported = client.post(
+                    export_path,
+                    json={"revision": 1},
+                )
+                self.assertEqual(
+                    exported.status_code,
+                    200,
+                    exported.text,
+                )
+                delivered = exported.json()
+                self.assertEqual(delivered["revision"], 2)
+                self.assertEqual(
+                    delivered["status"],
+                    "docx_exported",
+                )
+                self.assertEqual(delivered["docx_path"], "")
+                self.assertTrue(delivered["docx_asset_id"])
+                self.assertEqual(
+                    len(delivered["docx_content_hash"]),
+                    64,
+                )
+                self.assertTrue(
+                    delivered["docx_filename"].endswith(".docx")
+                )
+                self.assertEqual(
+                    len(private_store.put_calls),
+                    put_count + 1,
+                )
+                docx_asset = (
+                    PostgresKnowledgeAssetRepository(
+                        self.engine
+                    ).get_asset(
+                        self.project_a,
+                        delivered["docx_asset_id"],
+                    )
+                )
+                assert docx_asset is not None
+                docx_key = str(docx_asset.metadata["object_key"])
+                with ZipFile(
+                    BytesIO(private_store.objects[docx_key])
+                ) as archive:
+                    self.assertIn(
+                        "word/document.xml",
+                        archive.namelist(),
+                    )
+                    self.assertEqual(
+                        len(
+                            [
+                                name
+                                for name in archive.namelist()
+                                if name.startswith("word/media/")
+                            ]
+                        ),
+                        2,
+                    )
+                self.assertEqual(
+                    client.get(
+                        (
+                            f"/api/projects/{self.project_a}/assets/"
+                            f"{delivered['docx_asset_id']}/download"
+                        )
+                    ).status_code,
+                    404,
+                )
+                docx_download_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/docx/download"
+                )
+                docx_download = client.get(docx_download_path)
+                self.assertEqual(
+                    docx_download.status_code,
+                    200,
+                    docx_download.text,
+                )
+                self.assertEqual(
+                    docx_download.json()["asset_id"],
+                    delivered["docx_asset_id"],
+                )
+                put_count = len(private_store.put_calls)
+                self.assertEqual(
+                    client.post(
+                        export_path,
+                        json={"revision": 1},
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    len(private_store.put_calls),
+                    put_count,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="viewer")
+                    )
+                self.assertEqual(
+                    client.get(docx_download_path).status_code,
+                    403,
                 )
                 self.assertFalse(local_state.exists())
 

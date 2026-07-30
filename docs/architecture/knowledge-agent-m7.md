@@ -66,15 +66,22 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Current Snapshot 主详情证据的产品，再用 Revision CAS 替换 Task 产品快照；
 - Server 产品投影不接受客户端上传的名称、URL、事实或图片地址；图片只复制稳定
   `asset_id`，不复制对象 URI、源站 URL 或本地路径；
+- 新增第三个 PostgreSQL-only 受限 Task 写操作
+  `PUT /api/projects/{project}/tasks/{task_id}/article/sections`：只接受当前 Revision、
+  唯一 Heading Path 和已审阅的 Replacement Body；在同一次 Task CAS 中保存修改前/
+  修改后版本快照，只替换目标 Markdown 章节并使全部下游产物失效；
 - 新增第四个 PostgreSQL-only 受限 Task 写操作
   `POST /api/projects/{project}/tasks/{task_id}/prepare-images`：请求只接受 Revision、
   一个项目内 Hero Asset ID 和可选的 Product ID -> Heading 人工锚点；产品图只读取
   Task 已保存的 `selected_asset_id`，重新授权读取私有原图，在内存中验证并生成
   内容寻址 WebP，再用 Revision CAS 保存资产引用和锚点；
-- 新增第三个 PostgreSQL-only 受限 Task 写操作
-  `PUT /api/projects/{project}/tasks/{task_id}/article/sections`：只接受当前 Revision、
-  唯一 Heading Path 和已审阅的 Replacement Body；在同一次 Task CAS 中保存修改前/
-  修改后版本快照，只替换目标 Markdown 章节并使全部下游产物失效；
+- 新增第五个 PostgreSQL-only 受限 Task 写操作
+  `POST /api/projects/{project}/tasks/{task_id}/export-docx`：只接受 Revision，
+  以 `article.deliver` 重新授权读取 Task 已确认的 WebP Asset，在内存复用现有 Word
+  排版器并写入内容寻址 DOCX；Task 只保存 DOCX Asset 身份，`docx_path` 为空；
+- 新增 `GET /api/projects/{project}/tasks/{task_id}/docx/download`：再次要求
+  `article.deliver` 后签发 DOCX 短期 URL；通用 `project.view` Asset 下载入口显式隐藏
+  `article_docx`，避免只知道 Asset ID 就绕过交付权限；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
   Object Service 在签名前再次读取 `project.view`，核对数据库 URI 的 Bucket 与
   Organization/Project Key 前缀，并签发最长一小时的临时 URL；
@@ -288,6 +295,8 @@ with engine.begin() as connection:
 | `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
 | `backend/knowledge_agent/object_storage.py` | M2 资产接入 S3 及授权后的知识对象服务 | 解析器适配与权限分离、下载重新授权、数据库只存 URI/证据 |
 | `backend/services/server_article_images.py` | Server 私有原图到文章 WebP 引用的准备服务 | 不使用 Task 本地路径、原图完整性复核、三图上限、视觉去重、锚点先于对象写入 |
+| `backend/services/docx_export.py` | Local/Server 共用的 Word 排版核心 | Local 写文件；Server 接收已验证内存 WebP 并返回 DOCX 字节，不自行读取对象或授权 |
+| `backend/services/server_docx_export.py` | Server ArticleImage Asset 到私有 DOCX Asset | `article.deliver`、原图身份/尺寸复核、纯内存排版、内容寻址输出、Task 不保存路径 |
 | `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
 | `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 非零即停止发布、备份恢复只能显式证明 |
 | `docs/runbooks/knowledge-agent-m7-server-cutover.md` | 备份、恢复、轮换、发布和回滚操作准源 | 新实例恢复、跨系统恢复点、禁止默认 Actor/Project |
@@ -598,11 +607,49 @@ WebP。若上传后发生并发 Revision 冲突，可能留下未引用但内容
 
 Server `ArticleImage` 只保存源/派生 `asset_id`、派生哈希、尺寸、文件名 Marker 和文章
 锚点；`source_path/prepared_path` 固定为空。展示继续通过授权后的短期下载 URL。现有
-本地模式仍使用文件路径，不受这一 Server 契约影响。Server DOCX/交付对象化尚未迁移，
-因此本操作完成不代表全部文章写路由或 `postgres_task_single_write` 已完成。
+本地模式仍使用文件路径，不受这一 Server 契约影响。Server 文章 DOCX 已由下一节迁移，
+但 TDK/Delivery ZIP 尚未对象化，因此本操作完成不代表全部文章写路由或
+`postgres_task_single_write` 已完成。
 派生资产可能被多篇文章按内容复用，所以来源图、产品、文章角色和锚点只属于
 `ArticleImage` 关系，不写入共享 `knowledge_assets.metadata`；共享元数据只记录
 `derivative_kind` 与由字节确定的感知哈希。
+
+#### D1.2 已实现：Server 文章 DOCX 导出与下载
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/export-docx
+body: { revision }
+  -> project.view + article.deliver
+  -> Revision 预检 + ACTION_EXPORT_DOCX
+  -> Task ArticleImage.prepared_asset_id（不接收客户端文件/Asset ID）
+  -> Object Service 再次检查 article.deliver
+  -> Bucket + Organization/Project Key、字节数、SHA-256
+  -> KnowledgeAsset type/hash/dimensions 与 Task 引用一致
+  -> 再验证实际 WebP 格式、尺寸和像素上限
+  -> build_task_docx_bytes(existing layout + in-memory WebP)
+  -> 内容寻址私有 article_docx Asset
+  -> Task(docx_asset_id, hash, filename); docx_path=""
+  -> Revision CAS + STATUS_DOCX_EXPORTED
+
+GET /api/projects/{project}/tasks/{task_id}/docx/download
+  -> project.view + article.deliver
+  -> Task Scope + ACTION_DOWNLOAD_DOCX
+  -> 专用 article_docx 类型检查
+  -> 短期签名 URL
+```
+
+排版层只认识“已验证的内存 WebP Payload”，不读取 S3、不做 RBAC，也不创建临时文件；
+Server 编排层负责授权、对象完整性和 Task CAS。Local 模式继续走原
+`export_task_docx()` 文件入口。这样后续替换 Word 渲染实现时，可以保留同一个输入契约，
+而不会把对象存储或权限判断塞进排版代码。
+
+`article_docx` 是 `article.deliver` 受限资产。虽然 Task JSON 会保存它的 Asset ID，
+通用 `GET .../assets/{asset_id}/download` 仍按 404 隐藏；只有 Task-scoped DOCX 下载
+入口可以签名。输出对象写入与 Task CAS 之间仍可能产生内容寻址 orphan，继续按延迟对账
+处理。若项目内同一内容哈希已经登记为另一访问类型，导出在 Task CAS 前 fail closed，
+不把它降级成 Viewer 可下载；后续若拆出独立 `task_artifacts` 关系表，必须继续保留这项
+访问分类不变量。TDK DOCX、最终 AI-rate 截图、交付 ZIP 和现有前端 Delivery UI 尚未
+对象化，因此这里的 `docx_exported` 只代表文章 Word 产物完成，不代表完整交付包已切换。
 
 正式 Server Mode 下载路由已经接线：真正展示时先在路由校验 `project.view`，对象服务
 在签名前再校验一次，并签发最长一小时的临时下载 URL。知识源上传要求

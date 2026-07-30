@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from config import AppConfig
 from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
@@ -26,6 +27,10 @@ from services.server_article_images import (
     ServerArticleImageError,
     ServerArticleImagePreparation,
 )
+from services.server_docx_export import (
+    ServerArticleDocxError,
+    ServerArticleDocxExport,
+)
 from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_product_selection import (
     ConfirmedProductSelectionError,
@@ -48,6 +53,8 @@ from services.server_request_security import (
 )
 from storage import RevisionConflictError
 from workflow.state_machine import (
+    ACTION_DOWNLOAD_DOCX,
+    ACTION_EXPORT_DOCX,
     ACTION_PREPARE_IMAGES,
     ACTION_REWRITE_FROM_SCRATCH,
     ACTION_UPDATE_ARTICLE,
@@ -143,6 +150,14 @@ class PrepareProjectImagesRequest(BaseModel):
                 "product anchors require unique product ids and headings"
             )
         return normalized
+
+
+class ExportProjectDocxRequest(BaseModel):
+    """Export the current Revision without caller-supplied file inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
 
 
 class ProductRediscoveryRequest(BaseModel):
@@ -289,6 +304,20 @@ def _task_store(
             detail="Server project task storage is not available.",
         )
     return factory.create(authorized).store
+
+
+def _server_app_config(request: Request) -> AppConfig:
+    factory = getattr(
+        request.app.state,
+        "server_project_task_store_factory",
+        None,
+    )
+    if not isinstance(factory, ServerProjectTaskStoreFactory):
+        raise HTTPException(
+            status_code=503,
+            detail="Server project task storage is not available.",
+        )
+    return factory.config
 
 
 def _knowledge_object_service(
@@ -653,6 +682,11 @@ def prepare_project_task_images(
                 "unresolved": list(exc.unresolved),
             },
         ) from exc
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
     except KnowledgeObjectNotFound as exc:
         raise HTTPException(
             status_code=409,
@@ -680,6 +714,158 @@ def prepare_project_task_images(
             status_code=409,
             detail=str(exc),
         ) from exc
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/export-docx",
+    response_model=TaskRecord,
+)
+def export_project_task_docx(
+    project: str,
+    task_id: str,
+    payload: ExportProjectDocxRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.deliver",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_EXPORT_DOCX)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        ServerArticleDocxExport(
+            config=_server_app_config(request),
+            objects=_knowledge_object_service(request),
+        ).export(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task=task,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A prepared article image is no longer available.",
+        ) from exc
+    except ObjectTooLarge as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="A prepared article image exceeds the delivery limit.",
+        ) from exc
+    except ServerArticleDocxError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Word export is temporarily unavailable.",
+        ) from exc
+    try:
+        return store.put(
+            task,
+            expected_revision=payload.revision,
+        )
+    except RevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/docx/download",
+    response_model=ProjectAssetDownload,
+)
+def create_project_task_docx_download(
+    project: str,
+    task_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectAssetDownload:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.deliver",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_DOWNLOAD_DOCX)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    asset_id = task.docx_asset_id.strip()
+    if not asset_id:
+        raise HTTPException(
+            status_code=409,
+            detail="The Server Word document has not been exported.",
+        )
+    try:
+        url = (
+            _knowledge_object_service(
+                request
+            ).create_article_docx_download_url(
+                actor=authorized.actor,
+                project_id=authorized.project_id,
+                asset_id=asset_id,
+                expires_seconds=expires_seconds,
+            )
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Word document was not found in the requested project.",
+        ) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Word download is temporarily unavailable.",
+        ) from exc
+    return ProjectAssetDownload(
+        asset_id=asset_id,
+        url=url,
+        expires_seconds=expires_seconds,
+    )
 
 
 @router.put(

@@ -285,7 +285,12 @@ class InvalidationTests(unittest.TestCase):
                 id="hero",
                 role="hero",
                 source_path="D:/source.jpg",
+                source_asset_id="source-asset",
                 prepared_path="D:/title.webp",
+                prepared_asset_id="prepared-asset",
+                prepared_content_hash="a" * 64,
+                width=320,
+                height=240,
                 filename="title.webp",
                 marker="img.title.webp",
                 status="ready",
@@ -293,6 +298,9 @@ class InvalidationTests(unittest.TestCase):
         ]
         task.final_article = "final"
         task.docx_path = "D:/export.docx"
+        task.docx_asset_id = "asset-docx"
+        task.docx_content_hash = "d" * 64
+        task.docx_filename = "Article.docx"
         task.tdk = {
             "title": "Example",
             "description": "Example description",
@@ -326,6 +334,9 @@ class InvalidationTests(unittest.TestCase):
         self.assertFalse(task.link_validation.passed)
         self.assertEqual(task.images, [])
         self.assertEqual(task.docx_path, "")
+        self.assertEqual(task.docx_asset_id, "")
+        self.assertEqual(task.docx_content_hash, "")
+        self.assertEqual(task.docx_filename, "")
         self.assertEqual(task.tdk_path, "")
         self.assertEqual(task.tdk.title, "")
         self.assertFalse(task.legacy_export)
@@ -355,6 +366,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.linked_article, "")
         self.assertEqual(task.images, [])
         self.assertEqual(task.docx_path, "")
+        self.assertEqual(task.docx_asset_id, "")
         self.assertEqual(task.tdk_path, "")
         self.assertEqual(task.delivery_package_path, "")
         self.assertEqual(
@@ -381,11 +393,17 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(len(task.images), 1)
         image = task.images[0]
         self.assertEqual(image.source_path, "D:/source.jpg")
+        self.assertEqual(image.source_asset_id, "source-asset")
         self.assertEqual(image.prepared_path, "")
+        self.assertEqual(image.prepared_asset_id, "")
+        self.assertEqual(image.prepared_content_hash, "")
+        self.assertIsNone(image.width)
+        self.assertIsNone(image.height)
         self.assertEqual(image.filename, "")
         self.assertEqual(image.marker, "")
         self.assertEqual(image.status, "pending")
         self.assertEqual(task.docx_path, "")
+        self.assertEqual(task.docx_asset_id, "")
 
     def test_final_article_edit_only_invalidates_export(self) -> None:
         task = self.populated_task()
@@ -396,6 +414,9 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.final_article, "manually edited final")
         self.assertEqual(task.article, "manually edited final")
         self.assertEqual(task.docx_path, "")
+        self.assertEqual(task.docx_asset_id, "")
+        self.assertEqual(task.docx_content_hash, "")
+        self.assertEqual(task.docx_filename, "")
         self.assertEqual(task.images[0].prepared_path, "D:/title.webp")
 
     def test_unknown_invalidation_stage_is_rejected(self) -> None:
