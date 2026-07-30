@@ -290,6 +290,8 @@ with engine.begin() as connection:
 
 - `GET /api/projects/{project}/members`：只返回显式 ProjectMembership，使用
   `limit(1..100) + after_user_id` 稳定分页；
+- `GET /api/projects/{project}/members/candidates`：返回可以新增为显式成员的 Active
+  同组织用户，使用同样的有界稳定分页；
 - `PUT /api/projects/{project}/members/{user_id}`：Body 只允许
   `{"role":"editor|reviewer|viewer"}`；
 - `DELETE /api/projects/{project}/members/{user_id}`：无请求 Body，重复撤销返回
@@ -299,6 +301,12 @@ GET 返回 `user_id/display_name/status/role`。它有意不把 Org Admin 或 Ow
 复制成 ProjectMembership，也不返回全 Organization 用户目录；Disabled User 的既有显式
 成员行仍会显示，便于管理员撤销残留关系。列表按 `user_id` 排序并使用同字段作为游标，
 不能先读全 Organization 再在 Python 过滤。
+
+Candidate GET 只返回 `user_id/display_name`，并在 SQL 中排除 Disabled User、Org Admin、
+Active Owning Team 的 Team Lead 和已经存在的显式 ProjectMembership。归档 Team 不再产生
+继承访问，因此其中原 Team Lead 会重新成为候选；普通 Team Member 从未继承项目访问，
+所以也可以成为候选。候选端点不是 Organization 用户目录，也不负责邀请、创建账号或修改
+Team 关系。
 
 Actor 和 Organization 只来自已验证 Cookie，Project 只来自规范化 Path。新增/改角色时
 目标 User 必须是同 Organization 的 Active User；撤销允许清理已经存在的旧 Membership，
@@ -382,7 +390,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/server_admin_http.py` | Organization-scoped Actor Session 撤销 API | 只接受空 Body、Cookie Actor 与路径 Organization 一致、统一 401/403/503、安全响应 |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
-| `backend/services/project_memberships.py` | 受授权的显式成员分页读模型，以及带审计的 ProjectMembership 变更 | SQL 内 Project Scope、稳定游标、授权/写入/审计同事务、跨组织目标不泄露 |
+| `backend/services/project_memberships.py` | 受授权的显式成员/可授权候选分页读模型，以及带审计的 ProjectMembership 变更 | SQL 内 Project Scope、候选不复制继承访问、稳定游标、授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
 | `backend/services/server_task_commands.py` | 已迁移 Server Task 写操作的事务命令 | 锁定可撤权事实、Action 固定权限与 Details 白名单、CAS 与 Audit 同事务 |
@@ -1088,3 +1096,6 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     提供版本、角色或跨 Organization 目标？
 35. Project Membership Roster 是否仍只返回显式成员、按 Project SQL Scope 和稳定
     `user_id` 游标分页，并在读取前锁定 `project.members.manage` 的可撤权事实？
+36. Member Candidate 是否仍只返回 Active 同组织普通成员，并排除已有显式成员、Org
+    Admin 与 Active Owning Team Lead；Team 归档后原 Lead 是否重新成为候选，而不扩大成
+    未经授权的 Organization 用户目录？

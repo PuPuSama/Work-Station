@@ -86,6 +86,9 @@ class ProjectMembershipHttpTests(unittest.TestCase):
         self.lead_a = f"{prefix}-lead-a"
         self.editor_a = f"{prefix}-editor-a"
         self.target_a = f"{prefix}-target-a"
+        self.candidate_a = f"{prefix}-candidate-a"
+        self.candidate_b = f"{prefix}-candidate-b"
+        self.disabled_a = f"{prefix}-disabled-a"
         self.admin_b = f"{prefix}-admin-b"
         with self.engine.begin() as connection:
             connection.execute(
@@ -138,12 +141,38 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                         "organization_role": "member",
                     },
                     {
+                        "organization_id": self.org_a,
+                        "user_id": self.candidate_a,
+                        "display_name": "Candidate A",
+                        "organization_role": "member",
+                    },
+                    {
+                        "organization_id": self.org_a,
+                        "user_id": self.candidate_b,
+                        "display_name": "Candidate B",
+                        "organization_role": "member",
+                    },
+                    {
+                        "organization_id": self.org_a,
+                        "user_id": self.disabled_a,
+                        "display_name": "Disabled A",
+                        "organization_role": "member",
+                    },
+                    {
                         "organization_id": self.org_b,
                         "user_id": self.admin_b,
                         "display_name": "Admin B",
                         "organization_role": "org_admin",
                     },
                 ),
+            )
+            connection.execute(
+                workspace_users.update()
+                .where(
+                    workspace_users.c.organization_id == self.org_a,
+                    workspace_users.c.user_id == self.disabled_a,
+                )
+                .values(status="disabled")
             )
             connection.execute(
                 teams.insert().values(
@@ -376,6 +405,142 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                     "project.membership.granted",
                     "project.membership.revoked",
                 ],
+            )
+        finally:
+            client.close()
+            app_module.app.state.server_mode_enabled = previous_mode
+            app_module.app.state.server_request_security = previous_security
+            app_module.app.state.server_project_memberships = (
+                previous_memberships
+            )
+
+    def test_http_candidates_only_include_active_users_without_access(
+        self,
+    ) -> None:
+        import app as app_module
+
+        previous_mode = getattr(
+            app_module.app.state,
+            "server_mode_enabled",
+            None,
+        )
+        previous_security = getattr(
+            app_module.app.state,
+            "server_request_security",
+            None,
+        )
+        previous_memberships = getattr(
+            app_module.app.state,
+            "server_project_memberships",
+            None,
+        )
+        app_module.app.state.server_mode_enabled = True
+        app_module.app.state.server_request_security = self._security()
+        app_module.app.state.server_project_memberships = (
+            PostgresProjectMembershipService(
+                self.engine,
+                audit=RecordingAuditWriter(),
+            )
+        )
+        client = TestClient(app_module.app)
+        path = f"/api/projects/{self.project_a}/members/candidates"
+        try:
+            self.assertEqual(client.get(path).status_code, 401)
+
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, self.editor_a),
+            )
+            self.assertEqual(client.get(path).status_code, 403)
+
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, self.lead_a),
+            )
+            first_page = client.get(path, params={"limit": 2})
+            self.assertEqual(first_page.status_code, 200, first_page.text)
+            self.assertEqual(
+                first_page.json(),
+                {
+                    "items": [
+                        {
+                            "user_id": self.candidate_a,
+                            "display_name": "Candidate A",
+                        },
+                        {
+                            "user_id": self.candidate_b,
+                            "display_name": "Candidate B",
+                        },
+                    ],
+                    "next_after_user_id": self.candidate_b,
+                },
+            )
+            second_page = client.get(
+                path,
+                params={
+                    "limit": 2,
+                    "after_user_id": self.candidate_b,
+                },
+            )
+            self.assertEqual(
+                second_page.json(),
+                {
+                    "items": [
+                        {
+                            "user_id": self.target_a,
+                            "display_name": "Target A",
+                        }
+                    ],
+                    "next_after_user_id": None,
+                },
+            )
+
+            granted = client.put(
+                (
+                    f"/api/projects/{self.project_a}/members/"
+                    f"{self.target_a}"
+                ),
+                json={"role": "viewer"},
+            )
+            self.assertEqual(granted.status_code, 200, granted.text)
+            refreshed = client.get(path)
+            self.assertEqual(
+                [item["user_id"] for item in refreshed.json()["items"]],
+                [self.candidate_a, self.candidate_b],
+            )
+            self.assertNotIn(self.admin_a, refreshed.text)
+            self.assertNotIn(self.lead_a, refreshed.text)
+            self.assertNotIn(self.editor_a, refreshed.text)
+            self.assertNotIn(self.disabled_a, refreshed.text)
+            self.assertNotIn(self.admin_b, refreshed.text)
+
+            with self.engine.begin() as connection:
+                connection.execute(
+                    teams.update()
+                    .where(
+                        teams.c.organization_id == self.org_a,
+                        teams.c.team_id == self.team_a,
+                    )
+                    .values(status="archived")
+                )
+            self.assertEqual(client.get(path).status_code, 403)
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, self.admin_a),
+            )
+            after_team_archive = client.get(path)
+            self.assertEqual(
+                [
+                    item["user_id"]
+                    for item in after_team_archive.json()["items"]
+                ],
+                [self.candidate_a, self.candidate_b, self.lead_a],
+            )
+            self.assertEqual(
+                client.get(
+                    f"/api/projects/{self.project_b}/members/candidates"
+                ).status_code,
+                403,
             )
         finally:
             client.close()

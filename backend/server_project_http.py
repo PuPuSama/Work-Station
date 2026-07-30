@@ -171,6 +171,16 @@ class ProjectMembershipListResponse(BaseModel):
     next_after_user_id: str | None = None
 
 
+class ProjectMembershipCandidateResponse(BaseModel):
+    user_id: str
+    display_name: str
+
+
+class ProjectMembershipCandidateListResponse(BaseModel):
+    items: list[ProjectMembershipCandidateResponse]
+    next_after_user_id: str | None = None
+
+
 class FinalAiCheckUpdateRequest(BaseModel):
     """Bind a manual final AI review to the current humanized article."""
 
@@ -619,6 +629,58 @@ def list_project_memberships(
                 display_name=item.display_name,
                 status=item.status,
                 role=item.role,
+            )
+            for item in page.items
+        ],
+        next_after_user_id=page.next_after_user_id,
+    )
+
+
+@router.get(
+    "/{project}/members/candidates",
+    response_model=ProjectMembershipCandidateListResponse,
+)
+def list_project_membership_candidates(
+    project: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=100),
+    after_user_id: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=512,
+    ),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectMembershipCandidateListResponse:
+    del project
+    try:
+        page = _project_membership_service(request).list_candidates(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            limit=limit,
+            after_user_id=after_user_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Project membership cursor is invalid.",
+        ) from exc
+    except ProjectMembershipUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project membership candidate list is temporarily unavailable.",
+        ) from exc
+    return ProjectMembershipCandidateListResponse(
+        items=[
+            ProjectMembershipCandidateResponse(
+                user_id=item.user_id,
+                display_name=item.display_name,
             )
             for item in page.items
         ],

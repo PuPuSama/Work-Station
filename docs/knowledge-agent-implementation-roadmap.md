@@ -118,9 +118,10 @@
 - 已实现不携带 Role 的签名 Actor Session，以及授权/撤销/审计同事务的
   ProjectMembership Service；
 - 已接入 Project-scoped ProjectMembership Roster、授权和撤销：Roster 只按 SQL Scope
-  返回显式成员并稳定分页，请求只能提交 `editor/reviewer/viewer`，读写事务均重新检查
-  `project.members.manage` 并锁定全部可撤权事实；跨组织目标不泄露，Audit 故障回滚；
-  前端成员管理尚未接入；
+  返回显式成员并稳定分页；Candidate 页只返回 Active 同组织普通成员，排除 Org Admin、
+  Active Owning Team Lead 与已有显式成员，归档 Team 不再贡献继承访问；写请求只能提交
+  `editor/reviewer/viewer`，读写事务均重新检查 `project.members.manage` 并锁定全部可
+  撤权事实；跨组织目标不泄露，Audit 故障回滚；前端成员管理尚未接入；
 - 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
   写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
   Org Admin 的 Organization-scoped HTTP 命令递增目标版本并与安全 Audit 同事务，请求

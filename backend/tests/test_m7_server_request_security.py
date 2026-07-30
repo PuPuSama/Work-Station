@@ -265,6 +265,18 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "GET",
+                "/api/projects/project-a/members/candidates",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "GET",
+                "/api/projects/project-a/members/other",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "PUT",
                 "/api/projects/project-a/members/user-a",
             )

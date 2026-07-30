@@ -10,6 +10,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from server_schema import (
     project_memberships,
+    project_ownership,
+    team_memberships,
+    teams,
     workspace_users,
 )
 from services.access_control import (
@@ -78,6 +81,20 @@ class ProjectMembershipListItem:
 @dataclass(frozen=True)
 class ProjectMembershipPage:
     items: tuple[ProjectMembershipListItem, ...]
+    next_after_user_id: str | None
+
+
+@dataclass(frozen=True)
+class ProjectMembershipCandidate:
+    """An active Organization member who lacks effective Project access."""
+
+    user_id: str
+    display_name: str
+
+
+@dataclass(frozen=True)
+class ProjectMembershipCandidatePage:
+    items: tuple[ProjectMembershipCandidate, ...]
     next_after_user_id: str | None
 
 
@@ -182,6 +199,127 @@ class PostgresProjectMembershipService:
             for row in visible_rows
         )
         return ProjectMembershipPage(
+            items=items,
+            next_after_user_id=items[-1].user_id if has_more else None,
+        )
+
+    def list_candidates(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        limit: int = 50,
+        after_user_id: str | None = None,
+    ) -> ProjectMembershipCandidatePage:
+        """Return active users who do not already have effective access."""
+
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_limit = int(limit)
+        if normalized_limit < 1 or normalized_limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        normalized_after = (
+            _required_text(after_user_id, "after_user_id")
+            if after_user_id is not None
+            else None
+        )
+
+        try:
+            with self._engine.begin() as connection:
+                facts = self._access.lock_project_access_in_connection(
+                    connection,
+                    actor,
+                    normalized_project_id,
+                )
+                decision = decide_project_permission(
+                    facts,
+                    "project.members.manage",
+                )
+                if not decision.allowed:
+                    raise ProjectAccessDenied("project access denied")
+
+                owning_team_id = connection.execute(
+                    sa.select(project_ownership.c.owning_team_id).where(
+                        project_ownership.c.organization_id
+                        == actor.organization_id,
+                        project_ownership.c.project_id
+                        == normalized_project_id,
+                    )
+                ).scalar_one()
+                explicit_membership_exists = sa.exists(
+                    sa.select(project_memberships.c.user_id).where(
+                        project_memberships.c.organization_id
+                        == workspace_users.c.organization_id,
+                        project_memberships.c.project_id
+                        == normalized_project_id,
+                        project_memberships.c.user_id
+                        == workspace_users.c.user_id,
+                    )
+                )
+                inherited_team_lead_exists = (
+                    sa.false()
+                    if owning_team_id is None
+                    else sa.exists(
+                        sa.select(team_memberships.c.user_id)
+                        .select_from(
+                            team_memberships.join(
+                                teams,
+                                sa.and_(
+                                    teams.c.organization_id
+                                    == team_memberships.c.organization_id,
+                                    teams.c.team_id
+                                    == team_memberships.c.team_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            team_memberships.c.organization_id
+                            == workspace_users.c.organization_id,
+                            team_memberships.c.team_id == owning_team_id,
+                            team_memberships.c.user_id
+                            == workspace_users.c.user_id,
+                            team_memberships.c.role == "team_lead",
+                            teams.c.status == "active",
+                        )
+                    )
+                )
+                statement = (
+                    sa.select(
+                        workspace_users.c.user_id,
+                        workspace_users.c.display_name,
+                    )
+                    .where(
+                        workspace_users.c.organization_id
+                        == actor.organization_id,
+                        workspace_users.c.status == "active",
+                        workspace_users.c.organization_role == "member",
+                        ~explicit_membership_exists,
+                        ~inherited_team_lead_exists,
+                    )
+                    .order_by(workspace_users.c.user_id)
+                    .limit(normalized_limit + 1)
+                )
+                if normalized_after is not None:
+                    statement = statement.where(
+                        workspace_users.c.user_id > normalized_after
+                    )
+                rows = connection.execute(statement).mappings().all()
+        except ProjectAccessDenied:
+            raise
+        except SQLAlchemyError as exc:
+            raise ProjectMembershipUnavailable(
+                "project membership candidate list is unavailable"
+            ) from exc
+
+        has_more = len(rows) > normalized_limit
+        visible_rows = rows[:normalized_limit]
+        items = tuple(
+            ProjectMembershipCandidate(
+                user_id=str(row["user_id"]),
+                display_name=str(row["display_name"]),
+            )
+            for row in visible_rows
+        )
+        return ProjectMembershipCandidatePage(
             items=items,
             next_after_user_id=items[-1].user_id if has_more else None,
         )
@@ -405,6 +543,8 @@ class PostgresProjectMembershipService:
 __all__ = [
     "PostgresProjectMembershipService",
     "ProjectMembershipConflict",
+    "ProjectMembershipCandidate",
+    "ProjectMembershipCandidatePage",
     "ProjectMembershipError",
     "ProjectMembershipListItem",
     "ProjectMembershipPage",

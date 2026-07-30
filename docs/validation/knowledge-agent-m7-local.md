@@ -55,9 +55,12 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 
 结果：
 
-- 29 tests；
+- 30 tests；
 - GET Roster 只返回当前 Project 的显式成员，按 `user_id` 稳定分页，1–100 条有界；
 - Roster 不伪造继承角色，保留 Disabled User 的既有成员行供撤销；
+- Candidate GET 只返回 Active 同组织普通成员，排除 Org Admin、Active Owning Team
+  Lead、Disabled User、已有显式成员与跨 Organization 用户；授权后目标立即移出候选，
+  Team 归档后原 Lead 重新成为候选；
 - PUT 只接受 `editor/reviewer/viewer` 和无额外字段的 Body，DELETE 为项目级幂等撤销；
 - 未认证 401，Editor 403，Owning Team Lead 可管理成员；
 - 跨 Organization Project 返回 403，跨 Organization Target 返回 404；
@@ -181,7 +184,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 560 tests；
+- 561 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。

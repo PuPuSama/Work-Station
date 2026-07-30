@@ -103,10 +103,11 @@ def server_http_route_available(method: str, path: str) -> bool:
     parts = normalized_path.rstrip("/").split("/")
     if (
         normalized_method == "GET"
-        and len(parts) == 5
+        and len(parts) in {5, 6}
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])
         and parts[4] == "members"
+        and (len(parts) == 5 or parts[5] == "candidates")
     ):
         return True
     if (

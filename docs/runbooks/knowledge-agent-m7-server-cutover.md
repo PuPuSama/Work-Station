@@ -192,6 +192,7 @@ Audit 故障都必须失败；Audit 失败后旧版本必须仍有效，错误�
 
 ```text
 GET    /api/projects/{project}/members?limit=50&after_user_id=...
+GET    /api/projects/{project}/members/candidates?limit=50&after_user_id=...
 PUT    /api/projects/{project}/members/{user_id}
 DELETE /api/projects/{project}/members/{user_id}
 ```
@@ -207,6 +208,9 @@ Permission。冒烟至少验证：
   撤销；
 - Roster 只出现本 Project 的显式成员，分页无重复/遗漏，Disabled User 的已有成员行仍
   可见以便清理，另一 Project/Organization 的成员不出现；
+- Candidate 页只出现 Active 同组织普通成员；已有显式成员、Org Admin、Active Owning
+  Team Lead、Disabled User 和另一 Organization 用户均不出现，授权成功后目标立即移出
+  候选；Team 归档后原 Lead 不再有继承访问并重新成为候选；
 - 另一 Organization 的 Project 返回 403；PUT 指向另一 Organization 或 Disabled User
   时返回不泄露细节的 404；
 - `org_admin`、`team_lead`、未知 Role 和额外 Organization 字段返回 422；
