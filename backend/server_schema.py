@@ -817,6 +817,57 @@ sa.Index(
     ),
 )
 
+object_orphan_observations = sa.Table(
+    "object_orphan_observations",
+    metadata,
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("project_id", sa.Text(), nullable=False),
+    sa.Column("object_key", sa.Text(), nullable=False),
+    sa.Column("fingerprint", sa.Text(), nullable=False),
+    sa.Column("byte_size", sa.BigInteger(), nullable=False),
+    sa.Column("object_last_modified_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("registered_asset_count", sa.Integer(), nullable=False),
+    sa.Column("first_seen_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("sighting_count", sa.Integer(), nullable=False),
+    sa.CheckConstraint(
+        "btrim(object_key) <> '' AND btrim(fingerprint) <> ''",
+        name="ck_object_orphan_observations_identity_nonempty",
+    ),
+    sa.CheckConstraint(
+        "byte_size >= 0 AND registered_asset_count >= 0 "
+        "AND sighting_count > 0",
+        name="ck_object_orphan_observations_counts",
+    ),
+    sa.CheckConstraint(
+        "last_seen_at >= first_seen_at",
+        name="ck_object_orphan_observations_seen_order",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "project_id"],
+        [
+            "project_ownership.organization_id",
+            "project_ownership.project_id",
+        ],
+        name="fk_object_orphan_observations_project",
+        ondelete="CASCADE",
+    ),
+    sa.PrimaryKeyConstraint(
+        "organization_id",
+        "project_id",
+        "object_key",
+        name="pk_object_orphan_observations",
+    ),
+)
+
+sa.Index(
+    "ix_object_orphan_observations_eligibility",
+    object_orphan_observations.c.organization_id,
+    object_orphan_observations.c.project_id,
+    object_orphan_observations.c.first_seen_at,
+    object_orphan_observations.c.sighting_count,
+)
+
 
 __all__ = [
     "article_tasks",
@@ -825,6 +876,7 @@ __all__ = [
     "external_identities",
     "job_batches",
     "organizations",
+    "object_orphan_observations",
     "project_memberships",
     "project_ownership",
     "team_memberships",

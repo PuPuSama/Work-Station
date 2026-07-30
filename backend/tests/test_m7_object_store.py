@@ -4,6 +4,7 @@ import hashlib
 import io
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from botocore.exceptions import ClientError
@@ -31,6 +32,7 @@ class FakeS3Client:
             "Body": io.BytesIO(b"data"),
         }
         self.deleted: list[dict[str, str]] = []
+        self.list_responses: list[dict[str, object]] = []
         self.fail_put = False
         self.fail_ready = False
 
@@ -59,6 +61,11 @@ class FakeS3Client:
 
     def delete_object(self, **kwargs):
         self.deleted.append(kwargs)
+
+    def list_objects_v2(self, **kwargs):
+        if self.list_responses:
+            return self.list_responses.pop(0)
+        return {"Contents": [], "IsTruncated": False}
 
 
 class ObjectStoreTests(unittest.TestCase):
@@ -160,6 +167,44 @@ class ObjectStoreTests(unittest.TestCase):
                 bucket="bucket",
                 access_key_id="only-access-key",
             )
+
+    def test_list_is_paginated_sorted_and_provider_errors_are_stable(self) -> None:
+        modified = datetime(2026, 7, 31, tzinfo=timezone.utc)
+        self.client.list_responses = [
+            {
+                "Contents": [
+                    {
+                        "Key": "scope/z",
+                        "Size": 2,
+                        "LastModified": modified,
+                        "ETag": '"z"',
+                    }
+                ],
+                "IsTruncated": True,
+                "NextContinuationToken": "page-2",
+            },
+            {
+                "Contents": [
+                    {
+                        "Key": "scope/a",
+                        "Size": 1,
+                        "LastModified": modified,
+                        "ETag": '"a"',
+                    }
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        listed = self.store.list(prefix="scope")
+
+        self.assertEqual([item.key for item in listed], ["scope/a", "scope/z"])
+        self.assertEqual(listed[0].etag, "a")
+        self.client.list_responses = [
+            {"IsTruncated": True, "NextContinuationToken": ""}
+        ]
+        with self.assertRaisesRegex(ObjectStoreError, "^object store list failed$"):
+            self.store.list(prefix="scope")
 
     def test_settings_hide_secrets_and_do_not_reuse_other_keys(self) -> None:
         environment = {

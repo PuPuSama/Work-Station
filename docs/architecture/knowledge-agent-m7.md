@@ -118,6 +118,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `trusted_identity_source=true` 只表示代码信任链已接通，不表示生产 IdP 已完成验收。
 - Alembic `20260730_0011` 为新 PostgreSQL Job 增加同 Organization 复合外键约束的
   `requested_by_user_id`；旧 SQLite 历史迁移时允许为空；
+- Alembic `20260730_0012` 增加项目级 `object_orphan_observations`，只保存对象
+  Fingerprint、大小和连续观察时间；
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -347,13 +349,16 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/authorized_job_queue.py` | Server Worker 的两阶段重新授权适配器 | Claim 前只看最小元数据、Handler 前二次授权、无可信 Requester 不读取 Payload |
 | `backend/services/server_product_rediscovery.py` | 产品重新发现的 Project Queue Registry、Handler 与正式 S3 同步工厂 | 固定租户 Scope、可信 Requester、两阶段授权、只抓 Active 官网、不改 Task、无本地回退 |
 | `backend/migrations/versions/20260730_0011_job_request_actor.py` | Job Requester Schema 准源 | Nullable 历史兼容、同 Organization User 复合 FK、Requester 查询索引 |
+| `backend/migrations/versions/20260730_0012_object_orphan_observations.py` | Orphan 连续观察 Schema 准源 | Project 复合 FK、指纹重置、Eligibility 索引 |
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/server_cutover_report.py` | SQLite/PG Task 与 Job 只读双读报告 | 只读连接、同一 Scope、顺序/ID/摘要、正文不出报告 |
 | `backend/knowledge_agent/m7_cutover_report.py` | C3 冻结窗口比对 CLI | ready 为 0、差异为 2、数据库 URL 只读环境注入 |
 | `backend/services/task_repository.py` | 本地/服务器 Task Repository Protocol 与 SQLite 实现 | 本地模式保持可用 |
 | `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
 | `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
+| `backend/services/object_orphan_reconciliation.py` | 项目对象引用对账与延迟清理 | Snapshot URI、Asset Link、Task Asset 联合集合；双观察、指纹、保留期、事务内重授权与安全审计 |
 | `backend/knowledge_agent/object_storage.py` | M2 资产接入 S3 及授权后的知识对象服务 | 解析器适配与权限分离、下载重新授权、数据库只存 URI/证据 |
+| `backend/knowledge_agent/m7_object_orphans.py` | 运维对账 CLI | 默认只观察；清理必须显式命令和精确 Project 二次确认；输出只有数量 |
 | `backend/services/server_article_images.py` | Server 私有原图到文章 WebP 引用的准备服务 | 不使用 Task 本地路径、原图完整性复核、三图上限、视觉去重、锚点先于对象写入 |
 | `backend/services/docx_export.py` | Local/Server 共用的 Word 排版核心 | Local 写文件；Server 接收已验证内存 WebP 并返回 DOCX 字节，不自行读取对象或授权 |
 | `backend/services/server_docx_export.py` | Server ArticleImage Asset 到私有 DOCX Asset | `article.deliver`、原图身份/尺寸复核、纯内存排版、内容寻址输出、Task 不保存路径 |
@@ -378,8 +383,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_server_ai_screenshots.py` | Server AI-rate 截图规范化测试 | PNG/尺寸/大小门禁、私有 Asset 类型、无本地路径 |
 | `backend/tests/test_m7_server_delivery_package.py` | Server Delivery ZIP 编排测试 | 当前正文终审绑定、全部私有资产身份、扁平归档、无本地路径 |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
+| `backend/tests/test_m7_object_orphan_reconciliation.py` | Orphan PostgreSQL 集成测试 | 注册/未注册 orphan、快照/Task 引用、指纹变化、跨项目、删除失败重试 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
-| `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/Sign/Delete、对象清理 |
+| `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/List/Sign/Delete、对象清理 |
 
 ## 9. 后续 M7 迁移顺序
 
@@ -903,9 +909,41 @@ Organization/Project，任一层 Scope 不一致都拒绝。
 没有任何快照或产品证据引用，不允许由抓取重试直接删除。
 
 S3 Put 与 PostgreSQL Insert 无法组成一个 ACID 事务。当前顺序是“先写确定性对象 Key，
-再幂等登记资产”；数据库失败时不会覆盖其他内容，但可能留下未引用对象。D2 必须增加按
-数据库引用集合对账的 orphan 扫描和延迟清理，并为正式上传动作补业务审计，不能在请求失败
-时立即删除对象（并发请求可能已经复用同一个 Key）。
+再幂等登记资产”；数据库失败时不会覆盖其他内容，但可能留下未引用对象。D2 已实现按
+数据库引用集合对账的 orphan 扫描和延迟清理；请求失败时仍不立即删除对象，因为并发请求
+可能已经复用同一个 Key。
+
+#### D2 已实现：Orphan 连续观察与显式清理
+
+对账只扫描
+`organizations/{organization_id}/projects/{project_id}/`，且只有实时数据库角色仍拥有
+`knowledge.delete` 的 Org Admin 可以执行。存活集合不是单表推断，而是以下引用的并集：
+
+1. `source_snapshots.raw_artifact_uri/normalized_artifact_uri`；
+2. `snapshot_assets -> knowledge_assets` 的快照证据；
+3. `article_tasks.payload` 内所有正式 `*_asset_id`，包括产品选择、准备图片、
+   DOCX、TDK、终审截图和 Delivery ZIP。
+
+因此系统同时识别两类 orphan：有 `knowledge_assets` 行但没有业务引用的 Registered
+Orphan，以及对象已 Put、数据库登记失败形成的 Unregistered Physical Orphan。其他
+Organization/Project 前缀、Bucket 不一致 URI 和本地 Artifact URI 都不进入本次清理范围。
+
+`object_orphan_observations` 记录首次/最近观察、次数和由 Key、ETag、大小、
+Last-Modified 组成的 Fingerprint。默认保留期 7 天，代码硬门至少 24 小时，并要求至少
+两次观察；同 Key 被覆盖或元数据变化时重新开始观察窗口。某对象恢复引用时立即移除观察，
+不能依赖一次 S3 Inventory 结果删除。
+
+显式 Cleanup 会再次列举对象、锁定 Actor/Organization/Project 的可撤权授权事实，
+锁定项目 Snapshot、Asset 和 Task 行并重算引用。只有 Scope、Fingerprint、双观察和保留
+期同时成立才先退休无引用 `knowledge_assets` 行，再删除物理对象。Provider Delete
+失败不会回填引用；对象会作为 Unregistered Orphan 重新开始一个完整观察窗口。Audit 只写
+候选数、退休 Asset 数和保留秒数，不写 Key、URI、文件名、正文或供应商异常。
+
+这个边界故意不自动挂到应用启动或请求失败处理。运维必须先运行两次 `observe`，跨过保留
+期后再使用精确 `--confirm-project-id` 执行 `cleanup`。S3 与 PostgreSQL 仍不是分布式
+事务；长保留窗口、内容寻址、写路径不即时删除和清理前重算共同降低并发复用风险。后续若
+需要缩短到小时级，应先让所有对象生产者与 Reconciler 共用项目 Advisory Lock，不能仅改
+常量。
 
 配置只读取独立的 `ARTICLE_AGENT_OBJECT_STORE_*` 环境变量，不回退到
 LLM/Embedding Key；Access Key/Secret 不进入公开配置或异常消息。默认请求服务端
@@ -960,3 +998,9 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     两个阶段重新检查 `knowledge.edit`？
 24. 重新发现失败、撤权或取消时，旧 Task 产品和已发布快照是否仍继续服务？
 25. 产品抓取是否仍只写项目绑定的 S3 与不可变 Inbox 证据，且不回退到本地文件？
+26. Orphan 存活集合是否仍同时覆盖 Snapshot URI、Snapshot Asset 和 Task
+    `*_asset_id`，而不是只看 `knowledge_assets`？
+27. Cleanup 是否仍要求 `knowledge.delete`、精确 Project 二次确认、双观察、稳定
+    Fingerprint 和至少 24 小时保留期？
+28. Provider Delete 失败是否仍以无引用物理对象重新进入完整观察窗口，且 Audit 不记录
+    Key、URI 或供应商错误正文？

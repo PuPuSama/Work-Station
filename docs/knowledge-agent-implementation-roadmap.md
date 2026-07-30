@@ -163,8 +163,8 @@
 - 已接通窄范围 Server 前端入口：认证状态先分流组件树，Server 首页只列 SQL-scoped
   Project Directory 并直达 Delivery Console；Console 按 Asset 身份识别产物、提交
   Revision 打包，并通过专用接口取得短期下载 URL；未迁移导航不挂载，Local UI 不变；
-- 派生对象 orphan 对账仍待完成；真实生产身份、对象供应商与恢复演练也未验收，因此
-  不能把当前可操作的 Server 交付界面描述成生产上线；
+- 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
+  仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
 - 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；

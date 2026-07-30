@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Mapping, Protocol
 from urllib.parse import urlsplit
 
@@ -96,13 +97,18 @@ def build_project_object_key(
     project_id: str,
     content_hash: str,
 ) -> str:
+    prefix = build_project_object_prefix(organization_id, project_id)
+    digest = _sha256(content_hash)
+    return f"{prefix}blobs/{digest[:2]}/{digest}"
+
+
+def build_project_object_prefix(
+    organization_id: str,
+    project_id: str,
+) -> str:
     organization = _scope_id(organization_id, "organization_id")
     project = _scope_id(project_id, "project_id")
-    digest = _sha256(content_hash)
-    return (
-        f"organizations/{organization}/projects/{project}/"
-        f"blobs/{digest[:2]}/{digest}"
-    )
+    return f"organizations/{organization}/projects/{project}/"
 
 
 @dataclass(frozen=True)
@@ -112,6 +118,25 @@ class StoredObject:
     content_type: str
     byte_size: int
     etag: str = ""
+
+
+@dataclass(frozen=True)
+class ObjectMetadata:
+    """Provider-neutral metadata used by delayed orphan reconciliation."""
+
+    key: str
+    byte_size: int
+    last_modified: datetime
+    etag: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "key", _object_key(self.key))
+        if self.byte_size < 0:
+            raise ValueError("byte_size must be non-negative")
+        modified = self.last_modified
+        if modified.tzinfo is None:
+            modified = modified.replace(tzinfo=timezone.utc)
+        object.__setattr__(self, "last_modified", modified.astimezone(timezone.utc))
 
 
 class ObjectStore(Protocol):
@@ -134,6 +159,8 @@ class ObjectStore(Protocol):
         *,
         expires_seconds: int,
     ) -> str: ...
+
+    def list(self, *, prefix: str) -> tuple[ObjectMetadata, ...]: ...
 
     def delete(self, key: str) -> None: ...
 
@@ -377,6 +404,41 @@ class S3ObjectStore:
                 "object store download signing failed"
             ) from exc
 
+    def list(self, *, prefix: str) -> tuple[ObjectMetadata, ...]:
+        normalized_prefix = _object_key(prefix.rstrip("/")) + "/"
+        objects: list[ObjectMetadata] = []
+        continuation_token: str | None = None
+        try:
+            while True:
+                arguments: dict[str, object] = {
+                    "Bucket": self.settings.bucket,
+                    "Prefix": normalized_prefix,
+                }
+                if continuation_token is not None:
+                    arguments["ContinuationToken"] = continuation_token
+                response = self._client.list_objects_v2(**arguments)
+                for item in response.get("Contents") or ():
+                    objects.append(
+                        ObjectMetadata(
+                            key=str(item["Key"]),
+                            byte_size=int(item.get("Size") or 0),
+                            last_modified=item["LastModified"],
+                            etag=str(item.get("ETag") or "").strip('"'),
+                        )
+                    )
+                if not response.get("IsTruncated"):
+                    break
+                continuation_token = str(
+                    response.get("NextContinuationToken") or ""
+                ).strip()
+                if not continuation_token:
+                    raise ObjectStoreError("object store list failed")
+        except ObjectStoreError:
+            raise
+        except (BotoCoreError, ClientError, KeyError, TypeError, ValueError) as exc:
+            raise ObjectStoreError("object store list failed") from exc
+        return tuple(sorted(objects, key=lambda item: item.key))
+
     def delete(self, key: str) -> None:
         normalized_key = _object_key(key)
         try:
@@ -438,6 +500,7 @@ class ProjectObjectUploader:
 
 
 __all__ = [
+    "ObjectMetadata",
     "ObjectStore",
     "ObjectStoreError",
     "ObjectTooLarge",
@@ -447,4 +510,5 @@ __all__ = [
     "S3ObjectStoreSettings",
     "StoredObject",
     "build_project_object_key",
+    "build_project_object_prefix",
 ]

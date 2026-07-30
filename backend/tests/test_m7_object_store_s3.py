@@ -18,6 +18,7 @@ from services.object_store import (  # noqa: E402
     S3ObjectStore,
     S3ObjectStoreSettings,
     build_project_object_key,
+    build_project_object_prefix,
 )
 
 
@@ -72,6 +73,13 @@ class S3ObjectStoreIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(stored.content_hash, digest)
             self.assertEqual(self.store.get(key, max_bytes=4096), data)
+            listed = self.store.list(
+                prefix=build_project_object_prefix(
+                    "integration-org",
+                    "integration-project",
+                )
+            )
+            self.assertIn(key, {item.key for item in listed})
             signed = self.store.create_download_url(
                 key,
                 expires_seconds=60,

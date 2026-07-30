@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260730_0011`
+- Alembic Head：`20260730_0012`
 
 ## 已通过验证
 
@@ -93,6 +93,16 @@ Job Requester 迁移新增后，在 `background_jobs` 为 0 行时执行：
 
 结果为 `20260730_0011 (head)`；降级、升级和重复升级均成功。
 
+Object Orphan Observation 迁移新增后执行：
+
+```powershell
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe upgrade head
+.\.venv\Scripts\alembic.exe current
+```
+
+结果为 `20260730_0012 (head)`；空库升级与降级往返在最终回归前再次验证。
+
 ### Task/Job PostgreSQL 定向测试
 
 ```powershell
@@ -134,7 +144,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 538 tests；
+- 543 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -160,6 +170,27 @@ $env:ARTICLE_AGENT_CONFIG = `
 - Object Store Key/Secret 不复用 LLM/Embedding Secret，`repr` 和稳定异常不泄露；
 - 上传要求 `knowledge.edit`，下载重新要求 `project.view`；
 - 数据库资产 URI 的 Bucket 或 Organization/Project 前缀不匹配时不签名。
+
+### 对象 Orphan 对账与延迟清理
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_object_store `
+  tests.test_m7_object_orphan_reconciliation -v
+```
+
+结果：
+
+- 12 tests，使用真实 PostgreSQL 和确定性内存 Object Inventory；
+- S3 List 分页、排序和稳定异常通过；
+- 未登记 Physical Orphan 与已登记但未引用 Asset 均能进入观察；
+- Snapshot Raw/Normalized URI、Snapshot Asset Link 和 Task `*_asset_id` 组成联合存活
+  集合，任一引用存在都不删除；
+- 其他 Organization/Project 前缀不扫描，跨组织 Actor 被拒绝；
+- 默认 7 天、硬性最短 24 小时、双观察和 Fingerprint 不变门禁通过；
+- Cleanup 前重新授权并重算引用；观察后被 Task 复用的 Asset 保留；
+- Provider Delete 失败不泄露供应商正文，并以新的一次观察重新开始保留窗口；
+- Audit Details 只有数量和保留秒数，不含对象 Key 或 URI。
 
 ### Server 私有文章图片派生
 
@@ -393,7 +424,7 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - OIDC 配置不完整或实时 Discovery/JWKS 探测失败时 Preflight 单独 fail closed；
 - `object_download_reauthorizes` 已由真实 HTTP 路由与签名前二次授权支撑为 true，
   不再只是未接线的底层 Service；
-- Alembic 不是 `20260730_0011` 时阻止发布；
+- Alembic 不是 `20260730_0012` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
 - 数据库 URL、Embedding Key、OIDC Client Secret、Token、S3 Key/Secret 和供应商
   错误正文不进入公开报告。
@@ -566,7 +597,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Mapping Revoked、User Disabled、Organization Suspended 均不能解析 Actor；
 - Link/Revoke 只有 Active Org Admin 可执行，且与 Audit Event 同事务；
 - 审计目标使用 Subject 哈希，审计 Details 不保存原始 Subject；
-- Preflight Head 已更新为 `20260730_0011`。
+- Preflight Head 已更新为 `20260730_0012`。
 
 ## 诊断记录
 
@@ -593,8 +624,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；
-- S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象和
-  no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
+- S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、
+  Orphan 双观察延迟清理和 no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
 - 前端已新增 Server OIDC、SQL Project Directory 与窄范围 Delivery Console，并通过
   lint/build；Article、Batch、Settings 等其余 M7 管理界面尚未接入 Server API。
 

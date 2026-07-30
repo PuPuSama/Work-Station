@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260730_0011`；
+- `alembic_version = 20260730_0012`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -109,6 +109,43 @@ SHA-256。至少覆盖产品主图、Gallery 图、私有文档和标准化产�
 
 因为 S3 与 PostgreSQL 没有跨系统事务，备份窗口必须记录数据库快照时间和对象
 Inventory/版本水位。恢复时先保持应用离线，完成 URI 存在性和哈希抽样，再开放读流量。
+
+### 4.1 Orphan 对账与延迟清理
+
+Orphan 清理不是应用启动步骤，也不在上传失败请求里执行。它只允许 Active Org Admin
+使用真实 Organization/User/Project 身份显式运行。命令输出只有项目和数量，不输出
+Bucket、Key、URI、客户正文或供应商错误。
+
+在 Windows 运维终端中先通过安全环境注入数据库和
+`ARTICLE_AGENT_OBJECT_STORE_*` 配置，再运行“不删除对象”的观察；该命令会更新
+`object_orphan_observations`，但不会删除 Asset 行或物理对象：
+
+```powershell
+Set-Location D:\Project\article\article-agent-formal\backend
+.\.venv\Scripts\python.exe -m knowledge_agent.m7_object_orphans observe `
+  --organization-id '<organization-id>' `
+  --user-id '<active-org-admin-user-id>' `
+  --project-id '<project-id>'
+```
+
+默认保留期为 7 天，代码拒绝短于 24 小时。必须至少在两个独立时间点观察，且期间对象
+Fingerprint 不变；恢复引用或 Fingerprint 变化都会重新开始窗口。清理前先保存本次
+Inventory 数量、操作者、UTC 时间和发布 Commit，人工确认 Snapshot URI、
+Snapshot Asset 与 Task `*_asset_id` 三类引用都在当前 Schema 中。
+
+跨过保留期后才运行显式清理，并重复输入完全相同的 Project ID：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_agent.m7_object_orphans cleanup `
+  --organization-id '<organization-id>' `
+  --user-id '<active-org-admin-user-id>' `
+  --project-id '<project-id>' `
+  --confirm-project-id '<project-id>'
+```
+
+退出码 `0` 表示本次 Provider Delete 全部成功；`2` 表示至少一个已退休引用的物理对象
+删除失败。失败对象不会立即重试，而会作为 Unregistered Orphan 重新经历完整观察窗口。
+不得用供应商控制台批量删除前缀，也不得通过降低保留期绕过对账。
 
 ## 5. Secret 与加密 Key 轮换
 
