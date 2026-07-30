@@ -127,6 +127,10 @@
   产品/知识资产授权上传和短期签名下载，并通过本地真实 S3 往返测试；
 - 已实现安全输出的部署 Preflight 和备份/恢复/轮换/回滚 Runbook；当前代码能力
   门禁明确 no-go，真实恢复演练与生产供应商仍待确定；
+- 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
+  未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
+- Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；正式 IdP 尚未选择，所以
+  登录入口仍保持关闭；
 - 当前单密码 Cookie 不具备 User Identity，正式身份来源也尚未确定，因此尚未把
   RBAC 接入 `app.py`；
 - 后续按“正式身份映射与 API 授权覆盖 -> 服务器单写切换

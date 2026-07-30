@@ -41,6 +41,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - M2 `ArtifactStore` 到 S3 的项目绑定适配器；
 - 产品图片等知识资产的授权上传、数据库登记和短期签名下载；
 - localhost-only、显式 profile 的 MinIO 开发兼容服务和真实往返测试。
+- `ServerRequestSecurity` 的签名 Actor 解析、项目规范化和数据库事实授权；
+- Knowledge Router 全路由统一依赖，以及按操作语义区分
+  `project.view / knowledge.edit / knowledge.publish / knowledge.delete`；
+- Server Mode 下未完成 Scope 迁移的旧 API、研究队列、上传和原始对象下载 fail closed；
+- 真实 Lifespan 中独立构建服务器安全服务，本地模式仍沿用原单密码入口。
 
 当前明确未做：
 
@@ -190,6 +195,8 @@ with engine.begin() as connection:
 | `backend/services/access_control.py` | Actor、权限契约、纯策略和 PostgreSQL 事实查询 | 不信任客户端 Role、统一拒绝、未绑定项目 fail closed |
 | `backend/services/audit_log.py` | 业务事务内追加审计事件 | 调用方事务、稳定 Event ID、无更新/删除接口 |
 | `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、独立 Secret、默认不开启 |
+| `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先认证再查数据库 Role、项目规范化、未迁移路由 fail closed |
+| `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
 | `backend/services/project_memberships.py` | 受授权且带审计的 ProjectMembership 变更 | 授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -205,6 +212,7 @@ with engine.begin() as connection:
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
+| `backend/tests/test_m7_server_request_security.py` | 请求授权和真实 Lifespan 接线测试 | 旧 API 阻断、Knowledge 全局依赖、权限语义、本地兼容 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
@@ -214,13 +222,40 @@ with engine.begin() as connection:
 
 ### M7-B：身份会话与管理写服务
 
-当前已完成第 2、3、4 项的底层接口，其余顺序：
+当前已完成 Actor Session、成员写服务和 Knowledge Router 请求授权底座：
 
 1. 选择正式身份来源并建立外部 Subject 到 Workspace User 的映射；
-2. 在显式 server mode 下接入 API，缺失 Actor 时 fail closed；
-3. 逐一给项目列表、文章、知识检索、对象下载和 Worker 增加权限依赖；
-4. 全部项目级入口覆盖前，不开放服务器登录；
-5. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
+2. 显式 server mode 已接入应用 Lifespan；缺失/篡改 Actor 为 401，数据库拒绝为
+   统一 403；
+3. Knowledge Router 已统一要求项目授权；读操作默认 `project.view`，普通写操作
+   默认 `knowledge.edit`，发布/产品确认为 `knowledge.publish`；
+4. 尚未迁移的 `/api/tasks`、文章、Project、Prompt、Batch 等旧 API 在 Server Mode
+   返回 503，不会退回本地全局数据；
+5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run
+   Start/Resume 和原始对象打开，在 Server Mode 单独返回 503；
+6. 逐一给项目列表、文章、对象下载和 Worker 增加项目 Scope 与权限依赖；
+7. 全部项目级入口覆盖前，不开放服务器登录；
+8. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
+
+上面的最后两项仍是硬门禁。`/api/auth/login` 在 Server Mode 明确返回 503，
+因为当前没有正式 IdP；它绝不使用 `APP_PASSWORD` 签发 Actor。`/api/auth/status`
+只报告模式和当前 Cookie 是否可解析，不返回 Organization/User/Role。
+
+请求授权链为：
+
+```text
+SERVER_AUTH_COOKIE_NAME
+  -> ServerActorSessionCodec.parse()
+  -> ActorIdentity(org, user)
+  -> normalized project path
+  -> PostgresProjectAccessRepository
+  -> ProjectAccessService.require(permission)
+  -> Knowledge route business code
+```
+
+Router 级依赖保证后续新增 Knowledge 路由默认也进入授权层；写权限映射集中在
+`knowledge_permission_for()`，避免各路由复制判断。任何依赖尚未完成服务器迁移的路由，
+还必须同时通过 `server_knowledge_route_ready()` 才能进入业务代码。
 
 ### M7-C：Task/Job PostgreSQL 准源
 

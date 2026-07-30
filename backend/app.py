@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
+import sqlalchemy as sa
 
 from config import ROOT_DIR, load_config, public_config
 from models import (
@@ -156,6 +157,20 @@ from services.tavily import TavilyClient
 from services.tdk import TdkGenerationError, export_tdk_docx, generate_tdk_metadata
 from services.topics import TopicWorkbookError, scan_topic_library, store_topic_workbook
 from services.task_identity import article_source_key, normalized_customer
+from services.access_control import (
+    PostgresProjectAccessRepository,
+    ProjectAccessService,
+)
+from services.server_auth import (
+    SERVER_AUTH_COOKIE_NAME,
+    load_server_actor_session_codec,
+    server_mode_enabled,
+)
+from services.server_request_security import (
+    ServerRequestSecurity,
+    ServerRequestUnauthenticated,
+    server_http_route_available,
+)
 from storage import (
     RevisionConflictError,
     TaskStore,
@@ -215,6 +230,41 @@ load_dotenv(ROOT_DIR / "backend" / ".env")
 @asynccontextmanager
 async def app_lifespan(application: FastAPI):
     cfg = config()
+    server_engine = None
+    previous_server_mode = getattr(
+        application.state,
+        "server_mode_enabled",
+        None,
+    )
+    previous_server_security = getattr(
+        application.state,
+        "server_request_security",
+        None,
+    )
+    server_mode = server_mode_enabled()
+    application.state.server_mode_enabled = server_mode
+    application.state.server_request_security = None
+    if server_mode:
+        codec = load_server_actor_session_codec()
+        server_settings = load_knowledge_agent_settings(
+            enabled=False,
+            require_ready=False,
+        )
+        database_url = server_settings.database_url or ""
+        if not database_url:
+            raise RuntimeError(
+                "ARTICLE_AGENT_DATABASE_URL is required in server mode"
+            )
+        server_engine = sa.create_engine(
+            database_url,
+            pool_pre_ping=True,
+        )
+        application.state.server_request_security = ServerRequestSecurity(
+            codec=codec,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(server_engine)
+            ),
+        )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -404,8 +454,12 @@ async def app_lifespan(application: FastAPI):
         writing_runner.stop()
         if knowledge_runtime is not None:
             knowledge_runtime.close()
+        if server_engine is not None:
+            server_engine.dispose()
         application.state.knowledge_agent_runtime = None
         application.state.knowledge_research_enqueue = None
+        application.state.server_mode_enabled = previous_server_mode
+        application.state.server_request_security = previous_server_security
 
 
 app = FastAPI(
@@ -430,8 +484,34 @@ _AUTH_PUBLIC_PATHS = {
 }
 
 
+def request_server_mode(request: Request) -> bool:
+    configured = getattr(
+        request.app.state,
+        "server_mode_enabled",
+        None,
+    )
+    return (
+        server_mode_enabled()
+        if configured is None
+        else bool(configured)
+    )
+
+
 @app.middleware("http")
 async def require_application_password(request: Request, call_next):
+    server_mode = request_server_mode(request)
+    if server_mode:
+        if server_http_route_available(
+            request.method,
+            request.url.path,
+        ):
+            return await call_next(request)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Route is not available in server mode yet."
+            },
+        )
     if (
         not authentication_enabled()
         or request.method == "OPTIONS"
@@ -463,6 +543,31 @@ def auth_cookie_secure(request: Request) -> bool:
 
 @app.get("/api/auth/status", response_model=ApiMessage)
 def auth_status(request: Request) -> ApiMessage:
+    server_mode = request_server_mode(request)
+    if server_mode:
+        security = getattr(
+            request.app.state,
+            "server_request_security",
+            None,
+        )
+        authenticated = False
+        if isinstance(security, ServerRequestSecurity):
+            try:
+                security.authenticate(
+                    request.cookies.get(SERVER_AUTH_COOKIE_NAME, "")
+                )
+                authenticated = True
+            except ServerRequestUnauthenticated:
+                pass
+        return ApiMessage(
+            message="Server authentication status.",
+            data={
+                "enabled": True,
+                "authenticated": authenticated,
+                "mode": "server",
+                "login_available": False,
+            },
+        )
     enabled = authentication_enabled()
     authenticated = not enabled or valid_session_token(
         request.cookies.get(AUTH_COOKIE_NAME, "")
@@ -475,6 +580,11 @@ def auth_status(request: Request) -> ApiMessage:
 
 @app.post("/api/auth/login", response_model=ApiMessage)
 def auth_login(request: Request, payload: AuthLoginRequest):
+    if request_server_mode(request):
+        raise HTTPException(
+            status_code=503,
+            detail="Server identity provider is not configured.",
+        )
     if not authentication_enabled():
         return ApiMessage(
             message="Password protection is not configured.",
@@ -512,6 +622,7 @@ def auth_logout() -> JSONResponse:
         }
     )
     response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    response.delete_cookie(SERVER_AUTH_COOKIE_NAME, path="/")
     return response
 
 

@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     Form,
     HTTPException,
@@ -64,6 +65,7 @@ from .research_chat_repository import (
     ResearchConversation,
 )
 from .scope_evidence import ScopeEvidenceNotFound, ScopeEvidenceService
+from .security import require_knowledge_project_access
 from .wordpress import (
     OfficialSiteFetchError,
     UnsafeOfficialSiteUrl,
@@ -756,7 +758,11 @@ def _conversation_response(
     )
 
 
-router = APIRouter(prefix="/api/knowledge", tags=["knowledge-agent"])
+router = APIRouter(
+    prefix="/api/knowledge",
+    tags=["knowledge-agent"],
+    dependencies=[Depends(require_knowledge_project_access)],
+)
 
 
 @router.post(

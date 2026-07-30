@@ -43,7 +43,7 @@ class ServerCutoverCapabilities:
     postgres_task_single_write: bool = False
     postgres_job_single_write: bool = False
     worker_reauthorizes: bool = False
-    object_download_reauthorizes: bool = True
+    object_download_reauthorizes: bool = False
 
     def missing(self) -> tuple[str, ...]:
         return tuple(

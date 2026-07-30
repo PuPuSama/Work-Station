@@ -102,7 +102,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 463 tests；
+- 470 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -166,6 +166,30 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 当前 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 的预期结果仍是 no-go。本文没有把
 Runbook 的存在描述成“备份已完成”；真实恢复证据、RPO/RTO 和生产供应商待外部环境。
 
+### Server Request Security 与 Knowledge Router
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_auth `
+  tests.test_auth -v
+```
+
+结果：
+
+- 15 tests；
+- Actor Cookie 篡改/缺失统一为未认证；
+- Project 按官网域名规则规范化后才查询 PostgreSQL 权限事实；
+- Viewer 可通过 Knowledge GET，但不能发布来源；
+- Publish/Product Confirm 映射 `knowledge.publish`，普通写操作映射
+  `knowledge.edit`，只读对话/覆盖率等映射 `project.view`；
+- Server Mode 下 `/api/tasks` 等未迁移旧入口返回 503；
+- WordPress、私有上传、Research Start/Resume 和本地 Raw Artifact 暂不开放；
+- 旧 `APP_PASSWORD` 登录在 Server Mode 返回 503；
+- 真实 Lifespan 使用 PostgreSQL Engine 构建请求安全服务并正常清理；
+- Local Mode 原密码认证测试保持通过。
+
 ## 诊断记录
 
 第一次完整回归未指定 CI Config，2 个既有 Humanize 测试读取本机默认
@@ -177,10 +201,14 @@ Runbook 的存在描述成“备份已完成”；真实恢复证据、RPO/RTO �
 ## 当前未验证或未接入
 
 - 已有 Actor Session Codec，但正式身份来源与登录签发入口尚未接入；
-- RBAC 尚未接入 FastAPI 路由、Knowledge Retriever 或 Worker；对象下载服务底层已重新授权，但尚无公开 HTTP 路由；
+- Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
+  旧路由和 Worker 尚未接入；
+- 对象下载服务底层已重新授权，但现有 Raw Artifact HTTP 路由仍是本地文件实现，
+  因此 Server Mode 明确阻断；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
 - SQLite Terminal Job 历史导入已实现；切换双读报告和 `app.py` 单写切换尚未实现；
-- S3 对象存储底层与产品资产桥接已实现；备份恢复和部署门禁尚未实现；
+- S3 对象存储底层、产品资产桥接和 no-go 部署门禁已实现；真实备份恢复演练
+  与生产供应商尚未完成；
 - 本阶段未修改前端，因此没有新增 M7 前端验收项。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。
