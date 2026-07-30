@@ -1,9 +1,9 @@
-# Knowledge Agent M7-A/B/C1-C2 本地验证记录
+# Knowledge Agent M7-A/B/C1-C2/D1 本地验证记录
 
 - 日期：2026-07-30
 - 分支：`feature/knowledge-agent-m7`
 - 基线：`cc4bbf2 feat: add M6 retrieval evaluation framework`
-- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL 与 append-only 审计底座
+- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL、私有对象存储与 append-only 审计底座
 
 ## 环境
 
@@ -102,10 +102,50 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 445 tests；
+- 457 tests；
 - 全部通过；
-- 1 skipped；
+- 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
+
+### 对象存储定向与真实兼容测试
+
+无网络单元契约：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_object_store `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_m7_object_store_s3 -v
+```
+
+覆盖：
+
+- Key 为 `organization_id + project_id + SHA-256` 内容寻址；
+- 路径穿越、跨项目 Adapter 调用和内容哈希不匹配被拒绝；
+- Put 不设置公共 ACL，生产默认带 `AES256` 服务端加密参数；
+- Get 有大小上限并关闭响应流；
+- 下载 URL 有效期最多一小时；
+- Object Store Key/Secret 不复用 LLM/Embedding Secret，`repr` 和稳定异常不泄露；
+- 上传要求 `knowledge.edit`，下载重新要求 `project.view`；
+- 数据库资产 URI 的 Bucket 或 Organization/Project 前缀不匹配时不签名。
+
+真实 S3 兼容往返使用 `compose.dev.yaml` 的显式 `object-store` profile，
+一次性随机开发凭据和专用 `article-agent-test-*` Bucket。由于该本地 MinIO
+未配置 KMS，测试显式使用 `ARTICLE_AGENT_OBJECT_STORE_SSE=none`；生产默认不变。
+
+```powershell
+$env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_object_store_s3 -v
+```
+
+结果：
+
+- 1 test；
+- Put/Get/Presigned URL/Delete 全部通过；
+- 测试对象在 `finally` 中删除；
+- MinIO API/Console 仅绑定 `127.0.0.1:59000/59001`；
+- 此镜像只作为开发兼容目标，不代表生产供应商已选定。
 
 ## 诊断记录
 
@@ -118,10 +158,10 @@ $env:ARTICLE_AGENT_CONFIG = `
 ## 当前未验证或未接入
 
 - 已有 Actor Session Codec，但正式身份来源与登录签发入口尚未接入；
-- RBAC 尚未接入 FastAPI 路由、Knowledge Retriever、对象下载或 Worker；
+- RBAC 尚未接入 FastAPI 路由、Knowledge Retriever 或 Worker；对象下载服务底层已重新授权，但尚无公开 HTTP 路由；
 - `app.py` 的 Task/Job 仍以 SQLite 为准；PostgreSQL 实现尚未成为服务器单写准源；
 - SQLite Terminal Job 历史导入已实现；切换双读报告和 `app.py` 单写切换尚未实现；
-- S3 对象存储、备份恢复和部署门禁尚未实现；
+- S3 对象存储底层与产品资产桥接已实现；备份恢复和部署门禁尚未实现；
 - 本阶段未修改前端，因此没有新增 M7 前端验收项。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

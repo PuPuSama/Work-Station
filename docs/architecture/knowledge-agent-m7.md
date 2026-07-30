@@ -11,7 +11,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 3. 再让 API、检索、对象下载与 Worker 强制执行 RBAC；
 4. 验证服务器端闭环后，才收缩 SQLite 正式写入路径和临时兼容层。
 
-## 2. 当前完成范围：M7-A / M7-B / M7-C1-C2
+## 2. 当前完成范围：M7-A / M7-B / M7-C1-C2 / M7-D1
 
 本阶段已实现：
 
@@ -36,6 +36,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `PostgresJobQueue`。
 - Active Job 排空门禁和 SQLite Terminal Job 历史迁移；
 - Batch/Job 稳定 ID、数量、状态分布和内容 SHA-256 摘要复核。
+- S3 兼容 `ObjectStore` 协议与 boto3 适配器；
+- Organization/Project/内容哈希组成的不可变对象 Key；
+- M2 `ArtifactStore` 到 S3 的项目绑定适配器；
+- 产品图片等知识资产的授权上传、数据库登记和短期签名下载；
+- localhost-only、显式 profile 的 MinIO 开发兼容服务和真实往返测试。
 
 当前明确未做：
 
@@ -192,10 +197,15 @@ with engine.begin() as connection:
 | `backend/services/job_queue_migration.py` | SQLite Terminal Job 历史迁移 | Active 排空门、稳定 ID、状态与内容摘要复核 |
 | `backend/services/task_repository.py` | 本地/服务器 Task Repository Protocol 与 SQLite 实现 | 本地模式保持可用 |
 | `backend/services/job_queue.py` | Queue Protocol、SQLite Queue 与通用 Runner | 本地模式语义和 Runner 兼容 |
+| `backend/services/object_store.py` | 私有 S3 对象、配置、Key 和签名下载边界 | Secret 独立、Key 带组织/项目、默认私有、下载限时 |
+| `backend/knowledge_agent/object_storage.py` | M2 资产接入 S3 及授权后的知识对象服务 | 解析器适配与权限分离、下载重新授权、数据库只存 URI/证据 |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
+| `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
+| `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
+| `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/Sign/Delete、对象清理 |
 
 ## 9. 后续 M7 迁移顺序
 
@@ -252,7 +262,52 @@ organizations/{organization_id}/projects/{project_id}/...
 
 数据库只保存不可变对象 URI、哈希、媒体类型、大小和创建者。产品原图、抓取快照、私有文件、标准化产物、AI 检测截图和 DOCX 都迁入 S3 兼容存储。下载通过短期签名 URL 或授权后的后端流式响应，不能暴露长期公共 URL。
 
-之后补齐备份恢复演练、密钥轮换、迁移前检查、部署健康门和回滚方案，再讨论受控云端或公司私有部署。
+#### D1 已实现：对象存储边界
+
+```text
+已授权的 knowledge.edit 请求
+  -> 解析/抓取图片 bytes
+  -> SHA-256 校验和内容寻址
+  -> organizations/{org}/projects/{project}/blobs/{prefix}/{sha256}
+  -> 私有 S3 对象
+  -> knowledge_assets (URI/hash/type/size/dimensions/metadata)
+  -> snapshot_assets (图片在某个来源快照中的位置和文案)
+  -> knowledge_product_asset_evidence (图片属于哪个产品及其角色)
+```
+
+产品图片不是 Product 表上的一个可变 URL 字段，也不会复制进文章 JSON。三个层次分别保存：
+
+1. `knowledge_assets` 表示项目内按内容去重的不可变图片；
+2. `snapshot_assets` 保留图片出现在哪个网页快照、顺序、源 URL、alt、caption；
+3. `knowledge_product_asset_evidence` 记录它与产品的 `primary/gallery/...` 证据关系。
+
+文章或前端只保存 `asset_id`/证据选择。真正展示时先校验
+`project.view`，再签发最长一小时的临时下载 URL。上传要求
+`knowledge.edit`。S3 Key 和数据库查询同时锁定 Organization/Project，任一层
+Scope 不一致都拒绝。
+
+现有 M2 解析器不感知 boto3。`ScopedS3ArtifactStore` 实现原来的
+`ArtifactStore.put()`，并在构造时固定 Organization/Project；后期替换存储供应商时，
+产品解析、图片证据和产品目录不需要一起重写。
+
+对象采用内容寻址，因此同一项目重复抓取相同字节只得到同一个物理 Key。源站图片变化会
+产生新哈希和新对象，旧快照继续引用旧对象，支持审计和回滚。删除/生命周期管理必须先证明
+没有任何快照或产品证据引用，不允许由抓取重试直接删除。
+
+S3 Put 与 PostgreSQL Insert 无法组成一个 ACID 事务。当前顺序是“先写确定性对象 Key，
+再幂等登记资产”；数据库失败时不会覆盖其他内容，但可能留下未引用对象。D2 必须增加按
+数据库引用集合对账的 orphan 扫描和延迟清理，并为正式上传动作补业务审计，不能在请求失败
+时立即删除对象（并发请求可能已经复用同一个 Key）。
+
+配置只读取独立的 `ARTICLE_AGENT_OBJECT_STORE_*` 环境变量，不回退到
+LLM/Embedding Key；Access Key/Secret 不进入公开配置或异常消息。默认请求服务端
+加密 `AES256`，`none` 只允许本地兼容目标显式使用。开发 MinIO profile 仅用于
+S3 契约验证，不是生产供应商选择。
+
+#### D2 待实现：运维与部署门禁
+
+之后补齐备份恢复演练、对象版本/生命周期、密钥轮换、迁移前检查、部署健康门和回滚方案，
+再讨论受控云端或公司私有部署。正式身份和 API 全覆盖之前，不把对象服务开放为公共入口。
 
 ## 10. 重构检查清单
 
@@ -268,3 +323,5 @@ organizations/{organization_id}/projects/{project_id}/...
 10. Task/Job 切换后，SQLite 是否仍只属于明确的本地模式？
 11. 对象 Key、数据库行和签名下载是否都同时带 Organization/Project Scope？
 12. 是否有迁移、回滚、跨组织攻击和旧项目 fail-closed 自动测试？
+13. 产品图片是否仍拆分为不可变对象、快照出现证据和产品关系，而非退化成可覆盖 URL？
+14. S3 供应商或 SDK 替换后，M2 Parser/Ingester 是否仍只依赖 ArtifactStore 契约？
