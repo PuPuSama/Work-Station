@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import replace
+import os
 from pathlib import Path
 import re
 from threading import Lock
@@ -33,6 +35,7 @@ from models import (
     GenerateOutlineRequest,
     ImagesUpdateRequest,
     LinkValidation,
+    LlmSettingsUpdateRequest,
     ManualTitleGenerationRequest,
     OutlineUpdateRequest,
     ProductsUpdateRequest,
@@ -117,6 +120,7 @@ from services.project_prompts import (
     PromptInUseError,
     PromptLibraryError,
 )
+from services.llm_settings import LlmSettingsRepository
 from services.seo_review import (
     SeoReviewError,
     build_review_candidate,
@@ -241,8 +245,57 @@ _PRODUCT_PROCESSING_GUARD = Lock()
 _PRODUCT_PROCESSING_TASKS: set[str] = set()
 
 
+def available_with_current(
+    current: str,
+    configured: tuple[str, ...],
+) -> tuple[str, ...]:
+    if not current or current in configured:
+        return configured
+    return (current, *configured)
+
+
 def config():
-    return load_config()
+    base = load_config()
+    environment_model = os.environ.get("LLM_MODEL", "").strip()
+    environment_reasoning_effort = os.environ.get(
+        "LLM_REASONING_EFFORT",
+        "",
+    ).strip()
+    environment_base_url = os.environ.get("LLM_BASE_URL", "").strip()
+    if environment_model or environment_reasoning_effort or environment_base_url:
+        base = replace(
+            base,
+            llm_model=environment_model or base.llm_model,
+            llm_reasoning_effort=(
+                environment_reasoning_effort or base.llm_reasoning_effort
+            ),
+            llm_base_url=(environment_base_url or base.llm_base_url).rstrip("/"),
+            llm_available_models=available_with_current(
+                environment_model or base.llm_model,
+                base.llm_available_models,
+            ),
+            llm_available_reasoning_efforts=available_with_current(
+                environment_reasoning_effort or base.llm_reasoning_effort,
+                base.llm_available_reasoning_efforts,
+            ),
+        )
+    saved = LlmSettingsRepository(base.data_file).get()
+    if saved is None:
+        return base
+    return replace(
+        base,
+        llm_model=saved.model,
+        llm_reasoning_effort=saved.reasoning_effort,
+        llm_available_models=available_with_current(
+            saved.model,
+            base.llm_available_models,
+        ),
+        llm_available_reasoning_efforts=available_with_current(
+            saved.reasoning_effort,
+            base.llm_available_reasoning_efforts,
+        ),
+        llm_runtime_override=True,
+    )
 
 
 def store() -> TaskStore:
@@ -460,6 +513,28 @@ def health() -> dict[str, str]:
 
 @app.get("/api/config")
 def read_config() -> dict:
+    return public_config(config())
+
+
+@app.put("/api/settings/llm")
+def update_llm_settings(request: LlmSettingsUpdateRequest) -> dict:
+    base = load_config()
+    model = request.model.strip()
+    reasoning_effort = request.reasoning_effort.strip()
+    if model not in base.llm_available_models:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected model is not available.",
+        )
+    if reasoning_effort not in base.llm_available_reasoning_efforts:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected reasoning effort is not available.",
+        )
+    LlmSettingsRepository(base.data_file).save(
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
     return public_config(config())
 
 

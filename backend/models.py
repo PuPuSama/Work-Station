@@ -445,6 +445,11 @@ class ProjectContextUpdateRequest(WorkflowModel):
     project_notes: str = Field(default="", max_length=30000)
 
 
+class LlmSettingsUpdateRequest(WorkflowModel):
+    model: str = Field(min_length=1, max_length=120)
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"]
+
+
 class WritingSettingsUpdateRequest(RevisionedRequest):
     topic_notes: str = Field(default="", max_length=30000)
     outline_custom_prompt: str = Field(default="", max_length=40000)

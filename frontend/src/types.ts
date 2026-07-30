@@ -358,6 +358,9 @@ export type PublicConfig = {
     provider: string;
     base_url: string;
     model: string;
+    reasoning_effort: string;
+    available_models: string[];
+    available_reasoning_efforts: string[];
   };
   integrations?: {
     tavily_ready: boolean;

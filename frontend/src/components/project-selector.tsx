@@ -17,9 +17,18 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { apiGet, apiPost, apiUpload } from "@/lib/api";
+import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ApiMessage, DashboardSummary, PublicConfig, TaskRecord } from "@/types";
 
@@ -45,6 +54,9 @@ export function ProjectSelector() {
   const [pendingActions, setPendingActions] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [llmSettingsOpen, setLlmSettingsOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState("");
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
   function setPending(key: string, pending: boolean) {
@@ -152,6 +164,34 @@ export function ProjectSelector() {
     }
   }
 
+  function openLlmSettings() {
+    setSelectedModel(config?.llm.model || "");
+    setSelectedReasoningEffort(config?.llm.reasoning_effort || "");
+    setLlmSettingsOpen(true);
+  }
+
+  async function saveLlmSettings() {
+    if (!selectedModel || !selectedReasoningEffort) return;
+    setPending("llm-settings", true);
+    setError("");
+    setMessage("");
+    try {
+      const nextConfig = await apiPut<PublicConfig>("/api/settings/llm", {
+        model: selectedModel,
+        reasoning_effort: selectedReasoningEffort,
+      });
+      setConfig(nextConfig);
+      setLlmSettingsOpen(false);
+      setMessage(
+        `模型设置已保存：${nextConfig.llm.model} / ${nextConfig.llm.reasoning_effort}`,
+      );
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPending("llm-settings", false);
+    }
+  }
+
   async function uploadTopicFiles(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
     if (!files.length) return;
@@ -197,6 +237,19 @@ export function ProjectSelector() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={openLlmSettings}
+              disabled={!config || isPending("llm-settings")}
+            >
+              <Settings2 />
+              模型设置
+              {config && (
+                <span className="hidden text-xs text-muted-foreground sm:inline">
+                  {config.llm.model} · {config.llm.reasoning_effort}
+                </span>
+              )}
+            </Button>
             <input
               ref={uploadInputRef}
               type="file"
@@ -369,6 +422,90 @@ export function ProjectSelector() {
           </Card>
         </section>
       </div>
+
+      <Dialog open={llmSettingsOpen} onOpenChange={setLlmSettingsOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>全局模型设置</DialogTitle>
+            <DialogDescription>
+              用于标题、产品分析、大纲、正文、复检和 TDK 等后续模型请求。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-5 py-2">
+            <div className="grid gap-2">
+              <Label htmlFor="global-llm-model">模型</Label>
+              <select
+                id="global-llm-model"
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                value={selectedModel}
+                onChange={(event) => setSelectedModel(event.target.value)}
+              >
+                {(config?.llm.available_models || []).map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="global-reasoning-effort">推理强度</Label>
+              <select
+                id="global-reasoning-effort"
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                value={selectedReasoningEffort}
+                onChange={(event) =>
+                  setSelectedReasoningEffort(event.target.value)
+                }
+              >
+                {(config?.llm.available_reasoning_efforts || []).map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs leading-5 text-muted-foreground">
+                推理越高通常越适合复杂的大纲、正文和复检，但响应时间和用量也可能增加。
+              </p>
+            </div>
+
+            <Alert>
+              <AlertTitle>生效范围</AlertTitle>
+              <AlertDescription>
+                保存后，新的请求及队列中尚未开始的任务使用新设置；正在执行的请求不会被中断。
+              </AlertDescription>
+            </Alert>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setLlmSettingsOpen(false)}
+              disabled={isPending("llm-settings")}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void saveLlmSettings()}
+              disabled={
+                !selectedModel ||
+                !selectedReasoningEffort ||
+                isPending("llm-settings")
+              }
+            >
+              {isPending("llm-settings") ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Settings2 />
+              )}
+              保存模型设置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }

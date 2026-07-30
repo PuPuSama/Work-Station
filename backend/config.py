@@ -52,6 +52,10 @@ class AppConfig:
     llm_provider: str
     llm_base_url: str
     llm_model: str
+    llm_reasoning_effort: str
+    llm_available_models: tuple[str, ...]
+    llm_available_reasoning_efforts: tuple[str, ...]
+    llm_runtime_override: bool
 
     @property
     def current_week_folder(self) -> str:
@@ -80,6 +84,40 @@ def load_config() -> AppConfig:
     styles = docx["styles"]
     llm = raw.get("llm", {})
     legacy_week = raw.get("week_folder", {})
+    configured_model = str(llm.get("model", "")).strip()
+    configured_reasoning_effort = str(
+        llm.get("reasoning_effort", "xhigh")
+    ).strip()
+    available_models = tuple(
+        dict.fromkeys(
+            [
+                configured_model,
+                *[
+                    str(item).strip()
+                    for item in llm.get(
+                        "available_models",
+                        ["gpt-5.6-sol", "gpt-5.6-terra"],
+                    )
+                ],
+            ]
+        )
+    )
+    available_models = tuple(item for item in available_models if item)
+    available_reasoning_efforts = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in llm.get(
+                "available_reasoning_efforts",
+                ["low", "medium", "high", "xhigh"],
+            )
+            if str(item).strip()
+        )
+    )
+    if configured_reasoning_effort not in available_reasoning_efforts:
+        available_reasoning_efforts = (
+            configured_reasoning_effort,
+            *available_reasoning_efforts,
+        )
 
     return AppConfig(
         topic_library=_configured_path(paths["topic_library"]),
@@ -107,7 +145,11 @@ def load_config() -> AppConfig:
         body_size=float(styles["body"]["size_pt"]),
         llm_provider=str(llm.get("provider", "openai_compatible")),
         llm_base_url=str(llm.get("base_url", "https://api.openai.com/v1")).rstrip("/"),
-        llm_model=str(llm.get("model", "")),
+        llm_model=configured_model,
+        llm_reasoning_effort=configured_reasoning_effort,
+        llm_available_models=available_models,
+        llm_available_reasoning_efforts=available_reasoning_efforts,
+        llm_runtime_override=False,
     )
 
 
@@ -142,6 +184,11 @@ def public_config(config: AppConfig) -> dict[str, Any]:
             "provider": config.llm_provider,
             "base_url": config.llm_base_url,
             "model": config.llm_model,
+            "reasoning_effort": config.llm_reasoning_effort,
+            "available_models": list(config.llm_available_models),
+            "available_reasoning_efforts": list(
+                config.llm_available_reasoning_efforts
+            ),
         },
         "integrations": {
             "tavily_ready": bool(os.environ.get("TAVILY_API_KEY", "").strip()),

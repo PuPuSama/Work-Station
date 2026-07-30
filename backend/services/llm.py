@@ -30,8 +30,19 @@ class LLMClient:
         self.api_key = (
             os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
         ).strip()
-        self.model = os.environ.get("LLM_MODEL", config.llm_model).strip()
-        self.base_url = os.environ.get("LLM_BASE_URL", config.llm_base_url).strip().rstrip("/")
+        if config.llm_runtime_override:
+            self.model = config.llm_model.strip()
+            self.reasoning_effort = config.llm_reasoning_effort.strip()
+        else:
+            self.model = os.environ.get("LLM_MODEL", config.llm_model).strip()
+            self.reasoning_effort = os.environ.get(
+                "LLM_REASONING_EFFORT",
+                config.llm_reasoning_effort,
+            ).strip()
+        self.base_url = os.environ.get(
+            "LLM_BASE_URL",
+            config.llm_base_url,
+        ).strip().rstrip("/")
         self.timeout_seconds = float(timeout_seconds)
 
     @property
@@ -52,6 +63,7 @@ class LLMClient:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort=self.reasoning_effort,
         )
 
         body = json.dumps(payload).encode("utf-8")
@@ -79,13 +91,14 @@ def build_responses_payload(
     messages: list[dict[str, Any]],
     temperature: float,
     max_tokens: int,
+    reasoning_effort: str = "xhigh",
 ) -> dict[str, Any]:
-    """Build the shared Responses API payload with maximum reasoning effort."""
+    """Build the shared Responses API payload with the selected reasoning effort."""
 
     return {
         "model": model,
         "input": responses_input_from_messages(messages),
-        "reasoning": {"effort": "xhigh"},
+        "reasoning": {"effort": reasoning_effort},
         "temperature": temperature,
         "max_output_tokens": max_tokens,
         "stream": True,
