@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from math import isfinite
 from types import MappingProxyType
 from typing import Literal, Mapping, Sequence
@@ -10,6 +10,16 @@ from urllib.parse import urlsplit
 
 Metadata = Mapping[str, object]
 Sufficiency = Literal["sufficient", "weak", "missing"]
+RetrievalScopeType = Literal[
+    "introduction",
+    "h2_section",
+    "product_fact",
+    "faq",
+]
+EvidenceSupportScope = Literal["paragraph", "sentence"]
+EvidenceClaimType = Literal["reference", "hard_fact"]
+EvidenceSupportType = Literal["direct", "paraphrase", "contextual"]
+EvidenceValidationStatus = Literal["valid", "needs_review", "invalid"]
 ProjectStatus = Literal["active", "archived"]
 SourceKind = Literal[
     "private_file",
@@ -38,6 +48,15 @@ TRUST_TIERS = frozenset(
 )
 SOURCE_STATUSES = frozenset(
     {"inbox", "published", "needs_review", "rejected", "stale"}
+)
+RETRIEVAL_SCOPE_TYPES = frozenset(
+    {"introduction", "h2_section", "product_fact", "faq"}
+)
+EVIDENCE_SUPPORT_SCOPES = frozenset({"paragraph", "sentence"})
+EVIDENCE_CLAIM_TYPES = frozenset({"reference", "hard_fact"})
+EVIDENCE_SUPPORT_TYPES = frozenset({"direct", "paraphrase", "contextual"})
+EVIDENCE_VALIDATION_STATUSES = frozenset(
+    {"valid", "needs_review", "invalid"}
 )
 
 
@@ -489,16 +508,155 @@ class EvidencePackRequest:
     scope_type: str
     scope_key: str
     query_variants: tuple[str, ...]
+    retrieval_plan_id: str | None = None
+    scope_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("project_id", "article_id", "scope_type", "scope_key"):
             object.__setattr__(self, name, _require(getattr(self, name), name))
+        if self.scope_type not in RETRIEVAL_SCOPE_TYPES:
+            raise ValueError(
+                "scope_type must be one of: "
+                + ", ".join(sorted(RETRIEVAL_SCOPE_TYPES))
+            )
         if self.outline_version <= 0:
             raise ValueError("outline_version must be positive")
         queries = tuple(_require(query, "query_variants") for query in self.query_variants)
         if not queries:
             raise ValueError("query_variants must not be empty")
         object.__setattr__(self, "query_variants", queries)
+        object.__setattr__(
+            self,
+            "retrieval_plan_id",
+            _optional_text(self.retrieval_plan_id, "retrieval_plan_id"),
+        )
+        object.__setattr__(
+            self,
+            "scope_id",
+            _optional_text(self.scope_id, "scope_id"),
+        )
+        if (self.retrieval_plan_id is None) != (self.scope_id is None):
+            raise ValueError(
+                "retrieval_plan_id and scope_id must be provided together"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalScope:
+    """One independently retrievable outline scope within a frozen plan."""
+
+    project_id: str
+    retrieval_plan_id: str
+    scope_id: str
+    ordinal: int
+    scope_type: RetrievalScopeType
+    scope_key: str
+    title: str
+    query_variants: tuple[str, ...]
+    filters: Metadata = field(default_factory=dict)
+    minimum_hits: int = 2
+    minimum_distinct_sources: int = 1
+    require_hard_fact: bool = False
+    metadata: Metadata = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "project_id",
+            "retrieval_plan_id",
+            "scope_id",
+            "scope_key",
+            "title",
+        ):
+            object.__setattr__(self, name, _require(getattr(self, name), name))
+        if self.scope_type not in RETRIEVAL_SCOPE_TYPES:
+            raise ValueError(
+                "scope_type must be one of: "
+                + ", ".join(sorted(RETRIEVAL_SCOPE_TYPES))
+            )
+        if isinstance(self.ordinal, bool) or self.ordinal < 0:
+            raise ValueError("ordinal must be a non-negative integer")
+        queries = tuple(_require(query, "query_variants") for query in self.query_variants)
+        if not queries:
+            raise ValueError("query_variants must not be empty")
+        object.__setattr__(self, "query_variants", queries)
+        for name in ("minimum_hits", "minimum_distinct_sources"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.require_hard_fact, bool):
+            raise ValueError("require_hard_fact must be a boolean")
+        object.__setattr__(self, "filters", _metadata(self.filters, "filters"))
+        object.__setattr__(self, "metadata", _metadata(self.metadata, "metadata"))
+
+    def evidence_request(
+        self,
+        *,
+        article_id: str,
+        outline_version: int,
+    ) -> EvidencePackRequest:
+        return EvidencePackRequest(
+            project_id=self.project_id,
+            article_id=article_id,
+            outline_version=outline_version,
+            scope_type=self.scope_type,
+            scope_key=self.scope_key,
+            query_variants=self.query_variants,
+            retrieval_plan_id=self.retrieval_plan_id,
+            scope_id=self.scope_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalPlan:
+    """Immutable retrieval intent for one article outline version."""
+
+    project_id: str
+    retrieval_plan_id: str
+    article_id: str
+    outline_version: int
+    scopes: tuple[RetrievalScope, ...]
+    max_gap_fill_rounds: int = 2
+    metadata: Metadata = field(default_factory=dict)
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    def __post_init__(self) -> None:
+        for name in ("project_id", "retrieval_plan_id", "article_id"):
+            object.__setattr__(self, name, _require(getattr(self, name), name))
+        if (
+            isinstance(self.outline_version, bool)
+            or not isinstance(self.outline_version, int)
+            or self.outline_version <= 0
+        ):
+            raise ValueError("outline_version must be positive")
+        if (
+            isinstance(self.max_gap_fill_rounds, bool)
+            or not isinstance(self.max_gap_fill_rounds, int)
+            or not 0 <= self.max_gap_fill_rounds <= 2
+        ):
+            raise ValueError("max_gap_fill_rounds must be between 0 and 2")
+        scopes = tuple(self.scopes)
+        if not scopes:
+            raise ValueError("scopes must not be empty")
+        if any(
+            scope.project_id != self.project_id
+            or scope.retrieval_plan_id != self.retrieval_plan_id
+            for scope in scopes
+        ):
+            raise ValueError("retrieval scopes must belong to the same plan")
+        if len({scope.scope_id for scope in scopes}) != len(scopes):
+            raise ValueError("scope_id values must be unique within a plan")
+        if len({scope.ordinal for scope in scopes}) != len(scopes):
+            raise ValueError("scope ordinals must be unique within a plan")
+        object.__setattr__(self, "scopes", scopes)
+        object.__setattr__(self, "metadata", _metadata(self.metadata, "metadata"))
+        if (
+            not isinstance(self.created_at, datetime)
+            or self.created_at.tzinfo is None
+            or self.created_at.utcoffset() is None
+        ):
+            raise ValueError("created_at must be a timezone-aware datetime")
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +666,11 @@ class EvidencePack:
     hits: tuple[RetrievalHit, ...]
     sufficiency: Sufficiency
     gap_reasons: tuple[str, ...] = ()
+    hard_fact_chunk_ids: tuple[str, ...] = ()
+    public_citation_urls: tuple[str, ...] = ()
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -519,10 +682,183 @@ class EvidencePack:
             raise ValueError("sufficiency must be sufficient, weak, or missing")
         if any(hit.project_id != self.project_id for hit in self.hits):
             raise ValueError("evidence hits must belong to the same project")
+        gap_reasons = tuple(_require(reason, "gap_reasons") for reason in self.gap_reasons)
+        object.__setattr__(self, "gap_reasons", gap_reasons)
+        hit_chunk_ids = {hit.chunk.chunk_id for hit in self.hits}
+        hard_fact_chunk_ids = tuple(
+            _require(chunk_id, "hard_fact_chunk_ids")
+            for chunk_id in self.hard_fact_chunk_ids
+        )
+        if not set(hard_fact_chunk_ids).issubset(hit_chunk_ids):
+            raise ValueError("hard_fact_chunk_ids must identify evidence hits")
+        object.__setattr__(self, "hard_fact_chunk_ids", hard_fact_chunk_ids)
+        public_citation_urls = tuple(
+            _http_url(url, "public_citation_urls")
+            for url in self.public_citation_urls
+        )
+        object.__setattr__(self, "public_citation_urls", public_citation_urls)
+        if (
+            not isinstance(self.created_at, datetime)
+            or self.created_at.tzinfo is None
+            or self.created_at.utcoffset() is None
+        ):
+            raise ValueError("created_at must be a timezone-aware datetime")
 
     @property
     def project_id(self) -> str:
         return self.request.project_id
+
+
+SectionEvidencePack = EvidencePack
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceLink:
+    """Auditable claim-to-chunk link used by coverage and fact gates."""
+
+    project_id: str
+    evidence_link_id: str
+    article_id: str
+    paragraph_id: str
+    paragraph_hash: str
+    chunk_id: str
+    support_scope: EvidenceSupportScope = "paragraph"
+    claim_type: EvidenceClaimType = "reference"
+    support_type: EvidenceSupportType = "paraphrase"
+    sentence_id: str | None = None
+    visible_words: int = 0
+    public_citation_url: str | None = None
+    validation_status: EvidenceValidationStatus = "valid"
+    metadata: Metadata = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "project_id",
+            "evidence_link_id",
+            "article_id",
+            "paragraph_id",
+            "chunk_id",
+        ):
+            object.__setattr__(self, name, _require(getattr(self, name), name))
+        paragraph_hash = _require(self.paragraph_hash, "paragraph_hash").lower()
+        if len(paragraph_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in paragraph_hash
+        ):
+            raise ValueError("paragraph_hash must be a SHA-256 hex digest")
+        object.__setattr__(self, "paragraph_hash", paragraph_hash)
+        if self.support_scope not in EVIDENCE_SUPPORT_SCOPES:
+            raise ValueError("support_scope must be paragraph or sentence")
+        if self.claim_type not in EVIDENCE_CLAIM_TYPES:
+            raise ValueError("claim_type must be reference or hard_fact")
+        if self.support_type not in EVIDENCE_SUPPORT_TYPES:
+            raise ValueError(
+                "support_type must be direct, paraphrase, or contextual"
+            )
+        if self.validation_status not in EVIDENCE_VALIDATION_STATUSES:
+            raise ValueError(
+                "validation_status must be valid, needs_review, or invalid"
+            )
+        object.__setattr__(
+            self,
+            "sentence_id",
+            _optional_text(self.sentence_id, "sentence_id"),
+        )
+        if (self.support_scope == "sentence") != (self.sentence_id is not None):
+            raise ValueError("sentence support requires sentence_id")
+        if self.claim_type == "hard_fact" and self.support_scope != "sentence":
+            raise ValueError("hard facts require sentence-level evidence")
+        if (
+            isinstance(self.visible_words, bool)
+            or not isinstance(self.visible_words, int)
+            or self.visible_words < 0
+        ):
+            raise ValueError("visible_words must be a non-negative integer")
+        if self.public_citation_url is not None:
+            object.__setattr__(
+                self,
+                "public_citation_url",
+                _http_url(self.public_citation_url, "public_citation_url"),
+            )
+        object.__setattr__(self, "metadata", _metadata(self.metadata, "metadata"))
+
+
+@dataclass(frozen=True, slots=True)
+class ParagraphEvidenceTarget:
+    paragraph_id: str
+    paragraph_hash: str
+    visible_words: int
+    eligible: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paragraph_id", _require(self.paragraph_id, "paragraph_id"))
+        normalized_hash = _require(self.paragraph_hash, "paragraph_hash").lower()
+        if len(normalized_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_hash
+        ):
+            raise ValueError("paragraph_hash must be a SHA-256 hex digest")
+        object.__setattr__(self, "paragraph_hash", normalized_hash)
+        if (
+            isinstance(self.visible_words, bool)
+            or not isinstance(self.visible_words, int)
+            or self.visible_words < 0
+        ):
+            raise ValueError("visible_words must be a non-negative integer")
+        if not isinstance(self.eligible, bool):
+            raise ValueError("eligible must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class HardFactSentenceTarget:
+    paragraph_id: str
+    sentence_id: str
+    paragraph_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paragraph_id", _require(self.paragraph_id, "paragraph_id"))
+        object.__setattr__(self, "sentence_id", _require(self.sentence_id, "sentence_id"))
+        normalized_hash = _require(self.paragraph_hash, "paragraph_hash").lower()
+        if len(normalized_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_hash
+        ):
+            raise ValueError("paragraph_hash must be a SHA-256 hex digest")
+        object.__setattr__(self, "paragraph_hash", normalized_hash)
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCoverageReport:
+    eligible_paragraphs: int
+    supported_paragraphs: int
+    hard_fact_sentences: int
+    supported_hard_fact_sentences: int
+
+    def __post_init__(self) -> None:
+        for name in (
+            "eligible_paragraphs",
+            "supported_paragraphs",
+            "hard_fact_sentences",
+            "supported_hard_fact_sentences",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.supported_paragraphs > self.eligible_paragraphs:
+            raise ValueError("supported_paragraphs exceeds eligible_paragraphs")
+        if self.supported_hard_fact_sentences > self.hard_fact_sentences:
+            raise ValueError(
+                "supported_hard_fact_sentences exceeds hard_fact_sentences"
+            )
+
+    @property
+    def paragraph_coverage(self) -> float:
+        if self.eligible_paragraphs == 0:
+            return 1.0
+        return self.supported_paragraphs / self.eligible_paragraphs
+
+    @property
+    def hard_fact_coverage(self) -> float:
+        if self.hard_fact_sentences == 0:
+            return 1.0
+        return self.supported_hard_fact_sentences / self.hard_fact_sentences
 
 
 @dataclass(frozen=True, slots=True)

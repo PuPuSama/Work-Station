@@ -8,6 +8,7 @@ from .contracts import (
     EmbeddingBatch,
     EvidencePack,
     EvidencePackRequest,
+    EvidenceLink,
     KnowledgeChunk,
     KnowledgeProject,
     KnowledgeSource,
@@ -15,6 +16,7 @@ from .contracts import (
     ResearchResult,
     RetrievalHit,
     RetrievalQuery,
+    RetrievalPlan,
     SourceSnapshot,
     SourceCandidate,
 )
@@ -61,6 +63,36 @@ class EvidencePackRepository(Protocol):
     def get_evidence_pack(
         self, project_id: str, evidence_pack_id: str
     ) -> EvidencePack | None: ...
+
+
+@runtime_checkable
+class RetrievalPlanRepository(Protocol):
+    """Persistence boundary for outline-versioned retrieval intent."""
+
+    def save_retrieval_plan(self, plan: RetrievalPlan) -> None: ...
+
+    def get_retrieval_plan(
+        self, project_id: str, retrieval_plan_id: str
+    ) -> RetrievalPlan | None: ...
+
+
+@runtime_checkable
+class EvidenceLinkRepository(Protocol):
+    """Persistence boundary for article claims linked to active knowledge."""
+
+    def save_evidence_link(self, link: EvidenceLink) -> None: ...
+
+    def list_evidence_links(
+        self, project_id: str, article_id: str
+    ) -> Sequence[EvidenceLink]: ...
+
+    def mark_paragraph_links_for_review(
+        self,
+        project_id: str,
+        article_id: str,
+        paragraph_id: str,
+        current_paragraph_hash: str,
+    ) -> int: ...
 
 
 @runtime_checkable
