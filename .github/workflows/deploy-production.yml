@@ -62,14 +62,15 @@ jobs:
         run: npm run build
 
   deploy:
-    name: Deploy /root/article
+    name: Deploy /home/ubuntu/Work-Station
     needs: quality
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
     env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_HOST: 43.154.92.36
+      DEPLOY_USER: ubuntu
       DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
       DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
     steps:
@@ -79,7 +80,6 @@ jobs:
       - name: Validate deployment secrets
         shell: bash
         run: |
-          test -n "$DEPLOY_HOST" || { echo "DEPLOY_HOST is missing" >&2; exit 1; }
           test -n "$DEPLOY_SSH_PRIVATE_KEY" || { echo "DEPLOY_SSH_PRIVATE_KEY is missing" >&2; exit 1; }
           test -n "$DEPLOY_KNOWN_HOSTS" || { echo "DEPLOY_KNOWN_HOSTS is missing" >&2; exit 1; }
 
@@ -99,5 +99,5 @@ jobs:
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
-            root@"$DEPLOY_HOST" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -s -- '$GITHUB_SHA'" < deploy/deploy-production.sh
