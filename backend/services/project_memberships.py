@@ -19,7 +19,11 @@ from services.access_control import (
     ProjectRole,
     decide_project_permission,
 )
-from services.audit_log import AuditEvent, PostgresAuditEventWriter
+from services.audit_log import (
+    AuditEvent,
+    AuditEventWriter,
+    PostgresAuditEventWriter,
+)
 
 
 class ProjectMembershipError(RuntimeError):
@@ -32,6 +36,10 @@ class ProjectMembershipTargetUnavailable(ProjectMembershipError):
 
 class ProjectMembershipConflict(ProjectMembershipError):
     """Raised when a stable audit event identity is reused."""
+
+
+class ProjectMembershipUnavailable(ProjectMembershipError):
+    """A dependency failed without exposing its private error."""
 
 
 def _required_text(value: str, field_name: str) -> str:
@@ -60,10 +68,15 @@ class ProjectMembershipRecord:
 class PostgresProjectMembershipService:
     """Mutate ProjectMembership and its AuditEvent atomically."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        audit: AuditEventWriter | None = None,
+    ) -> None:
         self._engine = engine
         self._access = PostgresProjectAccessRepository(engine)
-        self._audit = PostgresAuditEventWriter()
+        self._audit = audit or PostgresAuditEventWriter()
 
     def grant(
         self,
@@ -113,7 +126,7 @@ class PostgresProjectMembershipService:
         normalized_event_id = _required_text(event_id, "event_id")
         normalized_role = _project_role(role)
 
-        facts = self._access.resolve_project_access_in_connection(
+        facts = self._access.lock_project_access_in_connection(
             connection,
             actor,
             normalized_project_id,
@@ -130,6 +143,7 @@ class PostgresProjectMembershipService:
                 workspace_users.c.user_id == normalized_target,
                 workspace_users.c.status == "active",
             )
+            .with_for_update()
         ).scalar_one_or_none()
         if target_exists is None:
             raise ProjectMembershipTargetUnavailable(
@@ -157,7 +171,7 @@ class PostgresProjectMembershipService:
             },
         )
         connection.execute(statement)
-        self._audit.append(
+        self._append_audit(
             connection,
             AuditEvent(
                 organization_id=actor.organization_id,
@@ -221,7 +235,7 @@ class PostgresProjectMembershipService:
         normalized_target = _required_text(target_user_id, "target_user_id")
         normalized_event_id = _required_text(event_id, "event_id")
 
-        facts = self._access.resolve_project_access_in_connection(
+        facts = self._access.lock_project_access_in_connection(
             connection,
             actor,
             normalized_project_id,
@@ -239,6 +253,7 @@ class PostgresProjectMembershipService:
                 project_memberships.c.project_id == normalized_project_id,
                 project_memberships.c.user_id == normalized_target,
             )
+            .with_for_update()
         ).scalar_one_or_none()
         if existing_role is None:
             return False
@@ -249,7 +264,7 @@ class PostgresProjectMembershipService:
                 project_memberships.c.user_id == normalized_target,
             )
         )
-        self._audit.append(
+        self._append_audit(
             connection,
             AuditEvent(
                 organization_id=actor.organization_id,
@@ -264,6 +279,20 @@ class PostgresProjectMembershipService:
         )
         return True
 
+    def _append_audit(
+        self,
+        connection: Connection,
+        event: AuditEvent,
+    ) -> None:
+        try:
+            self._audit.append(connection, event)
+        except IntegrityError:
+            raise
+        except Exception as exc:
+            raise ProjectMembershipUnavailable(
+                "project membership change is unavailable"
+            ) from exc
+
 
 __all__ = [
     "PostgresProjectMembershipService",
@@ -271,4 +300,5 @@ __all__ = [
     "ProjectMembershipError",
     "ProjectMembershipRecord",
     "ProjectMembershipTargetUnavailable",
+    "ProjectMembershipUnavailable",
 ]

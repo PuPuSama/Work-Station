@@ -110,13 +110,16 @@
 - 受控云端或公司私有部署。
 - 先增加三个受限对话写操作：重新检索产品、确认后替换产品、版本快照后重写指定章节。再根据明确业务目标决定 GSC、Semrush 和更多写操作。
 
-实施状态（2026-07-30）：
+实施状态（2026-07-31）：
 
 - 已新增 Organization、User、Team、TeamMembership、显式 Project Ownership、
   ProjectMembership 和 append-only Audit Event；
 - 已实现统一权限矩阵、PostgreSQL 事实查询和事务内 Audit Writer；
 - 已实现不携带 Role 的签名 Actor Session，以及授权/撤销/审计同事务的
   ProjectMembership Service；
+- 已接入 Project-scoped ProjectMembership HTTP 授权/撤销：请求只能提交
+  `editor/reviewer/viewer`，事务内重新检查 `project.members.manage` 并锁定全部可撤权
+  事实，跨组织目标不泄露，Audit 故障回滚；前端成员管理尚未接入；
 - 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
   写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
   Org Admin 的 Organization-scoped HTTP 命令递增目标版本并与安全 Audit 同事务，请求

@@ -42,6 +42,29 @@ Set-Location D:\Project\article\article-agent-formal\backend
 - 成员授权/撤销与 Audit Event 同事务；
 - 重复 Event ID 会回滚同事务内的成员角色更新。
 
+### ProjectMembership HTTP 与授权事实锁
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_project_membership_http `
+  tests.test_m7_access_control `
+  tests.test_m7_access_control_postgres `
+  tests.test_m7_server_request_security -v
+```
+
+结果：
+
+- 28 tests；
+- PUT 只接受 `editor/reviewer/viewer` 和无额外字段的 Body，DELETE 为项目级幂等撤销；
+- 未认证 401，Editor 403，Owning Team Lead 可管理成员；
+- 跨 Organization Project 返回 403，跨 Organization Target 返回 404；
+- 授权/撤销只产生固定 Audit Action，重复撤销不伪造事件；
+- Audit Writer 故障返回脱敏 503，Membership 与 Audit 同事务回滚；
+- 成员写事务锁定 Actor 的可撤权授权事实；并发 Team Lead 降级在事务完成前因锁超时
+  被拒绝，排除 check-then-revoke 竞态；
+- Server Mode 白名单只开放精确 PUT/DELETE 路径，POST 和其他未迁移变体继续拒绝。
+
 ### Alembic 往返和重复升级
 
 在确认 M7 新表均为 0 行后执行：
@@ -155,7 +178,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 556 tests；
+- 559 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -674,8 +697,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 ## 当前未验证或未接入
 
 - Actor Session、External Identity Mapping、OIDC/JWKS 验签、PKCE Callback 与登录页
-  已接入；Session Version 校验与 Org Admin 撤销 HTTP/事务服务已完成，但成员管理 UI、
-  具体生产 Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
+  已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
+  授权/撤销 HTTP/事务服务已完成，但成员管理 UI、邀请/Team 管理、具体生产 Provider
+  注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备

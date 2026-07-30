@@ -286,16 +286,34 @@ with engine.begin() as connection:
 先提交权限修改 -> 再单独写审计
 ```
 
-当前尚未提供 Membership HTTP 写 API；`PostgresProjectMembershipService` 仍是唯一正式
-成员写服务。测试夹具可直接插入，但生产代码新增权限或业务写操作时必须组合 Audit
-Writer。
+项目成员管理 HTTP 只暴露两条项目级命令：
 
-`PostgresProjectMembershipService` 已提供两层接口：
+- `PUT /api/projects/{project}/members/{user_id}`：Body 只允许
+  `{"role":"editor|reviewer|viewer"}`；
+- `DELETE /api/projects/{project}/members/{user_id}`：无请求 Body，重复撤销返回
+  `revoked=false`。
+
+Actor 和 Organization 只来自已验证 Cookie，Project 只来自规范化 Path。新增/改角色时
+目标 User 必须是同 Organization 的 Active User；撤销允许清理已经存在的旧 Membership，
+并以“Membership 是否存在”返回幂等结果。客户端不能提交 Organization、Effective
+Permission 或 `org_admin/team_lead`；后两种是 Organization/Team 事实，不是
+ProjectMembership。跨组织 Project 统一 403，PUT 的跨组织或不可用目标统一 404，避免
+泄露其他租户的用户状态。
+
+`PostgresProjectMembershipService` 是唯一正式成员写服务，并提供两层接口：
 
 - `grant/revoke`：自行建立单个 PostgreSQL 事务；
 - `grant_in_transaction/revoke_in_transaction`：加入调用方已有业务事务。
 
-稳定 `event_id` 若重复会触发唯一约束；数据库错误会使同一事务内的成员变更一起回滚，不会出现“权限已变但审计没写”的状态。
+服务在事务内重新计算 `project.members.manage`，并对所有能够撤销本次授权结论的现有事实
+加行锁，包括 Organization/User/Project Ownership、Actor 的 TeamMembership 或
+ProjectMembership；目标 User 和待删除的 Membership 也会加锁。这样 HTTP 依赖中的初次
+检查只负责尽早拒绝，真正写入不会遭遇“检查通过后并发撤权仍继续提交”的竞态。
+
+成功授权与撤销分别追加 `project.membership.granted` 和
+`project.membership.revoked`。稳定 `event_id` 若重复会触发唯一约束；数据库或 Audit
+错误会使同一事务内的成员变更一起回滚，不会出现“权限已变但审计没写”的状态。公开
+HTTP 错误只返回固定 409/503，不回显底层数据库、Audit Writer 或 Secret。
 
 已迁移的 Server Task 命令使用同一原则：
 
@@ -359,7 +377,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
 | `backend/services/server_task_commands.py` | 已迁移 Server Task 写操作的事务命令 | 锁定可撤权事实、Action 固定权限与 Details 白名单、CAS 与 Audit 同事务 |
-| `backend/server_project_http.py` | Server Mode Project Directory、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、每次请求查数据库权限、写入用 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
+| `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读/确定性重写与私有资产下载 API | 路径必须含 Project、成员 Body/角色白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内原子创建、终态与安全 Audit 同事务 |
@@ -404,6 +422,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_object_orphan_reconciliation.py` | Orphan PostgreSQL 集成测试 | 注册/未注册 orphan、快照/Task 引用、指纹变化、跨项目、删除失败重试 |
 | `backend/tests/test_m7_knowledge_object_storage.py` | 产品/知识资产授权与 M2 适配测试 | 上传和下载分别授权、跨项目适配拒绝 |
 | `backend/tests/test_m7_object_store_s3.py` | 可选真实 S3 兼容往返测试 | 专用测试 Bucket、Put/Get/List/Sign/Delete、对象清理 |
+| `backend/tests/test_m7_project_membership_http.py` | ProjectMembership HTTP 与并发授权测试 | Body/角色边界、跨组织拒绝、Audit 回滚、授权事实行锁 |
 
 ## 9. 后续 M7 迁移顺序
 
@@ -420,11 +439,14 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
    返回 503，不会退回本地全局数据；
 5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run
    Start/Resume 和原始对象打开，在 Server Mode 单独返回 503；
-6. Project Directory、Task 列表/单条读取和确定性受限操作已新增显式 Actor/Project
-   Scope；继续给 Project 管理写入、其他文章写入和通用 Batch/Worker 增加权限依赖；
+6. Project Directory、ProjectMembership 授权/撤销、Task 列表/单条读取和确定性受限
+   操作已新增显式 Actor/Project Scope；继续给其他 Project 管理写入、文章写入和通用
+   Batch/Worker 增加权限依赖；
 7. OIDC 登录只在四项 Provider 配置完整时开放，缺项或实时 Discovery/JWKS 失败均
    fail closed；
-8. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
+8. ProjectMembership HTTP 只允许 `org_admin/team_lead` 管理
+   `editor/reviewer/viewer`，服务事务重新授权并锁定可撤权事实；
+9. 本地模式继续使用现有单密码入口，不把它映射成生产用户。
 
 `/api/auth/login` 在 Server Mode 仍明确返回 503，绝不使用 `APP_PASSWORD` 签发
 Actor。标准入口是 `/api/auth/oidc/start` 与 `/api/auth/oidc/callback`；

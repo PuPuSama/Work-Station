@@ -189,6 +189,7 @@ from services.oidc_login import (
     OidcLoginStateError,
 )
 from services.project_directory import PostgresProjectDirectory
+from services.project_memberships import PostgresProjectMembershipService
 from services.server_auth import (
     SERVER_AUTH_COOKIE_NAME,
     load_server_actor_session_codec,
@@ -293,6 +294,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_directory",
         None,
     )
+    previous_server_project_memberships = getattr(
+        application.state,
+        "server_project_memberships",
+        None,
+    )
     previous_server_project_object_service = getattr(
         application.state,
         "server_project_object_service",
@@ -325,6 +331,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_directory = None
+    application.state.server_project_memberships = None
     application.state.server_project_object_service = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
@@ -372,6 +379,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_directory = (
             PostgresProjectDirectory(server_engine)
+        )
+        application.state.server_project_memberships = (
+            PostgresProjectMembershipService(server_engine)
         )
         application.state.server_confirmed_product_selection = (
             PostgresConfirmedProductSelection(server_engine)
@@ -469,6 +479,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_directory = (
                 previous_server_project_directory
+            )
+            application.state.server_project_memberships = (
+                previous_server_project_memberships
             )
             application.state.server_project_object_service = (
                 previous_server_project_object_service
@@ -667,6 +680,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_directory = (
             previous_server_project_directory
+        )
+        application.state.server_project_memberships = (
+            previous_server_project_memberships
         )
         application.state.server_project_object_service = (
             previous_server_project_object_service

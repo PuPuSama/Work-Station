@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import uuid
+from typing import Literal
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -28,6 +31,12 @@ from services.project_directory import (
     AccessibleProject,
     PostgresProjectDirectory,
     ProjectDirectoryDenied,
+)
+from services.project_memberships import (
+    PostgresProjectMembershipService,
+    ProjectMembershipConflict,
+    ProjectMembershipTargetUnavailable,
+    ProjectMembershipUnavailable,
 )
 from services.server_auth import SERVER_AUTH_COOKIE_NAME, server_mode_enabled
 from services.server_article_images import (
@@ -130,6 +139,24 @@ class ProjectRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=0)
+
+
+class ProjectMembershipUpdateRequest(BaseModel):
+    """Accept one explicit project role, never an effective permission set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["editor", "reviewer", "viewer"]
+
+
+class ProjectMembershipResponse(BaseModel):
+    user_id: str
+    role: Literal["editor", "reviewer", "viewer"]
+
+
+class ProjectMembershipRevokeResponse(BaseModel):
+    user_id: str
+    revoked: bool
 
 
 class FinalAiCheckUpdateRequest(BaseModel):
@@ -338,6 +365,22 @@ def _project_directory(request: Request) -> PostgresProjectDirectory:
     return directory
 
 
+def _project_membership_service(
+    request: Request,
+) -> PostgresProjectMembershipService:
+    service = getattr(
+        request.app.state,
+        "server_project_memberships",
+        None,
+    )
+    if not isinstance(service, PostgresProjectMembershipService):
+        raise HTTPException(
+            status_code=503,
+            detail="Project membership management is not available.",
+        )
+    return service
+
+
 def _task_store(
     request: Request,
     authorized: AuthorizedProjectRequest,
@@ -515,6 +558,95 @@ def list_accessible_projects(
             status_code=403,
             detail="project access denied",
         ) from exc
+
+
+@router.put(
+    "/{project}/members/{user_id}",
+    response_model=ProjectMembershipResponse,
+)
+def grant_project_membership(
+    project: str,
+    user_id: str,
+    payload: ProjectMembershipUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectMembershipResponse:
+    del project
+    try:
+        record = _project_membership_service(request).grant(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            target_user_id=user_id,
+            role=payload.role,
+            event_id=f"project_member_{uuid.uuid4().hex}",
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ProjectMembershipTargetUnavailable as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Project member target is unavailable.",
+        ) from exc
+    except ProjectMembershipConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Project membership change conflicted.",
+        ) from exc
+    except ProjectMembershipUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project membership change is temporarily unavailable.",
+        ) from exc
+    return ProjectMembershipResponse(
+        user_id=record.user_id,
+        role=record.role,
+    )
+
+
+@router.delete(
+    "/{project}/members/{user_id}",
+    response_model=ProjectMembershipRevokeResponse,
+)
+def revoke_project_membership(
+    project: str,
+    user_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectMembershipRevokeResponse:
+    del project
+    try:
+        revoked = _project_membership_service(request).revoke(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            target_user_id=user_id,
+            event_id=f"project_member_{uuid.uuid4().hex}",
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ProjectMembershipConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Project membership change conflicted.",
+        ) from exc
+    except ProjectMembershipUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project membership change is temporarily unavailable.",
+        ) from exc
+    return ProjectMembershipRevokeResponse(
+        user_id=user_id.strip(),
+        revoked=revoked,
+    )
 
 
 @router.get(
