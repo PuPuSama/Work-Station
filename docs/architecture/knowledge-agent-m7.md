@@ -162,13 +162,15 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不把现有 `APP_PASSWORD` Cookie 假装成 User；
 - 不猜测或内置 Auth0、Keycloak、Entra ID 等具体供应商；正式 Provider 注册、生产
   Redirect URI、租户策略和 Conformance 冒烟仍需部署环境确认；
-- 项目显式成员 UI 已接入；Actor Session 全会话撤销仍只有后端命令，没有组织级前端入口；
+- 项目显式成员 UI 与 Organization Admin Console 已接入；Actor Session 全会话撤销已有
+  组织级确认入口；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前只有产品重新发现这一条
   Operation-specific Job 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
-- 不接邀请或外部身份关联 UI；Organization Admin Console 已接入 Workspace User、
-  全会话撤销、Team 与 TeamMembership，但生产 IdP 管理仍不在本地应用内；
+- 不接邀请与生产 IdP Provider 配置管理；Organization Admin Console 已接入
+  Workspace User、全会话撤销、Team、TeamMembership 与 External Identity 映射，
+  但 Discovery/JWKS、Client Secret 和 Redirect URI 仍由部署环境管理；
 - 不把已完成的 S3 适配器接入旧 Raw Artifact HTTP 路由；
 - 不接生产对象存储、生产部署或密钥服务。
 
@@ -387,7 +389,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_auth.py` | 服务器 Actor Session 的签名与解析 | Token 不带 Role、携带正整数 Session Version、独立 Secret、默认不开启 |
 | `backend/services/actor_sessions.py` | 数据库 Session Version 校验与全会话撤销服务 | 每请求校验 Active Org/User、Org Admin、版本递增与 Audit 同事务 |
 | `backend/services/external_identity.py` | 已验证外部身份到本地 Actor 的解析与 Session Exchange | 不接受原始 Token、不信任外部 Role、签发绑定数据库 Session Version |
-| `backend/services/external_identity_provisioning.py` | External Identity Link/Revoke | Org Admin、Subject 哈希审计目标、业务写入与审计同事务 |
+| `backend/services/external_identity_provisioning.py` | External Identity 目录、Link/Revoke 事务服务 | Org Admin、Subject 不进入公开读模型、稳定 Mapping ID、业务写入与审计同事务 |
+| `backend/server_identity_http.py` | Organization-scoped External Identity HTTP | Subject 只允许出现在 Link 请求；列表/响应/撤销只使用 Mapping ID，输入字段白名单与统一安全错误 |
 | `backend/services/oidc_identity.py` | OIDC 配置、Discovery/JWKS、Code Exchange 和 ID Token 验证 | 固定 RS256、精确 Issuer/Audience、Nonce/时间门禁、未知 Kid 刷新、错误不泄露 Secret |
 | `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
@@ -399,6 +402,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/server-project-members.tsx` | Server 显式成员 Roster/Candidate、角色更新与撤销 UI | 只消费 Project-scoped API、Disabled 只允许撤销、分页、就近反馈、前端角色不作为安全边界 |
 | `frontend/src/components/organization-admin-entry.tsx` | `/organization` 的 Server 身份与组织边界入口 | Auth Status 必须明确为 Server 且返回已认证 Organization；失败不降级到 Local |
 | `frontend/src/components/organization-admin-console.tsx` | Workspace User/Session 与 Team/TeamMembership 管理控制台 | 只传字段白名单、后端游标分页、危险操作确认、Manager/Lead 文案分离、前端状态不作为授权 |
+| `frontend/src/components/organization-external-identities.tsx` | External Identity 关联、目录与撤销 UI | Subject 只在受控输入中短暂存在且成功后清空；列表/撤销只持有 Mapping ID；危险操作确认 |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
@@ -446,6 +450,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
 | `backend/tests/test_m7_server_request_security.py` | 请求授权和真实 Lifespan 接线测试 | 旧 API 阻断、Knowledge 全局依赖、权限语义、本地兼容 |
 | `backend/tests/test_m7_external_identity.py` | Identity 映射、交换与 PostgreSQL 集成测试 | HTTPS Issuer、跨组织拒绝、状态失效、Link/Revoke 审计 |
+| `backend/tests/test_m7_external_identity_http.py` | External Identity 管理 HTTP 与 PostgreSQL 集成测试 | 稳定分页、Subject 脱敏、幂等 Link、Mapping ID 撤销、跨组织拒绝、Audit 回滚 |
 | `backend/tests/test_m7_oidc_identity.py` | OIDC/JWKS 与浏览器登录流测试 | RSA 签名、Claim/Nonce/PKCE/State、Kid 轮换、重放/开放重定向拒绝、Secret 不泄露 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
@@ -486,8 +491,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 
 `/api/auth/login` 在 Server Mode 仍明确返回 503，绝不使用 `APP_PASSWORD` 签发
 Actor。标准入口是 `/api/auth/oidc/start` 与 `/api/auth/oidc/callback`；
-`/api/auth/status` 只报告模式、是否已认证和登录是否可用，不返回
-Organization/User/Role。
+`/api/auth/status` 报告模式、是否已认证和登录是否可用；仅在 Server Mode 且 Cookie
+通过签名、时间和数据库 Session Version 校验后返回 Organization/User，始终不返回
+Role、Session Version 或外部身份信息。
 
 外部身份边界为：
 
@@ -528,18 +534,41 @@ Project 权限查询。
 目标不存在统一拒绝；Audit 失败回滚版本且不回显底层异常。
 `POST /api/organizations/{organization_id}/users/{user_id}/sessions/revoke` 只接受空 JSON
 对象，拒绝客户端传入版本、角色或目标 Organization 事实；成功只返回目标 User ID 与
-`revoked=true`。当前 Project 成员页不暴露这条 Organization-scoped 全会话撤销命令；
-它仍只有后端接口。Token 格式从 v1 升为 v2；新代码有意拒绝旧 Cookie，所以首次部署
-必须在无流量窗口完成旧实例排空并要求重新登录。
+`revoked=true`。Project 成员页不暴露这条 Organization-scoped 命令，但
+Organization Admin Console 已提供带确认的全会话撤销入口。Token 格式从 v1 升为 v2；
+新代码有意拒绝旧 Cookie，所以首次部署必须在无流量窗口完成旧实例排空并要求重新登录。
 
 Identity Link/Revoke 只允许当前 Organization 的 Active `org_admin`，并与
 append-only Audit Event 同事务。审计 `target_id` 使用 `issuer + subject` 的 SHA-256，
 Details 只保留 Issuer 和目标本地 User，不写入原始 Subject。
 
+身份管理数据流为：
+
+```text
+POST issuer + raw subject + target user
+  -> HTTP 字段白名单与 VerifiedExternalIdentity 校验
+  -> Active Organization / Active Org Admin / Active Target User 行锁
+  -> External Identity upsert + Audit（同一事务）
+  -> SHA-256(issuer + "\n" + subject) Mapping ID
+  -> Public Mapping Record（无 Subject）
+
+DELETE organization + Mapping ID
+  -> 服务端在已授权 Organization 内部解析原始主键
+  -> status=revoked + Audit（同一事务）
+  -> Public Mapping Record（无 Subject）
+```
+
+同一 Active 映射重复 Link 是无副作用的幂等成功，不追加伪 Audit；同一身份已属于其他
+User/Organization 时统一拒绝。目录按 Mapping ID 稳定分页并保留 Revoked 行用于管理
+可见性，但原始 Subject 不进入列表、响应、撤销 URL、前端状态展示或 Audit Details。
+这条边界若在后续重构中改为随机公开 ID，也必须保留“Subject 只在写入边界出现”和
+“撤销不要求客户端重新提交 Subject”两项不变量。
+
 OIDC/JWKS、Callback、State/Nonce、PKCE 和登录 UI 已实现，因此代码能力
 `trusted_identity_source=true`。仍未完成的是具体生产 Provider 注册与 Conformance
-冒烟、Client Secret 托管/轮换证据，以及邀请、Team/User 与 Session 撤销的组织级
-管理 UI；Preflight 会实时探测 Discovery/JWKS，任一环境证据缺失时整体仍为 no-go。
+冒烟、Client Secret 托管/轮换证据，以及邀请流程；Team/User、Session 撤销和
+External Identity 映射已有组织级管理 UI。Preflight 会实时探测 Discovery/JWKS，
+任一环境证据缺失时整体仍为 no-go。
 
 请求授权链为：
 
@@ -1168,3 +1197,13 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     确认的独立命令，并在 Pending 时禁止重复提交？
 48. Console 是否仍按服务端 Cursor 分页，不把前端已加载列表误当作完整组织目录或权限
     准源？
+49. External Identity 管理是否仍只允许同 Organization 的 Active Org Admin，并且 Link
+    目标必须是同组织 Active User？
+50. 原始 Subject 是否仍只出现在 Link 请求与服务端事务内部，不进入列表/响应、撤销
+    URL、前端展示状态、公开错误或 Audit Details？
+51. Mapping ID 是否仍由 `issuer + "\n" + subject` 的 SHA-256 稳定生成，并只在已授权
+    Organization 内解析到原始数据库主键？
+52. 重复 Link 同一 Active 映射是否仍是无副作用幂等成功，而跨 User/Organization 冲突
+    统一拒绝且不泄露已有映射归属？
+53. Link/Revoke 与 Audit 是否仍处于同一事务，Audit 失败时是否回滚映射变更并对外返回
+    不含 Subject、数据库错误或审计异常正文的统一错误？

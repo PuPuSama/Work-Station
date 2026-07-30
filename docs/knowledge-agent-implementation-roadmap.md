@@ -125,17 +125,17 @@
 - 已为 Actor Session 增加数据库版本绑定：OIDC Exchange 把当前 `session_version`
   写入 Cookie，每次 Server 请求在项目授权前重新校验 Active Organization/User 与版本；
   Org Admin 的 Organization-scoped HTTP 命令递增目标版本并与安全 Audit 同事务，请求
-  不接受版本或角色字段；全会话撤销的前端入口尚未接入；
+  不接受版本或角色字段；全会话撤销已接入 Organization Admin Console 并要求确认；
 - 已接入 Organization-scoped Workspace User 后端目录与生命周期命令：仅同组织 Active
   Org Admin 可读写，稳定分页返回 Active/Disabled 账号、Team/Project 显式成员数和
   `login_linked` 布尔值，不公开 Session Version 或外部身份；创建只建立本地 Active
   User，更新显示名/状态/组织角色；禁用和恢复都使旧 Cookie 失效，最后一个 Active
-  Org Admin 受保护，写入与 Audit 同事务；邀请和组织级前端控制台尚未实现；
+  Org Admin 受保护，写入与 Audit 同事务；组织级前端控制台已实现，邀请仍未实现；
 - 已接入 Organization-scoped Team/TeamMembership 后端命令：仅 Active Org Admin
   可读写，Team 与成员 Roster 稳定分页；Manager 指针只接受同组织 Active User 且不产生
   权限，项目继承仍只来自 Active Team 的显式 `team_lead`；归档立即停止继承访问并保留
   既有成员供清理，Disabled User 不可新增/改角色但旧成员可撤销；全部变更与 Audit
-  同事务；组织级前端控制台尚未实现；
+  同事务；组织级前端控制台已实现；
 - 已实现项目级 PostgreSQL Task Repository、SQLite Task 摘要校验导入、
   Revision CAS 和带 SKIP LOCKED/Worker Lease 的 PostgreSQL Job Queue；
 - 已实现 Active Job 排空门和 SQLite Terminal Job 历史迁移，按稳定 ID、
@@ -188,8 +188,11 @@
 - 已接入 `/organization` Organization Admin Console：仅 Server Auth Status 能提供
   已认证 Organization 时挂载；账号创建/资料/角色/状态、全会话撤销、Team 创建/归档、
   TeamMembership 授权/改角色/撤销均调用已验证的 Organization-scoped API；危险操作
-  使用确认 Dialog，加载与分页状态有界，Manager 与 Team Lead 明确分离；邀请与外部身份
-  关联 UI 仍未实现；
+  使用确认 Dialog，加载与分页状态有界，Manager 与 Team Lead 明确分离；
+- 已接入 Organization-scoped External Identity 目录、关联和撤销：原始 Subject 只在
+  Link 请求出现，公开目录/响应/Audit 不返回 Subject；稳定 Mapping ID 用于分页和撤销，
+  同一 Active 映射重复 Link 幂等，跨组织/用户冲突统一拒绝，写入与 Audit 同事务；
+  Organization Admin Console 只短暂持有 Subject 输入并在成功后清空；邀请仍未实现；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
 - 已让九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定

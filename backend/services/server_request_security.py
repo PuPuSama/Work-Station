@@ -128,6 +128,23 @@ def server_http_route_available(method: str, path: str) -> bool:
     ):
         return True
     if (
+        normalized_method in {"GET", "POST"}
+        and len(parts) == 5
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "external-identities"
+    ):
+        return True
+    if (
+        normalized_method == "DELETE"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "organizations"]
+        and bool(parts[3])
+        and parts[4] == "external-identities"
+        and bool(parts[5])
+    ):
+        return True
+    if (
         normalized_method == "PATCH"
         and len(parts) == 6
         and parts[1:3] == ["api", "organizations"]

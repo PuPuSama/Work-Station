@@ -178,6 +178,9 @@ from services.external_identity import (
     ExternalIdentityNotAuthorized,
     PostgresExternalIdentityRepository,
 )
+from services.external_identity_provisioning import (
+    PostgresExternalIdentityProvisioningService,
+)
 from services.oidc_identity import (
     OidcProviderSettings,
     OidcProviderUnavailable,
@@ -267,6 +270,7 @@ from knowledge_agent.settings import load_knowledge_agent_settings
 from server_project_http import router as server_project_router
 from server_admin_http import router as server_admin_router
 from server_team_http import router as server_team_router
+from server_identity_http import router as server_identity_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -337,6 +341,11 @@ async def app_lifespan(application: FastAPI):
         "server_team_administration",
         None,
     )
+    previous_server_external_identity_provisioning = getattr(
+        application.state,
+        "server_external_identity_provisioning",
+        None,
+    )
     server_product_rediscovery = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
@@ -352,6 +361,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_actor_session_revocation = None
     application.state.server_workspace_users = None
     application.state.server_team_administration = None
+    application.state.server_external_identity_provisioning = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -379,6 +389,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_team_administration = (
             PostgresTeamAdministrationService(server_engine)
+        )
+        application.state.server_external_identity_provisioning = (
+            PostgresExternalIdentityProvisioningService(server_engine)
         )
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
@@ -524,6 +537,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_team_administration = (
                 previous_server_team_administration
+            )
+            application.state.server_external_identity_provisioning = (
+                previous_server_external_identity_provisioning
             )
             if shutdown_error is not None:
                 raise shutdown_error
@@ -730,6 +746,9 @@ async def app_lifespan(application: FastAPI):
         application.state.server_team_administration = (
             previous_server_team_administration
         )
+        application.state.server_external_identity_provisioning = (
+            previous_server_external_identity_provisioning
+        )
 
 
 app = FastAPI(
@@ -741,6 +760,7 @@ app.include_router(knowledge_agent_router)
 app.include_router(server_project_router)
 app.include_router(server_admin_router)
 app.include_router(server_team_router)
+app.include_router(server_identity_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

@@ -283,7 +283,7 @@ $env:ARTICLE_AGENT_CONFIG = `
 
 结果：
 
-- 571 tests；
+- 576 tests；
 - 全部通过；
 - 2 skipped（真实 S3 与真实外部 LightRAG 默认显式跳过）；
 - 未调用真实外部 LLM、Embedding 或 LightRAG 服务。
@@ -791,6 +791,29 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 审计目标使用 Subject 哈希，审计 Details 不保存原始 Subject；
 - Preflight Head 已更新为 `20260731_0013`。
 
+### External Identity 管理 HTTP 与组织控制台
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_external_identity_http `
+  tests.test_m7_external_identity -v
+```
+
+结果：
+
+- 13 tests，全部通过；
+- 列表只允许同 Organization 的 Active Org Admin，按 64 字符稳定 Mapping ID 游标分页；
+- 列表、Link/Revoke 响应和公开错误不返回原始 Subject；
+- Link 目标必须是同组织 Active User；额外 Role 字段、非法 Issuer、普通 Member 和跨
+  Organization 请求 fail closed；
+- 同一 Active 映射重复 Link 幂等且不追加第二条 Audit；撤销只接收 Mapping ID，重复
+  撤销返回 404；
+- Audit Writer 故障返回脱敏 503，并回滚新映射；
+- Organization Admin Console 已新增外部身份 Tab；Subject 使用非回显输入，成功后清空，
+  列表只保存 Mapping ID，撤销使用确认 Dialog；
+- ESLint、TypeScript 与 Next.js production build 通过，`/organization` 路由正常生成。
+
 ## 诊断记录
 
 第一次完整回归未指定 CI Config，2 个既有 Humanize 测试读取本机默认
@@ -805,8 +828,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   已接入；Session Version 校验、Org Admin 全会话撤销，以及 ProjectMembership
   Roster/Candidate/授权/撤销 HTTP、事务服务与 Project Console 已完成；Workspace User
   和 Team/TeamMembership 后端目录、创建与生命周期命令及 Organization Admin Console
-  也已完成，但邀请、外部身份关联 UI、具体生产 Provider 注册、Client Secret 轮换和
-  Conformance 冒烟尚未执行；
+  也已完成，External Identity 目录/关联/撤销 HTTP 与 UI 已接入；但邀请、具体生产
+  Provider 注册、Client Secret 轮换和 Conformance 冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备
@@ -823,8 +846,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、
   Orphan 双观察延迟清理和 no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
-- 前端已新增 Server OIDC、SQL Project Directory、Project Membership Console 与窄范围
-  Delivery Console，并通过 lint/build；Article、Batch、Organization/Team/User 管理等
-  其余 M7 界面尚未接入 Server API。
+- 前端已新增 Server OIDC、SQL Project Directory、Project Membership Console、窄范围
+  Delivery Console，以及 Organization/Team/User/Session/External Identity 管理，并
+  通过 lint/build；Article、Batch 与邀请等其余 M7 界面尚未接入 Server API。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。

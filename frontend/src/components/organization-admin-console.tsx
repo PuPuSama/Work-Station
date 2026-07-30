@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   Building2,
   CheckCircle2,
+  Fingerprint,
   Loader2,
   LogOut,
   Plus,
@@ -21,6 +22,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
+import { OrganizationExternalIdentities } from "@/components/organization-external-identities";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -188,7 +190,7 @@ export function OrganizationAdminConsole({
               <h1 className="text-xl font-semibold">组织管理</h1>
             </div>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              管理本组织的本地账号、登录会话、团队及 Team Lead。邀请和外部身份关联仍由独立流程负责。
+              管理本组织的本地账号、登录会话、团队、Team Lead 与外部登录身份。邀请流程仍保持独立。
             </p>
             <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={organizationId}>
               {organizationId}
@@ -237,6 +239,9 @@ export function OrganizationAdminConsole({
               <TabsTrigger value="teams" className="min-h-10">
                 <Building2 />团队与成员
               </TabsTrigger>
+              <TabsTrigger value="identities" className="min-h-10">
+                <Fingerprint />外部身份
+              </TabsTrigger>
             </TabsList>
             <TabsContent value="users">
               <WorkspaceUsersPanel
@@ -272,6 +277,12 @@ export function OrganizationAdminConsole({
                   加载更多团队
                 </Button>
               )}
+            </TabsContent>
+            <TabsContent value="identities">
+              <OrganizationExternalIdentities
+                organizationId={organizationId}
+                users={users}
+              />
             </TabsContent>
           </Tabs>
         ) : null}

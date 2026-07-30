@@ -433,6 +433,22 @@ export type WorkspaceTeamMemberPage = {
   next_after_user_id: string | null;
 };
 
+export type ExternalIdentityMappingStatus = "active" | "revoked";
+
+export type ExternalIdentityMapping = {
+  mapping_id: string;
+  issuer: string;
+  user_id: string;
+  user_display_name: string;
+  user_status: WorkspaceUserStatus;
+  status: ExternalIdentityMappingStatus;
+};
+
+export type ExternalIdentityMappingPage = {
+  items: ExternalIdentityMapping[];
+  next_after_mapping_id: string | null;
+};
+
 export type ProjectMembershipMutation = {
   user_id: string;
   role: ProjectMembershipRole;
