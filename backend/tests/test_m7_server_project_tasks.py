@@ -993,6 +993,242 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(stored["revision"], 1)
                 self.assertFalse(local_state.exists())
 
+    def test_server_saves_outline_draft_and_confirmation_with_cas(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "revision": 0,
+                "status": "outline_confirmed",
+                "selected_title": "Current title",
+                "outline": "## Confirmed outline",
+                "outline_draft": "## Confirmed outline",
+                "article": "stale article",
+                "initial_article": "stale initial article",
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+        codec = ServerActorSessionCodec(b"r" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "r" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline"
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "outline": "## Working draft",
+                            "confirmed": False,
+                        },
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "outline": "   ",
+                            "confirmed": False,
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "outline": "## Working draft",
+                            "confirmed": False,
+                            "status": "caller-controlled",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_a}/outline"
+                        ),
+                        json={
+                            "revision": 0,
+                            "outline": "## Cross-project draft",
+                            "confirmed": False,
+                        },
+                    ).status_code,
+                    403,
+                )
+                draft = client.put(
+                    path,
+                    json={
+                        "revision": 0,
+                        "outline": "## Working draft",
+                        "confirmed": False,
+                    },
+                )
+                self.assertEqual(draft.status_code, 200, draft.text)
+                draft_body = draft.json()
+                self.assertEqual(draft_body["revision"], 1)
+                self.assertEqual(
+                    draft_body["outline"],
+                    "## Confirmed outline",
+                )
+                self.assertEqual(
+                    draft_body["outline_draft"],
+                    "## Working draft",
+                )
+                self.assertEqual(
+                    draft_body["article"],
+                    "stale article",
+                )
+                self.assertEqual(
+                    draft_body["article_versions"][-1]["kind"],
+                    "outline_draft",
+                )
+                confirmed = client.put(
+                    path,
+                    json={
+                        "revision": 1,
+                        "outline": "## Final reviewed outline",
+                        "confirmed": True,
+                    },
+                )
+                self.assertEqual(
+                    confirmed.status_code,
+                    200,
+                    confirmed.text,
+                )
+                confirmed_body = confirmed.json()
+                self.assertEqual(confirmed_body["revision"], 2)
+                self.assertEqual(
+                    confirmed_body["outline"],
+                    "## Final reviewed outline",
+                )
+                self.assertEqual(
+                    confirmed_body["outline_draft"],
+                    "## Final reviewed outline",
+                )
+                self.assertEqual(
+                    confirmed_body["status"],
+                    "outline_confirmed",
+                )
+                self.assertEqual(confirmed_body["article"], "")
+                self.assertEqual(
+                    confirmed_body["initial_article"],
+                    "",
+                )
+                self.assertEqual(
+                    confirmed_body["article_versions"][-1]["kind"],
+                    "outline",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.outline.updated",
+                        "article.outline.updated",
+                    ],
+                )
+                self.assertEqual(
+                    audit.events[0].details,
+                    {
+                        "from_revision": 0,
+                        "to_revision": 1,
+                        "status": "outline_confirmed",
+                        "confirmed": False,
+                        "outline_characters": 16,
+                    },
+                )
+                self.assertEqual(
+                    audit.events[1].details,
+                    {
+                        "from_revision": 1,
+                        "to_revision": 2,
+                        "status": "outline_confirmed",
+                        "confirmed": True,
+                        "outline_characters": 25,
+                    },
+                )
+                self.assertNotIn(
+                    "Working draft",
+                    str(audit.events),
+                )
+                self.assertNotIn(
+                    "Final reviewed outline",
+                    str(audit.events),
+                )
+                stale = client.put(
+                    path,
+                    json={
+                        "revision": 1,
+                        "outline": "## Stale outline",
+                        "confirmed": True,
+                    },
+                )
+                self.assertEqual(stale.status_code, 409)
+                self.assertEqual(len(audit.events), 2)
+                stored = repository.get(self.task_a)
+                assert stored is not None
+                self.assertEqual(stored["revision"], 2)
+                self.assertEqual(
+                    stored["outline"],
+                    "## Final reviewed outline",
+                )
+                self.assertFalse(local_state.exists())
+
     def test_server_task_api_is_not_added_to_local_mode(self) -> None:
         import app as app_module
 
@@ -1033,6 +1269,18 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/selected-title",
                     json={"revision": 0, "candidate_index": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline",
+                    json={
+                        "revision": 0,
+                        "outline": "## Reviewed outline",
+                        "confirmed": True,
+                    },
                 ).status_code,
                 404,
             )

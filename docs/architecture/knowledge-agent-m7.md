@@ -64,6 +64,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `PUT /api/projects/{project}/tasks/{task_id}/selected-title`：请求只接收 Revision
   与候选索引，服务端从当前 PostgreSQL Task 的 `title_candidates` 选择原值并使
   Outline/Article 等下游派生状态失效；不接受客户端替换标题正文；
+- 新增已审阅大纲保存/确认命令
+  `PUT /api/projects/{project}/tasks/{task_id}/outline`：请求只接收 Revision、
+  有界 Markdown 与 Confirmed 标志；草稿只追加 Version 并保留当前确认大纲和下游，
+  确认才替换正式大纲、追加 Version 并使 Article/Image/Review/Delivery 失效；
 - 新增第二个 PostgreSQL-only Task 写操作
   `PUT /api/projects/{project}/tasks/{task_id}/products`：请求只接收 Revision 和
   1–3 个 Product ID；服务端从同 Project 的正式产品目录投影已确认、且有 Published
@@ -102,7 +106,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 十一条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -431,7 +435,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
 | `backend/services/server_task_commands.py` | 已迁移 Server Task 写操作的事务命令 | 锁定可撤权事实、Action 固定权限与 Details 白名单、CAS 与 Audit 同事务 |
-| `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
+| `backend/services/server_outline_update.py` | 已审阅大纲草稿/确认的纯 Task 变换 | 内容哈希 Version 去重、草稿保留下游、确认使下游失效；不知道 HTTP/RBAC/PostgreSQL |
+| `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内创建/取消/重试、终态与安全 Audit 同事务 |
@@ -1193,7 +1198,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十条 Task 写操作、`product_rediscovery` 的 Enqueue/Runner 和窄范围
+身份代码链、十一条 Task 写操作、`product_rediscovery` 的 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
@@ -1325,3 +1330,11 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     Candidate Count/Index 而不记录标题文本？
 72. `titles` Job 在本地客户知识目录被正式 Published Knowledge Context 替换前，是否
     仍保持 Local Only 而不进入 PostgreSQL Worker Operation 集合？
+73. 大纲保存是否只接受 Revision、有界 Markdown 与 Confirmed 标志，并拒绝调用方
+    提交 Status、Audit 或其他服务端字段？
+74. 草稿保存是否只更新 `outline_draft` 并追加草稿 Version，同时保留确认大纲和下游
+    产物；确认时是否才更新 `outline` 并使下游全部失效？
+75. 大纲正文是否仍不进入 Audit，Event 是否只记录 Confirmed 与字符数，并与 Task CAS
+    处于同一事务？
+76. `outline` 生成 Job 是否在 Server Prompt Snapshot、LLM Provider 和两阶段 Worker
+    授权接线前继续保持 Local Only？

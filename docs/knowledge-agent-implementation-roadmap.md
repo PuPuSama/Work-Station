@@ -205,13 +205,16 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让十条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让十一条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
   服务端从当前 `title_candidates` 选择原值、失效下游状态并写安全 Audit；标题生成
   `titles` Job 仍依赖本地客户知识目录，因此在 Published Knowledge Context 接线前
   保持 Local Only；
+- 已新增 PostgreSQL Task 大纲草稿/确认命令：草稿保留当前确认大纲和下游产物，确认
+  才替换正式大纲并失效正文之后的派生状态；两者都追加内容哈希 Version，并以 CAS 与
+  不含 Markdown 的 Audit 原子提交；大纲生成 `outline` Job 仍保持 Local Only；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界

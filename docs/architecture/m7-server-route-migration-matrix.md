@@ -43,6 +43,7 @@
 |---|---|---|---|---|
 | 完全重写 | `POST .../rewrite-from-scratch` | `article.edit` | PostgreSQL CAS + Audit | Server Ready |
 | 选择当前标题候选 | `PUT .../selected-title` | `article.edit` | Server-owned Candidate + CAS + Audit | Server Ready |
+| 保存/确认已审阅大纲 | `PUT .../outline` | `article.edit` | PostgreSQL Version + CAS + Audit | Server Ready |
 | 选择已确认产品 | `PUT .../products` | `article.edit` | Published Evidence 投影 + CAS + Audit | Server Ready |
 | 产品重新发现 | `POST .../product-rediscovery` | `knowledge.edit` | PostgreSQL Job + S3 Inbox Evidence | Server Ready |
 | 替换指定章节 | `PUT .../article/sections` | `article.edit` | Heading Scope + Version + CAS + Audit | Server Ready |
@@ -93,6 +94,11 @@ Local Only。已迁移的 `selected-title` 命令只允许客户端提交当前 
 服务端从 PostgreSQL Task 的当前 `title_candidates` 取值；它不接受调用方替换标题正文，
 也不表示标题生成链已经切换为服务器知识准源。
 
+大纲“生成”与大纲“保存/确认”也分离：`outline` Job 仍依赖本地 Prompt Library 与 LLM
+运行链，因此不进入 PostgreSQL Worker Operation 集合。已迁移的 `PUT .../outline`
+只保存编辑者已审阅的 Markdown；草稿追加 `outline_draft` Version 但保留当前确认大纲
+和下游产物，确认则追加 `outline` Version 并使正文、图片、检查与交付产物失效。
+
 ## 6. 已完成闭环：Project Job Control
 
 已只为迁移完成的 `product_rediscovery` 增加：
@@ -129,3 +135,5 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 10. Server 单写切换后，Local Mode 是否仍可独立使用 SQLite，且两种模式不会双写？
 11. 标题选择是否仍只读取当前 PostgreSQL Task 的候选并拒绝客户端标题正文？
 12. `titles` Job 是否在发布知识上下文接线前继续保持 Local Only？
+13. 大纲草稿是否仍保留当前确认大纲和下游产物，而确认大纲才执行下游失效？
+14. `outline` 生成 Job 是否在 Server Prompt/LLM 边界接线前继续保持 Local Only？

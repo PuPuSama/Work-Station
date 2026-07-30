@@ -19,7 +19,7 @@ from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
 )
-from models import AICheck, STATUS_FINAL_AI_CHECKED, TaskRecord
+from models import STATUS_FINAL_AI_CHECKED, AICheck, TaskRecord
 from services.access_control import (
     ActorIdentity,
     ProjectAccessDenied,
@@ -52,6 +52,10 @@ from services.server_ai_screenshots import (
 from services.server_docx_export import (
     ServerArticleDocxError,
     ServerArticleDocxExport,
+)
+from services.server_outline_update import (
+    ServerOutlineUpdateError,
+    apply_reviewed_outline,
 )
 from services.server_delivery_package import (
     ServerDeliveryPackage,
@@ -100,6 +104,7 @@ from workflow.state_machine import (
     ACTION_REWRITE_FROM_SCRATCH,
     ACTION_SELECT_TITLE,
     ACTION_UPDATE_ARTICLE,
+    ACTION_UPDATE_OUTLINE,
     ACTION_UPDATE_PRODUCTS,
     WorkflowActionNotAllowed,
     ensure_action_allowed,
@@ -149,6 +154,16 @@ class ProjectTitleSelectionRequest(BaseModel):
 
     revision: int = Field(ge=0)
     candidate_index: int = Field(ge=0, le=99)
+
+
+class ProjectOutlineUpdateRequest(BaseModel):
+    """Save one reviewed outline without accepting workflow or audit fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    outline: str = Field(min_length=1, max_length=40000)
+    confirmed: bool = True
 
 
 class ProjectMembershipUpdateRequest(BaseModel):
@@ -979,6 +994,64 @@ def select_project_task_title(
         details={
             "candidate_count": len(task.title_candidates),
             "candidate_index": payload.candidate_index,
+        },
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/outline",
+    response_model=TaskRecord,
+)
+def update_project_task_outline(
+    project: str,
+    task_id: str,
+    payload: ProjectOutlineUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_UPDATE_OUTLINE)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    try:
+        outline = apply_reviewed_outline(
+            task,
+            outline=payload.outline,
+            confirmed=payload.confirmed,
+        )
+    except ServerOutlineUpdateError:
+        raise HTTPException(
+            status_code=422,
+            detail="Outline cannot be empty.",
+        ) from None
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.outline.updated",
+        details={
+            "confirmed": payload.confirmed,
+            "outline_characters": len(outline),
         },
     )
 

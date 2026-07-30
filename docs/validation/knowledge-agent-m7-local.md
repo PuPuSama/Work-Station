@@ -521,7 +521,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十条 HTTP Task 写操作分别记录 rewrite/title-selection/products/section/images/docx/tdk/
+- 十一条 HTTP Task 写操作分别记录 rewrite/title-selection/outline/products/section/images/docx/tdk/
   final-ai-screenshot/final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
@@ -918,6 +918,34 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   Local Only；
 - 完整后端回归 597 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
+- Alembic Current 与 Head 均为 `20260731_0014`。
+
+### M7 Task 大纲草稿与确认
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_saves_outline_draft_and_confirmation_with_cas `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_task_commands `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 14 tests 全部通过；
+- `PUT /api/projects/{project}/tasks/{task_id}/outline` 只接受 Revision、有界 Markdown
+  与 Confirmed 标志，额外 Workflow 字段和空白大纲返回 422；
+- Viewer 与跨项目请求 fail closed；草稿保留当前确认大纲/正文，确认后才清空下游；
+- 草稿与确认分别追加 `outline_draft` / `outline` 内容哈希 Version，并通过同一
+  `article.outline.updated` Audit Action 记录安全计数；
+- 旧 Revision 返回 409 且不增加 Version/Audit；Local Mode 不挂载该接口；
+- `POST .../outline` 生成端点仍未开放，避免在 Server Mode 复用本地 Prompt/LLM 链；
+- 完整后端回归 598 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
+- 首次把 TypeScript 与 Next build 并行运行时，两者竞争 `.next/types` 导致临时
+  `routes.js` 缺失；按 build -> lint/typecheck 复核后通过，不属于代码失败；
 - Alembic Current 与 Head 均为 `20260731_0014`。
 
 ## 诊断记录
