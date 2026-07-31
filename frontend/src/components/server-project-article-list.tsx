@@ -25,6 +25,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ServerTaskIntakePanel } from "@/components/server-task-intake-panel";
 import {
   Table,
   TableBody,
@@ -168,6 +169,11 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
+
+        <ServerTaskIntakePanel
+          customer={customer}
+          onCompleted={loadTasks}
+        />
 
         <Card className="gap-0 py-0">
           <CardHeader className="border-b px-4 py-4">

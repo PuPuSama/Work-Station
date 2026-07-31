@@ -8,6 +8,7 @@ from config import AppConfig
 from services.audit_log import AuditEventWriter
 from services.postgres_task_repository import PostgresTaskRepository
 from services.server_request_security import AuthorizedProjectRequest
+from services.server_task_intake import PostgresServerTaskIntakeService
 from services.server_task_commands import PostgresAuditedTaskWriter
 from storage import TaskStore
 
@@ -26,6 +27,7 @@ class ServerProjectTaskRuntime:
 
     scope: ServerProjectTaskScope
     store: TaskStore
+    intake: PostgresServerTaskIntakeService
     audited_writer: PostgresAuditedTaskWriter
 
 
@@ -73,6 +75,12 @@ class ServerProjectTaskStoreFactory:
                 self._config,
                 repository=repository,
                 legacy_import_enabled=False,
+            ),
+            intake=PostgresServerTaskIntakeService(
+                self._engine,
+                organization_id=scope.organization_id,
+                project_id=scope.project_id,
+                audit=self._audit,
             ),
             audited_writer=PostgresAuditedTaskWriter(
                 self._engine,

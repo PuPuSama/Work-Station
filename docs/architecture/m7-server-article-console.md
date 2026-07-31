@@ -20,6 +20,9 @@ articles/page.tsx
        -> GET /api/auth/status
        -> local  -> ProjectArticleList
        -> server -> ServerProjectArticleList
+                    -> ServerTaskIntakePanel
+                         -> POST /api/projects/{project}/tasks
+                         -> POST /api/projects/{project}/task-imports
 
 articles/[taskId]/page.tsx
   -> ProjectArticleWorkspace
@@ -53,6 +56,7 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 | `project-article-directory.tsx` | 列表页 Local/Server 组件树分流 | Auth 失败不挂载任一数据组件 |
 | `project-article-workspace.tsx` | 详情页 Local/Server 组件树分流 | Server Task 不得进入 `ArticleWorkbench` |
 | `server-project-article-list.tsx` | 读取 Project-scoped Task、搜索和状态定位 | 只调用 `/api/projects/{project}/tasks` |
+| `server-task-intake-panel.tsx` | 单条创建与 Tab 分隔行导入 | 只提交话题行和幂等键；不提交 Task ID/序号/客户/状态/Revision，不读取 Local XLSX |
 | `server-article-workbench.tsx` | 编排已迁移的人工命令与异步 Job | 每次写入提交当前 Revision；Job 只按公开 ID 轮询 |
 | `server-seo-review-panel.tsx` | Review 设置、Run 选择、逐条裁决、预览与完成 | Apply 必须回传当前精确 Preview Hash；风险与 Pending 均显式确认 |
 | `server-outline-history.tsx` | 展示 Task 内 Outline Version 并恢复草稿 | 只提交服务端 `version_index`，不回传历史正文 |
@@ -87,6 +91,8 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 
 | UI 阶段 | 接口 | 客户端允许提交的内容 |
 |---|---|---|
+| 单条创建 Task | `POST /api/projects/{project}/tasks` | Intake ID、Topic、可选竞对关键词/HTTP(S) URL |
+| 批量导入 Task | `POST /api/projects/{project}/task-imports` | Intake ID、来源标签、1–200 条规范化话题行 |
 | 标题候选 | `POST .../titles` + `GET .../titles/jobs/{job}` | Revision |
 | 完全重写 | `POST .../rewrite-from-scratch` | Revision + 显式 UI 风险确认 |
 | 选择标题 | `PUT .../selected-title` | Revision、Candidate Index |
@@ -234,19 +240,49 @@ ServerBatchPage
 仍在事务内锁定可撤权事实并按 Operation 检查 `knowledge.edit/article.edit/article.review`。
 Retry 重放服务器私有请求，浏览器不能修改 Source Revision、Task、Requester 或参数。
 
-## 11. 当前明确未接入的控制
+## 11. Server Task Intake
 
-本切片是现有 Task 的主链操作面，不是完整 Local UI 等价迁移。以下后端能力仍需专用面板：
+Task Intake 把“输入来源”和“正式 Task 身份”分开：
 
-- Server Task 导入/创建。
+```text
+ServerTaskIntakePanel
+  -> 规范化单条或 1–200 条 Tab 分隔行
+  -> POST Project-scoped Intake API
+  -> 路由要求 article.edit
+  -> PostgresServerTaskIntakeService
+       -> 事务内重锁可撤权 Project 权限
+       -> 以 Organization + Project + Intake ID 取得事务级幂等锁
+       -> 同一 Intake ID + 同一规范化摘要：返回原 Task，不追加 Audit
+       -> 同一 Intake ID + 不同摘要：409
+       -> 锁 task_store_state，服务端顺序分配 topic_index
+       -> 服务端生成 Task ID、Project customer/brand 和 server source identity
+       -> 原子写 article_tasks + task_intakes + append-only Audit
+```
+
+`task_intakes` 是不保存原始正文的幂等凭据，只含 Intake Kind、来源标签、SHA-256 摘要、
+Task ID 列表、数量和 Actor。Audit 只含 Kind、数量及首尾序号，不含 Topic、竞对关键词、
+URL、来源摘要或文件内容。Audit 失败时 Task 和 Intake Receipt 一起回滚。
+
+单条创建和行导入都不接受客户端 `task_id/topic_index/customer/brand/status/revision`。
+新 Task 的 `week_folder=server`、`task_dir=""`，后续产物继续只走 PostgreSQL 和私有
+ObjectStore。前端在一次失败重试期间保留 Intake ID；任意输入变化会生成新身份。以后把
+Textarea 替换为 CSV/XLSX Parser 时，应只替换“文件到规范化行”的前置解析层，不改变
+Project API、Receipt、服务端身份分配或事务审计边界。
+
+## 12. 仍未等价迁移的 Local 控制
+
+Task 单条创建与规范化行导入已经接入，但以下 Local 能力没有伪装成 Server 能力：
+
+- `/api/topic-files/upload` 仍写本地 Topic Library；Server 若需要原始 XLSX 留档，必须
+  先设计私有 Topic Asset、内容哈希和 Parser Version，不能把本地路径带进 Intake；
+- `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` 仍是 Local 兼容路径；Server
+  目录直接读取 Project-scoped PostgreSQL Task；
+- Project Brand/Context 元数据编辑仍缺独立 PostgreSQL Metadata Service。
 
 Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Knowledge Inbox
 审阅，不在文章工作台复制来源、发布或产品确认状态机。
 
-这些入口不能通过把 Local `ArticleWorkbench` 的 Handler 改个 URL 来补齐；每个面板都必须
-只提交 Server 契约允许的字段，并保留 Revision、权限和私有对象边界。
-
-## 12. 重构检查清单
+## 13. 重构检查清单
 
 1. Auth Status 失败时是否仍不会猜测 Local/Server？
 2. Server 列表和详情是否仍只使用显式 Project 路径？
@@ -272,3 +308,7 @@ Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Kn
     WordPress Sync、Research/Evidence 或 Raw Artifact？
 22. 来源 Review/Publish 是否仍为两个动作，产品 Confirm 是否仍不能绕过文章选择时的
     Published Current Evidence 门禁？
+23. Task Intake 是否仍不接受客户端 Task ID、序号、客户、状态、Revision 或本地路径？
+24. 同一 Intake ID 的同内容重试是否仍只产生一批 Task 和一条 Audit，不同内容是否 409？
+25. Task、Intake Receipt 与安全 Audit 是否仍为同一事务，Audit 是否仍不含 Topic/URL/
+    Source Digest？

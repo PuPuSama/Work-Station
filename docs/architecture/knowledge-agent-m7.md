@@ -215,6 +215,12 @@ M7 不一次性切换整个应用。采用 expand/contract：
   的数据库 Kind CHECK；服务层另外要求内容恰好包含一个 `{{ARTICLE}}`。降级时若仍有
   Humanize Prompt 历史，PostgreSQL 在事务内拒绝收窄 CHECK，避免删除不可变版本来迁就
   旧 Schema。
+- Alembic `20260731_0017` 新增 `task_intakes`：只保存 Project-scoped 幂等身份、输入
+  SHA-256 摘要、来源标签、Task ID 列表与创建者，不保存 Topic/关键词/URL 正文；
+- 新增 `PostgresServerTaskIntakeService`：单条创建与 1–200 条规范化行导入均在事务内
+  重新锁定 `article.edit`，以 Intake ID 串行化重试，由服务端分配 Task ID/Topic Index，
+  并原子提交 `article_tasks/task_intakes/AuditEvent`。同 ID 同摘要返回原 Task，不同摘要
+  409，Audit 故障回滚整批；
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -477,6 +483,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/migrations/versions/20260731_0014_workspace_invitations.py` | 一次性 Workspace Invitation Schema 准源 | Token 只存 Hash、复合租户 FK、状态/过期约束、每 User/Issuer 单 Pending、可升降级 |
 | `backend/migrations/versions/20260731_0015_project_prompt_snapshots.py` | Project Prompt Snapshot Schema 准源 | Head/不可变 Version/精确 Default 指针、复合 Project/User FK、Append-only Trigger |
 | `backend/migrations/versions/20260731_0016_humanize_prompt_kind.py` | Server Humanize Prompt Kind 迁移 | 三张 Prompt 表同步 Kind CHECK、保留不可变历史、含 Humanize 数据时降级 fail closed |
+| `backend/migrations/versions/20260731_0017_server_task_intakes.py` | Server Task Intake Receipt Schema | Project/Creator 复合 FK、Kind/Digest/Task ID 数量约束、可升降级 |
+| `backend/services/server_task_intake.py` | Task 单条创建与规范化行导入事务服务 | 不读 Local 文件；服务端身份/序号；幂等 Receipt、Task、Audit 原子提交 |
+| `backend/server_project_http.py` | Project Task Intake HTTP 与其余 Server Task 命令 | 字段白名单、Project Scope、统一 403/409/422/503、最小 Intake 响应 |
 | `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
 | `backend/services/server_project_prompt_migration.py` | SQLite Prompt 当前 Snapshot 一次性导入 | 显式 Customer 到 Project 映射、版本/状态/Default 保留、摘要复核、差异目标不覆盖、导入与安全 Audit 同事务 |
 | `backend/server_prompt_http.py` | Project Prompt 目录、创建、版本、Active 与 Default HTTP | Project Scope、严格 Body、统一 403/404/409/422/503、公开响应不含内部 Actor/Hash |
@@ -495,6 +504,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/organization-invitations.tsx` | 邀请签发、一次复制、目录与撤销 UI | Token 不进入列表或持久状态，刷新不可恢复；危险操作确认、过期状态可清理、后端 Cursor |
 | `frontend/src/app/accept-invite/page.tsx` | 邀请领取入口 | Token 优先从 URL Fragment 读取并在网络请求前清除；仅 POST 到准备端点，不进入查询参数或 IdP URL |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
+| `frontend/src/components/server-task-intake-panel.tsx` | Server Task 单条创建与 Tab 行导入 | 失败重试保留 Intake ID；输入变化换新身份；不提交 Task/Project/Workflow 字段或本地路径 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
 | `backend/services/workspace_users.py` | Workspace User 目录、创建与生命周期事务服务 | Active Org Admin、组织内稳定游标、精确关联计数、最后管理员保护、状态切换递增 Session Version、业务写入与 Audit 同事务 |

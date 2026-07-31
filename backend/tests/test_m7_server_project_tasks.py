@@ -59,6 +59,7 @@ from server_schema import (  # noqa: E402
     organizations,
     project_memberships,
     project_ownership,
+    task_intakes,
     task_store_state,
     workspace_users,
 )
@@ -124,6 +125,11 @@ from services.server_project_tasks import (  # noqa: E402
 )
 from services.server_task_commands import (  # noqa: E402
     ServerTaskCommandUnavailable,
+)
+from services.server_task_intake import (  # noqa: E402
+    PostgresServerTaskIntakeService,
+    ServerTaskIntakeResult,
+    ServerTaskIntakeRow,
 )
 from storage import content_hash  # noqa: E402
 from services.seo_review import (  # noqa: E402
@@ -617,6 +623,13 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             connection.execute(
                 job_batches.delete().where(
                     job_batches.c.organization_id.in_(
+                        (self.org_a, self.org_b)
+                    )
+                )
+            )
+            connection.execute(
+                task_intakes.delete().where(
+                    task_intakes.c.organization_id.in_(
                         (self.org_a, self.org_b)
                     )
                 )
@@ -1190,6 +1203,378 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     client.get("/api/projects").status_code,
                     401,
                 )
+
+    def test_server_task_create_and_import_are_scoped_idempotent_and_audited(
+        self,
+    ) -> None:
+        import app as app_module
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+
+        codec = ServerActorSessionCodec(b"z" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "z" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                create_body = {
+                    "intake_id": "manual-request-001",
+                    "topic": "How to compare forged fastener suppliers",
+                    "competitor_keyword": "forged fasteners",
+                    "competitor_blog": (
+                        "https://competitor.example.test/guide"
+                    ),
+                }
+                created = client.post(
+                    f"/api/projects/{self.project_a}/tasks",
+                    json=create_body,
+                )
+                self.assertEqual(created.status_code, 200, created.text)
+                create_payload = created.json()
+                self.assertTrue(create_payload["created"])
+                self.assertEqual(create_payload["intake_kind"], "manual")
+                self.assertEqual(create_payload["source_name"], "manual")
+                self.assertRegex(
+                    create_payload["source_digest"],
+                    r"^[0-9a-f]{64}$",
+                )
+                self.assertEqual(len(create_payload["tasks"]), 1)
+                manual_task = create_payload["tasks"][0]
+                self.assertEqual(manual_task["topic_index"], 3)
+                self.assertEqual(manual_task["status"], "new")
+                self.assertEqual(manual_task["revision"], 0)
+                self.assertEqual(
+                    set(manual_task),
+                    {
+                        "id",
+                        "topic_index",
+                        "topic",
+                        "competitor_keyword",
+                        "competitor_blog",
+                        "status",
+                        "revision",
+                    },
+                )
+
+                repository = self._task_repository(
+                    organization_id=self.org_a,
+                    project_id=self.project_a,
+                )
+                stored = repository.get(manual_task["id"])
+                assert stored is not None
+                self.assertEqual(stored["organization_id"], self.org_a)
+                self.assertEqual(stored["project_id"], self.project_a)
+                self.assertEqual(stored["customer"], self.project_a)
+                self.assertEqual(stored["brand_name"], "Project A")
+                self.assertEqual(stored["week_folder"], "server")
+                self.assertEqual(stored["task_dir"], "")
+                self.assertEqual(stored["source_kind"], "manual")
+                self.assertNotIn(
+                    str(local_state),
+                    json.dumps(stored),
+                )
+
+                retried = client.post(
+                    f"/api/projects/{self.project_a}/tasks",
+                    json=create_body,
+                )
+                self.assertEqual(retried.status_code, 200)
+                self.assertFalse(retried.json()["created"])
+                self.assertEqual(
+                    retried.json()["tasks"],
+                    create_payload["tasks"],
+                )
+                self.assertEqual(len(audit.events), 1)
+
+                conflict = client.post(
+                    f"/api/projects/{self.project_a}/tasks",
+                    json={**create_body, "topic": "Different input"},
+                )
+                self.assertEqual(conflict.status_code, 409)
+                self.assertNotIn("Different input", conflict.text)
+
+                imported = client.post(
+                    f"/api/projects/{self.project_a}/task-imports",
+                    json={
+                        "intake_id": "import-request-001",
+                        "source_name": "q3-topic-rows.tsv",
+                        "rows": [
+                            {
+                                "topic": "Bolt grade selection",
+                                "competitor_keyword": "bolt grades",
+                                "competitor_blog": "",
+                            },
+                            {
+                                "topic": "Fastener coating guide",
+                                "competitor_keyword": "",
+                                "competitor_blog": (
+                                    "https://competitor.example.test/coatings"
+                                ),
+                            },
+                        ],
+                    },
+                )
+                self.assertEqual(imported.status_code, 200, imported.text)
+                import_payload = imported.json()
+                self.assertTrue(import_payload["created"])
+                self.assertEqual(
+                    import_payload["intake_kind"],
+                    "row_import",
+                )
+                self.assertEqual(
+                    [item["topic_index"] for item in import_payload["tasks"]],
+                    [4, 5],
+                )
+                source_kinds: list[str] = []
+                for item in import_payload["tasks"]:
+                    imported_record = repository.get(item["id"])
+                    assert imported_record is not None
+                    source_kinds.append(str(imported_record["source_kind"]))
+                self.assertEqual(
+                    source_kinds,
+                    ["server_import", "server_import"],
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.task.created",
+                        "article.tasks.imported",
+                    ],
+                )
+                audit_json = json.dumps(
+                    [event.details for event in audit.events],
+                    ensure_ascii=False,
+                )
+                self.assertNotIn(
+                    "forged fastener",
+                    audit_json.casefold(),
+                )
+                self.assertNotIn(
+                    "competitor.example.test",
+                    audit_json,
+                )
+                self.assertNotIn(
+                    create_payload["source_digest"],
+                    audit_json,
+                )
+                self.assertEqual(
+                    audit.events[-1].details,
+                    {
+                        "intake_kind": "row_import",
+                        "task_count": 2,
+                        "first_topic_index": 4,
+                        "last_topic_index": 5,
+                    },
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/api/projects/{self.project_b}/task-imports",
+                        json={
+                            "intake_id": "import-request-002",
+                            "source_name": "rows.tsv",
+                            "rows": [{"topic": "Cross project"}],
+                        },
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/api/projects/{self.project_a}/tasks",
+                        json={
+                            **create_body,
+                            "intake_id": "manual-request-002",
+                            "task_id": "caller-controlled",
+                        },
+                    ).status_code,
+                    422,
+                )
+                invalid_url = client.post(
+                    f"/api/projects/{self.project_a}/tasks",
+                    json={
+                        **create_body,
+                        "intake_id": "manual-request-003",
+                        "competitor_blog": (
+                            "https://user:secret@example.test/private"
+                        ),
+                    },
+                )
+                self.assertEqual(invalid_url.status_code, 422)
+                self.assertNotIn("secret", invalid_url.text)
+                self.assertFalse(local_state.exists())
+
+    def test_server_task_intake_rolls_back_when_audit_fails(
+        self,
+    ) -> None:
+        import app as app_module
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        codec = ServerActorSessionCodec(b"z" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        isolated = replace(
+            base_config,
+            knowledge_agent_enabled=False,
+        )
+        with (
+            patch.object(app_module, "config", return_value=isolated),
+            patch.dict(
+                os.environ,
+                {
+                    "ARTICLE_AGENT_SERVER_MODE": "true",
+                    "ARTICLE_AGENT_SERVER_SESSION_SECRET": "z" * 32,
+                },
+                clear=False,
+            ),
+            TestClient(app_module.app) as client,
+        ):
+            client.app.state.server_project_task_store_factory = (
+                ServerProjectTaskStoreFactory(
+                    self.engine,
+                    isolated,
+                    audit=FailingAuditWriter(),
+                )
+            )
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                codec.create(actor),
+            )
+            response = client.post(
+                f"/api/projects/{self.project_a}/tasks",
+                json={
+                    "intake_id": "audit-failure-001",
+                    "topic": "Must roll back",
+                },
+            )
+            self.assertEqual(response.status_code, 503)
+            self.assertNotIn("private audit failure", response.text)
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        self.assertEqual(
+            [item["id"] for item in repository.load_all()],
+            [self.task_a],
+        )
+        with self.engine.connect() as connection:
+            receipt_count = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(task_intakes)
+                .where(
+                    task_intakes.c.organization_id == self.org_a,
+                    task_intakes.c.project_id == self.project_a,
+                )
+            ).scalar_one()
+        self.assertEqual(receipt_count, 0)
+
+    def test_concurrent_identical_task_intake_creates_one_receipt(
+        self,
+    ) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        audit = RecordingAuditWriter()
+        service = PostgresServerTaskIntakeService(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+            audit=audit,
+        )
+        actor = ActorIdentity(self.org_a, self.user_a)
+        barrier = threading.Barrier(2)
+        results: list[ServerTaskIntakeResult] = []
+        errors: list[BaseException] = []
+
+        def create() -> None:
+            try:
+                barrier.wait(timeout=10)
+                results.append(
+                    service.import_rows(
+                        actor=actor,
+                        intake_id="concurrent-import-001",
+                        source_name="concurrent.tsv",
+                        rows=(
+                            ServerTaskIntakeRow(
+                                topic="Concurrent topic",
+                            ),
+                        ),
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=create) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        created = sorted(result.created for result in results)
+        self.assertEqual(created, [False, True])
+        task_ids = {result.tasks[0].id for result in results}
+        self.assertEqual(len(task_ids), 1)
+        self.assertEqual(len(audit.events), 1)
+        with self.engine.connect() as connection:
+            receipt_count = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(task_intakes)
+                .where(
+                    task_intakes.c.organization_id == self.org_a,
+                    task_intakes.c.project_id == self.project_a,
+                )
+            ).scalar_one()
+        self.assertEqual(receipt_count, 1)
 
     def test_server_selects_only_current_title_candidate_with_cas(
         self,
@@ -1798,6 +2183,27 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_a}/assets/"
                     f"{self.asset_a}/download"
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks",
+                    json={
+                        "intake_id": "local-create-001",
+                        "topic": "Local must stay isolated",
+                    },
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/task-imports",
+                    json={
+                        "intake_id": "local-import-001",
+                        "source_name": "rows.tsv",
+                        "rows": [{"topic": "Local must stay isolated"}],
+                    },
                 ).status_code,
                 404,
             )

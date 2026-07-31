@@ -209,7 +209,8 @@
   提交 Revision，产品只提交 confirmed Product ID，图片只提交私有 Asset ID 与锚点；
   SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control、
   可视化 Hero Asset Picker 与独立 Server Knowledge Inbox 已接入；Server Task
-  导入/创建仍待专用服务与面板，Local UI 不变；组件与接口痕迹见
+  单条创建和 1–200 条规范化行导入也已接入，服务端分配 Task ID/Topic Index，并以
+  Intake Receipt、Task 和安全 Audit 同事务提交；Local UI 不变。组件与接口痕迹见
   `docs/architecture/m7-server-article-console.md`；
 - 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不

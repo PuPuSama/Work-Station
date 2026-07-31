@@ -835,6 +835,7 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         self.assertTrue(
             {
                 "task_store_state",
+                "task_intakes",
                 "article_tasks",
                 "job_batches",
                 "background_jobs",
@@ -849,6 +850,7 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
                         FROM pg_constraint
                         WHERE conrelid IN (
                             'task_store_state'::regclass,
+                            'task_intakes'::regclass,
                             'article_tasks'::regclass,
                             'job_batches'::regclass,
                             'background_jobs'::regclass
@@ -870,6 +872,14 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         self.assertTrue(
             {
                 "fk_task_store_state_project",
+                "pk_task_intakes",
+                "fk_task_intakes_project",
+                "fk_task_intakes_creator",
+                "ck_task_intakes_identity_nonempty",
+                "ck_task_intakes_kind",
+                "ck_task_intakes_payload_digest",
+                "ck_task_intakes_task_count",
+                "ck_task_intakes_task_ids",
                 "pk_article_tasks",
                 "fk_article_tasks_project",
                 "pk_job_batches",
@@ -882,6 +892,13 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
                 "ck_background_jobs_lease_state",
                 "ck_background_jobs_requester_nonempty",
             }.issubset(constraint_names)
+        )
+        self.assertIn(
+            "ix_task_intakes_project_created",
+            {
+                item["name"]
+                for item in inspector.get_indexes("task_intakes")
+            },
         )
         self.assertIn(
             "ix_background_jobs_requester",

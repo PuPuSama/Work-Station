@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import Literal
 
 from fastapi import (
@@ -146,6 +147,12 @@ from services.server_task_commands import (
     ServerTaskAuditAction,
     ServerTaskCommandUnavailable,
 )
+from services.server_task_intake import (
+    ServerTaskIntakeConflict,
+    ServerTaskIntakeResult,
+    ServerTaskIntakeRow,
+    ServerTaskIntakeUnavailable,
+)
 from services.server_tdk_export import (
     ServerTdkDocxExport,
     ServerTdkError,
@@ -227,6 +234,70 @@ class ProjectRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=0)
+
+
+class ProjectTaskIntakeRowRequest(BaseModel):
+    """One server-owned Task source row without identity or workflow fields."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    topic: str = Field(min_length=1, max_length=500)
+    competitor_keyword: str = Field(default="", max_length=500)
+    competitor_blog: str = Field(default="", max_length=2048)
+
+
+class ProjectTaskCreateRequest(ProjectTaskIntakeRowRequest):
+    """Create one Task with a caller-stable idempotency identity."""
+
+    intake_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+
+
+class ProjectTaskImportRequest(BaseModel):
+    """Import normalized rows; raw workbooks never cross this boundary."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    intake_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    source_name: str = Field(min_length=1, max_length=255)
+    rows: list[ProjectTaskIntakeRowRequest] = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+
+class ProjectTaskIntakeItemResponse(BaseModel):
+    """Minimal new-Task projection for create/import confirmation."""
+
+    id: str
+    topic_index: int
+    topic: str
+    competitor_keyword: str
+    competitor_blog: str
+    status: str
+    revision: int
+
+
+class ProjectTaskIntakeResponse(BaseModel):
+    intake_id: str
+    intake_kind: Literal["manual", "row_import"]
+    source_name: str
+    source_digest: str
+    created: bool
+    tasks: list[ProjectTaskIntakeItemResponse]
 
 
 class ProjectSeoReviewSettingsRequest(BaseModel):
@@ -661,6 +732,57 @@ def _save_audited_task(
         raise HTTPException(
             status_code=503,
             detail="Task update is temporarily unavailable.",
+        ) from exc
+
+
+def _task_intake_response(
+    result: ServerTaskIntakeResult,
+) -> ProjectTaskIntakeResponse:
+    return ProjectTaskIntakeResponse(
+        intake_id=result.intake_id,
+        intake_kind=result.intake_kind,
+        source_name=result.source_name,
+        source_digest=result.source_digest,
+        created=result.created,
+        tasks=[
+            ProjectTaskIntakeItemResponse(
+                id=task.id,
+                topic_index=task.topic_index,
+                topic=task.topic,
+                competitor_keyword=task.competitor_keyword,
+                competitor_blog=task.competitor_blog,
+                status=task.status,
+                revision=task.revision,
+            )
+            for task in result.tasks
+        ],
+    )
+
+
+def _run_task_intake(
+    command: Callable[[], ServerTaskIntakeResult],
+) -> ProjectTaskIntakeResponse:
+    try:
+        return _task_intake_response(command())
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ServerTaskIntakeConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+    except ServerTaskIntakeUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Task intake is temporarily unavailable.",
         ) from exc
 
 
@@ -1125,6 +1247,74 @@ def list_project_tasks(
     return sorted(
         tasks,
         key=lambda task: (task.topic_index, task.id),
+    )
+
+
+@router.post(
+    "/{project}/tasks",
+    response_model=ProjectTaskIntakeResponse,
+)
+def create_project_task(
+    project: str,
+    payload: ProjectTaskCreateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectTaskIntakeResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    runtime = _task_runtime(request, authorized)
+    return _run_task_intake(
+        lambda: runtime.intake.create_manual(
+            actor=authorized.actor,
+            intake_id=payload.intake_id,
+            row=ServerTaskIntakeRow(
+                topic=payload.topic,
+                competitor_keyword=payload.competitor_keyword,
+                competitor_blog=payload.competitor_blog,
+            ),
+        )
+    )
+
+
+@router.post(
+    "/{project}/task-imports",
+    response_model=ProjectTaskIntakeResponse,
+)
+def import_project_tasks(
+    project: str,
+    payload: ProjectTaskImportRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectTaskIntakeResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    runtime = _task_runtime(request, authorized)
+    return _run_task_intake(
+        lambda: runtime.intake.import_rows(
+            actor=authorized.actor,
+            intake_id=payload.intake_id,
+            source_name=payload.source_name,
+            rows=tuple(
+                ServerTaskIntakeRow(
+                    topic=row.topic,
+                    competitor_keyword=row.competitor_keyword,
+                    competitor_blog=row.competitor_blog,
+                )
+                for row in payload.rows
+            ),
+        )
     )
 
 

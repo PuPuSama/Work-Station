@@ -361,6 +361,25 @@ export type AccessibleProject = {
   effective_role: "org_admin" | "team_lead" | "editor" | "reviewer" | "viewer";
 };
 
+export type ServerTaskIntakeItem = {
+  id: string;
+  topic_index: number;
+  topic: string;
+  competitor_keyword: string;
+  competitor_blog: string;
+  status: WorkflowStatus;
+  revision: number;
+};
+
+export type ServerTaskIntakeResponse = {
+  intake_id: string;
+  intake_kind: "manual" | "row_import";
+  source_name: string;
+  source_digest: string;
+  created: boolean;
+  tasks: ServerTaskIntakeItem[];
+};
+
 export type ProjectMembershipRole = "editor" | "reviewer" | "viewer";
 
 export type ProjectMembership = {

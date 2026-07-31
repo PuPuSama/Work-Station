@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260731_0016`；
+- `alembic_version = 20260731_0017`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -432,9 +432,25 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
 - Server Article Console 已接通现有 Task 的标题到交付主链，Delivery ZIP 与下载也已接线；
   SEO Change 裁决/Preview/Apply/Complete、历史大纲恢复和章节重写已有专用 Server
   面板；Product Rediscovery 创建/状态、Rewrite From Scratch、Project Batch/Job
-  列表/详情/全局抽屉、Rediscovery Inbox 审阅和可视化 Hero Asset Picker 也已迁移。
-  Server Task 导入/创建仍未迁移，发布证据不得写成
-  “全部操作员工作流已上线”。
+  列表/详情/全局抽屉、Rediscovery Inbox 审阅、可视化 Hero Asset Picker，以及
+  Project-scoped Task 单条创建/规范化行导入也已迁移。原始 XLSX Topic Asset 上传、
+  生产 IdP/ObjectStore 与恢复演练仍未完成，发布证据不得写成“生产已上线”。
+
+Server Task Intake 冒烟必须覆盖：
+
+- Viewer/Reviewer 的 `POST /api/projects/{project}/tasks` 与 `/task-imports` 返回 403；
+  Editor/Lead/Admin 才能创建，后端在事务内再次锁定权限；
+- 单条 Body 只含 Intake ID、Topic 和可选竞对字段；批量 Body 只含 Intake ID、来源
+  标签与 1–200 条规范化行。提交 `task_id/topic_index/customer/status/revision/task_dir`
+  必须返回 422；
+- 同一 Intake ID 与相同规范化输入重试返回相同 Task 且 `created=false`；同一 ID
+  改变输入返回 409。并发相同请求只能留下一个 Receipt、一批 Task 和一条 Audit；
+- 新 Task 的 `week_folder=server`、`task_dir=""`，Customer/Brand 来自当前 Active
+  Project；跨 Project 路径不得创建或读取 Task；
+- `article_tasks`、`task_intakes` 与 Audit 同事务。注入 Audit 故障应返回脱敏 503 且
+  三者都不增加；Audit Details 不得包含 Topic、关键词、URL 或 Source Digest；
+- Server 页面只解析 Tab 分隔行，不调用 `/api/topic-files/upload`、`/api/sync-tasks`
+  或本地 Topic Library。原始 XLSX 留档仍是未迁移能力。
 
 TDK DOCX 冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/generate-tdk`，随后使用

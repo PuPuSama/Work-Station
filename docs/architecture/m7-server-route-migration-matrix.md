@@ -36,6 +36,7 @@
 | Project Product/Image Catalog | `/api/projects/{project}/catalog` | PostgreSQL Current Published Evidence | `project.view`；最小无 URL DTO | Server Ready |
 | Knowledge API | `/api/knowledge/projects/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
+| Project Task Intake | `POST /api/projects/{project}/tasks`、`/task-imports` | PostgreSQL Task + Intake Receipt + Audit | `article.edit`；服务端 ID/序号 | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
@@ -45,6 +46,8 @@
 
 | 业务操作 | Project-scoped Server 路径 | 权限 | 存储边界 | 状态 |
 |---|---|---|---|---|
+| 单条创建 Task | `POST /api/projects/{project}/tasks` | `article.edit` | 服务端身份/序号 + 幂等 Receipt + Audit | Server Ready |
+| 规范化行导入 Task | `POST /api/projects/{project}/task-imports` | `article.edit` | 1–200 行 + Source Digest + 幂等 Receipt + Audit | Server Ready |
 | 完全重写 | `POST .../rewrite-from-scratch` | `article.edit` | PostgreSQL CAS + Audit | Server Ready |
 | 选择当前标题候选 | `PUT .../selected-title` | `article.edit` | Server-owned Candidate + CAS + Audit | Server Ready |
 | 保存/确认已审阅大纲 | `PUT .../outline` | `article.edit` | PostgreSQL Version + CAS + Audit | Server Ready |
@@ -75,7 +78,7 @@
 | 路由组 | 当前依赖 | Server 目标 | 迁移前必须补齐 |
 |---|---|---|---|
 | `/api/config`、`/api/settings/llm` | Local Config/.env | Server 管理配置 | Secret Manager、组织/环境权限、公开字段分型 |
-| `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
+| `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | 不复用；Server 已用 Project Task 目录与 Intake API | 旧路径继续 503，不读本地 Topic Library |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |

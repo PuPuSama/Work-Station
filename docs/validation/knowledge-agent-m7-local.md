@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260731_0016`
+- Alembic Head：`20260731_0017`
 
 ## 已通过验证
 
@@ -1462,6 +1462,60 @@ node .\node_modules\next\dist\bin\next build
 - 完整后端回归 672 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - TypeScript、全量 ESLint 与默认 API 的 Next.js production build 全部通过；
 - Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
+
+### M7 Server Task Intake
+
+实现边界：
+
+- 新增 `task_intakes` 与 Alembic `20260731_0017`；Receipt 只保存 Intake Kind、来源
+  标签、规范化输入 SHA-256、Task ID 列表/数量和创建者，不保存 Topic、关键词或 URL；
+- `POST /api/projects/{project}/tasks` 只接受 Intake ID、Topic 和可选竞对字段；
+  `POST /api/projects/{project}/task-imports` 只接受 Intake ID、来源标签和 1–200 条
+  规范化行。两条路由均不接受 Task ID、Topic Index、Customer、Status、Revision 或
+  本地路径；
+- `PostgresServerTaskIntakeService` 在事务内重新锁定 `article.edit`，以 Organization/
+  Project/Intake ID 取得事务级幂等锁，再锁 `task_store_state` 分配连续 Topic Index；
+  Task ID、Project Customer/Brand、Server Source Identity 均由服务端生成；
+- `article_tasks`、`task_intakes` 与 `article.task.created/article.tasks.imported` Audit
+  同事务。Audit 只含 Kind、Task 数量和首尾 Topic Index；Audit 故障回滚全部；
+- `ServerTaskIntakePanel` 只挂在 Server Article Directory。单条创建和 Tab 分隔行导入
+  均在失败重试时保留 Intake ID，任何输入变化会生成新身份；Local 目录组件不改。
+
+定向验证：
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\backend\.venv\Scripts\python.exe -m unittest `
+  backend.tests.test_m7_server_request_security `
+  backend.tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_create_and_import_are_scoped_idempotent_and_audited `
+  backend.tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_intake_rolls_back_when_audit_fails `
+  backend.tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_concurrent_identical_task_intake_creates_one_receipt `
+  backend.tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  backend.tests.test_m7_postgres_tasks.M7PostgresTaskRepositoryTests.test_task_job_schema_has_scoped_constraints_and_partial_index `
+  backend.tests.test_m7_deployment_readiness `
+  backend.tests.test_m7_object_orphan_reconciliation -q
+```
+
+结果：
+
+- 23 tests 全部通过；
+- 同一 Intake ID/同一规范化内容的并发请求只创建一个 Receipt、一批 Task 和一条 Audit；
+  重试返回原 Task，复用同一 ID 提交不同内容返回 409；
+- Viewer/跨 Project/额外身份字段/含凭据 URL/Local Mode 均 fail closed；
+- Audit 内容断言不含 Topic、竞对 URL 或 Source Digest，注入 Audit 故障返回脱敏 503，
+  且 Task 与 Receipt 数量不变；
+- Targeted TypeScript 与 ESLint 通过；
+- 不调用业务数据库、对象存储或外部模型的 Mock Server production QA 中，单条创建后
+  目录从 1 条更新为 2 条，批量导入 2 行后更新为 4 条；成功摘要只显示 Task 序号和
+  Source Digest 前 12 位；
+- 四列 Tab 行显示明确错误并禁用提交；空表单按钮文案稳定为“导入 Task”；
+- 375×812 覆盖下展开 Intake 表单后实际 Client Width/Scroll Width 均为 360，无水平
+  溢出，浏览器无 Warning/Error；QA 后恢复视口并删除临时服务与 Mock 文件；
+- 完整后端回归 675 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- TypeScript、全量 ESLint 与默认 API 的 Next.js production build 全部通过；
+- `task_intakes` 为空后执行 `0017 -> 0016 -> 0017` 往返成功，重复
+  `upgrade head` 成功，Alembic Current/Head 均为 `20260731_0017`。
 
 ### M7 Server Product/Image Catalog 与 Hero Picker
 

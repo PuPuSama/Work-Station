@@ -217,6 +217,14 @@ def server_http_route_available(method: str, path: str) -> bool:
         return True
     if (
         normalized_method == "POST"
+        and len(parts) == 5
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] in {"tasks", "task-imports"}
+    ):
+        return True
+    if (
+        normalized_method == "POST"
         and len(parts) == 8
         and parts[1:3] == ["api", "organizations"]
         and bool(parts[3])
