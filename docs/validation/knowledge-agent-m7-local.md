@@ -968,6 +968,38 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
 - Alembic Current 与 Head 均为 `20260731_0015`。
 
+### M7 Server Outline 生成闭环
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_prompts `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_job_control -q
+```
+
+结果：
+
+- 联合定向回归 50 tests 全部通过；
+- `POST .../outline` 只接受 Revision；Prompt/Chunk/Actor 覆盖字段返回 422，Viewer 与
+  跨 Project 请求返回 403，Local Mode 的 POST/GET 状态路由返回 404；
+- Enqueue 固定不可变 Prompt ID + Version；Project Default 从 V1 切到 V2 后，已排队
+  Worker 仍读取 V1；
+- 词法 Context 只选择同 Project、当前 Published Snapshot 的 Chunk；Unpublished 和
+  另一 Project 的更相似 Chunk 不进入 Provider，已固定 Chunk 取消发布后进入 Conflict；
+- Provider 未配置、空结果或异常不生成 mock，供应商异常统一脱敏；
+- 成功只把生成结果写入 `outline_draft`、`generated` Version 与
+  `last_outline_prompt_snapshot`，正式 Outline 和下游保持原值；
+- Task CAS/撤权/Audit 故障不留下 Draft、Version 或 Prompt Snapshot 部分写入，公开
+  Job/Audit 不含 Prompt 正文、Knowledge 正文、Requester 或原始错误；
+- `outline` 与 `product_rediscovery` 进入 Project-scoped Batch/Job Control，其余
+  Operation 仍不可见；
+- 完整后端回归 617 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 复核全部通过；
+- Alembic Current 与 Head 仍为 `20260731_0015`。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell
@@ -1065,16 +1097,17 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
-  “完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、私有图片准备
-  和文章 DOCX 导出/下载，并为 `product_rediscovery` 提供窄范围 Batch/Job 控制；但不
-  代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
+  大纲生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
+  私有图片准备和文章 DOCX 导出/下载，并为 `product_rediscovery/outline` 提供窄范围
+  Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery` Job 为单写，其余路径尚未成为 PostgreSQL 准源；
-- Server Mode 已停止 SQLite Queue/Worker；产品重新发现已有项目级 PostgreSQL Runner
-  和两阶段授权，Enqueue、该 Operation 的终态 Audit 与有界 drain/join 报告已完成；
-  该 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
+  Task 命令和 `product_rediscovery/outline` Job 为单写，其余路径尚未成为 PostgreSQL
+  准源；
+- Server Mode 已停止 SQLite Queue/Worker；产品重新发现与大纲生成已有项目级
+  PostgreSQL Runner 和两阶段授权，Enqueue、终态 Audit 与有界 drain/join 报告已完成；
+  这两个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
   Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；

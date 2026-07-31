@@ -221,7 +221,8 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
   导入后以相同输入重跑必须得到 `already_matched=True`；
 - 目标已有任意不同 Prompt/Default 时必须停止并调查，不允许清空、覆盖或合并猜测；
   旧 SQLite 只保存当前版本，因此导入保留当前 Version 号但不补造更早正文；
-- 生成 Worker 接线前，旧 Local Prompt API 继续 fail closed，不能混用两套准源。
+- Outline Worker 已接线后，旧 Local Prompt API 仍继续 fail closed；Worker 只能读取
+  入队时固定的 PostgreSQL Prompt Version，Article/Review Worker 尚未迁移。
 
 Prompt HTTP 冒烟：
 
@@ -510,6 +511,9 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   才使下游失效；Audit 只记录 Confirmed 与字符数，不记录 Markdown；
 - 大纲恢复只提交 Version Index，只允许当前 Task 的 Outline Version 恢复成草稿；
   Article Version、越界索引和客户端历史正文均拒绝，Audit 不记录版本正文；
+- 大纲生成只提交当前 Revision；入队时由服务端固定 Prompt ID + Version 与 Published
+  Chunk ID，公开 Job 不返回这些私有输入。Worker 执行前复核 Prompt/Chunk Scope，
+  成功只写 `outline_draft` 和 `generated` Version，不替换确认大纲、不使下游失效；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/
@@ -534,13 +538,31 @@ Job ID 调用
 - 对象存储配置缺失时新 Job 返回 503，但已有 Job 的状态仍可读取；
 - 重启恢复只处理 Active `product_rediscovery` Job，不得把旧无 Requester 历史重新执行。
 
+Outline 生成冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/outline`，随后只使用响应 Job ID 调用
+`GET /api/projects/{project}/tasks/{task_id}/outline/jobs/{job_id}`。至少验证：
+
+- Body 只允许当前 Revision；Prompt ID/正文、Chunk ID、Actor、Role 或 Provider 字段
+  均返回 422；
+- Viewer 与跨 Project 请求返回 403，可信 Requester 在 Claim 前和 Handler 前都要求
+  `article.edit`；
+- Project Default 在入队后切换到新 Version，已排队 Job 仍使用原不可变 Version；
+- Knowledge Context 只来自同 Project 的当前 Published Snapshot；任一固定 Chunk 被
+  取消发布或切换 Snapshot 后，Job 在调用 Provider 前进入 Conflict；
+- Provider 未配置、空输出或异常只返回脱敏失败，不得回退 mock、本地 Customer
+  Context、SQLite Prompt 或本地 Artifact；
+- 成功后 Task Revision 加一，只更新 Draft、`last_outline_prompt_snapshot` 和
+  `generated` Version；人工 PUT Confirmed 前正式 Outline 与下游保持原值；
+- Task CAS、撤权或 Audit 失败不留下 Draft/Version/Prompt Snapshot 部分写入，日志和
+  Audit 不含 Prompt 正文、Knowledge 正文或 Provider 原始响应。
+
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery`，并且响应不存在 Request、Requester、Category URL、原始 Error、
-  Worker Lease、对象 URI 或签名 URL；
-- Viewer 可读但 Cancel/Retry 返回 403；具备 `knowledge.edit` 的 Actor 才能控制该
-  Operation，且撤权后即使 Cookie 与页面仍有效也必须失败；
+  `product_rediscovery/outline`，并且响应不存在 Request、Requester、URL、Prompt/
+  Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
+- Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
+  `knowledge.edit/article.edit`，且撤权后即使 Cookie 与页面仍有效也必须失败；
 - Batch/Job ID 从另一 Project 或 Organization 带入当前路径时返回 404，不能读取后
   再由应用层过滤；
 - `POST .../cancel` 使用空 Body；Queued/Retry-wait 直接成为 Cancelled，Running 只设置

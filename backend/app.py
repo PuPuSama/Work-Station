@@ -222,6 +222,11 @@ from services.server_product_rediscovery import (
     ServerProductRediscoveryRegistry,
     create_product_sync_factory,
 )
+from services.server_outline_generation import (
+    LlmServerOutlineProvider,
+    ServerOutlineGenerationHandler,
+    ServerOutlineGenerationRegistry,
+)
 from services.server_job_control import PostgresServerJobControlService
 from storage import (
     RevisionConflictError,
@@ -338,6 +343,11 @@ async def app_lifespan(application: FastAPI):
         "server_product_rediscovery",
         None,
     )
+    previous_server_outline_generation = getattr(
+        application.state,
+        "server_outline_generation",
+        None,
+    )
     previous_server_job_control = getattr(
         application.state,
         "server_job_control",
@@ -374,6 +384,7 @@ async def app_lifespan(application: FastAPI):
         None,
     )
     server_product_rediscovery = None
+    server_outline_generation = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
@@ -385,6 +396,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_object_service = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
+    application.state.server_outline_generation = None
     application.state.server_job_control = None
     application.state.server_oidc_login = None
     application.state.server_actor_session_revocation = None
@@ -498,6 +510,24 @@ async def app_lifespan(application: FastAPI):
         application.state.server_product_rediscovery = (
             server_product_rediscovery
         )
+        outline_provider = LlmServerOutlineProvider(cfg)
+        outline_handler = (
+            ServerOutlineGenerationHandler(
+                server_engine,
+                provider=outline_provider,
+            )
+            if outline_provider.ready
+            else None
+        )
+        server_outline_generation = ServerOutlineGenerationRegistry(
+            server_engine,
+            access=server_access,
+            handler=outline_handler,
+        )
+        server_outline_generation.start_existing()
+        application.state.server_outline_generation = (
+            server_outline_generation
+        )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -540,6 +570,12 @@ async def app_lifespan(application: FastAPI):
                     shutdown_error = RuntimeError(
                         "server product rediscovery did not drain"
                     )
+            if server_outline_generation is not None:
+                stop_report = server_outline_generation.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server outline generation did not drain"
+                    )
             if server_oidc_login is not None:
                 server_oidc_login.close()
             if knowledge_runtime is not None:
@@ -572,6 +608,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_product_rediscovery = (
                 previous_server_product_rediscovery
+            )
+            application.state.server_outline_generation = (
+                previous_server_outline_generation
             )
             application.state.server_job_control = previous_server_job_control
             application.state.server_oidc_login = (
@@ -759,6 +798,8 @@ async def app_lifespan(application: FastAPI):
         writing_runner.stop()
         if server_product_rediscovery is not None:
             server_product_rediscovery.stop()
+        if server_outline_generation is not None:
+            server_outline_generation.stop()
         if server_oidc_login is not None:
             server_oidc_login.close()
         if knowledge_runtime is not None:
@@ -789,6 +830,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_product_rediscovery = (
             previous_server_product_rediscovery
+        )
+        application.state.server_outline_generation = (
+            previous_server_outline_generation
         )
         application.state.server_job_control = previous_server_job_control
         application.state.server_oidc_login = previous_server_oidc_login

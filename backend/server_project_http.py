@@ -59,6 +59,10 @@ from services.server_outline_update import (
     apply_reviewed_outline,
     restore_reviewed_outline_version,
 )
+from services.server_outline_generation import (
+    OutlineGenerationUnavailable,
+    ServerOutlineGenerationRegistry,
+)
 from services.server_delivery_package import (
     ServerDeliveryPackage,
     ServerDeliveryPackageError,
@@ -322,6 +326,10 @@ class ProductRediscoveryJobResponse(BaseModel):
     has_error: bool
 
 
+class OutlineGenerationJobResponse(ProductRediscoveryJobResponse):
+    """Public outline Job state; private Prompt and Chunk input stay hidden."""
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -558,6 +566,22 @@ def _product_rediscovery(
         raise HTTPException(
             status_code=503,
             detail="Server product rediscovery is not available.",
+        )
+    return registry
+
+
+def _outline_generation(
+    request: Request,
+) -> ServerOutlineGenerationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_outline_generation",
+        None,
+    )
+    if not isinstance(registry, ServerOutlineGenerationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server outline generation is not available.",
         )
     return registry
 
@@ -1007,6 +1031,91 @@ def select_project_task_title(
             "candidate_index": payload.candidate_index,
         },
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/outline",
+    response_model=OutlineGenerationJobResponse,
+)
+def enqueue_project_task_outline_generation(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> OutlineGenerationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _outline_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OutlineGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server outline generation is not available.",
+        ) from exc
+    return OutlineGenerationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/outline/jobs/{job_id}",
+    response_model=OutlineGenerationJobResponse,
+)
+def read_project_task_outline_generation_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> OutlineGenerationJobResponse:
+    del project
+    try:
+        job = _outline_generation(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Outline generation job was not found.",
+        ) from None
+    except OutlineGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server outline generation is not available.",
+        ) from exc
+    return OutlineGenerationJobResponse.model_validate(job)
 
 
 @router.put(
@@ -2106,6 +2215,7 @@ def read_project_product_rediscovery_job(
 __all__ = [
     "ArticleSectionRewriteRequest",
     "ConfirmedProductsUpdateRequest",
+    "OutlineGenerationJobResponse",
     "ProductRediscoveryJobResponse",
     "ProductRediscoveryRequest",
     "ProjectAssetDownload",

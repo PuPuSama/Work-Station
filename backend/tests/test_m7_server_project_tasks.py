@@ -35,6 +35,7 @@ from knowledge_agent.object_storage import (  # noqa: E402
 )
 from knowledge_agent.schema import (  # noqa: E402
     knowledge_assets,
+    knowledge_chunks,
     knowledge_product_asset_evidence,
     knowledge_product_source_evidence,
     knowledge_products,
@@ -77,6 +78,11 @@ from services.server_product_rediscovery import (  # noqa: E402
     ProductRediscoveryUnavailable,
     ServerProductRediscoveryHandler,
     ServerProductRediscoveryRegistry,
+)
+from services.server_outline_generation import (  # noqa: E402
+    PostgresPublishedOutlineContext,
+    ServerOutlineGenerationHandler,
+    ServerOutlineGenerationRegistry,
 )
 from services.server_project_tasks import (  # noqa: E402
     ServerProjectTaskStoreFactory,
@@ -134,6 +140,34 @@ class StubServerTdkLlm:
     def chat(self, messages, temperature=0.7, max_tokens=1800):
         del messages, temperature, max_tokens
         return SERVER_TDK_RESPONSE
+
+
+class RecordingOutlineProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        task,
+        *,
+        prompt_snapshot,
+        context_chunks,
+    ):
+        self.calls.append(
+            {
+                "task_id": task.id,
+                "prompt_id": prompt_snapshot.prompt_id,
+                "prompt_version": prompt_snapshot.version,
+                "prompt_source": prompt_snapshot.source,
+                "chunk_ids": [
+                    chunk.chunk_id for chunk in context_chunks
+                ],
+                "chunk_text": [
+                    chunk.text for chunk in context_chunks
+                ],
+            }
+        )
+        return "## Generated server outline\n\n### Evidence-led section"
 
 
 class FakeDownloadStore:
@@ -325,6 +359,13 @@ class ServerProjectTaskApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         with self.engine.begin() as connection:
             connection.execute(
+                knowledge_chunks.delete().where(
+                    knowledge_chunks.c.project_id.in_(
+                        (self.project_a, self.project_b)
+                    )
+                )
+            )
+            connection.execute(
                 knowledge_product_asset_evidence.delete().where(
                     knowledge_product_asset_evidence.c.project_id.in_(
                         (self.project_a, self.project_b)
@@ -487,6 +528,61 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             format="PNG",
         )
         return output.getvalue()
+
+    def _store_outline_context(
+        self,
+        *,
+        project_id: str,
+        suffix: str,
+        text: str,
+        status: str = "published",
+    ) -> str:
+        source_id = f"{suffix}-source"
+        snapshot_id = f"{suffix}-snapshot"
+        chunk_id = f"{snapshot_id}:chunk-0"
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.insert().values(
+                    project_id=project_id,
+                    source_id=source_id,
+                    display_name=f"{suffix} source",
+                    source_kind="knowledge_page",
+                    trust_tier="hard_fact",
+                    status=status,
+                    public_source=True,
+                    canonical_url=f"https://{project_id}/{suffix}",
+                    current_snapshot_id=(
+                        snapshot_id if status == "published" else None
+                    ),
+                )
+            )
+            connection.execute(
+                source_snapshots.insert().values(
+                    project_id=project_id,
+                    snapshot_id=snapshot_id,
+                    source_id=source_id,
+                    content_hash=hashlib.sha256(
+                        text.encode("utf-8")
+                    ).hexdigest(),
+                    parser_name="m7-outline-test",
+                    parser_version="1",
+                    fetched_at=datetime.now(timezone.utc),
+                )
+            )
+            connection.execute(
+                knowledge_chunks.insert().values(
+                    project_id=project_id,
+                    chunk_id=chunk_id,
+                    source_id=source_id,
+                    snapshot_id=snapshot_id,
+                    ordinal=0,
+                    heading_path=["Published facts"],
+                    text=text,
+                    locator={"section": "facts"},
+                    metadata={},
+                )
+            )
+        return chunk_id
 
     def _store_selectable_product(
         self,
@@ -1480,6 +1576,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         "outline": "## Reviewed outline",
                         "confirmed": True,
                     },
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline/jobs/job-a",
                 ).status_code,
                 404,
             )
@@ -2593,6 +2704,226 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     403,
                 )
                 self.assertFalse(local_state.exists())
+
+    def test_server_outline_generation_uses_pinned_prompt_and_published_scope(
+        self,
+    ) -> None:
+        import app as app_module
+
+        published_chunk = self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-published",
+            text=(
+                "Selected topic 2 uses one verified published project fact."
+            ),
+        )
+        self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-inbox",
+            text=(
+                "Selected topic 2 must not use this unpublished project fact."
+            ),
+            status="inbox",
+        )
+        self._store_outline_context(
+            project_id=self.project_b,
+            suffix=f"{self.task_b}-published",
+            text=(
+                "Selected topic 2 repeated repeated is a cross-project fact."
+            ),
+        )
+        provider = RecordingOutlineProvider()
+        audit = RecordingAuditWriter()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        handler = ServerOutlineGenerationHandler(
+            self.engine,
+            provider=provider,
+            audit=audit,
+        )
+        registry = ServerOutlineGenerationRegistry(
+            self.engine,
+            access=access,
+            handler=handler,
+            audit=audit,
+        )
+        self.addCleanup(registry.stop)
+        codec = ServerActorSessionCodec(b"o" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "o" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_outline_generation = registry
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline"
+                )
+                self.assertEqual(
+                    client.post(path, json={"revision": 0}).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={
+                            "revision": 0,
+                            "prompt_id": "client-controlled",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/outline"
+                        ),
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                queued = client.post(path, json={"revision": 0})
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertEqual(public_job["operation"], "outline")
+                self.assertNotIn("request", public_job)
+                self.assertNotIn("requested_by_user_id", public_job)
+                status_path = (
+                    f"{path}/jobs/{public_job['job_id']}"
+                )
+                terminal = None
+                for _attempt in range(100):
+                    response = client.get(status_path)
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+                    terminal = response.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(terminal["status"], "succeeded")
+                self.assertEqual(terminal["result_revision"], 1)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    provider.calls[0]["chunk_ids"],
+                    [published_chunk],
+                )
+                self.assertEqual(
+                    provider.calls[0]["prompt_source"],
+                    "system",
+                )
+                stored_payload = self._task_repository(
+                    organization_id=self.org_a,
+                    project_id=self.project_a,
+                ).get(self.task_a)
+                assert stored_payload is not None
+                stored = TaskRecord.model_validate(stored_payload)
+                self.assertEqual(stored.revision, 1)
+                self.assertEqual(stored.outline, "")
+                self.assertEqual(
+                    stored.outline_draft,
+                    "## Generated server outline\n\n"
+                    "### Evidence-led section",
+                )
+                self.assertEqual(
+                    stored.article_versions[-1].kind,
+                    "outline_draft",
+                )
+                self.assertEqual(
+                    stored.article_versions[-1].source_kind,
+                    "generated",
+                )
+                assert stored.last_outline_prompt_snapshot is not None
+                self.assertEqual(
+                    stored.last_outline_prompt_snapshot.source,
+                    "system",
+                )
+                self.assertNotIn(
+                    "Generated server outline",
+                    str(audit.events),
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_outline_context_rejects_unpublished_pinned_chunk(
+        self,
+    ) -> None:
+        suffix = f"{self.task_a}-context-revoked"
+        chunk_id = self._store_outline_context(
+            project_id=self.project_a,
+            suffix=suffix,
+            text="Selected topic 2 published context.",
+        )
+        context = PostgresPublishedOutlineContext(self.engine)
+        selected = context.select(
+            project_id=self.project_a,
+            query="Selected topic 2",
+        )
+        self.assertEqual(
+            [chunk.chunk_id for chunk in selected],
+            [chunk_id],
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.update()
+                .where(
+                    knowledge_sources.c.project_id == self.project_a,
+                    knowledge_sources.c.source_id == f"{suffix}-source",
+                )
+                .values(
+                    status="stale",
+                    current_snapshot_id=None,
+                )
+            )
+        with self.assertRaisesRegex(
+            JobConflict,
+            "^published outline context changed$",
+        ):
+            context.load_current(
+                project_id=self.project_a,
+                chunk_ids=(chunk_id,),
+            )
 
     def test_server_product_rediscovery_uses_requested_actor_and_pg_worker(
         self,

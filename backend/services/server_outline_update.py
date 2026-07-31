@@ -5,6 +5,7 @@ from typing import Literal
 from models import (
     STATUS_OUTLINE_CONFIRMED,
     ArticleVersion,
+    PromptSnapshot,
     TaskRecord,
 )
 from services.article_validation import visible_word_count
@@ -26,6 +27,7 @@ def _append_outline_version(
     kind: Literal["outline", "outline_draft"],
     content: str,
     source_kind: Literal[
+        "generated",
         "manual_confirmed",
         "manual_draft",
         "restored",
@@ -50,6 +52,28 @@ def _append_outline_version(
         ):
             return
     task.article_versions.append(record)
+
+
+def apply_generated_outline_draft(
+    task: TaskRecord,
+    *,
+    outline: str,
+    prompt_snapshot: PromptSnapshot,
+) -> str:
+    """Store generated text as a reviewable draft, never as confirmation."""
+
+    normalized = outline.strip()
+    if not normalized:
+        raise ServerOutlineUpdateError("outline cannot be empty")
+    task.outline_draft = normalized
+    task.last_outline_prompt_snapshot = prompt_snapshot
+    _append_outline_version(
+        task,
+        kind="outline_draft",
+        content=normalized,
+        source_kind="generated",
+    )
+    return normalized
 
 
 def apply_reviewed_outline(

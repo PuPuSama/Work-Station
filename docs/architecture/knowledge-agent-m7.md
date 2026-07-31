@@ -72,6 +72,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `POST /api/projects/{project}/tasks/{task_id}/outline/restore-version`：只接收
   Revision 与 Version Index，服务端只允许当前 Task 的 `outline/outline_draft` Version
   恢复成新草稿；不接受客户端历史正文、不恢复 Article Version、不失效当前下游；
+- 新增 Project-scoped Outline 生成 Job：`POST .../outline` 只接受 Task Revision，
+  Enqueue 固定不可变 Prompt ID + Version 与当前 Published Chunk ID；Worker 两阶段
+  重新授权，执行时复核 Prompt/Chunk Scope，模型失败脱敏且不生成 mock。成功只写
+  `outline_draft` 和 `generated` Version，人工确认前不替换正式大纲或下游；
 - 新增第二个 PostgreSQL-only Task 写操作
   `PUT /api/projects/{project}/tasks/{task_id}/products`：请求只接收 Revision 和
   1–3 个 Product ID；服务端从同 Project 的正式产品目录投影已确认、且有 Published
@@ -182,8 +186,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Organization/Project 绑定的 S3 ArtifactStore；不允许本地 Artifact 回退；
 - 重新发现只写不可变 Inbox 来源/快照/产品证据，不改 Task Revision、不替换 Task
   当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
-- 对象存储未配置时，历史 Job 状态仍可读取，但新 Job 明确返回 503；应用重启时只恢复
-  `product_rediscovery` 的 Active PostgreSQL Job。
+- 对象存储未配置时，产品发现历史 Job 状态仍可读取但新发现 Job 返回 503；Outline
+  Provider 未配置时新生成 Job 返回 503。应用重启按各自配置只恢复
+  `product_rediscovery/outline` 的 Active PostgreSQL Job。
 - 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
   释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
   数据库 Engine，不宣称已经排空。
@@ -458,7 +463,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
 | `backend/services/server_task_commands.py` | 已迁移 Server Task 写操作的事务命令 | 锁定可撤权事实、Action 固定权限与 Details 白名单、CAS 与 Audit 同事务 |
-| `backend/services/server_outline_update.py` | 已审阅大纲草稿/确认/版本恢复的纯 Task 变换 | 内容哈希 Version 去重、服务器版本类型门禁、草稿保留下游、确认使下游失效；不知道 HTTP/RBAC/PostgreSQL |
+| `backend/services/server_outline_update.py` | 生成草稿、已审阅草稿/确认/版本恢复的纯 Task 变换 | 内容哈希 Version 去重、生成只写 Draft、服务器版本类型门禁、草稿保留下游、确认使下游失效；不知道 HTTP/RBAC/PostgreSQL |
+| `backend/services/server_outline_generation.py` | Project Outline Context、Provider、Handler 与 Queue Registry | Prompt Version/Published Chunk 身份固定、无本地文件与 mock 回退、Provider 错误脱敏、两阶段授权、草稿 CAS/Audit、有界停机 |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -711,7 +717,7 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
 已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
-`product_rediscovery` 已有独立 PostgreSQL Job API/Runner。其余 Article 写入、通用
+`product_rediscovery` 与 `outline` 已有独立 PostgreSQL Job API/Runner。其余 Article 写入、通用
 Batch 和 Worker 尚未接线。因此
 不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
 Runner 描述成“服务器 Job 单写已完成”。
@@ -727,7 +733,7 @@ Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一�
 退出的非用户取消 Job 释放回 `queued`，并返回有界 Join 报告。若报告仍有在途 Job，
 Lifespan 明确失败且不释放数据库 Engine。
 
-这套语义当前只接到 `product_rediscovery`。仍没有通用 Server Batch API、全部 Operation
+这套语义当前接到 `product_rediscovery` 与 `outline`。仍没有全部 Operation
 的 Runner 和正式环境排空演练，所以 `worker_reauthorizes` 与
 `postgres_job_single_write` 仍保持 false，不能把单条 Operation 的证据扩写成整体
 Worker Cutover 已完成。
@@ -1140,7 +1146,7 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 `ServerJobSummary/ServerBatchSummary` 是独立公开投影，只返回稳定身份、状态、Revision、
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
-分页；当前唯一可见 Operation 是 `product_rediscovery`。旧 `/api/batches*` 继续 503，
+分页；当前可见 Operation 是 `product_rediscovery/outline`。旧 `/api/batches*` 继续 503，
 未迁移的 `titles/products/article/...` 即使误写入 PostgreSQL 也不会出现在控制面。
 
 读取要求 `project.view`。取消与重试先锁定 Organization/User/Project 及全部可撤权
@@ -1221,7 +1227,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十二条 Task 写操作、`product_rediscovery` 的 Enqueue/Runner 和窄范围
+身份代码链、十二条 Task 写操作、`product_rediscovery/outline` 的 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
@@ -1340,7 +1346,8 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
     Requester、Operation 或 Task？
 65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
-66. `product_rediscovery` 以外的 Operation 是否仍不出现在列表、详情、取消或重试接口？
+66. `product_rediscovery/outline` 以外的 Operation 是否仍不出现在列表、详情、取消或
+    重试接口？
 67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
     别名？
 68. 新 Operation 加入控制面前，是否已经具备可信 Enqueue、两阶段 Worker 授权、
@@ -1359,8 +1366,8 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     产物；确认时是否才更新 `outline` 并使下游全部失效？
 75. 大纲正文是否仍不进入 Audit，Event 是否只记录 Confirmed 与字符数，并与 Task CAS
     处于同一事务？
-76. `outline` 生成 Job 是否在 Server Prompt Snapshot、LLM Provider 和两阶段 Worker
-    授权接线前继续保持 Local Only？
+76. `outline` 生成 Job 是否固定不可变 Prompt Version 和当前 Published Chunk ID，
+    Provider 未配置或失败时是否不生成 mock？
 77. 大纲版本恢复是否只接收 Revision 与 Version Index，而不接受历史正文或
     `source_kind/status` 等服务端字段？
 78. 恢复目标是否只允许当前 Task 的 `outline/outline_draft` Version，并对越界索引、
@@ -1378,8 +1385,8 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 85. Prompt Audit 是否只记录 Kind、Version、状态和字符数，不记录名称、正文或内容 Hash？
 86. Audit 失败、撤权、旧 Expected Version 或 Kind 不匹配是否不留下 Head、Version 或
     Default 部分写入？
-87. Server Prompt HTTP 已接线但生成 Worker 尚未接线时，旧
-    `/api/projects/{customer}/prompts` 是否仍在 Server Mode 保持关闭而不回退 SQLite？
+87. Server Outline Worker 接线后，旧 `/api/projects/{customer}/prompts` 是否仍在
+    Server Mode 保持关闭，且 Worker 不回退 SQLite Prompt？
 88. Prompt HTTP 是否只开放精确 Method + Segment，且所有路径显式包含 Project？
 89. Prompt 目录是否允许 Viewer 读取，但所有写操作仍由事务服务重新锁定
     `article.edit`，而不是信任路由先验判断？

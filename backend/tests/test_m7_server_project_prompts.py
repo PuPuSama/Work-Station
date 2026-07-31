@@ -19,6 +19,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 from knowledge_agent.database import create_knowledge_engine  # noqa: E402
 from knowledge_agent.schema import projects  # noqa: E402
+from config import load_config  # noqa: E402
+from models import PromptSnapshot, TaskRecord  # noqa: E402
 from server_schema import (  # noqa: E402
     organizations,
     project_memberships,
@@ -40,10 +42,22 @@ from services.server_project_prompts import (  # noqa: E402
     ServerProjectPromptServiceFactory,
 )
 from services.project_prompts import ProjectPromptRepository  # noqa: E402
+from services.postgres_task_repository import (  # noqa: E402
+    PostgresTaskRepository,
+)
+from services.server_outline_generation import (  # noqa: E402
+    LlmServerOutlineProvider,
+    OutlineGenerationUnavailable,
+    OutlinePromptReference,
+    ServerOutlineGenerationHandler,
+)
 from services.server_project_prompt_migration import (  # noqa: E402
     ProjectPromptMigrationConflict,
     ProjectPromptMigrationUnavailable,
     migrate_project_prompts,
+)
+from services.server_task_commands import (  # noqa: E402
+    ServerTaskCommandUnavailable,
 )
 from services.server_auth import (  # noqa: E402
     SERVER_AUTH_COOKIE_NAME,
@@ -65,6 +79,30 @@ class FailingAuditWriter:
     def append(self, connection, event) -> None:
         del connection, event
         raise RuntimeError("private injected audit failure")
+
+
+class RecordingOutlineProvider:
+    def __init__(self) -> None:
+        self.versions: list[int] = []
+
+    def generate(
+        self,
+        task,
+        *,
+        prompt_snapshot,
+        context_chunks,
+    ):
+        del task, context_chunks
+        self.versions.append(prompt_snapshot.version)
+        return "## Pinned prompt outline"
+
+
+class LeakingOutlineLlm:
+    ready = True
+
+    def chat(self, messages, temperature=0.7, max_tokens=1800):
+        del messages, temperature, max_tokens
+        raise RuntimeError("provider leaked private-provider-detail")
 
 
 @unittest.skipUnless(
@@ -895,6 +933,156 @@ class ServerProjectPromptTests(unittest.TestCase):
                 str(audit.events),
             )
 
+    def test_outline_worker_keeps_enqueued_prompt_version_after_default_moves(
+        self,
+    ) -> None:
+        prompt_v1 = self.service.create(
+            self.editor,
+            name="Outline v1",
+            kind="outline",
+            content="Pinned outline instructions v1.",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="outline",
+            prompt_id=prompt_v1.prompt_id,
+        )
+        pinned = self.service.resolve(
+            self.editor,
+            kind="outline",
+            selection="project_default",
+        )
+        prompt_v2 = self.service.update(
+            self.editor,
+            prompt_id=prompt_v1.prompt_id,
+            expected_version=1,
+            name="Outline v2",
+            content="New default instructions v2.",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="outline",
+            prompt_id=prompt_v2.prompt_id,
+        )
+        task_id = f"{self.project_id}-outline-task"
+        repository = PostgresTaskRepository(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        )
+        repository.upsert(
+            TaskRecord(
+                id=task_id,
+                week_folder="server",
+                customer=self.project_id,
+                topic_index=1,
+                topic="Pinned prompt topic",
+                status="title_selected",
+                selected_title="Pinned prompt title",
+                task_dir=f"/server/{task_id}",
+                created_at="2026-07-31T00:00:00+00:00",
+                updated_at="2026-07-31T00:00:00+00:00",
+            ).model_dump(mode="json")
+        )
+        provider = RecordingOutlineProvider()
+        reference = OutlinePromptReference.from_snapshot(pinned)
+        result_revision = ServerOutlineGenerationHandler(
+            self.engine,
+            provider=provider,
+            audit=self.audit,
+        )(
+            {
+                "organization_id": self.organization_id,
+                "project_id": self.project_id,
+                "task_id": task_id,
+                "requested_by_user_id": self.editor_id,
+                "operation": "outline",
+                "source_revision": 0,
+                "request": {
+                    **reference.private_values(),
+                    "context_chunk_ids": [],
+                },
+            },
+            lambda: False,
+        )
+        self.assertEqual(result_revision, 1)
+        self.assertEqual(provider.versions, [1])
+        stored_payload = repository.get(task_id)
+        assert stored_payload is not None
+        stored = TaskRecord.model_validate(stored_payload)
+        assert stored.last_outline_prompt_snapshot is not None
+        self.assertEqual(
+            stored.last_outline_prompt_snapshot.version,
+            1,
+        )
+        self.assertEqual(
+            stored.last_outline_prompt_snapshot.content,
+            "Pinned outline instructions v1.",
+        )
+        current_default = self.service.resolve(
+            self.editor,
+            kind="outline",
+            selection="project_default",
+        )
+        self.assertEqual(current_default.version, 2)
+
+    def test_outline_worker_rolls_back_generated_draft_when_audit_fails(
+        self,
+    ) -> None:
+        task_id = f"{self.project_id}-outline-audit-task"
+        repository = PostgresTaskRepository(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        )
+        repository.upsert(
+            TaskRecord(
+                id=task_id,
+                week_folder="server",
+                customer=self.project_id,
+                topic_index=2,
+                topic="Audit rollback topic",
+                status="title_selected",
+                selected_title="Audit rollback title",
+                task_dir=f"/server/{task_id}",
+                created_at="2026-07-31T00:00:00+00:00",
+                updated_at="2026-07-31T00:00:00+00:00",
+            ).model_dump(mode="json")
+        )
+        system = self.service.resolve(
+            self.editor,
+            kind="outline",
+            selection="system",
+        )
+        reference = OutlinePromptReference.from_snapshot(system)
+        with self.assertRaises(ServerTaskCommandUnavailable):
+            ServerOutlineGenerationHandler(
+                self.engine,
+                provider=RecordingOutlineProvider(),
+                audit=FailingAuditWriter(),
+            )(
+                {
+                    "organization_id": self.organization_id,
+                    "project_id": self.project_id,
+                    "task_id": task_id,
+                    "requested_by_user_id": self.editor_id,
+                    "operation": "outline",
+                    "source_revision": 0,
+                    "request": {
+                        **reference.private_values(),
+                        "context_chunk_ids": [],
+                    },
+                },
+                lambda: False,
+            )
+        stored_payload = repository.get(task_id)
+        assert stored_payload is not None
+        stored = TaskRecord.model_validate(stored_payload)
+        self.assertEqual(stored.revision, 0)
+        self.assertEqual(stored.outline_draft, "")
+        self.assertEqual(stored.article_versions, [])
+        self.assertIsNone(stored.last_outline_prompt_snapshot)
+
     def test_prompt_migration_dry_run_and_divergent_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source, _ = self._legacy_source(directory)
@@ -981,6 +1169,45 @@ class ServerProjectPromptTests(unittest.TestCase):
                     ).scalar_one(),
                     0,
                 )
+
+
+class ServerOutlineProviderTests(unittest.TestCase):
+    def test_provider_error_does_not_expose_private_gateway_message(
+        self,
+    ) -> None:
+        provider = LlmServerOutlineProvider(
+            load_config(),
+            llm=LeakingOutlineLlm(),
+        )
+        task = TaskRecord(
+            id="outline-provider-task",
+            week_folder="server",
+            customer="example.test",
+            topic_index=1,
+            topic="Provider safety topic",
+            status="title_selected",
+            selected_title="Provider safety title",
+            task_dir="/server/outline-provider-task",
+            created_at="2026-07-31T00:00:00+00:00",
+            updated_at="2026-07-31T00:00:00+00:00",
+        )
+        with self.assertRaisesRegex(
+            OutlineGenerationUnavailable,
+            "^outline provider is temporarily unavailable$",
+        ) as caught:
+            provider.generate(
+                task,
+                prompt_snapshot=PromptSnapshot(
+                    kind="outline",
+                    source="system",
+                    captured_at="2026-07-31T00:00:00+00:00",
+                ),
+                context_chunks=(),
+            )
+        self.assertNotIn(
+            "private-provider-detail",
+            str(caught.exception),
+        )
 
 
 if __name__ == "__main__":

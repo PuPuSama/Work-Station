@@ -515,10 +515,24 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/projects/example.com/tasks/task-a/selected-title",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             server_http_route_available(
                 "POST",
                 "/api/projects/example.com/tasks/task-a/outline",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/projects/example.com/tasks/task-a/"
+                "outline/jobs/job-a",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/tasks/task-a/"
+                "outline/jobs/job-a",
             )
         )
         self.assertFalse(

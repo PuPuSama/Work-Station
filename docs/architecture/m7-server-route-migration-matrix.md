@@ -67,8 +67,8 @@
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
-| Project Prompt Library | Project-scoped PostgreSQL HTTP 与显式当前 Snapshot 导入已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 执行一次性导入、再接生成 Worker；旧路由继续关闭 |
-| Title/Product/Outline/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Provider 错误脱敏、CAS/Audit |
+| Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Article/Review Worker 继续逐项接线；旧路由继续关闭 |
+| Title/Product/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
 | Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
@@ -78,9 +78,9 @@
 | Operation | Enqueue | Worker | Claim 前授权 | Handler 前授权 | 控制面 |
 |---|---|---|---|---|---|
 | `product_rediscovery` | Project-scoped、与 Task Revision/Audit 同事务 | Project Registry | `knowledge.edit` | `knowledge.edit` | Project-scoped Batch/Job 列表、取消、重试已完成 |
+| `outline` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | Project Registry，只写 Review Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `titles` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
-| `outline` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `seo_review` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `article` / `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `humanize` / `restore_links` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
@@ -96,8 +96,12 @@ Local Only。已迁移的 `selected-title` 命令只允许客户端提交当前 
 服务端从 PostgreSQL Task 的当前 `title_candidates` 取值；它不接受调用方替换标题正文，
 也不表示标题生成链已经切换为服务器知识准源。
 
-大纲“生成”与大纲“保存/确认”也分离：`outline` Job 仍依赖本地 Prompt Library 与 LLM
-运行链，因此不进入 PostgreSQL Worker Operation 集合。已迁移的 `PUT .../outline`
+大纲“生成”与大纲“保存/确认”继续分离：`POST .../outline` 只接受当前 Revision，
+入队时固定 PostgreSQL Prompt ID + Version 与当前 Published Chunk ID；Worker 执行前
+再次授权并复核 Chunk 仍属于同 Project 的当前 Published Snapshot。生成结果只追加
+`outline_draft` Version，不替换确认大纲、不使下游失效；Provider 未配置、返回空结果、
+Prompt/Chunk 漂移、撤权或 Task CAS 冲突均 fail closed，不生成 mock。
+`PUT .../outline`
 只保存编辑者已审阅的 Markdown；草稿追加 `outline_draft` Version 但保留当前确认大纲
 和下游产物，确认则追加 `outline` Version 并使正文、图片、检查与交付产物失效。
 `POST .../outline/restore-version` 只接受 Version Index，从当前 Task 的服务器版本历史
@@ -105,7 +109,7 @@ Local Only。已迁移的 `selected-title` 命令只允许客户端提交当前 
 
 ## 6. 已完成闭环：Project Job Control
 
-已只为迁移完成的 `product_rediscovery` 增加：
+已为迁移完成的 `product_rediscovery` 和 `outline` 增加：
 
 ```text
 GET  /api/projects/{project}/batches
@@ -140,11 +144,12 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 11. 标题选择是否仍只读取当前 PostgreSQL Task 的候选并拒绝客户端标题正文？
 12. `titles` Job 是否在发布知识上下文接线前继续保持 Local Only？
 13. 大纲草稿是否仍保留当前确认大纲和下游产物，而确认大纲才执行下游失效？
-14. `outline` 生成 Job 是否在 Server Prompt/LLM 边界接线前继续保持 Local Only？
+14. `outline` Job 是否只固定 PostgreSQL Prompt Version 与当前 Published Chunk ID，
+    且只写可审阅草稿、不自动确认或生成 mock？
 15. 大纲恢复是否只按当前 Task 的 Version Index 读取 `outline/outline_draft`，并拒绝
     Article Version 与客户端历史正文？
 16. Prompt Default 是否绑定精确不可变 Version，而不是只指向会漂移的可变正文？
-17. Server Prompt HTTP 已接线后，旧 Local Prompt API 是否仍保持关闭，且 Worker 未接线
-    前不会混用 PostgreSQL/SQLite Prompt？
+17. Server Outline Worker 接线后，旧 Local Prompt API 是否仍保持关闭，且 Worker
+    只读取 PostgreSQL 不可变 Prompt Version、不混用 SQLite Prompt？
 18. SQLite Prompt 是否只通过显式一次性导入进入指定 Project，且非空差异目标不会被
     覆盖、旧库未保存的历史 Version 不会被伪造？

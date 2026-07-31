@@ -315,6 +315,16 @@ def server_http_route_available(method: str, path: str) -> bool:
         return True
     if (
         normalized_method == "POST"
+        and len(parts) == 7
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "tasks"
+        and bool(parts[5])
+        and parts[6] == "outline"
+    ):
+        return True
+    if (
+        normalized_method == "POST"
         and len(parts) == 8
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])
@@ -442,6 +452,17 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[4] == "tasks"
         and bool(parts[5])
         and parts[6:8] == ["product-rediscovery", "jobs"]
+        and bool(parts[8])
+    ):
+        return True
+    if (
+        normalized_method == "GET"
+        and len(parts) == 9
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "tasks"
+        and bool(parts[5])
+        and parts[6:8] == ["outline", "jobs"]
         and bool(parts[8])
     ):
         return True

@@ -149,10 +149,10 @@
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
-  调用 fail closed；产品重新发现已有独立 Project-scoped PostgreSQL Runner，其余
-  通用 Batch/Worker 尚未接线；
+  调用 fail closed；产品重新发现和大纲生成已有独立 Project-scoped PostgreSQL Runner，
+  其余通用 Batch/Worker 尚未接线；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery`，公开 DTO 不含私有 Request、Requester、Category URL、
+  只展示 `product_rediscovery/outline`，公开 DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
   返回 422；旧无 Project 的 `/api/batches*` 继续关闭；
@@ -214,7 +214,11 @@
   保持 Local Only；
 - 已新增 PostgreSQL Task 大纲草稿/确认命令：草稿保留当前确认大纲和下游产物，确认
   才替换正式大纲并失效正文之后的派生状态；两者都追加内容哈希 Version，并以 CAS 与
-  不含 Markdown 的 Audit 原子提交；大纲生成 `outline` Job 仍保持 Local Only；
+  不含 Markdown 的 Audit 原子提交；
+- 已新增 Project-scoped `outline` PostgreSQL Job：客户端只提交 Revision，Enqueue
+  固定不可变 Prompt ID + Version 和当前 Published Chunk ID；Claim/Handler 两阶段要求
+  `article.edit`，执行时复核 Prompt 与 Chunk Scope，Provider 失败脱敏且不生成 mock；
+  成功只写 `outline_draft` 与 `generated` Version，人工确认前不替换正式大纲或下游；
 - 已新增服务器历史大纲恢复命令：客户端只提交 Version Index，服务端只从当前 Task 的
   `outline/outline_draft` 历史恢复新草稿；Article Version、越界索引和客户端正文均
   fail closed，当前确认大纲与下游保持不变；
@@ -224,8 +228,9 @@
 - 已新增旧 SQLite Prompt 当前 Snapshot 的显式一次性导入：保留 Prompt ID、当前
   Version、Active/Archived 与 Default 精确版本，导入后在同一事务复核内容摘要并写
   安全 Audit；非空差异目标拒绝覆盖，旧库未保存的历史 Version 不会被伪造；
-- 生成 Worker 消费尚未接线，因此旧 Prompt API 在 Server Mode 继续关闭，不能把
-  HTTP 管理面和一次性数据导入完成描述成生成链已迁移；
+- Outline Worker 已消费精确 PostgreSQL Prompt Snapshot；旧 Prompt API 在 Server Mode
+  仍继续关闭，Article/Review Worker 尚未接线，不能把单一 Outline Operation 描述成
+  整条生成链已迁移；
 - 已接通 Project-scoped Server Prompt HTTP：Viewer 可读目录，Editor 可创建、追加版本、
   归档/恢复和切换精确 Default；严格 Body 与路由白名单不允许客户端提交 Actor、Role、
   Status 或内容 Hash；旧 SQLite Prompt API 仍不在 Server Mode 开放；

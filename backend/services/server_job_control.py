@@ -26,7 +26,9 @@ from services.job_queue import ACTIVE_JOB_STATUSES, ActiveJobError
 from services.postgres_job_queue import PostgresJobQueue
 
 
-SERVER_JOB_CONTROL_OPERATIONS = frozenset({"product_rediscovery"})
+SERVER_JOB_CONTROL_OPERATIONS = frozenset(
+    {"outline", "product_rediscovery"}
+)
 
 
 def _required_text(value: str, field_name: str) -> str:
