@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260731_0014`
+- Alembic Head：`20260731_0015`
 
 ## 已通过验证
 
@@ -240,7 +240,7 @@ Actor Session Version 迁移新增后执行：
 .\.venv\Scripts\alembic.exe current
 ```
 
-结果为 `20260731_0014 (head)`；降级、升级和重复升级均成功。
+结果为 `20260731_0015 (head)`；降级、升级和重复升级均成功。
 
 ### Task/Job PostgreSQL 定向测试
 
@@ -612,7 +612,7 @@ $env:ARTICLE_AGENT_OBJECT_STORE_INTEGRATION = '1'
 - OIDC 配置不完整或实时 Discovery/JWKS 探测失败时 Preflight 单独 fail closed；
 - `object_download_reauthorizes` 已由真实 HTTP 路由与签名前二次授权支撑为 true，
   不再只是未接线的底层 Service；
-- Alembic 不是 `20260731_0014` 时阻止发布；
+- Alembic 不是 `20260731_0015` 时阻止发布；
 - 远程对象存储 Endpoint 使用明文 HTTP 时阻止发布（localhost 开发目标除外）；
 - 数据库 URL、Embedding Key、OIDC Client Secret、Token、S3 Key/Secret 和供应商
   错误正文不进入公开报告。
@@ -817,7 +817,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Mapping Revoked、User Disabled、Organization Suspended 均不能解析 Actor；
 - Link/Revoke 只有 Active Org Admin 可执行，且与 Audit Event 同事务；
 - 审计目标使用 Subject 哈希，审计 Details 不保存原始 Subject；
-- Preflight Head 已更新为 `20260731_0014`。
+- Preflight Head 已更新为 `20260731_0015`。
 
 ### External Identity 管理 HTTP 与组织控制台
 
@@ -918,7 +918,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   Local Only；
 - 完整后端回归 597 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
-- Alembic Current 与 Head 均为 `20260731_0014`。
+- Alembic Current 与 Head 均为 `20260731_0015`。
 
 ### M7 Task 历史大纲恢复
 
@@ -943,7 +943,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 旧 Revision 返回 409 且不追加 Version/Audit；Local Mode 不挂载该接口；
 - 完整后端回归 599 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
-- Alembic Current 与 Head 均为 `20260731_0014`。
+- Alembic Current 与 Head 均为 `20260731_0015`。
 
 ### M7 Task 大纲草稿与确认
 
@@ -971,7 +971,32 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
 - 首次把 TypeScript 与 Next build 并行运行时，两者竞争 `.next/types` 导致临时
   `routes.js` 缺失；按 build -> lint/typecheck 复核后通过，不属于代码失败；
-- Alembic Current 与 Head 均为 `20260731_0014`。
+- Alembic Current 与 Head 均为 `20260731_0015`。
+
+### M7 Project Prompt Snapshot 底座
+
+```powershell
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_prompts `
+  tests.test_m7_deployment_readiness `
+  tests.test_m7_object_orphan_reconciliation -q
+```
+
+结果：
+
+- 18 tests 全部通过；
+- Alembic `0015 -> 0014 -> head -> head` 降级、升级与重复升级成功；
+- Prompt Head、不可变 Version、精确 Default 指针及其 Project/User 复合 FK 已验证；
+- Version UPDATE/DELETE 被数据库 Trigger 拒绝，跨项目 Default Pointer 被 FK 拒绝；
+- V1 设为默认后创建 V2，默认仍解析 V1；显式切换后才解析 V2；
+- Viewer 可解析但不能写，跨 Project/Organization、旧 Expected Version、Kind 不匹配
+  均 fail closed；
+- 创建、追加版本、归档/恢复与默认切换写入安全 Audit，Details 不含 Prompt 名称/正文；
+- Audit 故障返回脱敏错误并回滚 Prompt Head/Version/Default；
+- 完整后端回归 607 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
+- Alembic Current 与 Head 均为 `20260731_0015`。
 
 ## 诊断记录
 

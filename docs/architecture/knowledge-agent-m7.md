@@ -157,6 +157,13 @@ M7 不一次性切换整个应用。采用 expand/contract：
   撤销、Audit 和数据库公开读模型不返回 Token/Hash；兑换要求短期 HttpOnly Cookie 与
   HMAC State 中的 Token Hash 一致，并在 OIDC 验签后原子绑定 External Identity、消费
   邀请和写 Audit。
+- Alembic `20260731_0015` 新增 Project Prompt Snapshot 底座：Prompt Head 只保存
+  Kind、Status 与 Current Version 指针；每次编辑追加不可变 Version，数据库 Trigger
+  禁止修改/删除历史正文；Project Default 绑定精确 Prompt ID + Version，不随新版本
+  自动漂移。
+- 新增 `PostgresProjectPromptService`：读取要求 `project.view`，创建、追加版本、归档/
+  恢复和默认指针切换在事务内重新锁定 `article.edit`，并与不含 Prompt 正文/名称的
+  Audit 原子提交；Audit 失败回滚全部业务写入。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -413,6 +420,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/oidc_identity.py` | OIDC 配置、Discovery/JWKS、Code Exchange 和 ID Token 验证 | 固定 RS256、精确 Issuer/Audience、Nonce/时间门禁、未知 Kid 刷新、错误不泄露 Secret |
 | `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
 | `backend/migrations/versions/20260731_0014_workspace_invitations.py` | 一次性 Workspace Invitation Schema 准源 | Token 只存 Hash、复合租户 FK、状态/过期约束、每 User/Issuer 单 Pending、可升降级 |
+| `backend/migrations/versions/20260731_0015_project_prompt_snapshots.py` | Project Prompt Snapshot Schema 准源 | Head/不可变 Version/精确 Default 指针、复合 Project/User FK、Append-only Trigger |
+| `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
 | `backend/services/workspace_invitations.py` | 邀请目录、签发、撤销与 Verified Identity 兑换事务 | Active Org Admin、一次返回 Token、过期/重放拒绝、Identity/Invitation/Audit 同事务 |
 | `backend/server_invitation_http.py` | Organization-scoped 邀请管理 HTTP | 创建响应与目录响应分型，Token 只出现在创建响应，输入白名单、稳定分页、统一安全错误 |
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
@@ -1348,3 +1357,16 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     空版本和 Article Version fail closed？
 79. 恢复是否只产生新的 `outline_draft` Version，保留当前确认大纲、正文与下游状态？
 80. 恢复 Audit 是否只记录 Version Index/来源类型而不记录版本正文，并与 CAS 原子提交？
+81. Project Prompt Head 是否只保存 Current Version 指针，而历史 Version 正文仍由数据库
+    Trigger 禁止 UPDATE/DELETE？
+82. Project Default 是否绑定精确 Prompt ID + Version，创建新 Version 后是否不会静默
+    改变默认生成输入？
+83. Prompt 创建/更新/归档/默认切换是否在事务内重新锁定 `article.edit`，而解析只要求
+    `project.view`？
+84. Prompt Version Creator、Head、Default 是否均通过复合 FK 固定在同一
+    Organization/Project/User Scope？
+85. Prompt Audit 是否只记录 Kind、Version、状态和字符数，不记录名称、正文或内容 Hash？
+86. Audit 失败、撤权、旧 Expected Version 或 Kind 不匹配是否不留下 Head、Version 或
+    Default 部分写入？
+87. Server Prompt HTTP 与生成 Worker 尚未接线时，旧 `/api/projects/{customer}/prompts`
+    是否仍在 Server Mode 保持关闭而不回退 SQLite？

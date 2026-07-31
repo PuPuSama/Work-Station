@@ -218,6 +218,11 @@
 - 已新增服务器历史大纲恢复命令：客户端只提交 Version Index，服务端只从当前 Task 的
   `outline/outline_draft` 历史恢复新草稿；Article Version、越界索引和客户端正文均
   fail closed，当前确认大纲与下游保持不变；
+- 已新增 PostgreSQL Project Prompt Snapshot 底座：Head、不可变 Version 与精确
+  Default 指针分表；编辑只追加新 Version，默认不会自动漂移；读取与写入分别要求
+  `project.view/article.edit`，写操作重新锁定可撤权事实并与安全 Audit 同事务；
+- Server Prompt HTTP、旧 SQLite Prompt 数据迁移和生成 Worker 消费尚未接线，因此旧
+  Prompt API 在 Server Mode 继续关闭，不能把底座完成描述成生成链已迁移；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界

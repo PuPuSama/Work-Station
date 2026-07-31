@@ -610,6 +610,223 @@ sa.Index(
 )
 
 
+project_prompt_heads = sa.Table(
+    "project_prompt_heads",
+    metadata,
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("project_id", sa.Text(), nullable=False),
+    sa.Column("prompt_id", sa.Text(), nullable=False),
+    sa.Column("kind", sa.Text(), nullable=False),
+    sa.Column(
+        "status",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("'active'"),
+    ),
+    sa.Column(
+        "current_version",
+        sa.Integer(),
+        nullable=False,
+        server_default=sa.text("1"),
+    ),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "btrim(prompt_id) <> ''",
+        name="ck_project_prompt_heads_identity_nonempty",
+    ),
+    sa.CheckConstraint(
+        "kind IN ('outline', 'article', 'review')",
+        name="ck_project_prompt_heads_kind",
+    ),
+    sa.CheckConstraint(
+        "status IN ('active', 'archived')",
+        name="ck_project_prompt_heads_status",
+    ),
+    sa.CheckConstraint(
+        "current_version > 0",
+        name="ck_project_prompt_heads_current_version",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "project_id"],
+        ["project_ownership.organization_id", "project_ownership.project_id"],
+        name="fk_project_prompt_heads_project",
+        ondelete="RESTRICT",
+    ),
+    sa.PrimaryKeyConstraint(
+        "organization_id", "project_id", "prompt_id",
+        name="pk_project_prompt_heads",
+    ),
+    sa.UniqueConstraint(
+        "organization_id", "project_id", "prompt_id", "kind",
+        name="uq_project_prompt_heads_kind",
+    ),
+    sa.UniqueConstraint(
+        "organization_id", "project_id", "prompt_id", "current_version",
+        name="uq_project_prompt_heads_current_version",
+    ),
+)
+
+project_prompt_versions = sa.Table(
+    "project_prompt_versions",
+    metadata,
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("project_id", sa.Text(), nullable=False),
+    sa.Column("prompt_id", sa.Text(), nullable=False),
+    sa.Column("kind", sa.Text(), nullable=False),
+    sa.Column("version", sa.Integer(), nullable=False),
+    sa.Column("name", sa.Text(), nullable=False),
+    sa.Column("content", sa.Text(), nullable=False),
+    sa.Column("content_hash", sa.Text(), nullable=False),
+    sa.Column("created_by_user_id", sa.Text(), nullable=False),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "kind IN ('outline', 'article', 'review')",
+        name="ck_project_prompt_versions_kind",
+    ),
+    sa.CheckConstraint(
+        "version > 0 AND btrim(name) <> '' AND btrim(content) <> ''",
+        name="ck_project_prompt_versions_content",
+    ),
+    sa.CheckConstraint(
+        "content_hash ~ '^[0-9a-f]{64}$'",
+        name="ck_project_prompt_versions_hash",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "project_id", "prompt_id", "kind"],
+        [
+            "project_prompt_heads.organization_id",
+            "project_prompt_heads.project_id",
+            "project_prompt_heads.prompt_id",
+            "project_prompt_heads.kind",
+        ],
+        name="fk_project_prompt_versions_head",
+        ondelete="RESTRICT",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "created_by_user_id"],
+        ["workspace_users.organization_id", "workspace_users.user_id"],
+        name="fk_project_prompt_versions_creator",
+        ondelete="RESTRICT",
+    ),
+    sa.PrimaryKeyConstraint(
+        "organization_id", "project_id", "prompt_id", "version",
+        name="pk_project_prompt_versions",
+    ),
+    sa.UniqueConstraint(
+        "organization_id", "project_id", "prompt_id", "kind", "version",
+        name="uq_project_prompt_versions_kind",
+    ),
+)
+
+project_prompt_heads.append_constraint(
+    sa.ForeignKeyConstraint(
+        [
+            "organization_id",
+            "project_id",
+            "prompt_id",
+            "kind",
+            "current_version",
+        ],
+        [
+            "project_prompt_versions.organization_id",
+            "project_prompt_versions.project_id",
+            "project_prompt_versions.prompt_id",
+            "project_prompt_versions.kind",
+            "project_prompt_versions.version",
+        ],
+        name="fk_project_prompt_heads_current_version",
+        ondelete="RESTRICT",
+        deferrable=True,
+        initially="DEFERRED",
+        use_alter=True,
+    )
+)
+
+project_prompt_defaults = sa.Table(
+    "project_prompt_defaults",
+    metadata,
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("project_id", sa.Text(), nullable=False),
+    sa.Column("kind", sa.Text(), nullable=False),
+    sa.Column("prompt_id", sa.Text(), nullable=False),
+    sa.Column("version", sa.Integer(), nullable=False),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "kind IN ('outline', 'article', 'review')",
+        name="ck_project_prompt_defaults_kind",
+    ),
+    sa.CheckConstraint(
+        "version > 0",
+        name="ck_project_prompt_defaults_version",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "project_id"],
+        ["project_ownership.organization_id", "project_ownership.project_id"],
+        name="fk_project_prompt_defaults_project",
+        ondelete="RESTRICT",
+    ),
+    sa.ForeignKeyConstraint(
+        [
+            "organization_id",
+            "project_id",
+            "prompt_id",
+            "kind",
+            "version",
+        ],
+        [
+            "project_prompt_versions.organization_id",
+            "project_prompt_versions.project_id",
+            "project_prompt_versions.prompt_id",
+            "project_prompt_versions.kind",
+            "project_prompt_versions.version",
+        ],
+        name="fk_project_prompt_defaults_version",
+        ondelete="RESTRICT",
+    ),
+    sa.PrimaryKeyConstraint(
+        "organization_id", "project_id", "kind",
+        name="pk_project_prompt_defaults",
+    ),
+)
+
+sa.Index(
+    "ix_project_prompt_heads_directory",
+    project_prompt_heads.c.organization_id,
+    project_prompt_heads.c.project_id,
+    project_prompt_heads.c.status,
+    project_prompt_heads.c.kind,
+    project_prompt_heads.c.prompt_id,
+)
+sa.Index(
+    "ix_project_prompt_versions_history",
+    project_prompt_versions.c.organization_id,
+    project_prompt_versions.c.project_id,
+    project_prompt_versions.c.prompt_id,
+    project_prompt_versions.c.version,
+)
+
+
 task_store_state = sa.Table(
     "task_store_state",
     metadata,
@@ -985,6 +1202,9 @@ __all__ = [
     "object_orphan_observations",
     "project_memberships",
     "project_ownership",
+    "project_prompt_defaults",
+    "project_prompt_heads",
+    "project_prompt_versions",
     "team_memberships",
     "teams",
     "task_store_state",

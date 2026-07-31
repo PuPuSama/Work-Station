@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260731_0014`；
+- `alembic_version = 20260731_0015`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -199,6 +199,20 @@ Audit 故障都必须失败；Audit 失败后旧版本必须仍有效，错误�
 或失败都必须清除 State 与 Invitation HttpOnly Cookie；邀请过期、撤销或已兑换后不得
 恢复。验收至少覆盖：Cookie 中途替换在 Token Endpoint 前失败、同 Token 重放失败，以及
 Audit 故障同时回滚 External Identity 与 Invitation Accepted。
+
+### Project Prompt Snapshot
+
+`20260731_0015` 把 Server Prompt 拆成 `project_prompt_heads`、
+`project_prompt_versions` 和 `project_prompt_defaults`。发布前必须验证：
+
+- Version 表的 UPDATE/DELETE 被 Append-only Trigger 拒绝；
+- Head 的 Current Version 与 Default 的 Prompt ID + Version 都由复合 FK 固定在同一
+  Organization/Project；
+- 创建 V2 后，已绑定 V1 的 Project Default 仍解析 V1；只有显式切换才采用 V2；
+- Viewer 可解析已授权项目 Prompt，但创建/更新/归档/默认切换要求 `article.edit`；
+- 写操作在事务内重新锁定权限，Audit 故障必须同时回滚 Head/Version/Default；
+- Audit 不含 Prompt 名称、正文或 Hash；
+- Server Prompt HTTP 与生成 Worker 接线前，旧 Local Prompt API 继续 fail closed。
 
 ### ProjectMembership 授权与撤销
 

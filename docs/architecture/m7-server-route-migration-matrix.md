@@ -66,7 +66,7 @@
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
-| Project Prompt Library | 本地 Prompt 文件/JSON | Project Prompt Snapshot | 不可变版本、Active 指针、Project 权限 |
+| Project Prompt Library | Local HTTP 仍使用 SQLite；PostgreSQL Snapshot 服务已完成 | Project Prompt Snapshot | Server HTTP/Worker 接线；旧路由继续关闭 |
 | Title/Product/Outline/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Provider 错误脱敏、CAS/Audit |
 | Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
@@ -142,3 +142,5 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 14. `outline` 生成 Job 是否在 Server Prompt/LLM 边界接线前继续保持 Local Only？
 15. 大纲恢复是否只按当前 Task 的 Version Index 读取 `outline/outline_draft`，并拒绝
     Article Version 与客户端历史正文？
+16. Prompt Default 是否绑定精确不可变 Version，而不是只指向会漂移的可变正文？
+17. Server Prompt HTTP/Worker 未接线前，旧 Local Prompt API 是否仍保持关闭？
