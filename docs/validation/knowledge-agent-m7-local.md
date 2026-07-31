@@ -943,6 +943,31 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
 - Alembic Current 与 Head 均为 `20260731_0015`。
 
+### M7 SQLite Prompt 当前 Snapshot 显式导入
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_prompts `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 联合定向回归 21 tests 全部通过，其中 Prompt 测试文件 13 tests 全部通过；
+- 导入保留旧库当前 Prompt ID、Version、Active/Archived 和 Default 的精确版本；
+- 旧库只有当前版本，导入不会虚构缺失的历史 Version；
+- `dry_run=True` 不写 Head/Version/Default/Audit；首次正式导入后，完全相同输入重跑
+  返回 `already_matched=True`，且不重复 Audit；
+- PostgreSQL 已有不同 Prompt 时拒绝覆盖；Viewer 无权迁移，跨 Project 仍由项目授权门
+  拒绝；
+- 导入、内容摘要复核和安全 Audit 在同一事务；Audit 故障回滚全部 Prompt 写入，Audit
+  不含 Prompt 名称、正文或内容 Hash；
+- 完整后端回归 612 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
+- Alembic Current 与 Head 均为 `20260731_0015`。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell

@@ -167,6 +167,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 Project-scoped Prompt HTTP：目录、创建、追加版本、归档/恢复与精确 Default
   切换全部走 PostgreSQL Snapshot Service；Body 字段严格白名单，旧无 Server Scope 的
   `/api/projects/{customer}/prompts` Handler 不复用，Local Mode 不挂载新接口。
+- 新增显式 `migrate_project_prompts()`：把指定 SQLite Customer 的当前 Prompt Library
+  导入指定 Organization/Project，保留 Prompt ID、当前 Version、Active/Archived 和
+  Default 的精确版本；旧库没有不可变历史行，因此只迁移可证明存在的当前 Snapshot，
+  不伪造早期版本。目标非空且摘要不同会拒绝覆盖，重复执行仅在内容完全一致时返回
+  `already_matched`；导入、校验和不含正文/名称/Hash 的 Audit 在同一事务。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -425,6 +430,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/migrations/versions/20260731_0014_workspace_invitations.py` | 一次性 Workspace Invitation Schema 准源 | Token 只存 Hash、复合租户 FK、状态/过期约束、每 User/Issuer 单 Pending、可升降级 |
 | `backend/migrations/versions/20260731_0015_project_prompt_snapshots.py` | Project Prompt Snapshot Schema 准源 | Head/不可变 Version/精确 Default 指针、复合 Project/User FK、Append-only Trigger |
 | `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
+| `backend/services/server_project_prompt_migration.py` | SQLite Prompt 当前 Snapshot 一次性导入 | 显式 Customer 到 Project 映射、版本/状态/Default 保留、摘要复核、差异目标不覆盖、导入与安全 Audit 同事务 |
 | `backend/server_prompt_http.py` | Project Prompt 目录、创建、版本、Active 与 Default HTTP | Project Scope、严格 Body、统一 403/404/409/422/503、公开响应不含内部 Actor/Hash |
 | `backend/services/workspace_invitations.py` | 邀请目录、签发、撤销与 Verified Identity 兑换事务 | Active Org Admin、一次返回 Token、过期/重放拒绝、Identity/Invitation/Audit 同事务 |
 | `backend/server_invitation_http.py` | Organization-scoped 邀请管理 HTTP | 创建响应与目录响应分型，Token 只出现在创建响应，输入白名单、稳定分页、统一安全错误 |
@@ -1383,3 +1389,10 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     `ProjectPromptRepository` 或创建本地 SQLite 文件？
 92. Prompt 追加版本与 Active 切换是否都要求 Expected Version，并在旧值时返回 409
     而不追加 Audit？
+93. SQLite Prompt 导入是否只能显式指定 Source Customer 和目标 Project，且在事务内
+    重新锁定 `article.edit`？
+94. Prompt 导入是否保留当前 Prompt ID、Version、Active/Archived 和 Default 精确版本，
+    同时明确不伪造旧库未保存的历史 Version？
+95. 目标非空时是否只有摘要完全一致才允许幂等重试，任意差异是否都拒绝覆盖？
+96. Prompt 导入校验或 Audit 失败时是否整笔回滚，Audit 是否只含数量而不含名称、正文
+    或内容 Hash？

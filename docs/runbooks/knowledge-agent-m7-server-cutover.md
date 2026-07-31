@@ -214,6 +214,13 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
 - Audit 不含 Prompt 名称、正文或 Hash；
 - Project-scoped Prompt HTTP 目录/创建/更新/Active/Default 必须通过精确路由白名单；
   Viewer 仅可读，Editor 才可写，Local Mode 返回 404；
+- 旧 SQLite Prompt 只能在冻结旧写入口后，由操作员显式调用
+  `migrate_project_prompts()`，同时指定 Source Customer、目标 Project 和已认证
+  Editor；应用启动不得自动导入或双写；
+- 先运行 `dry_run=True` 记录 Prompt/Active/Default 数量和内容摘要，再执行正式导入；
+  导入后以相同输入重跑必须得到 `already_matched=True`；
+- 目标已有任意不同 Prompt/Default 时必须停止并调查，不允许清空、覆盖或合并猜测；
+  旧 SQLite 只保存当前版本，因此导入保留当前 Version 号但不补造更早正文；
 - 生成 Worker 接线前，旧 Local Prompt API 继续 fail closed，不能混用两套准源。
 
 Prompt HTTP 冒烟：
@@ -225,6 +232,18 @@ PUT  /api/projects/{project}/prompt-snapshots/{prompt_id}
 PUT  /api/projects/{project}/prompt-snapshots/{prompt_id}/active
 PUT  /api/projects/{project}/prompt-defaults/{outline|article|review}
 ```
+
+Prompt 数据切换顺序：
+
+1. 停止目标 Customer 的旧 Prompt 写入口，记录 SQLite 文件只读备份；
+2. 用 `ProjectPromptRepository` 打开明确的旧数据路径，构造目标 Project 的 Server
+   Actor，再调用 `migrate_project_prompts(..., dry_run=True)`；
+3. 人工复核报告中的 Organization、Project、三类数量和 `content_digest`，报告或日志
+   不得输出 Prompt 名称、正文或 API Key；
+4. 以完全相同的 Source/Target 调用 `dry_run=False`，保存 `imported=True` 的报告；
+5. 再次执行并确认 `already_matched=True`，然后通过 Project-scoped GET 解析 Default；
+6. 若出现 `ProjectPromptMigrationConflict`，保持两边原状并调查 Scope 或冻结窗口，
+   不得用删除目标数据作为自动恢复动作。
 
 请求不得携带 Organization、Actor、Role、Status、Content Hash 或服务端 Version 字段；
 追加版本和 Active 切换都必须提交 `expected_version`，旧值返回 409。归档必须清除

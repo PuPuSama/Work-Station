@@ -221,8 +221,11 @@
 - 已新增 PostgreSQL Project Prompt Snapshot 底座：Head、不可变 Version 与精确
   Default 指针分表；编辑只追加新 Version，默认不会自动漂移；读取与写入分别要求
   `project.view/article.edit`，写操作重新锁定可撤权事实并与安全 Audit 同事务；
-- 旧 SQLite Prompt 数据迁移和生成 Worker 消费尚未接线，因此旧 Prompt API 在
-  Server Mode 继续关闭，不能把 HTTP 管理面完成描述成生成链已迁移；
+- 已新增旧 SQLite Prompt 当前 Snapshot 的显式一次性导入：保留 Prompt ID、当前
+  Version、Active/Archived 与 Default 精确版本，导入后在同一事务复核内容摘要并写
+  安全 Audit；非空差异目标拒绝覆盖，旧库未保存的历史 Version 不会被伪造；
+- 生成 Worker 消费尚未接线，因此旧 Prompt API 在 Server Mode 继续关闭，不能把
+  HTTP 管理面和一次性数据导入完成描述成生成链已迁移；
 - 已接通 Project-scoped Server Prompt HTTP：Viewer 可读目录，Editor 可创建、追加版本、
   归档/恢复和切换精确 Default；严格 Body 与路由白名单不允许客户端提交 Actor、Role、
   Status 或内容 Hash；旧 SQLite Prompt API 仍不在 Server Mode 开放；

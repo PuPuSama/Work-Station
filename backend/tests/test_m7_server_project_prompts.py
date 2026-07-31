@@ -39,6 +39,12 @@ from services.server_project_prompts import (  # noqa: E402
     ServerProjectPromptUnavailable,
     ServerProjectPromptServiceFactory,
 )
+from services.project_prompts import ProjectPromptRepository  # noqa: E402
+from services.server_project_prompt_migration import (  # noqa: E402
+    ProjectPromptMigrationConflict,
+    ProjectPromptMigrationUnavailable,
+    migrate_project_prompts,
+)
 from services.server_auth import (  # noqa: E402
     SERVER_AUTH_COOKIE_NAME,
     ServerActorSessionCodec,
@@ -167,6 +173,36 @@ class ServerProjectPromptTests(unittest.TestCase):
             project_id=self.project_id,
             audit=self.audit,
         )
+
+    def _legacy_source(
+        self,
+        directory: str,
+    ) -> tuple[ProjectPromptRepository, str]:
+        customer = self.project_id
+        source = ProjectPromptRepository(
+            Path(directory) / "legacy-tasks.json"
+        )
+        outline = source.create(
+            customer,
+            "Legacy outline",
+            "outline",
+            "Legacy outline version one.",
+        )
+        source.update(
+            customer,
+            outline.id,
+            "Legacy outline v2",
+            "Legacy outline version two.",
+        )
+        article = source.create(
+            customer,
+            "Archived article",
+            "article",
+            "Archived article prompt.",
+        )
+        source.set_active(customer, article.id, False)
+        source.set_defaults(customer, outline.id, "")
+        return source, outline.id
 
     def test_versions_are_immutable_and_default_is_exactly_pinned(
         self,
@@ -805,6 +841,146 @@ class ServerProjectPromptTests(unittest.TestCase):
             )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
+
+    def test_explicit_sqlite_migration_preserves_current_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source, outline_id = self._legacy_source(directory)
+            audit = RecordingAuditWriter()
+            report = migrate_project_prompts(
+                source,
+                customer=self.project_id,
+                engine=self.engine,
+                actor=self.editor,
+                project_id=self.project_id,
+                audit=audit,
+            )
+            self.assertTrue(report.imported)
+            self.assertEqual(report.source.prompt_count, 2)
+            self.assertEqual(report.source.active_count, 1)
+            self.assertEqual(report.source.default_count, 1)
+            resolved = self.service.resolve(
+                self.viewer,
+                kind="outline",
+                selection="project_default",
+            )
+            self.assertEqual(resolved.prompt_id, outline_id)
+            self.assertEqual(resolved.version, 2)
+            self.assertEqual(
+                resolved.content,
+                "Legacy outline version two.",
+            )
+            listing = self.service.list(self.viewer)
+            self.assertEqual(
+                {item.status for item in listing.prompts},
+                {"active", "archived"},
+            )
+            repeated = migrate_project_prompts(
+                source,
+                customer=self.project_id,
+                engine=self.engine,
+                actor=self.editor,
+                project_id=self.project_id,
+                audit=audit,
+            )
+            self.assertTrue(repeated.already_matched)
+            self.assertFalse(repeated.imported)
+            self.assertEqual(
+                [event.action for event in audit.events],
+                ["project_prompt.imported"],
+            )
+            self.assertNotIn(
+                "Legacy outline",
+                str(audit.events),
+            )
+
+    def test_prompt_migration_dry_run_and_divergent_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source, _ = self._legacy_source(directory)
+            dry_run = migrate_project_prompts(
+                source,
+                customer=self.project_id,
+                engine=self.engine,
+                actor=self.editor,
+                project_id=self.project_id,
+                audit=self.audit,
+                dry_run=True,
+            )
+            self.assertFalse(dry_run.imported)
+            with self.engine.connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(project_prompt_heads)
+                        .where(
+                            project_prompt_heads.c.organization_id
+                            == self.organization_id,
+                            project_prompt_heads.c.project_id
+                            == self.project_id,
+                        )
+                    ).scalar_one(),
+                    0,
+                )
+            self.service.create(
+                self.editor,
+                name="Divergent target",
+                kind="outline",
+                content="Different content.",
+            )
+            with self.assertRaises(ProjectPromptMigrationConflict):
+                migrate_project_prompts(
+                    source,
+                    customer=self.project_id,
+                    engine=self.engine,
+                    actor=self.editor,
+                    project_id=self.project_id,
+                )
+
+    def test_prompt_migration_requires_editor_and_rolls_back_audit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source, _ = self._legacy_source(directory)
+            with self.assertRaises(ProjectAccessDenied):
+                migrate_project_prompts(
+                    source,
+                    customer=self.project_id,
+                    engine=self.engine,
+                    actor=self.viewer,
+                    project_id=self.project_id,
+                )
+            with self.assertRaises(ProjectAccessDenied):
+                migrate_project_prompts(
+                    source,
+                    customer=self.project_id,
+                    engine=self.engine,
+                    actor=self.editor,
+                    project_id=self.other_project_id,
+                )
+            with self.assertRaises(ProjectPromptMigrationUnavailable):
+                migrate_project_prompts(
+                    source,
+                    customer=self.project_id,
+                    engine=self.engine,
+                    actor=self.editor,
+                    project_id=self.project_id,
+                    audit=FailingAuditWriter(),
+                )
+            with self.engine.connect() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(project_prompt_heads)
+                        .where(
+                            project_prompt_heads.c.organization_id
+                            == self.organization_id,
+                            project_prompt_heads.c.project_id
+                            == self.project_id,
+                        )
+                    ).scalar_one(),
+                    0,
+                )
 
 
 if __name__ == "__main__":
