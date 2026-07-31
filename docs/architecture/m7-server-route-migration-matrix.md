@@ -37,6 +37,7 @@
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
+| Server Article Console | `/projects/{project}/articles*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
 
 ## 3. Task 写操作矩阵
 
@@ -214,3 +215,7 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     独立 Version 来源和事务边界？
 28. Humanize 的 Prompt/Article/Revision 漂移、执行前撤权、非法输出或 Audit/CAS
     故障是否都不会留下部分 Humanized Version 或泄露正文/Prompt/Hash？
+29. Article 页面是否仍在挂载数据组件前按 Auth Status 分流，Server 分支不请求
+    `/api/tasks*`、`/api/dashboard`、`/api/config` 或本地文件 API？
+30. Server 产品与图片 UI 是否仍分别只提交 Product ID 和 Asset ID/Heading Anchor，
+    而不接受客户端产品事实、对象路径或图片 URL？

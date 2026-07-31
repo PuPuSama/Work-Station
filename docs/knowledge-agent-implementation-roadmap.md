@@ -198,9 +198,13 @@
 - 已接通 Server Delivery ZIP：服务端只读取 Task 已绑定且逐项复核的文章 DOCX、
   `D.docx`、Prepared WebP 和已确认终审截图，在内存生成确定性扁平 ZIP；Task 只保存
   私有 `delivery_zip` Asset 身份，通用 Viewer 下载隐藏，专用下载重新授权；
-- 已接通窄范围 Server 前端入口：认证状态先分流组件树，Server 首页只列 SQL-scoped
-  Project Directory 并直达 Delivery Console；Console 按 Asset 身份识别产物、提交
-  Revision 打包，并通过专用接口取得短期下载 URL；未迁移导航不挂载，Local UI 不变；
+- 已接通 Server 文章目录与单篇主链工作台：认证状态在列表/详情路由先分流组件树，
+  Server 只调用 Project-scoped Task、Knowledge Library、Job 和下载接口；标题、产品、
+  大纲、初稿、初检、人化、终检、链接、图片、Word/TDK/ZIP 已有受限操作面，所有写入
+  提交 Revision，产品只提交 confirmed Product ID，图片只提交私有 Asset ID 与锚点；
+  SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control、可视化
+  Asset Picker 和 Server Task 导入/创建仍待专用面板，Local UI 不变；组件与接口痕迹见
+  `docs/architecture/m7-server-article-console.md`；
 - 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不
   降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；

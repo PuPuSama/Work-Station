@@ -142,12 +142,16 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
   ];
   const items =
     serverMode === true
-      ? localItems.filter((item) => item.href.endsWith("/deliveries"))
+      ? localItems.filter(
+          (item) =>
+            item.href.endsWith("/articles") ||
+            item.href.endsWith("/deliveries"),
+        )
       : serverMode === false
         ? localItems
         : [];
   const projectHome = serverMode === true
-    ? `${projectPath}/deliveries`
+    ? `${projectPath}/articles`
     : `${projectPath}/articles`;
   const canManageServerMembers =
     serverRole === "org_admin" || serverRole === "team_lead";

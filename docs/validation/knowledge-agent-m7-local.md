@@ -1317,6 +1317,47 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过。
 
+### M7 Server Article Console 主链入口
+
+实现边界：
+
+- `/projects/{project}/articles` 与详情页新增 Auth Status 分流器；Local 继续挂载原
+  `ProjectArticleList/ArticleWorkbench`，Server 只挂载专用组件；
+- Server 列表只请求 `/api/projects/{project}/tasks`；单篇工作台只请求
+  Project-scoped Task/Knowledge/Job/下载接口，不请求 Local `/api/tasks*`、
+  `/api/dashboard` 或 `/api/config`；
+- 主操作面覆盖标题候选/选择、confirmed Product ID 选择、大纲生成/确认、初稿、初检、
+  Humanize、人工人化稿、终检、链接恢复、图片准备、Word、TDK 与 ZIP；
+- 截图上传后先重新读取最新 Revision 再确认；Job 页面轮询超时不发送取消；
+- 图片 UI 只提交 Hero Asset ID 与当前 Task Product ID 到 H2 的锚点，不显示或提交
+  Bucket、Object Key、本地 Path、产品事实或图片 URL；
+- 当前明确未接入 SEO Change 逐条裁决、Product Rediscovery、Outline Version 恢复、
+  章节重写、全局 Job Control、可视化 Asset Picker 和 Server Task 导入/创建，不能将
+  本切片描述为完整 Local UI 等价迁移；
+- 详细组件拓扑、接口作用和重构清单见
+  `docs/architecture/m7-server-article-console.md`。
+
+验证命令：
+
+```powershell
+# frontend
+node .\node_modules\typescript\bin\tsc --noEmit
+node .\node_modules\eslint\bin\eslint.js .
+node .\node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- TypeScript、ESLint 与 Next.js production build 全部通过；
+- 使用不调用外部模型、对象存储或业务数据库的 Mock Server API 做浏览器验证：
+  Server Project 导航只显示 Article/Delivery，文章目录正确读取一条 Project Task，
+  单篇工作台可切换 Review 与图片/交付面板，浏览器日志无错误；
+- 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- Alembic Current/Head 均为 `20260731_0016`，重复 `upgrade head` 成功；
+- 首轮完整回归暴露既有 Audit 测试在同一事务内只按 `created_at` 排序。PostgreSQL
+  `now()` 在事务内稳定，两条事件时间相同时顺序未定义；测试改为按 Event ID 映射核对
+  Action，不再把未定义的物理返回顺序当业务契约。隔离测试与完整回归均通过。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell

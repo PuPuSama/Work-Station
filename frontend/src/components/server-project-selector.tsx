@@ -6,8 +6,8 @@ import {
   AlertCircle,
   ArrowRight,
   Building2,
+  FileText,
   Loader2,
-  PackageCheck,
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
@@ -77,8 +77,8 @@ export function ServerProjectSelector() {
             </div>
             <h1 className="text-xl font-semibold">可访问项目</h1>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              当前只开放已迁移到 PostgreSQL 与私有对象存储的交付控制台。
-              未迁移的本地文章、批量任务和设置入口不会在 Server 模式显示。
+              当前开放已迁移到 PostgreSQL 的文章主链与私有对象交付控制台。
+              未迁移的本地批量任务和本地设置入口不会在 Server 模式显示。
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -134,7 +134,7 @@ export function ServerProjectSelector() {
             className="grid gap-3 md:grid-cols-2"
           >
             {projects.map((project) => {
-              const href = `/projects/${encodeURIComponent(project.project_id)}/deliveries`;
+              const href = `/projects/${encodeURIComponent(project.project_id)}/articles`;
               return (
                 <Card key={project.project_id} className="gap-0 py-0">
                   <CardHeader className="border-b px-4 py-4">
@@ -164,12 +164,12 @@ export function ServerProjectSelector() {
                       render={
                         <Link
                           href={href}
-                          aria-label={`打开 ${project.customer_name || project.project_id} 的交付记录`}
+                          aria-label={`打开 ${project.customer_name || project.project_id} 的文章任务`}
                         />
                       }
                     >
-                      <PackageCheck />
-                      交付记录
+                      <FileText />
+                      文章任务
                       <ArrowRight />
                     </Button>
                   </CardContent>
