@@ -705,7 +705,7 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(
             worker_permission_for("knowledge_research"),
-            "knowledge.edit",
+            "knowledge.publish",
         )
         self.assertEqual(
             worker_permission_for("product_rediscovery"),

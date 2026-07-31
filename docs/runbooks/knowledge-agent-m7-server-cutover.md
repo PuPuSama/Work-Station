@@ -349,6 +349,38 @@ Provider 的 RS256 Signing Key 由 JWKS 管理；应用遇到未知 `kid` 会刷
 KMS Key 轮换遵循供应商策略；先验证旧对象仍可解密。不得把删除旧 Key 当作普通
 应用回滚动作。
 
+### Knowledge Research Runtime
+
+Server Research 必须同时具备以下条件；任一缺失都不得把工作区描述成可执行：
+
+```text
+features.knowledge_agent_enabled=true
+ARTICLE_AGENT_DATABASE_URL
+EMBEDDING_BASE_URL
+EMBEDDING_API_KEY
+EMBEDDING_MODEL
+EMBEDDING_DIMENSIONS=1536
+TAVILY_API_KEY
+ARTICLE_AGENT_OBJECT_STORE_BUCKET
+ARTICLE_AGENT_OBJECT_STORE_REGION
+ARTICLE_AGENT_OBJECT_STORE_ACCESS_KEY
+ARTICLE_AGENT_OBJECT_STORE_SECRET_KEY
+```
+
+如使用自建 S3，还需按供应商配置 Endpoint、Path Style 和 SSE/KMS。密钥只由 Secret
+Manager 注入，不写入 Config、Audit、Job 公共 DTO 或验证记录。
+
+LangGraph Checkpointer Schema 是显式维护步骤，应用启动不会运行 `setup()`：
+
+```powershell
+# Server maintenance shell；先由安全环境注入数据库和 Embedding 配置
+cd backend
+.\.venv\Scripts\python.exe -m knowledge_agent.checkpoint_setup
+```
+
+重复执行必须安全。Schema 未准备时 Research Job 应失败并输出脱敏终态，不能临时回退
+内存 Checkpointer 或 SQLite Queue。
+
 ## 6. 发布和回滚顺序
 
 发布顺序：
@@ -388,8 +420,8 @@ Source URL、Artifact URI、Bucket、Object Key、Hash 或 Metadata。
 
 Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
 
-- Auth Status 为 Local 时仍挂原 Knowledge/Research/Evidence 组件；Server 时只挂
-  `ServerKnowledgeInbox`，导航显示 Knowledge；
+- Auth Status 为 Local 时仍挂原 Knowledge/Research/Evidence 组件；Server 时挂
+  `ServerKnowledgeWorkspace`，由“来源 Inbox”和“资料研究”两个 Tab 组成；
 - Viewer/Reviewer 只能读取；Editor 可保存 Source Kind、Trust Tier、Decision 和
   Reason，发布与产品确认仍由后端要求 `knowledge.publish`；
 - Editor 上传一份不含真实客户正文的 DOCX/PDF/XLSX 测试资料，确认只进入 Inbox，
@@ -420,10 +452,30 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
 - 检查三类 Audit：Review 只含 Decision/Source Kind/Trust Tier，Publish 只含不可变
   Snapshot ID/Chunk Count/Embedding Model，Confirm 只含确认状态；正文、Reason、URL、
   原始 Content Hash、Artifact URI 和 Secret 均不得出现；
-- Server DOM 与网络允许且只允许 Project-scoped 私有 Upload；不得出现 WordPress
-  Sync、Research Run Start/Resume、Raw Artifact 或 Local `/api/config` 请求；
+- Server DOM 与网络只允许已迁移的 Project-scoped Upload、Task Plan 和 Research
+  Run/Resume；不得出现通用 Plan POST、WordPress Sync、Raw Artifact 或 Local
+  `/api/config` 请求；
 - Product Confirm 不代表文章可选择；必须再验证 Project Catalog 只投影当前 Published
   Snapshot Evidence。
+
+Server Knowledge Research 冒烟还必须覆盖：
+
+- 从当前 Project 的已确认 PostgreSQL Task 创建 Plan；未确认大纲、旧 Revision、跨
+  Project Task 和通用 `POST .../retrieval-plans` 均 fail closed；
+- Start 只提交 Plan ID、查询预算和 Request ID；创建的 Job 使用真实 Task ID，同一
+  Request ID 重试返回同一 Job，Run/Event/Batch/Job/Audit 任一失败时整笔回滚；
+- Viewer/Reviewer 不能 Start/Resume；撤销 Publisher 后，Claim、Handler 和下一个候选
+  抓取检查点必须拒绝，不能发布来源；
+- Run 列表、详情、SSE、Gap Attempt、Job 和 Audit 不得公开私有 Request、Requester、
+  Query、发现 URL、对象位置、Provider 原文或 Secret；
+- 候选审批只提交 Candidate ID；伪造、过期或其他 Attempt 的 ID 返回冲突。Resume 创建
+  新 Job，零选择有明确语义，不调用通用 Retry；
+- SSE 中断后页面使用有界轮询恢复；Thread 深链刷新后仍能读取同一 Run，不回退 Local；
+- 高置信度获批官网页只写当前 Organization/Project 的 S3 前缀并走审阅/发布命令；
+  低置信度页面停在 Inbox，Embedding/Publish 失败时旧 Current Snapshot 继续服务；
+- Research Job 在 Batch/Header 可读并链接回 Knowledge Research，但通用 Cancel/Retry
+  前后端都返回不可用；Graph 终态失败不得被基础设施自动重放；
+- Evidence Pack 只返回安全摘要和引用，不提供 Raw Artifact。
 
 对象下载冒烟必须通过
 `GET /api/projects/{project}/assets/{asset_id}/download`，验证 URL 过期时间不超过
@@ -743,7 +795,7 @@ SEO Review 生成冒烟必须通过
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`，并且响应不存在 Request、Requester、URL、Prompt/
+  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`，并且响应不存在 Request、Requester、URL、Prompt/
   Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
 - Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
   `knowledge.edit/article.edit/article.review`，且撤权后即使 Cookie 与页面仍有效也必须失败；
@@ -753,6 +805,8 @@ Project-scoped Job Control 冒烟必须另外验证：
   Cancel Requested，终态与命令 Audit 都不包含私有输入；
 - `POST .../retry` 只允许 Failed/Cancelled/Conflict，空 Body 重放服务端保存的同一
   Request 与 Source Revision；任何客户端覆盖字段返回 422；
+- `knowledge_research` 是显式例外：列表可见，但通用 Cancel/Retry 返回 409；继续执行
+  必须通过 Research Resume 创建新的私有 Job；
 - 人工注入 Audit 故障时状态变化完整回滚；旧 `/api/batches*`、无 Project Job Detail
   和未迁移 Operation 继续由精确白名单拒绝。
 

@@ -16,6 +16,7 @@ export function serverOperationLabel(operation: string) {
   const labels: Record<string, string> = {
     article: "正文初稿",
     humanize: "自动人化",
+    knowledge_research: "资料研究",
     outline: "大纲生成",
     product_rediscovery: "产品重新发现",
     restore_links: "链接恢复",
@@ -44,6 +45,7 @@ export function serverJobStep(operation: string) {
     return "setup";
   }
   if (operation === "outline") return "outline";
+  if (operation === "knowledge_research") return "research";
   if (operation === "article") return "draft";
   if (
     operation === "humanize" ||
@@ -55,10 +57,27 @@ export function serverJobStep(operation: string) {
   return "setup";
 }
 
+export function serverJobHref(
+  customer: string,
+  taskId: string,
+  operation: string,
+) {
+  const project = encodeURIComponent(customer);
+  if (operation === "knowledge_research") {
+    return `/projects/${project}/knowledge?tab=research`;
+  }
+  return `/projects/${project}/articles/${encodeURIComponent(taskId)}?step=${serverJobStep(operation)}`;
+}
+
 export function canControlServerJob(
   role: AccessibleProject["effective_role"] | null,
   operation: string,
 ) {
+  if (operation === "knowledge_research") {
+    // Research Resume is a domain command. Generic Job cancel/retry remains
+    // fail-closed until Run/Checkpoint cancellation semantics are implemented.
+    return false;
+  }
   if (role === "org_admin" || role === "team_lead" || role === "editor") {
     return true;
   }

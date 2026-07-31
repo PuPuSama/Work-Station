@@ -28,10 +28,12 @@ def worker_permission_for(operation: str) -> ProjectPermission:
         "package_delivery",
     }:
         return "article.deliver"
-    if normalized in {
-        "knowledge_research",
-        "product_rediscovery",
-    }:
+    if normalized == "knowledge_research":
+        # Resume can publish approved official evidence. Until Start/Resume
+        # become separate operations, the whole Server operation uses the
+        # conservative publication permission at Claim and Handler time.
+        return "knowledge.publish"
+    if normalized == "product_rediscovery":
         return "knowledge.edit"
     return "article.edit"
 

@@ -30,6 +30,7 @@ SERVER_JOB_CONTROL_OPERATIONS = frozenset(
     {
         "article",
         "humanize",
+        "knowledge_research",
         "outline",
         "product_rediscovery",
         "restore_links",
@@ -37,6 +38,7 @@ SERVER_JOB_CONTROL_OPERATIONS = frozenset(
         "titles",
     }
 )
+SERVER_JOB_DOMAIN_CONTROL_BLOCKED = frozenset({"knowledge_research"})
 
 
 def _required_text(value: str, field_name: str) -> str:
@@ -430,7 +432,11 @@ class PostgresServerJobControlService:
                         else None
                     ),
                 )
-        except (KeyError, ProjectAccessDenied):
+        except (
+            KeyError,
+            ProjectAccessDenied,
+            ServerJobControlConflict,
+        ):
             raise
         except ServerJobControlUnavailable:
             raise
@@ -471,7 +477,11 @@ class PostgresServerJobControlService:
                     batch,
                     jobs[normalized_batch],
                 )
-        except (KeyError, ProjectAccessDenied):
+        except (
+            KeyError,
+            ProjectAccessDenied,
+            ServerJobControlConflict,
+        ):
             raise
         except ServerJobControlUnavailable:
             raise
@@ -530,6 +540,11 @@ class PostgresServerJobControlService:
                 )
                 operation = str(before["operation"])
                 self._require_operation_permission(facts, operation)
+                if operation in SERVER_JOB_DOMAIN_CONTROL_BLOCKED:
+                    raise ServerJobControlConflict(
+                        "knowledge research must be resumed from its run; "
+                        "generic cancellation is not available"
+                    )
                 internal = self._queue(
                     organization_id,
                     normalized_project,
@@ -563,7 +578,11 @@ class PostgresServerJobControlService:
                         "server job control data is inconsistent"
                     )
                 return self._job_summary(after)
-        except (KeyError, ProjectAccessDenied):
+        except (
+            KeyError,
+            ProjectAccessDenied,
+            ServerJobControlConflict,
+        ):
             raise
         except ServerJobControlUnavailable:
             raise
@@ -597,6 +616,11 @@ class PostgresServerJobControlService:
                 )
                 operation = str(batch["operation"])
                 self._require_operation_permission(facts, operation)
+                if operation in SERVER_JOB_DOMAIN_CONTROL_BLOCKED:
+                    raise ServerJobControlConflict(
+                        "knowledge research must be resumed from its run; "
+                        "generic cancellation is not available"
+                    )
                 before_jobs = self._batch_jobs(
                     connection,
                     organization_id=organization_id,
@@ -646,7 +670,11 @@ class PostgresServerJobControlService:
                     },
                 )
                 return self._batch_summary(after_batch, after_jobs)
-        except (KeyError, ProjectAccessDenied):
+        except (
+            KeyError,
+            ProjectAccessDenied,
+            ServerJobControlConflict,
+        ):
             raise
         except ServerJobControlUnavailable:
             raise
@@ -680,6 +708,11 @@ class PostgresServerJobControlService:
                 )
                 operation = str(before["operation"])
                 self._require_operation_permission(facts, operation)
+                if operation in SERVER_JOB_DOMAIN_CONTROL_BLOCKED:
+                    raise ServerJobControlConflict(
+                        "knowledge research retry is not available; "
+                        "create a new run"
+                    )
                 try:
                     internal = self._queue(
                         organization_id,
@@ -731,6 +764,7 @@ class PostgresServerJobControlService:
 __all__ = [
     "PostgresServerJobControlService",
     "SERVER_JOB_CONTROL_OPERATIONS",
+    "SERVER_JOB_DOMAIN_CONTROL_BLOCKED",
     "ServerBatchPage",
     "ServerBatchSummary",
     "ServerJobControlConflict",

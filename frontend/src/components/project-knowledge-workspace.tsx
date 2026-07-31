@@ -7,7 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ProjectEvidenceWorkbench } from "@/components/project-evidence-workbench";
 import { ProjectKnowledgeLibrary } from "@/components/project-knowledge-library";
 import { ProjectResearchWorkspace } from "@/components/project-research-workspace";
-import { ServerKnowledgeInbox } from "@/components/server-knowledge-inbox";
+import { ServerKnowledgeWorkspace } from "@/components/server-knowledge-workspace";
 import { apiGet } from "@/lib/api";
 import type { AuthStatus } from "@/types";
 
@@ -47,7 +47,7 @@ export function ProjectKnowledgeWorkspace({
   }, []);
 
   if (mode === "server") {
-    return <ServerKnowledgeInbox customer={customer} />;
+    return <ServerKnowledgeWorkspace customer={customer} />;
   }
   if (mode === "local") {
     return (

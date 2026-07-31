@@ -160,13 +160,21 @@
   不重复 Audit，撤权或 Audit 故障不留下数据库半成品；前端上传入口只挂
   `ServerKnowledgeInbox`。结构记录见
   `docs/architecture/m7-server-private-document-ingestion.md`；
+- 已接入 Server Knowledge Research：Retrieval Plan 只能从当前已确认的 PostgreSQL
+  Task 大纲冻结；Start/Resume 把 Run/Event/真实 Task Batch/私有 Job/脱敏 Audit 原子
+  提交，Resume 只接受当前候选 ID 并创建新 Job。Worker 在 Claim、Handler、逐候选抓取与
+  Publish 分层复核 `knowledge.publish`，候选资产只写 Project-scoped S3；公共 Run/Event/
+  Job/Audit 不公开私有 Request、URL 或原始异常。Server 独立 Research 工作区使用 SSE
+  与轮询恢复，Local Research 保持原组件树。通用 Plan POST、Research Cancel/Retry、
+  WordPress 和 Raw Artifact 继续关闭。结构记录见
+  `docs/architecture/m7-server-knowledge-research.md`；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
   调用 fail closed；产品重新发现、标题、大纲、正文初稿、自动 Humanize、链接恢复和
   SEO Review 生成已有独立
   Project-scoped PostgreSQL Runner，
   其余通用 Batch/Worker 尚未接线；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`，公开
+  只展示 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`，公开
   DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
@@ -316,10 +324,10 @@
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界
-  drain/join 报告也已完成，受控停机释放 Claim 而不伪装成用户取消；该 Operation 的
-  Project-scoped Batch/Job Control 也已完成，但其他 Operation 的可信 Enqueue、
-  Server-only Handler、通用 Runner 和正式排空演练尚未完成，所以整体 Preflight 能力
-  仍保持 false；
+  drain/join 报告也已完成，受控停机释放 Claim 而不伪装成用户取消；Knowledge Research
+  也已有可信 Plan/Start/Resume、Server-only Handler 和专用 Runner，但因 Checkpoint
+  语义不同而显式禁止通用 Cancel/Retry。其余 Operation 与正式环境排空演练尚未完成，
+  所以整体 Preflight 能力仍保持 false；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；已接通供应商无关 OIDC

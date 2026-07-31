@@ -467,7 +467,8 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
             私有资料上传与 Rediscovery 都只把来源、产品和图片证据放入
             Inbox。这里负责人工分类、发布 Snapshot 与确认产品身份；WordPress
-            Sync、Research Run 和原始对象打开仍保持 Server 关闭。
+            Sync 和原始对象打开仍保持 Server 关闭。Research Run 已迁移到独立的
+            PostgreSQL Worker，可在“资料研究”页签中运行。
           </p>
         </div>
         <Button

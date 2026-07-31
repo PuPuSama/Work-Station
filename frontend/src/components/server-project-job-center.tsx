@@ -25,10 +25,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { apiGet, apiPost } from "@/lib/api";
 import {
   canControlServerJob,
+  serverJobHref,
   SERVER_ACTIVE_JOB_STATUSES,
   SERVER_RETRYABLE_JOB_STATUSES,
   serverJobStatusLabel,
-  serverJobStep,
   serverOperationLabel,
 } from "@/lib/server-jobs";
 import type {
@@ -175,7 +175,11 @@ export function ServerProjectJobCenter({
               const active = SERVER_ACTIVE_JOB_STATUSES.has(job.status);
               const retryable = SERVER_RETRYABLE_JOB_STATUSES.has(job.status);
               const controllable = canControlServerJob(role, job.operation);
-              const href = `/projects/${encodeURIComponent(customer)}/articles/${encodeURIComponent(job.task_id)}?step=${serverJobStep(job.operation)}`;
+              const href = serverJobHref(
+                customer,
+                job.task_id,
+                job.operation,
+              );
               return (
                 <div
                   key={job.job_id}

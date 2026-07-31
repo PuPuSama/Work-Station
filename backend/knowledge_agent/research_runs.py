@@ -7,7 +7,7 @@ from typing import Literal
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine import Engine, RowMapping
+from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError
 
 from .research_graph import ResearchGraphRequest
@@ -245,6 +245,27 @@ class PostgresResearchRunRepository:
         *,
         metadata: Mapping[str, object] | None = None,
     ) -> ResearchGraphRun:
+        try:
+            with self._engine.begin() as connection:
+                return self.create_run_in_transaction(
+                    connection,
+                    request,
+                    metadata=metadata,
+                )
+        except IntegrityError as exc:
+            raise ResearchRunConflictError(
+                "research run violates project, plan, or thread identity constraints"
+            ) from exc
+
+    def create_run_in_transaction(
+        self,
+        connection: Connection,
+        request: ResearchGraphRequest,
+        *,
+        metadata: Mapping[str, object] | None = None,
+    ) -> ResearchGraphRun:
+        """Create an immutable run identity inside a caller-owned transaction."""
+
         requested = ResearchGraphRun(
             project_id=request.project_id,
             thread_id=request.thread_id,
@@ -261,53 +282,57 @@ class PostgresResearchRunRepository:
             max_discovery_queries=request.max_discovery_queries,
             metadata=dict(metadata or {}),
         )
-        try:
-            with self._engine.begin() as connection:
-                existing = self._get(
-                    connection,
-                    requested.project_id,
-                    requested.thread_id,
+        existing = self._get(
+            connection,
+            requested.project_id,
+            requested.thread_id,
+        )
+        if existing is not None:
+            if _run_signature(existing) != _run_signature(requested):
+                raise ResearchRunConflictError(
+                    "research thread identity already has different content"
                 )
-                if existing is not None:
-                    if _run_signature(existing) != _run_signature(requested):
-                        raise ResearchRunConflictError(
-                            "research thread identity already has different content"
-                        )
-                    return existing
-                row = connection.execute(
-                    research_graph_runs.insert()
-                    .values(
-                        project_id=requested.project_id,
-                        thread_id=requested.thread_id,
-                        organization_id=requested.organization_id,
-                        retrieval_plan_id=requested.retrieval_plan_id,
-                        article_id=requested.article_id,
-                        outline_version=requested.outline_version,
-                        status=requested.status,
-                        current_node=requested.current_node,
-                        current_scope_id=None,
-                        gap_fill_round=0,
-                        max_gap_fill_rounds=requested.max_gap_fill_rounds,
-                        discovery_queries_used=0,
-                        max_discovery_queries=requested.max_discovery_queries,
-                        evidence_pack_ids=[],
-                        warnings=[],
-                        error_code=None,
-                        error_message=None,
-                        metadata=dict(requested.metadata),
-                        finished_at=None,
-                    )
-                    .returning(research_graph_runs)
-                ).mappings().one()
-                return _run_from_row(row)
-        except IntegrityError as exc:
-            raise ResearchRunConflictError(
-                "research run violates project, plan, or thread identity constraints"
-            ) from exc
+            return existing
+        row = connection.execute(
+            research_graph_runs.insert()
+            .values(
+                project_id=requested.project_id,
+                thread_id=requested.thread_id,
+                organization_id=requested.organization_id,
+                retrieval_plan_id=requested.retrieval_plan_id,
+                article_id=requested.article_id,
+                outline_version=requested.outline_version,
+                status=requested.status,
+                current_node=requested.current_node,
+                current_scope_id=None,
+                gap_fill_round=0,
+                max_gap_fill_rounds=requested.max_gap_fill_rounds,
+                discovery_queries_used=0,
+                max_discovery_queries=requested.max_discovery_queries,
+                evidence_pack_ids=[],
+                warnings=[],
+                error_code=None,
+                error_message=None,
+                metadata=dict(requested.metadata),
+                finished_at=None,
+            )
+            .returning(research_graph_runs)
+        ).mappings().one()
+        return _run_from_row(row)
 
     def get_run(self, project_id: str, thread_id: str) -> ResearchGraphRun | None:
         with self._engine.connect() as connection:
             return self._get(connection, project_id, thread_id)
+
+    def get_run_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        thread_id: str,
+    ) -> ResearchGraphRun | None:
+        """Read one run through the caller's transaction snapshot."""
+
+        return self._get(connection, project_id, thread_id)
 
     def list_runs(
         self,
@@ -459,33 +484,68 @@ class PostgresResearchRunRepository:
         details: Mapping[str, object] | None = None,
     ) -> ResearchGraphEvent:
         with self._engine.begin() as connection:
-            self._locked_run(connection, project_id, thread_id)
-            sequence = connection.execute(
-                sa.select(
-                    sa.func.coalesce(
-                        sa.func.max(research_graph_events.c.sequence),
-                        0,
-                    )
-                ).where(
-                    research_graph_events.c.project_id == project_id,
-                    research_graph_events.c.thread_id == thread_id,
+            return self.append_event_in_transaction(
+                connection,
+                project_id=project_id,
+                thread_id=thread_id,
+                event_type=event_type,
+                node_name=node_name,
+                scope_id=scope_id,
+                attempt=attempt,
+                details=details,
+            )
+
+    def append_event_in_transaction(
+        self,
+        connection: Connection,
+        *,
+        project_id: str,
+        thread_id: str,
+        event_type: ResearchEventType,
+        node_name: str,
+        scope_id: str | None = None,
+        attempt: int = 1,
+        details: Mapping[str, object] | None = None,
+    ) -> ResearchGraphEvent:
+        """Append a sequenced event inside a caller-owned transaction."""
+
+        self._locked_run(connection, project_id, thread_id)
+        sequence = connection.execute(
+            sa.select(
+                sa.func.coalesce(
+                    sa.func.max(research_graph_events.c.sequence),
+                    0,
                 )
-            ).scalar_one()
-            row = connection.execute(
-                research_graph_events.insert()
-                .values(
-                    project_id=project_id,
-                    thread_id=thread_id,
-                    sequence=int(sequence) + 1,
-                    event_type=event_type,
-                    node_name=node_name,
-                    scope_id=scope_id,
-                    attempt=attempt,
-                    details=dict(details or {}),
-                )
-                .returning(research_graph_events)
-            ).mappings().one()
-            return _event_from_row(row)
+            ).where(
+                research_graph_events.c.project_id == project_id,
+                research_graph_events.c.thread_id == thread_id,
+            )
+        ).scalar_one()
+        row = connection.execute(
+            research_graph_events.insert()
+            .values(
+                project_id=project_id,
+                thread_id=thread_id,
+                sequence=int(sequence) + 1,
+                event_type=event_type,
+                node_name=node_name,
+                scope_id=scope_id,
+                attempt=attempt,
+                details=dict(details or {}),
+            )
+            .returning(research_graph_events)
+        ).mappings().one()
+        return _event_from_row(row)
+
+    def lock_run_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        thread_id: str,
+    ) -> ResearchGraphRun:
+        """Lock one project-scoped run for a larger command transaction."""
+
+        return self._locked_run(connection, project_id, thread_id)
 
     def append_node_attempt(
         self,

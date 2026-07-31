@@ -41,11 +41,14 @@
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
 | Server Knowledge Inbox | `/projects/{project}/knowledge` | Knowledge Library + 私有文档两阶段入库 + 原子 Review/Publish/Confirm；对象 Prepare、Embedding Prepare 与最终数据库切换分离 | `project.view` / `knowledge.edit` / `knowledge.publish`；上传前和写事务内重验权限并追加脱敏 Audit | Server Narrow |
+| Server Knowledge Research | `/api/knowledge/{project}/tasks/{task}/retrieval-plan`、`/api/knowledge/{project}/research-runs*` | 已确认 PostgreSQL Task + 不可变 Plan + PostgreSQL Run/Job/Checkpoint + Project-scoped S3 | Plan 为 `knowledge.edit`；Start/Resume、Claim、Handler、逐候选抓取与 Publish 为 `knowledge.publish` | Server Narrow |
 
 私有文档上传 `POST /api/knowledge/{project}/sources/upload` 已迁移为 Server Narrow：
 原始/标准化/内嵌资产写入 Project-scoped ObjectStore，随后 Source/Snapshot/Chunk/Asset
-Link 与 Audit 在一个 PostgreSQL 事务提交。WordPress Sync、Raw Artifact 和
-Research Run Start/Resume 仍保持关闭，不能因 Upload 已开放而整体放开 Knowledge 路由组。
+Link 与 Audit 在一个 PostgreSQL 事务提交。Research Plan/Start/Resume 已通过独立
+Server Registry、私有 Job 和安全 DTO 开放；通用 Plan POST、WordPress Sync 与 Raw
+Artifact 仍保持关闭，不能因同组窄路径已开放而整体放开 Knowledge 路由组。结构记录见
+`docs/architecture/m7-server-knowledge-research.md`。
 
 ## 3. Task 写操作矩阵
 
@@ -104,7 +107,7 @@ Research Run Start/Resume 仍保持关闭，不能因 Upload 已开放而整体�
 | `seo_review` | Project-scoped、固定 Task Revision/Initial Article Hash/Prompt Version/System Template Hash/Published Chunk ID | 共享 Lifecycle + Operation-specific Enqueue/Handler；只追加 Open Review Run | `article.review` | `article.review` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
-| `knowledge_research` | Local Research Queue | Local Runner | 无完整 Server 链 | 无完整 Server 链 | Local Only |
+| `knowledge_research` | 已确认 PostgreSQL Task、Plan/Run/Event/Batch/Job/Audit 同事务；Resume 只接受 Candidate ID | Server-only Handler + PostgreSQL Checkpointer + Project-scoped S3 | `knowledge.publish` | `knowledge.publish`；逐候选抓取与 Publish 再复核 | 列表已开放；通用 Cancel/Retry fail closed，只能创建领域 Resume Job |
 
 不能因为 `PostgresJobQueue` 支持任意 Operation 字符串，就把某个 Operation 标成已迁移。
 每个 Operation 必须有可信 Requester、两阶段权限映射、Server-only Handler、私有存储
@@ -237,3 +240,11 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 33. Server Batch 页面和全局 Job 抽屉是否仍只请求 Project-scoped 控制面，并保持公共
     DTO 不含 Request、Requester、URL、Prompt、Chunk 或原始错误？
 34. Cancel/Retry 是否仍提交空 Body，且 UI Role 提示不会替代后端事务内授权？
+35. Server Retrieval Plan 是否仍只来自当前已确认的 PostgreSQL Task 大纲，而通用
+    `POST .../retrieval-plans` 继续关闭？
+36. Research Start/Resume 是否仍与 Run/Event/Batch/Job/Audit 同事务，且 Job 使用真实
+    Task ID、公共 DTO/Audit 不含私有 Request 或 URL？
+37. Resume 是否仍只接受当前 Gap Attempt 的 Candidate ID 并创建新 Job，而不是修改旧
+    Job 或调用通用 Retry？
+38. Research Worker 是否仍在 Claim、Handler、逐候选抓取和最终 Publish 分层重验权限，
+    且 Graph 终态失败不会触发基础设施自动重放？

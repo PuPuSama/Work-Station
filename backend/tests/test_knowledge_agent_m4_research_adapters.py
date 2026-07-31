@@ -283,6 +283,7 @@ class KnowledgeAgentM4ResearchAdapterTests(unittest.TestCase):
         repository = FakeSourceRepository()
         web = FakeWebIngestion(repository, confidence=0.91)
         publication = FakePublication(repository)
+        authorization_checks: list[str] = []
         adapter = OfficialCandidateIngestionAdapter(
             projects=self.projects,
             web_ingestion=web,  # type: ignore[arg-type]
@@ -290,6 +291,9 @@ class KnowledgeAgentM4ResearchAdapterTests(unittest.TestCase):
             library=FakeLibrary(repository),  # type: ignore[arg-type]
             publication=publication,  # type: ignore[arg-type]
             attempts=self.runs,
+            authorize_candidate=lambda: authorization_checks.append(
+                "checked"
+            ),
         )
 
         first = adapter.ingest(
@@ -317,6 +321,7 @@ class KnowledgeAgentM4ResearchAdapterTests(unittest.TestCase):
         self.assertEqual(retried.published_source_ids, ("source-1",))
         self.assertEqual(web.calls, 1)
         self.assertEqual(publication.calls, 1)
+        self.assertEqual(authorization_checks, ["checked"])
         self.assertEqual(
             self.runs.get_gap_attempt_by_id(self.attempt_id).result,  # type: ignore[union-attr]
             "improved",

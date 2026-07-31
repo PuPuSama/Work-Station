@@ -169,6 +169,7 @@ from services.topics import TopicWorkbookError, scan_topic_library, store_topic_
 from services.task_identity import article_source_key, normalized_customer
 from services.access_control import (
     PostgresProjectAccessRepository,
+    ProjectAccessDenied,
     ProjectAccessService,
 )
 from services.actor_sessions import (
@@ -226,6 +227,11 @@ from services.server_product_rediscovery import (
     ServerProductRediscoveryHandler,
     ServerProductRediscoveryRegistry,
     create_product_sync_factory,
+)
+from services.server_knowledge_research import (
+    ServerKnowledgeResearchRegistry,
+    ServerKnowledgeResearchUnavailable,
+    create_server_research_execution,
 )
 from services.server_outline_generation import (
     LlmServerOutlineProvider,
@@ -388,6 +394,11 @@ async def app_lifespan(application: FastAPI):
         "server_product_rediscovery",
         None,
     )
+    previous_server_knowledge_research = getattr(
+        application.state,
+        "server_knowledge_research",
+        None,
+    )
     previous_server_outline_generation = getattr(
         application.state,
         "server_outline_generation",
@@ -454,6 +465,7 @@ async def app_lifespan(application: FastAPI):
         None,
     )
     server_product_rediscovery = None
+    server_knowledge_research = None
     server_outline_generation = None
     server_title_generation = None
     server_article_generation = None
@@ -474,6 +486,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_catalog = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
+    application.state.server_knowledge_research = None
     application.state.server_outline_generation = None
     application.state.server_title_generation = None
     application.state.server_article_generation = None
@@ -566,12 +579,15 @@ async def app_lifespan(application: FastAPI):
             )
         )
         rediscovery_handler = None
+        server_object_store = None
+        server_object_bucket = ""
         if os.environ.get(
             "ARTICLE_AGENT_OBJECT_STORE_BUCKET",
             "",
         ).strip():
             object_settings = S3ObjectStoreSettings.from_environment()
             server_object_store = S3ObjectStore(object_settings)
+            server_object_bucket = object_settings.bucket
             application.state.server_project_object_service = (
                 ProjectKnowledgeObjectService(
                     store=server_object_store,
@@ -744,9 +760,32 @@ async def app_lifespan(application: FastAPI):
         prune_expired_research_details(knowledge_runtime)
         application.state.knowledge_agent_runtime = knowledge_runtime
     if server_mode:
+        research_execution = None
+        if (
+            knowledge_runtime is not None
+            and server_object_store is not None
+        ):
+            research_execution = create_server_research_execution(
+                engine=server_engine,
+                database_url=database_url,
+                embedding_provider=knowledge_runtime.embedding_provider,
+                store=server_object_store,
+                bucket=server_object_bucket,
+                access=server_access,
+            )
+        server_knowledge_research = ServerKnowledgeResearchRegistry(
+            server_engine,
+            access=server_access,
+            execution=research_execution,
+            access_repository=server_access_repository,
+        )
+        server_knowledge_research.start_existing()
+        application.state.server_knowledge_research = (
+            server_knowledge_research
+        )
         # Server Mode must never start the portable SQLite queue or its
-        # workers. Product rediscovery has its own project-scoped PostgreSQL
-        # runner and narrow Job control; every other Operation remains closed.
+        # workers. Migrated Operations use their own project-scoped
+        # PostgreSQL runners.
         application.state.job_queue = None
         application.state.batch_runner = None
         application.state.batch_runners = ()
@@ -759,6 +798,12 @@ async def app_lifespan(application: FastAPI):
                 if not stop_report.drained:
                     shutdown_error = RuntimeError(
                         "server product rediscovery did not drain"
+                    )
+            if server_knowledge_research is not None:
+                stop_report = server_knowledge_research.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server knowledge research did not drain"
                     )
             if server_outline_generation is not None:
                 stop_report = server_outline_generation.stop()
@@ -837,6 +882,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_product_rediscovery = (
                 previous_server_product_rediscovery
+            )
+            application.state.server_knowledge_research = (
+                previous_server_knowledge_research
             )
             application.state.server_outline_generation = (
                 previous_server_outline_generation
@@ -1042,6 +1090,8 @@ async def app_lifespan(application: FastAPI):
         writing_runner.stop()
         if server_product_rediscovery is not None:
             server_product_rediscovery.stop()
+        if server_knowledge_research is not None:
+            server_knowledge_research.stop()
         if server_outline_generation is not None:
             server_outline_generation.stop()
         if server_title_generation is not None:
@@ -1093,6 +1143,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_product_rediscovery = (
             previous_server_product_rediscovery
+        )
+        application.state.server_knowledge_research = (
+            previous_server_knowledge_research
         )
         application.state.server_outline_generation = (
             previous_server_outline_generation
@@ -1893,12 +1946,57 @@ def read_task(task_id: str) -> TaskRecord:
 def create_task_retrieval_plan(
     project: str,
     task_id: str,
+    request: Request = None,  # type: ignore[assignment]
 ) -> RetrievalPlanResponse:
-    """Freeze the confirmed SQLite outline as a PostgreSQL retrieval plan."""
+    """Freeze the confirmed Local or Server Task outline as a retrieval plan."""
 
     runtime = getattr(app.state, "knowledge_agent_runtime", None)
     if runtime is None:
         raise HTTPException(status_code=404, detail="Knowledge Agent is disabled.")
+    if request is not None and request_server_mode(request):
+        actor = getattr(request.state, "actor_identity", None)
+        project_id = str(
+            getattr(request.state, "project_id", "")
+        ).strip()
+        research = getattr(
+            request.app.state,
+            "server_knowledge_research",
+            None,
+        )
+        if (
+            actor is None
+            or not project_id
+            or not isinstance(
+                research,
+                ServerKnowledgeResearchRegistry,
+            )
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Server knowledge research is not available.",
+            )
+        try:
+            return _plan_response(
+                research.create_plan_from_task(
+                    actor=actor,
+                    project_id=project_id,
+                    task_id=task_id,
+                )
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Task was not found in the requested project.",
+            ) from exc
+        except ProjectAccessDenied as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="project access denied",
+            ) from exc
+        except (JobConflict, EvidenceRepositoryError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ServerKnowledgeResearchUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     task = get_task_or_404(task_id)
     project_id = normalized_customer(project)
     if normalized_customer(task.customer) != project_id:

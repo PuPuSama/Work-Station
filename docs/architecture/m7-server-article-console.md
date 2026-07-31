@@ -220,19 +220,29 @@ Local
   -> ProjectEvidenceWorkbench
 
 Server
-  -> ServerKnowledgeInbox
-       -> GET /api/knowledge/{project}
-       -> ServerPrivateDocumentUpload
-            -> POST .../sources/upload
-       -> PUT .../sources/{source}/review
-       -> POST .../sources/{source}/publish
-       -> POST .../products/{product}/confirm
+  -> ServerKnowledgeWorkspace
+       -> 来源 Inbox
+          -> ServerKnowledgeInbox
+          -> GET /api/knowledge/{project}
+          -> ServerPrivateDocumentUpload
+               -> POST .../sources/upload
+          -> PUT .../sources/{source}/review
+          -> POST .../sources/{source}/publish
+          -> POST .../products/{product}/confirm
+       -> 资料研究
+          -> ServerResearchWorkspace
+          -> POST /api/knowledge/{project}/tasks/{task}/retrieval-plan
+          -> POST .../research-runs
+          -> POST .../research-runs/{thread}/resume
+          -> GET/SSE .../research-runs/{thread}/*
+          -> GET .../evidence-packs/{pack}
 ```
 
 Server 分支只挂已完成 PostgreSQL Project Scope 和 Knowledge 权限映射的入口。私有
-Upload 已改为 Project-scoped ObjectStore Prepare + PostgreSQL/Audit 原子提交，因此可
-渲染；仍依赖旧路径的 WordPress Sync、Research Run Start/Resume、Task Retrieval Plan
-Compatibility 和 Raw Artifact 不渲染。不能因为同组一个 URL 已迁移就整体放开 503 路径。
+Upload 已改为 Project-scoped ObjectStore Prepare + PostgreSQL/Audit 原子提交；
+Research Plan/Start/Resume 已改为确认 Task、不可变 Plan、私有 PostgreSQL Job、
+PostgreSQL Checkpoint 和 S3 候选入库，因此可渲染。通用 Plan POST、WordPress Sync 和
+Raw Artifact 仍不渲染。不能因为同组窄路径已迁移就整体放开 503 路径。
 
 Upload 也不是单事务伪装：先在初次授权后解析并写内容寻址对象，再在 PostgreSQL 事务内
 重新锁定可撤权事实、Active Project 和 Source，把 Source/Snapshot/Chunk/Asset Link 与
@@ -280,9 +290,15 @@ Decision、Source Kind 和 Trust Tier；Publish 只含不可变 Snapshot ID、Ch
 与 Embedding Model；Reason、正文、URL、原始 Content Hash、Artifact URI 和 Secret
 均不进入 Audit。
 
+Research 浏览器只提交 Candidate ID；URL 由当前 Run 的 Gap Attempt 在服务端解析并仅
+进入私有 Job。Start/Resume 的 Run/Event/Batch/Job 与脱敏 Audit 同事务，Worker 在
+Claim、Handler、逐候选抓取和最终 Publish 分层复核权限。Research Job 可在公共队列中
+读取，但通用 Cancel/Retry 前后端都关闭；继续执行只能创建新的领域 Resume Job。完整
+结构和重构接缝见 `docs/architecture/m7-server-knowledge-research.md`。
+
 前端 Effective Role 只控制提示：Reviewer/Viewer 为只读，Editor/Lead/Admin 显示命令；
 Router 仍分别要求 `project.view`、`knowledge.edit` 和 `knowledge.publish`。Server 页面
-不提供 Raw Evidence 链接，也不复用 Local 文件持久化或研究组件。
+不提供 Raw Evidence 链接，也不复用 Local 文件持久化或 Local 研究组件。
 
 ## 10. Project-scoped Job Control
 
@@ -366,8 +382,9 @@ Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Kn
 18. Server Batch/Job UI 是否仍使用 Project 路径、公共 DTO 与空 Cancel/Retry Body？
 19. Catalog 是否仍只列出当前 Published Snapshot，且不返回对象位置、哈希或来源 URL？
 20. 短时图片 URL 是否仍只存在于组件内存，产品图是否仍不能由 Hero 选择器覆盖？
-21. Knowledge 页面是否仍按 Auth Status 分流，Server Upload 是否只走 Project-scoped
-    ObjectStore/PostgreSQL，且仍未挂载 WordPress Sync、Research/Evidence 或 Raw Artifact？
+21. Knowledge 页面是否仍按 Auth Status 分流，Server Upload/Research 是否只走
+    Project-scoped ObjectStore/PostgreSQL，且不挂载 Local Research、WordPress Sync 或
+    Raw Artifact？
 22. 来源 Review/Publish 是否仍为两个动作，产品 Confirm 是否仍不能绕过文章选择时的
     Published Current Evidence 门禁？
 23. Task Intake 是否仍不接受客户端 Task ID、序号、客户、状态、Revision 或本地路径？
@@ -378,3 +395,7 @@ Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Kn
     Source/Snapshot/Chunk/Asset Link/Audit 原子提交？
 27. 去重 Asset 是否使用 Repository 实际返回的 Asset ID，Phase 2 失败是否只留下受
     延迟对账保护的对象 orphan？
+28. Research 页面是否仍只提交 Plan ID、Request ID 与 Candidate ID，不提交 Organization、
+    Requester、URL、对象位置或私有 Job Request？
+29. Research Job 是否仍链接回 Knowledge Research，并同时在 UI 与后端禁止通用
+    Cancel/Retry？

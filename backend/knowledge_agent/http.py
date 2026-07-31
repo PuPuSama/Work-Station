@@ -21,9 +21,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.access_control import ActorIdentity, ProjectAccessDenied
+from services.job_queue import ActiveJobError, JobConflict
 from services.server_knowledge_commands import (
     PostgresServerKnowledgeCommands,
     ServerKnowledgeCommandUnavailable,
+)
+from services.server_knowledge_research import (
+    ServerKnowledgeResearchRegistry,
+    ServerKnowledgeResearchUnavailable,
 )
 from services.server_private_document_ingestion import (
     PostgresServerPrivateDocumentIngestion,
@@ -366,12 +371,17 @@ class ParagraphHashReviewResponse(KnowledgeApiModel):
 
 
 class ResearchRunCreateRequest(KnowledgeApiModel):
-    organization_id: str = Field(min_length=1, max_length=200)
+    organization_id: str | None = Field(default=None, max_length=200)
+    request_id: str | None = Field(default=None, max_length=200)
     retrieval_plan_id: str = Field(min_length=1, max_length=200)
     max_discovery_queries: int = Field(default=2, ge=0, le=20)
 
 
 class ResearchRunResumeRequest(KnowledgeApiModel):
+    request_id: str | None = Field(default=None, max_length=200)
+    approved_candidate_ids: list[
+        Annotated[str, Field(min_length=1, max_length=200)]
+    ] = Field(default_factory=list, max_length=20)
     approved_urls: list[
         Annotated[str, Field(min_length=1, max_length=4096)]
     ] = Field(default_factory=list, max_length=20)
@@ -425,10 +435,26 @@ class GapFillAttemptResponse(KnowledgeApiModel):
     updated_at: str | None
 
 
+class ResearchCandidateEvidenceResponse(KnowledgeApiModel):
+    reason: str | None = None
+    channel: str | None = None
+    same_site: bool | None = None
+    score: float | None = None
+    reused_attempt: bool | None = None
+
+
+class ResearchReviewCandidateResponse(KnowledgeApiModel):
+    candidate_id: str
+    url: str
+    page_type: str
+    needs_review: bool
+    evidence: ResearchCandidateEvidenceResponse
+
+
 class ResearchRunDetailResponse(ResearchRunResponse):
     events: list[ResearchEventResponse]
     gap_fill_attempts: list[GapFillAttemptResponse]
-    review_candidates: list[dict[str, object]]
+    review_candidates: list[ResearchReviewCandidateResponse]
 
 
 class ResearchRunQueuedResponse(KnowledgeApiModel):
@@ -550,6 +576,22 @@ def _research_enqueue(request: Request):
             detail="Knowledge research queue is not available.",
         )
     return enqueue
+
+
+def _server_research(
+    request: Request,
+) -> ServerKnowledgeResearchRegistry:
+    configured = getattr(
+        request.app.state,
+        "server_knowledge_research",
+        None,
+    )
+    if not isinstance(configured, ServerKnowledgeResearchRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server knowledge research is not available.",
+        )
+    return configured
 
 
 def _project_id(value: str) -> str:
@@ -752,32 +794,115 @@ def _research_run_response(run: ResearchGraphRun) -> ResearchRunResponse:
     )
 
 
-def _research_event_response(event: ResearchGraphEvent) -> ResearchEventResponse:
+def _research_event_response(
+    event: ResearchGraphEvent,
+    *,
+    server_mode: bool = False,
+) -> ResearchEventResponse:
+    details = dict(event.details)
+    if server_mode:
+        allowed = {
+            "approved_url_count",
+            "discovery_queries_used",
+            "error_code",
+            "gap_fill_round",
+            "outline_version",
+            "status",
+            "warning_count",
+        }
+        details = {
+            key: value
+            for key, value in details.items()
+            if key in allowed
+            and isinstance(value, (bool, int, float, str))
+        }
     return ResearchEventResponse(
         sequence=event.sequence,
         event_type=event.event_type,
         node_name=event.node_name,
         scope_id=event.scope_id,
         attempt=event.attempt,
-        details=dict(event.details),
+        details=details,
         created_at=(event.created_at.isoformat() if event.created_at else None),
     )
 
 
-def _gap_attempt_response(attempt: GapFillAttempt) -> GapFillAttemptResponse:
+def _gap_attempt_response(
+    attempt: GapFillAttempt,
+    *,
+    server_mode: bool = False,
+) -> GapFillAttemptResponse:
+    cost_usage = dict(attempt.cost_usage)
+    if server_mode:
+        allowed_cost_fields = {
+            "queries",
+            "result_count",
+            "request_id_present",
+        }
+        cost_usage = {
+            key: value
+            for key, value in cost_usage.items()
+            if key in allowed_cost_fields
+            and isinstance(value, (bool, int, float))
+        }
     return GapFillAttemptResponse(
         scope_id=attempt.scope_id,
         round_number=attempt.round_number,
         attempt_id=attempt.attempt_id,
         reason=attempt.reason,
         channel=attempt.channel,
-        query=attempt.query,
-        discovered_urls=list(attempt.discovered_urls),
+        query=("" if server_mode else attempt.query),
+        discovered_urls=([] if server_mode else list(attempt.discovered_urls)),
         published_source_ids=list(attempt.published_source_ids),
         result=attempt.result,
-        cost_usage=dict(attempt.cost_usage),
+        cost_usage=cost_usage,
         created_at=(attempt.created_at.isoformat() if attempt.created_at else None),
         updated_at=(attempt.updated_at.isoformat() if attempt.updated_at else None),
+    )
+
+
+def _review_candidate_response(
+    candidate: dict[str, object],
+) -> ResearchReviewCandidateResponse:
+    raw_evidence = candidate.get("evidence")
+    evidence = (
+        dict(raw_evidence)
+        if isinstance(raw_evidence, dict)
+        else {}
+    )
+    return ResearchReviewCandidateResponse(
+        candidate_id=str(candidate.get("candidate_id") or ""),
+        url=str(candidate.get("url") or ""),
+        page_type=str(candidate.get("page_type") or "unknown"),
+        needs_review=True,
+        evidence=ResearchCandidateEvidenceResponse(
+            reason=(
+                str(evidence["reason"])
+                if isinstance(evidence.get("reason"), str)
+                else None
+            ),
+            channel=(
+                str(evidence["channel"])
+                if isinstance(evidence.get("channel"), str)
+                else None
+            ),
+            same_site=(
+                bool(evidence["same_site"])
+                if isinstance(evidence.get("same_site"), bool)
+                else None
+            ),
+            score=(
+                float(evidence["score"])
+                if isinstance(evidence.get("score"), (int, float))
+                and not isinstance(evidence.get("score"), bool)
+                else None
+            ),
+            reused_attempt=(
+                bool(evidence["reused_attempt"])
+                if isinstance(evidence.get("reused_attempt"), bool)
+                else None
+            ),
+        ),
     )
 
 
@@ -948,6 +1073,14 @@ def create_retrieval_plan(
     payload: RetrievalPlanCreateRequest,
     request: Request,
 ) -> RetrievalPlanResponse:
+    if _server_knowledge_context(request, project) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Server retrieval plans must be generated from a confirmed "
+                "project task outline."
+            ),
+        )
     runtime = _runtime(request)
     project_id = _project_id(project)
     plan = RetrievalPlan(
@@ -1041,6 +1174,52 @@ def create_research_run(
     request: Request,
 ) -> ResearchRunQueuedResponse:
     runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is not None:
+        actor, project_id = server_context
+        if payload.organization_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="organization_id is derived from the server session.",
+            )
+        if payload.request_id is None or not payload.request_id.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="request_id is required in server mode.",
+            )
+        try:
+            queued = _server_research(request).enqueue_start(
+                actor=actor,
+                project_id=project_id,
+                retrieval_plan_id=payload.retrieval_plan_id,
+                request_id=payload.request_id,
+                max_discovery_queries=payload.max_discovery_queries,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Retrieval plan was not found.",
+            ) from exc
+        except ProjectAccessDenied as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="project access denied",
+            ) from exc
+        except (
+            ActiveJobError,
+            EvidenceRepositoryError,
+            JobConflict,
+            ResearchRunConflictError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ServerKnowledgeResearchUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return ResearchRunQueuedResponse(
+            run=_research_run_response(queued["run"]),
+            queue_batch_id=str(queued["batch_id"]),
+            queue_job_id=str(queued["job_id"]),
+        )
     if runtime.research_execution is None:
         raise HTTPException(
             status_code=503,
@@ -1053,6 +1232,11 @@ def create_research_run(
     )
     if plan is None:
         raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
+    if payload.organization_id is None or not payload.organization_id.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="organization_id is required in local mode.",
+        )
     graph_request = ResearchGraphRequest(
         organization_id=payload.organization_id,
         project_id=project_id,
@@ -1093,6 +1277,7 @@ def list_research_runs(
     limit: int = 50,
 ) -> list[ResearchRunResponse]:
     runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
     try:
         runs = runtime.research_run_repository.list_runs(
             _project_id(project),
@@ -1101,6 +1286,13 @@ def list_research_runs(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if server_context is not None:
+        actor, _project_id_value = server_context
+        runs = tuple(
+            run
+            for run in runs
+            if run.organization_id == actor.organization_id
+        )
     return [_research_run_response(run) for run in runs]
 
 
@@ -1115,10 +1307,18 @@ def read_research_run(
 ) -> ResearchRunDetailResponse:
     runtime = _runtime(request)
     project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
     run = runtime.research_run_repository.get_run(project_id, thread_id)
-    if run is None:
+    if (
+        run is None
+        or (
+            server_context is not None
+            and run.organization_id
+            != server_context[0].organization_id
+        )
+    ):
         raise HTTPException(status_code=404, detail="Research run was not found.")
-    review_candidates: list[dict[str, object]] = []
+    review_candidates: list[ResearchReviewCandidateResponse] = []
     if run.status == "waiting_for_review" and runtime.research_execution is not None:
         try:
             state = runtime.research_execution.checkpoint_state(
@@ -1130,7 +1330,7 @@ def read_research_run(
         raw_candidates = state.get("discovered_candidates", [])
         if isinstance(raw_candidates, list):
             review_candidates = [
-                dict(candidate)
+                _review_candidate_response(candidate)
                 for candidate in raw_candidates
                 if isinstance(candidate, dict) and candidate.get("needs_review")
             ]
@@ -1138,14 +1338,17 @@ def read_research_run(
     return ResearchRunDetailResponse(
         **response.model_dump(),
         events=[
-            _research_event_response(event)
+            _research_event_response(event, server_mode=server_context is not None)
             for event in runtime.research_run_repository.list_events(
                 project_id,
                 thread_id,
             )
         ],
         gap_fill_attempts=[
-            _gap_attempt_response(attempt)
+            _gap_attempt_response(
+                attempt,
+                server_mode=server_context is not None,
+            )
             for attempt in runtime.research_run_repository.list_gap_attempts(
                 project_id,
                 thread_id,
@@ -1167,6 +1370,7 @@ async def stream_research_run_events(
 ) -> StreamingResponse:
     runtime = _runtime(request)
     project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
     try:
         cursor = resolve_after_sequence(
             after_sequence,
@@ -1179,7 +1383,14 @@ async def stream_research_run_events(
         project_id,
         thread_id,
     )
-    if run is None:
+    if (
+        run is None
+        or (
+            server_context is not None
+            and run.organization_id
+            != server_context[0].organization_id
+        )
+    ):
         raise HTTPException(status_code=404, detail="Research run was not found.")
 
     async def events():
@@ -1198,7 +1409,10 @@ async def stream_research_run_events(
                 yield encode_sse(
                     event="research_event",
                     event_id=event.sequence,
-                    data=_research_event_response(event).model_dump(),
+                    data=_research_event_response(
+                        event,
+                        server_mode=server_context is not None,
+                    ).model_dump(),
                 )
             current = await asyncio.to_thread(
                 runtime.research_run_repository.get_run,
@@ -1254,6 +1468,53 @@ def resume_research_run(
     request: Request,
 ) -> ResearchRunQueuedResponse:
     runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is not None:
+        actor, project_id = server_context
+        if payload.approved_urls:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Server mode accepts approved_candidate_ids, not URLs."
+                ),
+            )
+        if payload.request_id is None or not payload.request_id.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="request_id is required in server mode.",
+            )
+        try:
+            queued = _server_research(request).enqueue_resume(
+                actor=actor,
+                project_id=project_id,
+                thread_id=thread_id,
+                request_id=payload.request_id,
+                approved_candidate_ids=payload.approved_candidate_ids,
+            )
+        except (KeyError, ResearchRunNotFound) as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Research run was not found.",
+            ) from exc
+        except ProjectAccessDenied as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="project access denied",
+            ) from exc
+        except (
+            ActiveJobError,
+            JobConflict,
+            ResearchRunConflictError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ServerKnowledgeResearchUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return ResearchRunQueuedResponse(
+            run=_research_run_response(queued["run"]),
+            queue_batch_id=str(queued["batch_id"]),
+            queue_job_id=str(queued["job_id"]),
+        )
     if runtime.research_execution is None:
         raise HTTPException(
             status_code=503,

@@ -5,7 +5,7 @@ from typing import Mapping
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine import Engine, RowMapping
+from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError
 
 from .contracts import (
@@ -132,49 +132,63 @@ class PostgresRetrievalPlanRepository:
     def save_retrieval_plan(self, plan: RetrievalPlan) -> None:
         try:
             with self._engine.begin() as connection:
-                existing = self._get(connection, plan.project_id, plan.retrieval_plan_id)
-                if existing is not None:
-                    if _plan_signature(existing) != _plan_signature(plan):
-                        raise EvidenceConflictError(
-                            "retrieval plan identity already has different content"
-                        )
-                    return
-                connection.execute(
-                    retrieval_plans.insert().values(
-                        project_id=plan.project_id,
-                        retrieval_plan_id=plan.retrieval_plan_id,
-                        article_id=plan.article_id,
-                        outline_version=plan.outline_version,
-                        max_gap_fill_rounds=plan.max_gap_fill_rounds,
-                        metadata=dict(plan.metadata),
-                        created_at=plan.created_at,
-                    )
-                )
-                connection.execute(
-                    retrieval_scopes.insert(),
-                    [
-                        {
-                            "project_id": scope.project_id,
-                            "retrieval_plan_id": scope.retrieval_plan_id,
-                            "scope_id": scope.scope_id,
-                            "ordinal": scope.ordinal,
-                            "scope_type": scope.scope_type,
-                            "scope_key": scope.scope_key,
-                            "title": scope.title,
-                            "query_variants": list(scope.query_variants),
-                            "filters": dict(scope.filters),
-                            "minimum_hits": scope.minimum_hits,
-                            "minimum_distinct_sources": scope.minimum_distinct_sources,
-                            "require_hard_fact": scope.require_hard_fact,
-                            "metadata": dict(scope.metadata),
-                        }
-                        for scope in plan.scopes
-                    ],
-                )
+                self.save_retrieval_plan_in_transaction(connection, plan)
         except IntegrityError as exc:
             raise EvidenceConflictError(
                 "retrieval plan violates project or outline identity constraints"
             ) from exc
+
+    def save_retrieval_plan_in_transaction(
+        self,
+        connection: Connection,
+        plan: RetrievalPlan,
+    ) -> RetrievalPlan:
+        """Persist one immutable plan inside a caller-owned command transaction."""
+
+        existing = self._get(
+            connection,
+            plan.project_id,
+            plan.retrieval_plan_id,
+        )
+        if existing is not None:
+            if _plan_signature(existing) != _plan_signature(plan):
+                raise EvidenceConflictError(
+                    "retrieval plan identity already has different content"
+                )
+            return existing
+        connection.execute(
+            retrieval_plans.insert().values(
+                project_id=plan.project_id,
+                retrieval_plan_id=plan.retrieval_plan_id,
+                article_id=plan.article_id,
+                outline_version=plan.outline_version,
+                max_gap_fill_rounds=plan.max_gap_fill_rounds,
+                metadata=dict(plan.metadata),
+                created_at=plan.created_at,
+            )
+        )
+        connection.execute(
+            retrieval_scopes.insert(),
+            [
+                {
+                    "project_id": scope.project_id,
+                    "retrieval_plan_id": scope.retrieval_plan_id,
+                    "scope_id": scope.scope_id,
+                    "ordinal": scope.ordinal,
+                    "scope_type": scope.scope_type,
+                    "scope_key": scope.scope_key,
+                    "title": scope.title,
+                    "query_variants": list(scope.query_variants),
+                    "filters": dict(scope.filters),
+                    "minimum_hits": scope.minimum_hits,
+                    "minimum_distinct_sources": scope.minimum_distinct_sources,
+                    "require_hard_fact": scope.require_hard_fact,
+                    "metadata": dict(scope.metadata),
+                }
+                for scope in plan.scopes
+            ],
+        )
+        return plan
 
     def get_retrieval_plan(
         self,
@@ -183,6 +197,16 @@ class PostgresRetrievalPlanRepository:
     ) -> RetrievalPlan | None:
         with self._engine.connect() as connection:
             return self._get(connection, project_id, retrieval_plan_id)
+
+    def get_retrieval_plan_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        retrieval_plan_id: str,
+    ) -> RetrievalPlan | None:
+        """Read an immutable plan through the caller's transaction snapshot."""
+
+        return self._get(connection, project_id, retrieval_plan_id)
 
     def list_retrieval_plans(
         self,

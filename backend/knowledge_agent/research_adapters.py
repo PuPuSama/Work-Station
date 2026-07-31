@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Protocol
+from typing import Callable, Protocol
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -297,6 +297,9 @@ class OfficialCandidateIngestionAdapter:
         publication: KnowledgePublicationService,
         attempts: PostgresResearchRunRepository,
         minimum_auto_publish_confidence: float = 0.75,
+        review_source: Callable[[KnowledgeSource, str, str], None] | None = None,
+        publish_source: Callable[[KnowledgeSource, str], str] | None = None,
+        authorize_candidate: Callable[[], None] | None = None,
     ) -> None:
         if not 0 <= minimum_auto_publish_confidence <= 1:
             raise ValueError("minimum_auto_publish_confidence must be between 0 and 1")
@@ -307,6 +310,9 @@ class OfficialCandidateIngestionAdapter:
         self._publication = publication
         self._attempts = attempts
         self._minimum_confidence = minimum_auto_publish_confidence
+        self._review_source = review_source or self._default_review_source
+        self._publish_source = publish_source or self._default_publish_source
+        self._authorize_candidate = authorize_candidate or (lambda: None)
 
     def ingest(
         self,
@@ -357,6 +363,9 @@ class OfficialCandidateIngestionAdapter:
         for url in approved:
             candidate = candidate_by_url[url]
             try:
+                # Server mode injects a fresh authorization check here so a
+                # revoked actor cannot continue fetching later candidates.
+                self._authorize_candidate()
                 normalized_url = normalize_official_url(site_url, url)
                 result = self._web_ingestion.ingest_url(
                     project_id=project_id,
@@ -389,10 +398,10 @@ class OfficialCandidateIngestionAdapter:
                 continue
 
             if result.classification.confidence < self._minimum_confidence:
-                self._store_review(
+                self._review_source(
                     result.source,
-                    decision="needs_review",
-                    reason="deterministic classification confidence is below the gate",
+                    "needs_review",
+                    "deterministic classification confidence is below the gate",
                 )
                 needs_review.append(candidate.candidate_id)
                 warnings.append(
@@ -401,20 +410,19 @@ class OfficialCandidateIngestionAdapter:
                 )
                 continue
 
-            self._store_review(
+            self._review_source(
                 result.source,
-                decision="approve",
-                reason=(
+                "approve",
+                (
                     "same-site URL was human-approved and deterministic "
                     "classification passed the automated publication gate"
                 ),
             )
-            publication = self._publication.publish(
-                project_id=project_id,
-                source_id=result.source.source_id,
-                snapshot_id=result.snapshot.snapshot_id,
+            published_source_id = self._publish_source(
+                result.source,
+                result.snapshot.snapshot_id,
             )
-            published.append(publication.source_id)
+            published.append(published_source_id)
 
         final_result = (
             "improved"
@@ -446,10 +454,9 @@ class OfficialCandidateIngestionAdapter:
             warnings=tuple(warnings),
         )
 
-    def _store_review(
+    def _default_review_source(
         self,
         source: KnowledgeSource,
-        *,
         decision: str,
         reason: str,
     ) -> None:
@@ -472,3 +479,15 @@ class OfficialCandidateIngestionAdapter:
             metadata=metadata,
         )
         self._repository.upsert_source(reviewed)
+
+    def _default_publish_source(
+        self,
+        source: KnowledgeSource,
+        snapshot_id: str,
+    ) -> str:
+        publication = self._publication.publish(
+            project_id=source.project_id,
+            source_id=source.source_id,
+            snapshot_id=snapshot_id,
+        )
+        return publication.source_id

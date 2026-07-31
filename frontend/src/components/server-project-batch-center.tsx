@@ -27,10 +27,10 @@ import { Progress } from "@/components/ui/progress";
 import { apiGet, apiPost } from "@/lib/api";
 import {
   canControlServerJob,
+  serverJobHref,
   SERVER_ACTIVE_JOB_STATUSES,
   SERVER_RETRYABLE_JOB_STATUSES,
   serverJobStatusLabel,
-  serverJobStep,
   serverOperationLabel,
 } from "@/lib/server-jobs";
 import type {
@@ -289,7 +289,11 @@ export function ServerProjectBatchCenter({
                               nativeButton={false}
                               render={
                                 <Link
-                                  href={`/projects/${encodeURIComponent(customer)}/articles/${encodeURIComponent(job.task_id)}?step=${serverJobStep(job.operation)}`}
+                                  href={serverJobHref(
+                                    customer,
+                                    job.task_id,
+                                    job.operation,
+                                  )}
                                 />
                               }
                             >

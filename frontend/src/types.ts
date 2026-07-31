@@ -807,10 +807,24 @@ export type ResearchGapFillAttempt = {
   updated_at: string | null;
 };
 
+export type ResearchReviewCandidate = {
+  candidate_id: string;
+  url: string;
+  page_type: string;
+  needs_review: boolean;
+  evidence: {
+    reason: string | null;
+    channel: string | null;
+    same_site: boolean | null;
+    score: number | null;
+    reused_attempt: boolean | null;
+  };
+};
+
 export type ResearchRunDetail = ResearchRun & {
   events: ResearchRunEvent[];
   gap_fill_attempts: ResearchGapFillAttempt[];
-  review_candidates: Array<Record<string, unknown>>;
+  review_candidates: ResearchReviewCandidate[];
 };
 
 export type ResearchRunQueued = {

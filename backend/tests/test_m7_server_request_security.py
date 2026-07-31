@@ -162,6 +162,14 @@ class ServerRequestSecurityTests(unittest.TestCase):
             ): "knowledge.publish",
             (
                 "POST",
+                "/api/knowledge/{project}/research-runs",
+            ): "knowledge.publish",
+            (
+                "POST",
+                "/api/knowledge/{project}/research-runs/x/resume",
+            ): "knowledge.publish",
+            (
+                "POST",
                 "/api/knowledge/{project}/sources/upload",
             ): "knowledge.edit",
             (
@@ -179,11 +187,6 @@ class ServerRequestSecurityTests(unittest.TestCase):
     def test_unmigrated_server_routes_fail_closed(self) -> None:
         blocked_knowledge_routes = (
             ("POST", "/api/knowledge/{project}/wordpress/sync"),
-            ("POST", "/api/knowledge/{project}/research-runs"),
-            (
-                "POST",
-                "/api/knowledge/{project}/research-runs/{thread_id}/resume",
-            ),
             (
                 "GET",
                 "/api/knowledge/{project}/sources/{source_id}/"
@@ -191,7 +194,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
             ),
             (
                 "POST",
-                "/api/knowledge/{project}/tasks/{task_id}/retrieval-plan",
+                "/api/knowledge/{project}/retrieval-plans",
             ),
         )
         for method, path in blocked_knowledge_routes:
@@ -211,6 +214,14 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/knowledge/{project}",
             )
         )
+        for migrated in (
+            "/api/knowledge/{project}/research-runs",
+            "/api/knowledge/{project}/research-runs/{thread_id}/resume",
+            "/api/knowledge/{project}/tasks/{task_id}/retrieval-plan",
+        ):
+            self.assertTrue(
+                server_knowledge_route_ready("POST", migrated)
+            )
         self.assertTrue(
             server_http_route_available(
                 "GET",
@@ -856,13 +867,13 @@ class ServerRequestSecurityTests(unittest.TestCase):
                     "/api/knowledge/example.com/research-runs",
                     json={},
                 ).status_code,
-                503,
+                422,
             )
             self.assertEqual(
                 client.post(
                     "/api/knowledge/example.com/tasks/task-a/retrieval-plan"
                 ).status_code,
-                503,
+                404,
             )
             self.assertEqual(
                 client.post(

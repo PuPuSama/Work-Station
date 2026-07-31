@@ -1786,3 +1786,46 @@ Set-Location frontend
   `upgrade head` 成功；`pip check` 无损坏依赖；
 - 测试使用内存 Fake ObjectStore 和测试 DOCX，不调用生产对象供应商、真实客户资料或
   外部模型；生产 S3/恢复演练仍属于 M7 External Gate。
+
+### M7 Server Knowledge Research
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+Set-Location backend
+.\.venv\Scripts\python.exe -m unittest -v `
+  tests.test_knowledge_agent_m4_research_adapters `
+  tests.test_knowledge_agent_m4_research_execution `
+  tests.test_m7_server_knowledge_research `
+  tests.test_m7_server_request_security
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m alembic current
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic upgrade head
+
+Set-Location ..\frontend
+& '<工作区 Node 绝对路径>' .\node_modules\typescript\bin\tsc --noEmit
+& '<工作区 Node 绝对路径>' .\node_modules\eslint\bin\eslint.js .
+& '<工作区 Node 绝对路径>' .\node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- 新增 4 项真实 PostgreSQL Server Research 集成测试并与 M4 Research Adapter/
+  Execution、Server Route Security 合计 18 项定向测试全部通过；
+- 已验证确认 Task 到不可变 Plan、真实 Task ID Job、Start/Resume Request 幂等、
+  Candidate ID 到私有 URL 解析、新 Resume Job、Audit 故障整笔回滚，以及 Research
+  通用 Cancel/Retry fail closed；
+- Candidate Adapter 在每个获批页面抓取前调用注入授权检查；Graph 执行失败转为安全
+  Job Conflict，不进入基础设施自动重试；
+- 完整后端回归 703 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 TypeScript、全量 ESLint 与 Next.js 16.2.10 production build 全部通过；
+- Server Knowledge 页面新增独立 Inbox/Research Tab；Research 支持 Task Plan、Run、
+  SSE、轮询恢复、Candidate ID 审批和 Evidence Pack，Local 组件树保持不变；
+- 本切片不修改 Schema；Alembic Current/Head 均为 `20260731_0018`，连续两次
+  `upgrade head` 成功；
+- 测试使用确定性 Fake Research Execution，不调用真实 Tavily、Embedding 或生产 S3。
+  LangGraph Checkpoint Schema 初始化、真实供应商联调、生产对象往返和正式停机演练仍是
+  M7 External Gate；
+- 组件职责、事务顺序、公共/私有字段、失败语义和后续重构接缝记录在
+  `docs/architecture/m7-server-knowledge-research.md`。

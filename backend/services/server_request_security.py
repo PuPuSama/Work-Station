@@ -43,6 +43,8 @@ def knowledge_permission_for(
     if (
         normalized_path.endswith("/publish")
         or normalized_path.endswith("/confirm")
+        or normalized_path.endswith("/research-runs")
+        or normalized_path.endswith("/resume")
     ):
         return "knowledge.publish"
     if normalized_method == "DELETE":
@@ -59,18 +61,12 @@ def server_knowledge_route_ready(method: str, route_path: str) -> bool:
         return False
     if normalized_path.endswith("/raw"):
         return False
-    if normalized_path.endswith("/retrieval-plan"):
-        # This compatibility route still reads the legacy global TaskStore.
-        # Keep it closed until it is backed by the authorized project-scoped
-        # PostgreSQL Task repository.
-        return False
     if (
         normalized_method == "POST"
-        and (
-            normalized_path.endswith("/research-runs")
-            or normalized_path.endswith("/resume")
-        )
+        and normalized_path.endswith("/retrieval-plans")
     ):
+        # Server Plans are derived from a locked PostgreSQL Task outline; the
+        # generic client-authored Plan endpoint remains Local-only.
         return False
     return True
 
