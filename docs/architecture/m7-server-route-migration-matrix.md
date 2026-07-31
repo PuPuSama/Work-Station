@@ -55,6 +55,7 @@
 | 保存人工审阅 Humanized Article | `PUT .../humanized-article` | `article.edit` | 结构/事实门禁 + Version + CAS + Audit | Server Ready |
 | 最终 AI 截图 | `POST .../checks/final-ai/screenshot` | `article.review` | 私有 PNG Asset + CAS + Audit | Server Ready |
 | 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
+| 恢复首稿链接 | `POST .../restore-links`、`GET .../restore-links/jobs/{job_id}` | `article.edit` | PostgreSQL Job + Template/Article Hash + 确定性校验 + CAS/Audit | Server Ready |
 | 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |
 | 生成 TDK DOCX | `POST .../generate-tdk` | `article.deliver` | 私有 TDK Asset + CAS + Audit | Server Ready |
 | 打包交付 ZIP | `POST .../package-delivery` | `article.deliver` | 私有 ZIP Asset + CAS + Audit | Server Ready |
@@ -72,7 +73,7 @@
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Review Worker 继续接线；旧路由继续关闭 |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
-| Humanize Job/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 正式 Prompt 准源、原文哈希、最小权限、可恢复版本 |
+| Humanize Job/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 正式 Prompt 准源、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
@@ -84,10 +85,11 @@
 | `titles` | Project-scoped、固定 Task Revision/Template Hash/Published Chunk ID | Project Registry，只写候选 | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `outline` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | Project Registry，只写 Review Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `article` | Project-scoped、固定 Task Revision/Prompt Version/目标字数/Published Chunk ID | Project Registry，只写 Raw/Initial Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
+| `restore_links` | Project-scoped、固定 Task Revision/Template Hash/Initial 与 Humanized Hash/链接数 | Project Registry；模型只产候选，确定性校验后写 Linked Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `seo_review` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
-| `humanize` / `restore_links` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `humanize` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `knowledge_research` | Local Research Queue | Local Runner | 无完整 Server 链 | 无完整 Server 链 | Local Only |
 
 不能因为 `PostgresJobQueue` 支持任意 Operation 字符串，就把某个 Operation 标成已迁移。
@@ -124,9 +126,15 @@ Prompt/Chunk 漂移、撤权或 Task CAS 冲突均 fail closed，不生成 mock�
 仍依赖 `humanize_prompt_path` 外部文件，在正式 Prompt Snapshot 或其他服务器准源接线前
 保持 Local Only。
 
+`restore_links` 已从该 Local 组合中拆出。Server Enqueue 只接受 Revision，并固定
+checked-in Template Hash、Initial/Humanized Article Hash、来源链接数和 Final Check
+绑定。Provider 只产生候选；提交前必须由确定性校验证明链接/URL 多重集合与首稿完全
+一致、非链接可见正文与 Humanized Article 一致。模板或正文漂移、撤权、Provider
+失败、CAS/Audit 失败均不写 Task，也不向公开 Job/Audit 暴露正文、Hash 或 URL。
+
 ## 6. 已完成闭环：Project Job Control
 
-已为迁移完成的 `product_rediscovery/titles/outline/article` 增加：
+已为迁移完成的 `product_rediscovery/titles/outline/article/restore_links` 增加：
 
 ```text
 GET  /api/projects/{project}/batches

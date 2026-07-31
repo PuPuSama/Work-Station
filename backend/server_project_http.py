@@ -78,6 +78,10 @@ from services.server_article_generation import (
     ArticleGenerationUnavailable,
     ServerArticleGenerationRegistry,
 )
+from services.server_link_restoration import (
+    LinkRestorationUnavailable,
+    ServerLinkRestorationRegistry,
+)
 from services.server_humanized_update import (
     ServerHumanizedArticleError,
     apply_reviewed_humanized_article,
@@ -372,6 +376,10 @@ class ArticleGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public article Job state; private Prompt and Chunk input stay hidden."""
 
 
+class LinkRestorationJobResponse(ProductRediscoveryJobResponse):
+    """Public link Job state; article and template identities stay hidden."""
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -656,6 +664,22 @@ def _article_generation(
         raise HTTPException(
             status_code=503,
             detail="Server article generation is not available.",
+        )
+    return registry
+
+
+def _link_restoration(
+    request: Request,
+) -> ServerLinkRestorationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_link_restoration",
+        None,
+    )
+    if not isinstance(registry, ServerLinkRestorationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server link restoration is not available.",
         )
     return registry
 
@@ -1215,6 +1239,91 @@ def read_project_task_article_generation_job(
             detail="Server article generation is not available.",
         ) from exc
     return ArticleGenerationJobResponse.model_validate(job)
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/restore-links",
+    response_model=LinkRestorationJobResponse,
+)
+def enqueue_project_task_link_restoration(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> LinkRestorationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _link_restoration(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LinkRestorationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server link restoration is not available.",
+        ) from exc
+    return LinkRestorationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/restore-links/jobs/{job_id}",
+    response_model=LinkRestorationJobResponse,
+)
+def read_project_task_link_restoration_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> LinkRestorationJobResponse:
+    del project
+    try:
+        job = _link_restoration(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Link restoration job was not found.",
+        ) from None
+    except LinkRestorationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server link restoration is not available.",
+        ) from exc
+    return LinkRestorationJobResponse.model_validate(job)
 
 
 @router.put(
@@ -2769,6 +2878,7 @@ __all__ = [
     "ArticleGenerationJobResponse",
     "ArticleSectionRewriteRequest",
     "ConfirmedProductsUpdateRequest",
+    "LinkRestorationJobResponse",
     "OutlineGenerationJobResponse",
     "ProductRediscoveryJobResponse",
     "ProductRediscoveryRequest",

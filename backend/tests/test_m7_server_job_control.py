@@ -378,10 +378,16 @@ class ServerJobControlTests(unittest.TestCase):
             self.task_ids[2],
             operation="article",
         )
-        self._create_job(
+        hidden_batch = self._create_job(
             self.queue_a,
             self.task_ids[3],
             operation="rewrite_article",
+        )
+        self.queue_a.cancel_batch(str(hidden_batch["id"]))
+        link_batch = self._create_job(
+            self.queue_a,
+            self.task_ids[3],
+            operation="restore_links",
         )
         service = self._service()
 
@@ -390,13 +396,14 @@ class ServerJobControlTests(unittest.TestCase):
             project_id=self.project_a,
         )
 
-        self.assertEqual(len(page.items), 3)
+        self.assertEqual(len(page.items), 4)
         self.assertEqual(
             {item.batch_id for item in page.items},
             {
                 batch_a["id"],
                 title_batch["id"],
                 article_batch["id"],
+                link_batch["id"],
             },
         )
         serialized = str(asdict(page))

@@ -521,9 +521,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十七条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+- 十八条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
   initial-ai-screenshot/initial-ai-check/humanized-update/products/section/images/docx/tdk/final-ai-screenshot/
-  final-ai-check/delivery-package Action；
+  final-ai-check/link-restoration/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
 - 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
@@ -1124,6 +1124,42 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
 
+### M7 Server Link Restore
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_link_restoration `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_link_restoration_is_project_scoped_and_hash_bound `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_link_worker_rejects_article_hash_drift_before_provider `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_link_restoration_audit_failure_rolls_back_task `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_link_worker_reauthorizes_before_provider_call `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 18 tests 全部通过；
+- `POST /api/projects/{project}/tasks/{task_id}/restore-links` 只接受 Revision，
+  对应 GET 只公开 Job 状态；Request、Requester、Template/Article Hash、正文和原始
+  Provider Error 均不进入公开 DTO；
+- Enqueue 固定 checked-in `restore_links` Template Hash、Initial/Humanized Article
+  Hash、来源链接数和 Task Revision；Worker 在 Provider 前复核 Final AI Check 仍绑定
+  当前 Humanized Article；
+- Provider 只产生候选；无缺失链接时不调用模型。提交前确定性验证精确 Markdown
+  Link/URL 多重集合与非链接可见正文，非法 URL 或正文变化不能写 Task；
+- 成功追加 `linked/humanized` Version、进入 `links_verified`、清空 Image/Export/
+  Delivery 下游，并以 `article.links.restored` 与 Task CAS 原子提交；Audit 只含来源/
+  恢复链接数；
+- Template/Article 漂移、跨 Project、Viewer、Claim 后撤权、Audit 失败和 Local Mode
+  均 fail closed；撤权发生在 Provider 前，Audit 失败完整回滚 Revision/Linked Version；
+- 自动 `humanize` Job 仍因外部 `humanize_prompt_path` 保持 Local Only；本次只迁移
+  Link Restore，不扩大到 SEO Review 或其他本地 Operation。
+- 完整后端回归 641 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
+  TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
+  `20260731_0015`。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell
@@ -1223,16 +1259,16 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   标题/大纲/正文初稿生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
   私有图片准备和文章 DOCX 导出/下载，并为
-  `product_rediscovery/titles/outline/article` 提供窄范围
+  `product_rediscovery/titles/outline/article/restore_links` 提供窄范围
   Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery/titles/outline/article` Job 为单写，其余路径尚未成为 PostgreSQL
+  Task 命令和 `product_rediscovery/titles/outline/article/restore_links` Job 为单写，其余路径尚未成为 PostgreSQL
   准源；
 - Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲与正文初稿生成已有项目级
   PostgreSQL Runner 和两阶段授权，Enqueue、终态 Audit 与有界 drain/join 报告已完成；
-  这四个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
+  这五个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
   Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；

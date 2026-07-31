@@ -153,7 +153,7 @@
   Project-scoped PostgreSQL Runner，
   其余通用 Batch/Worker 尚未接线；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery/titles/outline/article`，公开 DTO 不含私有 Request、Requester、URL、
+  只展示 `product_rediscovery/titles/outline/article/restore_links`，公开 DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
   返回 422；旧无 Project 的 `/api/batches*` 继续关闭；
@@ -212,7 +212,7 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让十七条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让十八条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
@@ -228,6 +228,11 @@
   ID + Version、服务端目标字数和当前 Published Chunk ID；Worker 复核全部身份并只接受
   完整文章结构，失败不读写本地文件、不补 mock；成功保存 Raw/Initial 两个 Version、
   进入 `draft_ready` 并清空旧下游，正文不进入 Audit；
+- 已新增 Project-scoped `restore_links` PostgreSQL Job：Enqueue 固定 checked-in
+  Template Hash、Initial/Humanized Article Hash、来源链接数和 Revision；Worker
+  重新授权并复核 Final AI Check 身份，模型只返回候选，只有精确链接集合与非链接
+  可见正文门禁全部通过才追加 Linked Version、进入 `links_verified` 并以 CAS/Audit
+  原子提交；公开 Job/Audit 不返回正文、文章 Hash、URL 或原始 Provider Error；
 - 已新增 Project-scoped `outline` PostgreSQL Job：客户端只提交 Revision，Enqueue
   固定不可变 Prompt ID + Version 和当前 Published Chunk ID；Claim/Handler 两阶段要求
   `article.edit`，执行时复核 Prompt 与 Chunk Scope，Provider 失败脱敏且不生成 mock；

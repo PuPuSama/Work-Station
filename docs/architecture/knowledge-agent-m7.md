@@ -124,13 +124,17 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增人工 Humanized Article 保存命令：`PUT .../humanized-article` 只接受 Revision
   与有界 Markdown，服务端校验标题层级、数字事实、FAQ、表格、列表和必须短语，追加
   `external_manual` Version 并进入 `humanized_ready`；不读取本地 Humanize Prompt；
+- 新增 Project-scoped Link Restore Job：`POST .../restore-links` 只接受 Revision，
+  入队固定 checked-in Template Hash、Initial/Humanized Article Hash 和来源链接数；
+  Worker 在两阶段重授权后复核 Final AI Check 身份，模型只产生候选，只有链接集合完全
+  复现且非链接可见正文不变时才追加 `linked` Version 并进入 `links_verified`；
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十七条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 十八条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -204,7 +208,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
   当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
 - 对象存储未配置时，产品发现历史 Job 状态仍可读取但新发现 Job 返回 503；Outline
   Provider 未配置时新生成 Job 返回 503。应用重启按各自配置只恢复
-  `product_rediscovery/titles/outline/article` 的 Active PostgreSQL Job。
+  `product_rediscovery/titles/outline/article/restore_links` 的 Active PostgreSQL Job。
 - 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
   释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
   数据库 Engine，不宣称已经排空。
@@ -221,7 +225,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
   组织级确认入口；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前
-  `product_rediscovery/titles/outline/article` 四条 Operation-specific Job 入口使用
+  `product_rediscovery/titles/outline/article/restore_links` 五条 Operation-specific Job 入口使用
   PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接邮件发送服务与生产 IdP Provider 配置管理；Organization Admin Console 已接入
@@ -485,6 +489,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_title_generation.py` | Project Title Provider、模板身份、Handler 与 Queue Registry | 系统模板 Hash/Published Chunk 身份固定、完整候选门禁、无本地文件与 mock 回退、两阶段授权、候选 CAS/Audit、有界停机 |
 | `backend/services/server_article_generation.py` | Project Article Provider、Handler、Draft 变换与 Queue Registry | Prompt Version/目标字数/Published Chunk 身份固定、结构门禁、Raw/Initial Version、无本地文件与 mock 回退、两阶段授权、正文 CAS/Audit、有界停机 |
 | `backend/services/server_humanized_update.py` | 人工审阅 Humanized Markdown 的纯 Task 变换 | 结构/数字/FAQ/表格/列表/必须短语门禁、Version 与下游失效；不知道 HTTP/RBAC/PostgreSQL/本地 Prompt |
+| `backend/services/server_link_restoration.py` | Project Link Restore Provider、Handler、确定性提交变换与 Queue Registry | Template/Initial/Humanized/Final Check 身份固定、模型候选与提交分离、精确链接/可见正文门禁、两阶段授权、CAS/Audit、有界停机 |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -531,6 +536,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
 | `backend/tests/test_m7_server_tdk_export.py` | Server TDK 纯内存导出测试 | 私有 Asset 身份、无本地路径、Provider 错误脱敏 |
 | `backend/tests/test_m7_server_ai_screenshots.py` | Server AI-rate 截图规范化测试 | PNG/尺寸/大小门禁、私有 Asset 类型、无本地路径 |
+| `backend/tests/test_m7_server_link_restoration.py` | Server Link Restore Provider 与确定性提交测试 | Template 漂移、Gateway 错误脱敏、无缺失链接不调用模型、精确链接/正文门禁 |
 | `backend/tests/test_m7_server_delivery_package.py` | Server Delivery ZIP 编排测试 | 当前正文终审绑定、全部私有资产身份、扁平归档、无本地路径 |
 | `backend/tests/test_m7_object_store.py` | S3 适配器单元契约 | 私有对象、加密参数、大小门禁、Secret 不泄露 |
 | `backend/tests/test_m7_object_orphan_reconciliation.py` | Orphan PostgreSQL 集成测试 | 注册/未注册 orphan、快照/Task 引用、指纹变化、跨项目、删除失败重试 |
@@ -744,7 +750,7 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
 已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
-`product_rediscovery/titles/outline/article` 已有独立 PostgreSQL Job API/Runner。
+`product_rediscovery/titles/outline/article/restore_links` 已有独立 PostgreSQL Job API/Runner。
 其余正文后处理写入、通用 Batch 和 Worker 尚未接线。因此
 不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
 Runner 描述成“服务器 Job 单写已完成”。
@@ -760,7 +766,7 @@ Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一�
 退出的非用户取消 Job 释放回 `queued`，并返回有界 Join 报告。若报告仍有在途 Job，
 Lifespan 明确失败且不释放数据库 Engine。
 
-这套语义当前接到 `product_rediscovery/titles/outline/article`。仍没有全部 Operation
+这套语义当前接到 `product_rediscovery/titles/outline/article/restore_links`。仍没有全部 Operation
 的 Runner 和正式环境排空演练，所以 `worker_reauthorizes` 与
 `postgres_job_single_write` 仍保持 false，不能把单条 Operation 的证据扩写成整体
 Worker Cutover 已完成。
@@ -1078,6 +1084,37 @@ report，并以 `article_hash` 防止上游正文修改后继续沿用旧确认�
 留下内容寻址截图 orphan，继续进入延迟对账。Delivery ZIP 与 Delivery Console 已由
 后续两节迁移。
 
+#### D1.4b 已实现：Server Link Restore
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/restore-links
+body: { revision }
+  -> project.view + article.edit
+  -> 固定 checked-in restore_links Template Hash
+  -> 固定 Initial/Humanized Article Hash、来源链接数和 Task Revision
+  -> PostgreSQL Job(requested_by_user_id)
+  -> Claim 前与 Handler 前重新授权
+  -> 复核两份正文 Hash 与 Final AI Check.article_hash
+  -> Provider 只产生候选 Markdown
+  -> 精确 Link/URL Counter + 非链接可见正文 Hash 门禁
+  -> Linked Version + links_verified + Task CAS + Audit
+
+GET /api/projects/{project}/tasks/{task_id}/restore-links/jobs/{job_id}
+  -> project.view
+  -> 只返回公开 Job 状态，不返回 Request/Requester/Hash/正文/Error
+```
+
+链接恢复不是“信任模型后写字段”。Provider 只负责候选；确定性校验必须证明候选精确
+复现 Initial Article 的 Markdown 链接与 URL 多重集合，并且除恢复成首稿 Anchor 外，
+Humanized Article 的可见正文不变。没有缺失链接时仍走同一确定性门禁，但不调用模型。
+Template、Revision、Initial/Humanized 或 Final Check 身份漂移，以及撤权、非法新增
+URL、空输出、正文变化、CAS/Audit 失败都会保留旧 Task，不产生部分 Linked Version。
+
+当前每个 Operation Registry 仍有重复调度样板，这是有意保留的迁移结构痕迹。后续可
+抽取共享 Registry，但必须保持 Operation-specific Scope、私有 Request、权限映射、
+公开 DTO 和有界 drain 语义不变。自动 `humanize` 仍依赖外部
+`humanize_prompt_path`，继续 Local Only，不能与已迁移的 Link Restore 合并判定。
+
 #### D1.5 已实现：Server Delivery ZIP 组装与下载
 
 ```text
@@ -1197,7 +1234,7 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 `ServerJobSummary/ServerBatchSummary` 是独立公开投影，只返回稳定身份、状态、Revision、
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
-分页；当前可见 Operation 是 `product_rediscovery/titles/outline/article`。旧
+分页；当前可见 Operation 是 `product_rediscovery/titles/outline/article/restore_links`。旧
 `/api/batches*` 继续 503，未迁移的 `products/rewrite_article/...` 即使误写入
 PostgreSQL 也不会出现在控制面。
 
@@ -1279,7 +1316,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十七条 Task 写操作、`product_rediscovery/titles/outline/article` 的
+身份代码链、十八条 Task 写操作、`product_rediscovery/titles/outline/article/restore_links` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
@@ -1399,7 +1436,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
     Requester、Operation 或 Task？
 65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
-66. `product_rediscovery/titles/outline/article` 以外的 Operation 是否仍不出现在列表、详情、取消或
+66. `product_rediscovery/titles/outline/article/restore_links` 以外的 Operation 是否仍不出现在列表、详情、取消或
     重试接口？
 67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
     别名？
@@ -1480,3 +1517,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      Version/Audit？
 108. 成功是否追加 `humanized/external_manual` Version、清空下游且不读取
      `humanize_prompt_path`，自动 Humanize Job 是否仍保持 Local Only？
+109. `restore_links` Job 是否固定 Template、Initial/Humanized Article 与 Final Check
+     身份，且 Provider 只能产生候选、不能绕过确定性 Link/Text 校验直接提交？
+110. Template/Article 漂移、撤权、非法 URL、正文变化、Audit 或 CAS 失败时，是否都
+     保持旧 `linked_article`、Revision 和下游产物不变，公开 Job/Audit 不泄露正文或 Hash？

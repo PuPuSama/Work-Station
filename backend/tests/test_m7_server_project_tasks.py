@@ -93,9 +93,18 @@ from services.server_article_generation import (  # noqa: E402
     ServerArticleGenerationHandler,
     ServerArticleGenerationRegistry,
 )
+from services.server_link_restoration import (  # noqa: E402
+    LinkTemplateReference,
+    ServerLinkRestorationHandler,
+    ServerLinkRestorationRegistry,
+)
 from services.server_project_tasks import (  # noqa: E402
     ServerProjectTaskStoreFactory,
 )
+from services.server_task_commands import (  # noqa: E402
+    ServerTaskCommandUnavailable,
+)
+from storage import content_hash  # noqa: E402
 
 
 SERVER_ARTICLE = """# Example Buyer Guide
@@ -232,6 +241,27 @@ class RecordingArticleProvider:
             }
         )
         return SERVER_ARTICLE
+
+
+class RecordingLinkRestorationProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def restore(
+        self,
+        *,
+        source_article,
+        candidate_article,
+        missing_links,
+    ):
+        self.calls.append(
+            {
+                "source_hash": content_hash(source_article),
+                "candidate_hash": content_hash(candidate_article),
+                "missing_links": list(missing_links),
+            }
+        )
+        return source_article
 
 
 class FakeDownloadStore:
@@ -592,6 +622,47 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             format="PNG",
         )
         return output.getvalue()
+
+    def _prepare_link_task(
+        self,
+    ) -> tuple[PostgresTaskRepository, str, str]:
+        source = SERVER_ARTICLE.strip()
+        candidate = source.replace(
+            "[example.com](https://example.com/)",
+            "example.com",
+        )
+        source_hash = content_hash(source)
+        candidate_hash = content_hash(candidate)
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "status": "final_ai_checked",
+                "initial_article": source,
+                "initial_article_hash": source_hash,
+                "humanized_article": candidate,
+                "humanized_article_hash": candidate_hash,
+                "article": candidate,
+                "final_ai_check": {
+                    "confirmed": True,
+                    "article_hash": candidate_hash,
+                },
+                "source_links": [
+                    {
+                        "anchor": "example.com",
+                        "url": "https://example.com/",
+                        "count": 1,
+                    }
+                ],
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+        return repository, source, candidate
 
     def _store_outline_context(
         self,
@@ -1685,6 +1756,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/article/jobs/job-a",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/restore-links",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/restore-links/jobs/job-a",
                 ).status_code,
                 404,
             )
@@ -3848,6 +3934,342 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 project_id=self.project_a,
                 chunk_ids=(chunk_id,),
             )
+
+    def test_server_link_restoration_is_project_scoped_and_hash_bound(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository, source, candidate = self._prepare_link_task()
+        source_hash = content_hash(source)
+        candidate_hash = content_hash(candidate)
+
+        provider = RecordingLinkRestorationProvider()
+        audit = RecordingAuditWriter()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        handler = ServerLinkRestorationHandler(
+            self.engine,
+            provider=provider,
+            audit=audit,
+        )
+        registry = ServerLinkRestorationRegistry(
+            self.engine,
+            access=access,
+            handler=handler,
+            audit=audit,
+        )
+        self.addCleanup(registry.stop)
+        codec = ServerActorSessionCodec(b"l" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "l" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_link_restoration = registry
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/restore-links"
+                )
+                self.assertEqual(
+                    client.post(path, json={"revision": 0}).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={
+                            "revision": 0,
+                            "article": "caller-controlled",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/restore-links"
+                        ),
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                queued = client.post(path, json={"revision": 0})
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertEqual(
+                    public_job["operation"],
+                    "restore_links",
+                )
+                self.assertNotIn("request", public_job)
+                self.assertNotIn("requested_by_user_id", public_job)
+                status_path = f"{path}/jobs/{public_job['job_id']}"
+                terminal = None
+                for _attempt in range(100):
+                    response = client.get(status_path)
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+                    terminal = response.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(
+                    terminal["status"],
+                    "succeeded",
+                    terminal,
+                )
+                self.assertEqual(terminal["result_revision"], 1)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    provider.calls[0]["source_hash"],
+                    source_hash,
+                )
+                self.assertEqual(
+                    provider.calls[0]["candidate_hash"],
+                    candidate_hash,
+                )
+                stored_payload = repository.get(self.task_a)
+                assert stored_payload is not None
+                stored = TaskRecord.model_validate(stored_payload)
+                self.assertEqual(stored.status, "links_verified")
+                self.assertEqual(stored.article, source)
+                self.assertEqual(stored.linked_article, source)
+                self.assertTrue(stored.link_validation.passed)
+                self.assertEqual(
+                    stored.article_versions[-1].kind,
+                    "linked",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.link_restoration.queued",
+                        "article.links.restored",
+                        "background_job.terminal",
+                    ],
+                )
+                self.assertNotIn(source, str(audit.events))
+                self.assertNotIn(candidate, str(audit.events))
+                self.assertFalse(local_state.exists())
+
+    def test_link_worker_rejects_article_hash_drift_before_provider(
+        self,
+    ) -> None:
+        repository, source, candidate = self._prepare_link_task()
+        template = LinkTemplateReference.current()
+        job = {
+            "operation": "restore_links",
+            "organization_id": self.org_a,
+            "project_id": self.project_a,
+            "task_id": self.task_a,
+            "requested_by_user_id": self.user_a,
+            "source_revision": 0,
+            "request": {
+                **template.private_values(),
+                "source_article_hash": content_hash(source),
+                "candidate_article_hash": content_hash(candidate),
+                "source_link_count": 1,
+            },
+        }
+        changed = repository.get(self.task_a)
+        assert changed is not None
+        changed_candidate = candidate.replace(
+            "Keep the original evidence guidance.",
+            "Keep revised evidence guidance.",
+        )
+        changed["humanized_article"] = changed_candidate
+        changed["humanized_article_hash"] = content_hash(
+            changed_candidate
+        )
+        changed["final_ai_check"]["article_hash"] = content_hash(  # type: ignore[index]
+            changed_candidate
+        )
+        repository.upsert(changed)
+        provider = RecordingLinkRestorationProvider()
+        handler = ServerLinkRestorationHandler(
+            self.engine,
+            provider=provider,
+        )
+
+        with self.assertRaisesRegex(
+            JobConflict,
+            "candidate article changed",
+        ):
+            handler(job, lambda: False)
+
+        self.assertEqual(provider.calls, [])
+        persisted = repository.get(self.task_a)
+        assert persisted is not None
+        self.assertEqual(persisted["revision"], 0)
+        self.assertEqual(persisted["status"], "final_ai_checked")
+
+    def test_link_restoration_audit_failure_rolls_back_task(self) -> None:
+        repository, source, candidate = self._prepare_link_task()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+
+        class FailingAudit:
+            def append(self, connection, event) -> None:
+                del connection, event
+                raise RuntimeError("audit unavailable")
+
+        template = LinkTemplateReference.current()
+        handler = ServerLinkRestorationHandler(
+            self.engine,
+            provider=RecordingLinkRestorationProvider(),
+            audit=FailingAudit(),
+        )
+        job = {
+            "operation": "restore_links",
+            "organization_id": self.org_a,
+            "project_id": self.project_a,
+            "task_id": self.task_a,
+            "requested_by_user_id": self.user_a,
+            "source_revision": 0,
+            "request": {
+                **template.private_values(),
+                "source_article_hash": content_hash(source),
+                "candidate_article_hash": content_hash(candidate),
+                "source_link_count": 1,
+            },
+        }
+
+        with self.assertRaises(ServerTaskCommandUnavailable):
+            handler(job, lambda: False)
+
+        persisted = repository.get(self.task_a)
+        assert persisted is not None
+        self.assertEqual(persisted["revision"], 0)
+        self.assertEqual(persisted["status"], "final_ai_checked")
+        self.assertEqual(persisted["linked_article"], "")
+
+    def test_link_worker_reauthorizes_before_provider_call(self) -> None:
+        _, source, candidate = self._prepare_link_task()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        template = LinkTemplateReference.current()
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        batch = raw_queue.create_batch(
+            "restore_links",
+            [
+                {
+                    "task_id": self.task_a,
+                    "source_revision": 0,
+                    "customer": self.project_a,
+                    "topic_index": 2,
+                    "request": {
+                        **template.private_values(),
+                        "source_article_hash": content_hash(source),
+                        "candidate_article_hash": content_hash(candidate),
+                        "source_link_count": 1,
+                    },
+                }
+            ],
+            customer=self.project_a,
+            requested_by_user_id=self.user_a,
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="viewer")
+            )
+        provider = RecordingLinkRestorationProvider()
+        registry = ServerLinkRestorationRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=ServerLinkRestorationHandler(
+                self.engine,
+                provider=provider,
+            ),
+            audit=RecordingAuditWriter(),
+        )
+        self.addCleanup(registry.stop)
+
+        registry.start_existing()
+
+        current = None
+        for _attempt in range(100):
+            current = raw_queue.get_job(job_id)
+            if current["status"] == "conflict":
+                break
+            time.sleep(0.02)
+        assert current is not None
+        self.assertEqual(current["status"], "conflict")
+        self.assertEqual(
+            current["error"],
+            "job actor is not authorized",
+        )
+        self.assertEqual(provider.calls, [])
 
     def test_server_product_rediscovery_uses_requested_actor_and_pg_worker(
         self,

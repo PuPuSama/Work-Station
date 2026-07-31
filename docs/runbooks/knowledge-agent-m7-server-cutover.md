@@ -506,14 +506,15 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十七条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十八条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
   `article.humanized.updated`、
+  `article.links.restored`、
   `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
@@ -548,6 +549,13 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - 人工 Humanized Article 保存只提交 Revision 与有界 Markdown；服务端必须拒绝标题
   层级、数字事实、FAQ、表格、列表或必须短语漂移，成功追加 `external_manual` Version、
   进入 `humanized_ready` 并清空终检之后的旧产物。Audit 只记录字数，不含正文；
+- Link Restore 只提交 Revision；Enqueue 固定 checked-in Template Hash、Initial/
+  Humanized Article Hash、来源链接数和 Final Check 绑定，公开 Job 不返回这些身份。
+  Worker 两阶段重授权并在 Provider 前复核固定身份；模型只返回候选，确定性校验必须
+  证明 Markdown Link/URL 多重集合与 Initial Article 完全相同，非链接可见正文与
+  Humanized Article 相同。成功只追加 `linked` Version、进入 `links_verified` 并
+  记录来源/恢复链接数；模板或正文漂移、撤权、非法 URL、正文变化、Audit/CAS 失败
+  不得留下 Task 部分写入，自动 Humanize 仍为 Local Only；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/
@@ -593,7 +601,7 @@ Outline 生成冒烟必须通过
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery/titles/outline/article`，并且响应不存在 Request、Requester、URL、Prompt/
+  `product_rediscovery/titles/outline/article/restore_links`，并且响应不存在 Request、Requester、URL、Prompt/
   Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
 - Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
   `knowledge.edit/article.edit`，且撤权后即使 Cookie 与页面仍有效也必须失败；
