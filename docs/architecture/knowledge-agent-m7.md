@@ -64,6 +64,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `PUT /api/projects/{project}/tasks/{task_id}/selected-title`：请求只接收 Revision
   与候选索引，服务端从当前 PostgreSQL Task 的 `title_candidates` 选择原值并使
   Outline/Article 等下游派生状态失效；不接受客户端替换标题正文；
+- 新增 Project-scoped 标题生成 Job：`POST .../titles` 只接受 Task Revision，Enqueue
+  固定 checked-in `titles` 模板 Hash 与当前 Published Chunk ID；Provider 必须返回
+  完整、唯一、有界候选，失败不补 mock、不读取本地 Customer Context。成功以 CAS 写入
+  `title_candidates`、清空旧选择和下游，并与不含候选正文的 Audit 同事务；
 - 新增已审阅大纲保存/确认命令
   `PUT /api/projects/{project}/tasks/{task_id}/outline`：请求只接收 Revision、
   有界 Markdown 与 Confirmed 标志；草稿只追加 Version 并保留当前确认大纲和下游，
@@ -114,7 +118,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十二条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 十三条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -188,7 +192,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
   当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
 - 对象存储未配置时，产品发现历史 Job 状态仍可读取但新发现 Job 返回 503；Outline
   Provider 未配置时新生成 Job 返回 503。应用重启按各自配置只恢复
-  `product_rediscovery/outline` 的 Active PostgreSQL Job。
+  `product_rediscovery/titles/outline` 的 Active PostgreSQL Job。
 - 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
   释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
   数据库 Engine，不宣称已经排空。
@@ -465,6 +469,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_task_commands.py` | 已迁移 Server Task 写操作的事务命令 | 锁定可撤权事实、Action 固定权限与 Details 白名单、CAS 与 Audit 同事务 |
 | `backend/services/server_outline_update.py` | 生成草稿、已审阅草稿/确认/版本恢复的纯 Task 变换 | 内容哈希 Version 去重、生成只写 Draft、服务器版本类型门禁、草稿保留下游、确认使下游失效；不知道 HTTP/RBAC/PostgreSQL |
 | `backend/services/server_outline_generation.py` | Project Outline Context、Provider、Handler 与 Queue Registry | Prompt Version/Published Chunk 身份固定、无本地文件与 mock 回退、Provider 错误脱敏、两阶段授权、草稿 CAS/Audit、有界停机 |
+| `backend/services/server_title_generation.py` | Project Title Provider、模板身份、Handler 与 Queue Registry | 系统模板 Hash/Published Chunk 身份固定、完整候选门禁、无本地文件与 mock 回退、两阶段授权、候选 CAS/Audit、有界停机 |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -1146,8 +1151,8 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 `ServerJobSummary/ServerBatchSummary` 是独立公开投影，只返回稳定身份、状态、Revision、
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
-分页；当前可见 Operation 是 `product_rediscovery/outline`。旧 `/api/batches*` 继续 503，
-未迁移的 `titles/products/article/...` 即使误写入 PostgreSQL 也不会出现在控制面。
+分页；当前可见 Operation 是 `product_rediscovery/titles/outline`。旧 `/api/batches*`
+继续 503，未迁移的 `products/article/...` 即使误写入 PostgreSQL 也不会出现在控制面。
 
 读取要求 `project.view`。取消与重试先锁定 Organization/User/Project 及全部可撤权
 Membership 事实，再锁 Batch/Job，并按 Operation 映射到 Worker 的最小权限；因此路由
@@ -1227,7 +1232,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十二条 Task 写操作、`product_rediscovery/outline` 的 Enqueue/Runner 和窄范围
+身份代码链、十三条 Task 写操作、`product_rediscovery/titles/outline` 的 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
@@ -1346,7 +1351,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
     Requester、Operation 或 Task？
 65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
-66. `product_rediscovery/outline` 以外的 Operation 是否仍不出现在列表、详情、取消或
+66. `product_rediscovery/titles/outline` 以外的 Operation 是否仍不出现在列表、详情、取消或
     重试接口？
 67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
     别名？
@@ -1358,8 +1363,8 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     fail closed，且不产生额外 Audit？
 71. 标题选择是否仍使 Outline/Article 等下游派生状态失效，并只在 Audit 中记录
     Candidate Count/Index 而不记录标题文本？
-72. `titles` Job 在本地客户知识目录被正式 Published Knowledge Context 替换前，是否
-    仍保持 Local Only 而不进入 PostgreSQL Worker Operation 集合？
+72. `titles` Job 是否固定 checked-in Template Hash 与当前 Published Chunk ID，且在
+    Provider 返回不足、重复或超长候选时失败而不补 mock？
 73. 大纲保存是否只接受 Revision、有界 Markdown 与 Confirmed 标志，并拒绝调用方
     提交 Status、Audit 或其他服务端字段？
 74. 草稿保存是否只更新 `outline_draft` 并追加草稿 Version，同时保留确认大纲和下游

@@ -320,7 +320,7 @@ def server_http_route_available(method: str, path: str) -> bool:
         and bool(parts[3])
         and parts[4] == "tasks"
         and bool(parts[5])
-        and parts[6] == "outline"
+        and parts[6] in {"outline", "titles"}
     ):
         return True
     if (
@@ -462,7 +462,8 @@ def server_http_route_available(method: str, path: str) -> bool:
         and bool(parts[3])
         and parts[4] == "tasks"
         and bool(parts[5])
-        and parts[6:8] == ["outline", "jobs"]
+        and parts[6] in {"outline", "titles"}
+        and parts[7] == "jobs"
         and bool(parts[8])
     ):
         return True

@@ -68,7 +68,7 @@
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Article/Review Worker 继续逐项接线；旧路由继续关闭 |
-| Title/Product/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
+| Product/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
 | Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
@@ -78,8 +78,8 @@
 | Operation | Enqueue | Worker | Claim 前授权 | Handler 前授权 | 控制面 |
 |---|---|---|---|---|---|
 | `product_rediscovery` | Project-scoped、与 Task Revision/Audit 同事务 | Project Registry | `knowledge.edit` | `knowledge.edit` | Project-scoped Batch/Job 列表、取消、重试已完成 |
+| `titles` | Project-scoped、固定 Task Revision/Template Hash/Published Chunk ID | Project Registry，只写候选 | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `outline` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | Project Registry，只写 Review Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
-| `titles` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `seo_review` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `article` / `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
@@ -90,11 +90,12 @@
 每个 Operation 必须有可信 Requester、两阶段权限映射、Server-only Handler、私有存储
 边界和取消/重试测试。
 
-标题“生成”与标题“选择”是两个边界：`titles` Job 仍会通过
-`collect_customer_context()` 递归读取本地 `knowledge_base/<customer>`，因此仍为
-Local Only。已迁移的 `selected-title` 命令只允许客户端提交当前 Revision 和候选索引，
+标题“生成”与标题“选择”是两个边界：`POST .../titles` 只接受 Revision，服务端固定
+checked-in Template Hash 与当前 Published Chunk ID，Provider 返回不足/重复/超长候选
+时失败，不调用本地 `collect_customer_context()` 或 `mock_titles()`。成功只写候选并
+清空旧选择和下游。`selected-title` 命令只允许客户端提交当前 Revision 和候选索引，
 服务端从 PostgreSQL Task 的当前 `title_candidates` 取值；它不接受调用方替换标题正文，
-也不表示标题生成链已经切换为服务器知识准源。
+候选生成与人工选择保持两个独立 CAS/Audit。
 
 大纲“生成”与大纲“保存/确认”继续分离：`POST .../outline` 只接受当前 Revision，
 入队时固定 PostgreSQL Prompt ID + Version 与当前 Published Chunk ID；Worker 执行前
@@ -142,7 +143,8 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 9. SQLite 冻结窗口证据是否仍与目标 Organization/Project/摘要绑定？
 10. Server 单写切换后，Local Mode 是否仍可独立使用 SQLite，且两种模式不会双写？
 11. 标题选择是否仍只读取当前 PostgreSQL Task 的候选并拒绝客户端标题正文？
-12. `titles` Job 是否在发布知识上下文接线前继续保持 Local Only？
+12. `titles` Job 是否固定系统模板 Hash 与当前 Published Chunk ID，并在 Provider
+    输出不完整时失败而不补 mock？
 13. 大纲草稿是否仍保留当前确认大纲和下游产物，而确认大纲才执行下游失效？
 14. `outline` Job 是否只固定 PostgreSQL Prompt Version 与当前 Published Chunk ID，
     且只写可审阅草稿、不自动确认或生成 mock？

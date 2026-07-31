@@ -489,11 +489,12 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十二条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十三条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、选择标题候选、保存/确认大纲、恢复历史大纲草稿、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
-  `article.task.rewritten`、`article.title.selected`、`article.outline.updated`、
+  `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
+  `article.outline.updated`、
   `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
@@ -507,6 +508,12 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   URL、对象 URI、签名 URL、Token 或 Secret；
 - 标题选择只提交 Candidate Index，不提交标题正文；服务端必须从当前 PostgreSQL Task
   的 `title_candidates` 取值，越界、空候选、旧 Revision 和跨项目请求均不写 Task/Audit；
+- 标题生成只提交当前 Revision；入队时固定 checked-in `titles` Template Hash、Task
+  Revision 与当前 Published Chunk ID，公开 Job 不返回 Template/Chunk 身份或请求正文。
+  Worker 执行前重新核对模板、Task Revision 和 Published Chunk Scope，只读取当前项目
+  发布态知识，不读取本地 Customer Context；Provider 返回不足、重复、空白或超长候选时
+  Job 失败且不补 mock。成功只写 `title_candidates`、清空旧选择和下游，并以
+  `article.titles.generated` 与 Task CAS 同事务提交，Audit 只含候选数和 Context Chunk 数；
 - 大纲保存只提交有界 Markdown 与 Confirmed 标志；草稿保留当前确认大纲和下游，确认
   才使下游失效；Audit 只记录 Confirmed 与字符数，不记录 Markdown；
 - 大纲恢复只提交 Version Index，只允许当前 Task 的 Outline Version 恢复成草稿；
@@ -559,7 +566,7 @@ Outline 生成冒烟必须通过
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery/outline`，并且响应不存在 Request、Requester、URL、Prompt/
+  `product_rediscovery/titles/outline`，并且响应不存在 Request、Requester、URL、Prompt/
   Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
 - Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
   `knowledge.edit/article.edit`，且撤权后即使 Cookie 与页面仍有效也必须失败；

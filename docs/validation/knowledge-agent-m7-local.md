@@ -521,7 +521,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十二条 HTTP Task 写操作分别记录 rewrite/title-selection/outline/outline-restore/products/section/images/docx/tdk/
+- 十三条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/products/section/images/docx/tdk/
   final-ai-screenshot/final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
@@ -914,11 +914,41 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   fail closed；
 - 成功选择会执行 Revision CAS、清空 Outline/Article 下游状态并追加
   `article.title.selected`；Audit 只含 Candidate Count/Index，不含标题正文；
-- Local Mode 不挂载该接口；标题生成 `titles` Job 仍因本地客户知识目录依赖保持
-  Local Only；
+- Local Mode 不挂载该接口；Server 标题选择不会接受客户端标题正文；
 - 完整后端回归 597 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
 - Alembic Current 与 Head 均为 `20260731_0015`。
+
+### M7 Project 标题候选生成
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_prompts `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_job_control -q
+```
+
+结果：54 tests 全部通过；随后完整后端回归 621 tests 全部通过，2 tests 按显式外部
+环境门禁跳过；前端 ESLint、TypeScript、Next.js production build 全部通过；
+Alembic Current 与 Head 均为 `20260731_0015`。
+
+验证边界：
+
+- `POST /api/projects/{project}/tasks/{task_id}/titles` 只接受当前 Revision，额外
+  Instruction、Template、Context 或候选字段返回 422；
+- Enqueue 固定 checked-in `titles` Template SHA-256、Task Revision 和当前 Published
+  Chunk ID；公开 Job DTO 不暴露 Request、Requester、Template 或 Chunk 身份；
+- Worker 执行前复核 Template Hash、Task Revision 和 Published Chunk Scope，只读取
+  当前项目发布态知识；更相似的跨项目 Chunk、旧快照和未发布来源都不进入 Provider；
+- Provider 必须一次返回完整、唯一、非空且每条不超过 300 字符的候选；不足、重复、
+  Provider 异常或模板漂移都失败且不生成 mock，错误响应不泄露网关正文或密钥；
+- 成功只写 `title_candidates`，清空旧标题选择及 Outline/Article 下游；人工选择仍走
+  独立 `selected-title` CAS，不由生成 Job 自动确认；
+- `article.titles.generated` 与 Task Revision CAS 同事务；注入 Audit 失败会同时回滚候选、
+  Status 和 Revision，Audit Details 只含候选数与 Context Chunk 数。
 
 ### M7 Project Prompt HTTP
 
@@ -1098,16 +1128,16 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   大纲生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
-  私有图片准备和文章 DOCX 导出/下载，并为 `product_rediscovery/outline` 提供窄范围
+  私有图片准备和文章 DOCX 导出/下载，并为 `product_rediscovery/titles/outline` 提供窄范围
   Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery/outline` Job 为单写，其余路径尚未成为 PostgreSQL
+  Task 命令和 `product_rediscovery/titles/outline` Job 为单写，其余路径尚未成为 PostgreSQL
   准源；
-- Server Mode 已停止 SQLite Queue/Worker；产品重新发现与大纲生成已有项目级
+- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题生成与大纲生成已有项目级
   PostgreSQL Runner 和两阶段授权，Enqueue、终态 Audit 与有界 drain/join 报告已完成；
-  这两个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
+  这三个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
   Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；

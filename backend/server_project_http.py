@@ -63,6 +63,10 @@ from services.server_outline_generation import (
     OutlineGenerationUnavailable,
     ServerOutlineGenerationRegistry,
 )
+from services.server_title_generation import (
+    ServerTitleGenerationRegistry,
+    TitleGenerationUnavailable,
+)
 from services.server_delivery_package import (
     ServerDeliveryPackage,
     ServerDeliveryPackageError,
@@ -330,6 +334,10 @@ class OutlineGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public outline Job state; private Prompt and Chunk input stay hidden."""
 
 
+class TitleGenerationJobResponse(ProductRediscoveryJobResponse):
+    """Public title Job state; private Template and Chunk input stay hidden."""
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -582,6 +590,22 @@ def _outline_generation(
         raise HTTPException(
             status_code=503,
             detail="Server outline generation is not available.",
+        )
+    return registry
+
+
+def _title_generation(
+    request: Request,
+) -> ServerTitleGenerationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_title_generation",
+        None,
+    )
+    if not isinstance(registry, ServerTitleGenerationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server title generation is not available.",
         )
     return registry
 
@@ -971,6 +995,91 @@ def rewrite_project_task_from_scratch(
         expected_revision=payload.revision,
         action="article.task.rewritten",
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/titles",
+    response_model=TitleGenerationJobResponse,
+)
+def enqueue_project_task_title_generation(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TitleGenerationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _title_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TitleGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server title generation is not available.",
+        ) from exc
+    return TitleGenerationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/titles/jobs/{job_id}",
+    response_model=TitleGenerationJobResponse,
+)
+def read_project_task_title_generation_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TitleGenerationJobResponse:
+    del project
+    try:
+        job = _title_generation(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Title generation job was not found.",
+        ) from None
+    except TitleGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server title generation is not available.",
+        ) from exc
+    return TitleGenerationJobResponse.model_validate(job)
 
 
 @router.put(
@@ -2219,6 +2328,7 @@ __all__ = [
     "ProductRediscoveryJobResponse",
     "ProductRediscoveryRequest",
     "ProjectAssetDownload",
+    "TitleGenerationJobResponse",
     "require_server_actor",
     "require_server_project_access",
     "router",

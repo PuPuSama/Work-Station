@@ -84,6 +84,11 @@ from services.server_outline_generation import (  # noqa: E402
     ServerOutlineGenerationHandler,
     ServerOutlineGenerationRegistry,
 )
+from services.server_title_generation import (  # noqa: E402
+    ServerTitleGenerationHandler,
+    ServerTitleGenerationRegistry,
+    TitleTemplateReference,
+)
 from services.server_project_tasks import (  # noqa: E402
     ServerProjectTaskStoreFactory,
 )
@@ -168,6 +173,32 @@ class RecordingOutlineProvider:
             }
         )
         return "## Generated server outline\n\n### Evidence-led section"
+
+
+class RecordingTitleProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        task,
+        *,
+        title_count,
+        context_chunks,
+    ):
+        self.calls.append(
+            {
+                "task_id": task.id,
+                "title_count": title_count,
+                "chunk_ids": [
+                    chunk.chunk_id for chunk in context_chunks
+                ],
+            }
+        )
+        return tuple(
+            f"Server candidate title {index}"
+            for index in range(1, title_count + 1)
+        )
 
 
 class FakeDownloadStore:
@@ -1595,6 +1626,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 404,
             )
             self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/titles",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/titles/jobs/job-a",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
                 TestClient(app_module.app).put(
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/products",
@@ -2702,6 +2748,173 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     client.get(download_path).status_code,
                     403,
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_title_generation_uses_system_template_and_published_scope(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "status": "new",
+                "selected_title": "",
+                "title_candidates": [],
+                "outline": "stale confirmed outline",
+                "outline_draft": "stale outline draft",
+                "article": "stale article",
+            }
+        )
+        repository.upsert(record)
+        published_chunk = self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-title-published",
+            text="Topic 2 has one verified published positioning fact.",
+        )
+        self._store_outline_context(
+            project_id=self.project_b,
+            suffix=f"{self.task_b}-title-published",
+            text="Topic 2 repeated is a cross-project positioning fact.",
+        )
+        provider = RecordingTitleProvider()
+        audit = RecordingAuditWriter()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        handler = ServerTitleGenerationHandler(
+            self.engine,
+            provider=provider,
+            audit=audit,
+        )
+        codec = ServerActorSessionCodec(b"t" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            registry = ServerTitleGenerationRegistry(
+                self.engine,
+                config=isolated,
+                access=access,
+                handler=handler,
+                audit=audit,
+            )
+            self.addCleanup(registry.stop)
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "t" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_title_generation = registry
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/titles"
+                )
+                self.assertEqual(
+                    client.post(path, json={"revision": 0}).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={
+                            "revision": 0,
+                            "instruction": "client override",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/titles"
+                        ),
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                queued = client.post(path, json={"revision": 0})
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertEqual(public_job["operation"], "titles")
+                self.assertNotIn("request", public_job)
+                self.assertNotIn("requested_by_user_id", public_job)
+                status_path = (
+                    f"{path}/jobs/{public_job['job_id']}"
+                )
+                terminal = None
+                for _attempt in range(100):
+                    response = client.get(status_path)
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+                    terminal = response.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(terminal["status"], "succeeded")
+                self.assertEqual(terminal["result_revision"], 1)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    provider.calls[0]["chunk_ids"],
+                    [published_chunk],
+                )
+                stored_payload = repository.get(self.task_a)
+                assert stored_payload is not None
+                stored = TaskRecord.model_validate(stored_payload)
+                self.assertEqual(stored.revision, 1)
+                self.assertEqual(stored.status, "titles_ready")
+                self.assertEqual(len(stored.title_candidates), 10)
+                self.assertEqual(stored.selected_title, "")
+                self.assertEqual(stored.outline, "")
+                self.assertEqual(stored.outline_draft, "")
+                self.assertEqual(stored.article, "")
+                self.assertNotIn(
+                    "Server candidate title",
+                    str(audit.events),
                 )
                 self.assertFalse(local_state.exists())
 

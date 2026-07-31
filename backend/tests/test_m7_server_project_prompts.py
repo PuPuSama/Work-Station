@@ -34,6 +34,7 @@ from services.access_control import (  # noqa: E402
     ActorIdentity,
     ProjectAccessDenied,
 )
+from services.job_queue import JobConflict  # noqa: E402
 from services.server_project_prompts import (  # noqa: E402
     PostgresProjectPromptService,
     ServerProjectPromptConflict,
@@ -50,6 +51,12 @@ from services.server_outline_generation import (  # noqa: E402
     OutlineGenerationUnavailable,
     OutlinePromptReference,
     ServerOutlineGenerationHandler,
+)
+from services.server_title_generation import (  # noqa: E402
+    LlmServerTitleProvider,
+    ServerTitleGenerationHandler,
+    TitleGenerationUnavailable,
+    TitleTemplateReference,
 )
 from services.server_project_prompt_migration import (  # noqa: E402
     ProjectPromptMigrationConflict,
@@ -103,6 +110,36 @@ class LeakingOutlineLlm:
     def chat(self, messages, temperature=0.7, max_tokens=1800):
         del messages, temperature, max_tokens
         raise RuntimeError("provider leaked private-provider-detail")
+
+
+class RecordingTitleProvider:
+    def generate(
+        self,
+        task,
+        *,
+        title_count,
+        context_chunks,
+    ):
+        del task, context_chunks
+        return tuple(
+            f"Rollback candidate {index}"
+            for index in range(1, title_count + 1)
+        )
+
+
+class LeakingTitleLlm:
+    ready = True
+
+    def __init__(self, response: str | None = None) -> None:
+        self.response = response
+
+    def chat(self, messages, temperature=0.7, max_tokens=1800):
+        del messages, temperature, max_tokens
+        if self.response is None:
+            raise RuntimeError(
+                "provider leaked private-title-provider-detail"
+            )
+        return self.response
 
 
 @unittest.skipUnless(
@@ -1083,6 +1120,57 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertEqual(stored.article_versions, [])
         self.assertIsNone(stored.last_outline_prompt_snapshot)
 
+    def test_title_worker_rolls_back_candidates_when_audit_fails(
+        self,
+    ) -> None:
+        task_id = f"{self.project_id}-title-audit-task"
+        repository = PostgresTaskRepository(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        )
+        repository.upsert(
+            TaskRecord(
+                id=task_id,
+                week_folder="server",
+                customer=self.project_id,
+                topic_index=3,
+                topic="Title audit rollback topic",
+                status="new",
+                task_dir=f"/server/{task_id}",
+                created_at="2026-07-31T00:00:00+00:00",
+                updated_at="2026-07-31T00:00:00+00:00",
+            ).model_dump(mode="json")
+        )
+        template = TitleTemplateReference.current()
+        with self.assertRaises(ServerTaskCommandUnavailable):
+            ServerTitleGenerationHandler(
+                self.engine,
+                provider=RecordingTitleProvider(),
+                audit=FailingAuditWriter(),
+            )(
+                {
+                    "organization_id": self.organization_id,
+                    "project_id": self.project_id,
+                    "task_id": task_id,
+                    "requested_by_user_id": self.editor_id,
+                    "operation": "titles",
+                    "source_revision": 0,
+                    "request": {
+                        **template.private_values(),
+                        "context_chunk_ids": [],
+                        "title_count": 3,
+                    },
+                },
+                lambda: False,
+            )
+        stored_payload = repository.get(task_id)
+        assert stored_payload is not None
+        stored = TaskRecord.model_validate(stored_payload)
+        self.assertEqual(stored.revision, 0)
+        self.assertEqual(stored.status, "new")
+        self.assertEqual(stored.title_candidates, [])
+
     def test_prompt_migration_dry_run_and_divergent_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source, _ = self._legacy_source(directory)
@@ -1208,6 +1296,70 @@ class ServerOutlineProviderTests(unittest.TestCase):
             "private-provider-detail",
             str(caught.exception),
         )
+
+
+class ServerTitleProviderTests(unittest.TestCase):
+    @staticmethod
+    def _task() -> TaskRecord:
+        return TaskRecord(
+            id="title-provider-task",
+            week_folder="server",
+            customer="example.test",
+            topic_index=1,
+            topic="Title provider safety topic",
+            status="new",
+            task_dir="/server/title-provider-task",
+            created_at="2026-07-31T00:00:00+00:00",
+            updated_at="2026-07-31T00:00:00+00:00",
+        )
+
+    def test_provider_error_and_short_output_do_not_fall_back_to_mock(
+        self,
+    ) -> None:
+        leaking = LlmServerTitleProvider(
+            load_config(),
+            llm=LeakingTitleLlm(),
+        )
+        with self.assertRaisesRegex(
+            TitleGenerationUnavailable,
+            "^title provider is temporarily unavailable$",
+        ) as caught:
+            leaking.generate(
+                self._task(),
+                title_count=3,
+                context_chunks=(),
+            )
+        self.assertNotIn(
+            "private-title-provider-detail",
+            str(caught.exception),
+        )
+        short = LlmServerTitleProvider(
+            load_config(),
+            llm=LeakingTitleLlm("1. Only one candidate"),
+        )
+        with self.assertRaisesRegex(
+            TitleGenerationUnavailable,
+            "^title provider returned an invalid result$",
+        ):
+            short.generate(
+                self._task(),
+                title_count=3,
+                context_chunks=(),
+            )
+
+    def test_template_reference_detects_checked_in_prompt_drift(
+        self,
+    ) -> None:
+        reference = TitleTemplateReference.current()
+        with patch(
+            "services.server_title_generation.load_prompt_template",
+            return_value="changed checked-in title template",
+        ):
+            with self.assertRaisesRegex(
+                JobConflict,
+                "^pinned title template changed$",
+            ):
+                reference.verify_current()
 
 
 if __name__ == "__main__":

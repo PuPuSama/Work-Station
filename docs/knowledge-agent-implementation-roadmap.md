@@ -152,7 +152,7 @@
   调用 fail closed；产品重新发现和大纲生成已有独立 Project-scoped PostgreSQL Runner，
   其余通用 Batch/Worker 尚未接线；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery/outline`，公开 DTO 不含私有 Request、Requester、URL、
+  只展示 `product_rediscovery/titles/outline`，公开 DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
   返回 422；旧无 Project 的 `/api/batches*` 继续关闭；
@@ -205,13 +205,15 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让十二条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让十三条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
-  服务端从当前 `title_candidates` 选择原值、失效下游状态并写安全 Audit；标题生成
-  `titles` Job 仍依赖本地客户知识目录，因此在 Published Knowledge Context 接线前
-  保持 Local Only；
+  服务端从当前 `title_candidates` 选择原值、失效下游状态并写安全 Audit；
+- 已新增 Project-scoped `titles` PostgreSQL Job：客户端只提交 Revision，Enqueue 固定
+  checked-in Template Hash 与当前 Published Chunk ID；Provider 输出必须完整、唯一、
+  有界，失败不读本地 Customer Context、不补 mock；成功只写候选并清空旧选择和下游，
+  候选正文不进入 Audit；
 - 已新增 PostgreSQL Task 大纲草稿/确认命令：草稿保留当前确认大纲和下游产物，确认
   才替换正式大纲并失效正文之后的派生状态；两者都追加内容哈希 Version，并以 CAS 与
   不含 Markdown 的 Audit 原子提交；
