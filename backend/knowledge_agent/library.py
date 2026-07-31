@@ -57,6 +57,14 @@ class KnowledgeSourceSummary:
                 return "; ".join(reasons)
         return ""
 
+    @property
+    def review_decision(self) -> str | None:
+        review = self.metadata.get("review")
+        if not isinstance(review, Mapping):
+            return None
+        decision = review.get("decision")
+        return decision if isinstance(decision, str) else None
+
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeLibrarySummary:

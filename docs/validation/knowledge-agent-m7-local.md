@@ -1427,6 +1427,42 @@ node .\node_modules\next\dist\bin\next build
 - 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
 
+### M7 Server Knowledge Inbox
+
+实现边界：
+
+- Knowledge Page 新增 Auth Status 分流：Local 仍挂
+  `ProjectKnowledgeLibrary/ProjectResearchWorkspace/ProjectEvidenceWorkbench`；
+  Server 只挂 `ServerKnowledgeInbox`，Project Navigation 新增 Knowledge 入口；
+- Server Inbox 只消费已完成 Server Scope 的 Knowledge Library、Source Review、
+  Source Publish 和 Product Confirm 路由，不渲染 Upload、WordPress Sync、Research
+  Run、Evidence Workbench 或 Raw Artifact；
+- 来源 Review 只提交 Source Kind、Trust Tier、Decision 和 1–500 字 Reason；Publish
+  是第二个显式动作，只在服务端 `review_decision=approve`、状态为 Inbox 且有 Chunk 时
+  显示；
+- `KnowledgeSourceResponse` 新增安全的 `review_decision` 读字段，避免客户端用相同的
+  `inbox` 状态猜测是否已经批准。它不返回 Review Reason；
+- Product Confirm 与 Task Product Selection 保持分离；确认后仍必须通过 Server
+  Catalog 的 Published Current Evidence 门禁；
+- Reviewer/Viewer 只读；Editor/Lead/Admin 显示编辑提示。后端继续逐请求执行
+  `project.view/knowledge.edit/knowledge.publish`，前端 Role 不是授权准源。
+
+验证结果：
+
+- M2 Source Review/Publication 定向集成测试通过，发布后的 Library 明确返回
+  `review_decision=approve`；M7 Server Request Security 8 项通过；
+- Mock Server production QA 页面只挂 Server Inbox：导航显示 Knowledge，3 个来源按
+  Approved Inbox、Needs Review、Published 分层，Published 来源不显示分类编辑；
+- 只有 Approved Inbox 显示 1 个 Publish 按钮；2 个 Review 表单均在 Reason 为空时
+  禁用，填写第一个 Reason 后仅第一个 Save 启用；Candidate Product 显示 1 个 Confirm；
+- 页面没有 Upload、WordPress Sync、Research 或 Raw Artifact 操作控件；QA 不执行任何
+  写命令，浏览器无 Warning/Error；
+- 375×812 覆盖下实际文档 Client Width 与 Scroll Width 都是 360，无水平溢出；
+  QA 后恢复视口、关闭页面并删除临时服务；
+- 完整后端回归 672 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- TypeScript、全量 ESLint 与默认 API 的 Next.js production build 全部通过；
+- Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
+
 ### M7 Server Product/Image Catalog 与 Hero Picker
 
 实现边界：

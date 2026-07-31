@@ -107,48 +107,44 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
     };
   }, [customer]);
 
+  const knowledgeItem = {
+    label: "知识库",
+    description:
+      serverMode === true ? "Inbox、发布与产品确认" : "来源、产品与证据",
+    href: `${projectPath}/knowledge`,
+    icon: BookOpenText,
+    active: section === "knowledge",
+  };
+  const articleItem = {
+    label: "文章任务",
+    description: "单篇内容与状态",
+    href: `${projectPath}/articles`,
+    icon: FileText,
+    active: section === "articles",
+  };
+  const batchItem = {
+    label: "批量处理",
+    description: "批量生成与队列",
+    href: `${projectPath}/batches`,
+    icon: Layers3,
+    active: section === "batches",
+  };
+  const deliveryItem = {
+    label: "交付记录",
+    description: "成品与导出历史",
+    href: `${projectPath}/deliveries`,
+    icon: PackageCheck,
+    active: section === "deliveries",
+  };
   const localItems = [
-    {
-      label: "文章任务",
-      description: "单篇内容与状态",
-      href: `${projectPath}/articles`,
-      icon: FileText,
-      active: section === "articles",
-    },
-    ...(knowledgeEnabled
-      ? [
-          {
-            label: "知识库",
-            description: "来源、产品与证据",
-            href: `${projectPath}/knowledge`,
-            icon: BookOpenText,
-            active: section === "knowledge",
-          },
-        ]
-      : []),
-    {
-      label: "批量处理",
-      description: "批量生成与队列",
-      href: `${projectPath}/batches`,
-      icon: Layers3,
-      active: section === "batches",
-    },
-    {
-      label: "交付记录",
-      description: "成品与导出历史",
-      href: `${projectPath}/deliveries`,
-      icon: PackageCheck,
-      active: section === "deliveries",
-    },
+    articleItem,
+    ...(knowledgeEnabled ? [knowledgeItem] : []),
+    batchItem,
+    deliveryItem,
   ];
   const items =
     serverMode === true
-      ? localItems.filter(
-          (item) =>
-            item.href.endsWith("/articles") ||
-            item.href.endsWith("/batches") ||
-            item.href.endsWith("/deliveries"),
-        )
+      ? [articleItem, knowledgeItem, batchItem, deliveryItem]
       : serverMode === false
         ? localItems
         : [];

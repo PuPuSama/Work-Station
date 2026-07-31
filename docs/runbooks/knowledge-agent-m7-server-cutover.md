@@ -378,6 +378,19 @@ Published Snapshot 支撑的 confirmed Product 与图片摘要；Inbox/Rejected/
 跨 Project 和无 Snapshot Evidence 的 Asset 均不得出现。响应字段不得包含 Canonical/
 Source URL、Artifact URI、Bucket、Object Key、Hash 或 Metadata。
 
+Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
+
+- Auth Status 为 Local 时仍挂原 Knowledge/Research/Evidence 组件；Server 时只挂
+  `ServerKnowledgeInbox`，导航显示 Knowledge；
+- Viewer/Reviewer 只能读取；Editor 可保存 Source Kind、Trust Tier、Decision 和
+  Reason，发布与产品确认仍由后端要求 `knowledge.publish`；
+- Review 与 Publish 是两个请求；Embedding 失败后来源不得显示为 Published，旧
+  Published Snapshot 继续服务；
+- Server DOM 与网络不得出现 Upload、WordPress Sync、Research Run Start/Resume、
+  Raw Artifact 或 Local `/api/config` 请求；
+- Product Confirm 不代表文章可选择；必须再验证 Project Catalog 只投影当前 Published
+  Snapshot Evidence。
+
 对象下载冒烟必须通过
 `GET /api/projects/{project}/assets/{asset_id}/download`，验证 URL 过期时间不超过
 3600 秒；同时使用另一 Project 的 Actor 和一条错误 Organization Key 前缀的测试资产，
@@ -419,8 +432,8 @@ Source URL、Artifact URI、Bucket、Object Key、Hash 或 Metadata。
 - Server Article Console 已接通现有 Task 的标题到交付主链，Delivery ZIP 与下载也已接线；
   SEO Change 裁决/Preview/Apply/Complete、历史大纲恢复和章节重写已有专用 Server
   面板；Product Rediscovery 创建/状态、Rewrite From Scratch、Project Batch/Job
-  列表/详情/全局抽屉也已迁移。Rediscovery Inbox 结果审阅、可视化 Asset Picker、
-  Server Task 导入/创建等界面仍未迁移，发布证据不得写成
+  列表/详情/全局抽屉、Rediscovery Inbox 审阅和可视化 Hero Asset Picker 也已迁移。
+  Server Task 导入/创建仍未迁移，发布证据不得写成
   “全部操作员工作流已上线”。
 
 TDK DOCX 冒烟必须通过

@@ -207,9 +207,9 @@
   Server 只调用 Project-scoped Task、最小 Catalog、Job 和下载接口；标题、产品、
   大纲、初稿、初检、人化、终检、链接、图片、Word/TDK/ZIP 已有受限操作面，所有写入
   提交 Revision，产品只提交 confirmed Product ID，图片只提交私有 Asset ID 与锚点；
-  SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control 和
-  可视化 Hero Asset Picker 已接入；Rediscovery Inbox 审阅与 Server Task 导入/创建仍待
-  专用面板，Local UI 不变；组件与接口痕迹见
+  SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control、
+  可视化 Hero Asset Picker 与独立 Server Knowledge Inbox 已接入；Server Task
+  导入/创建仍待专用服务与面板，Local UI 不变；组件与接口痕迹见
   `docs/architecture/m7-server-article-console.md`；
 - 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不

@@ -184,7 +184,39 @@ CDN 或虚拟列表时，不需要改变 `prepare-images` 命令契约。产品�
 2. 人工审核、发布并确认产品后，Task 选择区才按 Product ID 投影正式事实；
 3. Rediscovery Job 成功不修改 Task Revision、当前产品或文章，不把抓取结果直接当正式事实。
 
-## 9. Project-scoped Job Control
+## 9. Server Knowledge Inbox
+
+`/projects/{project}/knowledge` 与 Article/Batch 一样先读取 Auth Status，再显式分流组件树：
+
+```text
+Local
+  -> ProjectKnowledgeLibrary
+  -> ProjectResearchWorkspace
+  -> ProjectEvidenceWorkbench
+
+Server
+  -> ServerKnowledgeInbox
+       -> GET /api/knowledge/{project}
+       -> PUT .../sources/{source}/review
+       -> POST .../sources/{source}/publish
+       -> POST .../products/{product}/confirm
+```
+
+Server 分支只挂已完成 PostgreSQL Project Scope 和 Knowledge 权限映射的入口。依赖本地
+ArtifactStore/SQLite Queue 的 Upload、WordPress Sync、Research Run Start/Resume、
+Task Retrieval Plan Compatibility 和 Raw Artifact 均不渲染；不能因为 URL 存在就把
+503 路径显示成可操作能力。
+
+来源审阅和发布是两个显式步骤：审阅保存 Source Kind、Trust Tier、Decision 与有界
+Reason；只有 `inbox` 且包含 Chunk 的来源显示发布按钮。发布调用 Embedding Provider，
+失败时 UI 保留当前来源状态并重新读取服务器事实，不伪造已发布结果。产品确认只改变
+Catalog 身份；文章选择器仍以 Published Current Evidence 为二次门禁。
+
+前端 Effective Role 只控制提示：Reviewer/Viewer 为只读，Editor/Lead/Admin 显示命令；
+Router 仍分别要求 `project.view`、`knowledge.edit` 和 `knowledge.publish`。Server 页面
+不提供 Raw Evidence 链接，也不复用 Local 文件上传或研究组件。
+
+## 10. Project-scoped Job Control
 
 Server Header、批次列表和详情共用同一公共 DTO：
 
@@ -202,20 +234,19 @@ ServerBatchPage
 仍在事务内锁定可撤权事实并按 Operation 检查 `knowledge.edit/article.edit/article.review`。
 Retry 重放服务器私有请求，浏览器不能修改 Source Revision、Task、Requester 或参数。
 
-## 10. 当前明确未接入的控制
+## 11. 当前明确未接入的控制
 
 本切片是现有 Task 的主链操作面，不是完整 Local UI 等价迁移。以下后端能力仍需专用面板：
 
-- Product Rediscovery 的 Inbox 结果审阅；
 - Server Task 导入/创建。
 
-Product Rediscovery 的创建与 Job 状态已接入；“结果审阅”仍依赖正式 Knowledge 页面，
-尚未在文章工作台复制一套 Inbox 审阅器。
+Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Knowledge Inbox
+审阅，不在文章工作台复制来源、发布或产品确认状态机。
 
 这些入口不能通过把 Local `ArticleWorkbench` 的 Handler 改个 URL 来补齐；每个面板都必须
 只提交 Server 契约允许的字段，并保留 Revision、权限和私有对象边界。
 
-## 11. 重构检查清单
+## 12. 重构检查清单
 
 1. Auth Status 失败时是否仍不会猜测 Local/Server？
 2. Server 列表和详情是否仍只使用显式 Project 路径？
@@ -237,3 +268,7 @@ Product Rediscovery 的创建与 Job 状态已接入；“结果审阅”仍依�
 18. Server Batch/Job UI 是否仍使用 Project 路径、公共 DTO 与空 Cancel/Retry Body？
 19. Catalog 是否仍只列出当前 Published Snapshot，且不返回对象位置、哈希或来源 URL？
 20. 短时图片 URL 是否仍只存在于组件内存，产品图是否仍不能由 Hero 选择器覆盖？
+21. Knowledge 页面是否仍按 Auth Status 分流，Server 分支是否没有挂载 Upload、
+    WordPress Sync、Research/Evidence 或 Raw Artifact？
+22. 来源 Review/Publish 是否仍为两个动作，产品 Confirm 是否仍不能绕过文章选择时的
+    Published Current Evidence 门禁？

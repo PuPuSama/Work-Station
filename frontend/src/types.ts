@@ -577,6 +577,7 @@ export type KnowledgeSourceSummary = {
   asset_count: number;
   latest_fetched_at: string | null;
   classification_reason: string;
+  review_decision: "approve" | "needs_review" | "reject" | null;
   raw_evidence_url: string | null;
 };
 

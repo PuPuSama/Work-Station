@@ -386,6 +386,10 @@ class KnowledgeHttpIntegrationTests(unittest.TestCase):
             library["sources"][0]["current_snapshot_id"],
             uploaded["snapshot_id"],
         )
+        self.assertEqual(
+            library["sources"][0]["review_decision"],
+            "approve",
+        )
 
     def test_m3_plan_pack_link_and_coverage_flow(self) -> None:
         uploaded = self.client.post(

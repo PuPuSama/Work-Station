@@ -100,6 +100,7 @@ class KnowledgeSourceResponse(KnowledgeApiModel):
     asset_count: int
     latest_fetched_at: str | None
     classification_reason: str
+    review_decision: str | None
     raw_evidence_url: str | None
 
 
@@ -516,6 +517,7 @@ def _source_response(
             else item.latest_fetched_at.isoformat()
         ),
         classification_reason=item.classification_reason,
+        review_decision=item.review_decision,
         raw_evidence_url=raw_url,
     )
 
