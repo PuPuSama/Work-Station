@@ -315,6 +315,7 @@ def server_http_route_available(method: str, path: str) -> bool:
             "humanized-article",
             "outline",
             "products",
+            "seo-review-settings",
             "selected-title",
         }
     ):

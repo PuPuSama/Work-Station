@@ -521,9 +521,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十八条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+- 十九条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
   initial-ai-screenshot/initial-ai-check/humanized-update/products/section/images/docx/tdk/final-ai-screenshot/
-  final-ai-check/link-restoration/delivery-package Action；
+  final-ai-check/link-restoration/seo-review-settings/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
 - 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
@@ -1159,6 +1159,38 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 完整后端回归 641 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
   TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
+
+### M7 Server SEO Review Settings
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_seo_review_settings `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_saves_seo_review_settings_with_prompt_validation `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_task_commands -q
+```
+
+结果：
+
+- 16 tests 全部通过；
+- `PUT /api/projects/{project}/tasks/{task_id}/seo-review-settings` 只接受 Revision、
+  Primary Keyword、最多 30 个 Long-tail Keywords 和 Prompt Selection；Prompt 正文、
+  Version、Actor、Role 或 Provider 字段返回 422；
+- 服务端从当前 Project 的 PostgreSQL Prompt Service 解析 `review` Snapshot；空
+  Project Default 安全解析为 System Review Prompt，错误 Kind/归档/不存在选择拒绝；
+- Primary Keyword 规范化空白；Long-tail Keyword 规范化、大小写去重且每项最多
+  240 字符。成功只更新 Task Settings，不创建 Review Run、不调用模型；
+- Task CAS 与 `article.seo_review_settings.updated` Audit 同事务；Audit 只记录 Long-tail
+  数量和 Prompt Source/Version，不记录关键词或 Prompt 正文；
+- Viewer、跨 Project、旧 Revision、额外字段与 Local Mode fail closed；SEO Review
+  生成、Change、Preview、Apply/Complete 仍为 Local Only，等待 Published Context 和
+  Server Provider 接线。
+- 完整后端回归 644 tests 全部通过，2 tests 按显式外部环境门禁跳过；本切片不改
+  Frontend 或 Schema，前一切片的 ESLint、TypeScript、Next production build 与
+  Alembic `20260731_0015` Current/Head 证据继续有效。
 
 ### M7 Task 历史大纲恢复
 

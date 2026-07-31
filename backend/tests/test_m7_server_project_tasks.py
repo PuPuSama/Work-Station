@@ -1819,6 +1819,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             self.assertEqual(
                 TestClient(app_module.app).put(
                     f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-review-settings",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/products",
                     json={
                         "revision": 0,
@@ -4092,6 +4100,128 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertNotIn(source, str(audit.events))
                 self.assertNotIn(candidate, str(audit.events))
+                self.assertFalse(local_state.exists())
+
+    def test_server_saves_seo_review_settings_with_prompt_validation(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        codec = ServerActorSessionCodec(b"v" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "v" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-review-settings"
+                )
+                request = {
+                    "revision": 0,
+                    "primary_keyword": "  buyer   guide ",
+                    "long_tail_keywords": [
+                        "fastener   sourcing",
+                        "FASTENER SOURCING",
+                        "quality checks",
+                    ],
+                    "prompt_selection": "system",
+                }
+                self.assertEqual(
+                    client.put(path, json=request).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                escaped = dict(request)
+                escaped["prompt_content"] = "caller prompt"
+                self.assertEqual(
+                    client.put(path, json=escaped).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/seo-review-settings"
+                        ),
+                        json=request,
+                    ).status_code,
+                    403,
+                )
+                response = client.put(path, json=request)
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(body["revision"], 1)
+                self.assertEqual(
+                    body["seo_primary_keyword"],
+                    "buyer guide",
+                )
+                self.assertEqual(
+                    body["seo_long_tail_keywords"],
+                    ["fastener sourcing", "quality checks"],
+                )
+                self.assertEqual(
+                    body["seo_review_prompt_selection"],
+                    "system",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.seo_review_settings.updated"],
+                )
+                self.assertEqual(
+                    audit.events[0].details[
+                        "long_tail_keyword_count"
+                    ],
+                    2,
+                )
+                self.assertNotIn("buyer guide", str(audit.events))
+                self.assertNotIn("fastener sourcing", str(audit.events))
+                self.assertEqual(
+                    client.put(path, json=request).status_code,
+                    409,
+                )
+                stored = repository.get(self.task_a)
+                assert stored is not None
+                self.assertEqual(stored["revision"], 1)
                 self.assertFalse(local_state.exists())
 
     def test_link_worker_rejects_article_hash_drift_before_provider(

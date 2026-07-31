@@ -506,15 +506,16 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十八条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十九条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、保存 SEO Review 设置、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
   `article.humanized.updated`、
   `article.links.restored`、
+  `article.seo_review_settings.updated`、
   `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
@@ -556,6 +557,11 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   Humanized Article 相同。成功只追加 `linked` Version、进入 `links_verified` 并
   记录来源/恢复链接数；模板或正文漂移、撤权、非法 URL、正文变化、Audit/CAS 失败
   不得留下 Task 部分写入，自动 Humanize 仍为 Local Only；
+- SEO Review Settings 只提交 Revision、关键词和 Prompt Selection；服务端必须解析
+  当前 Project 的 `review` Prompt，不接受 Prompt 正文/Version/Provider。关键词规范化、
+  去重并限制数量/长度；Audit 只记录长尾关键词数量和 Prompt Source/Version，不记录
+  关键词或 Prompt 正文。该命令不得创建 Review Run，`seo_review` Job/Change/Finalize
+  在正式 Server Provider 与 Published Context 接线前仍保持 Local Only；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/

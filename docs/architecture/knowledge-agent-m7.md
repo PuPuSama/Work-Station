@@ -128,13 +128,16 @@ M7 不一次性切换整个应用。采用 expand/contract：
   入队固定 checked-in Template Hash、Initial/Humanized Article Hash 和来源链接数；
   Worker 在两阶段重授权后复核 Final AI Check 身份，模型只产生候选，只有链接集合完全
   复现且非链接可见正文不变时才追加 `linked` Version 并进入 `links_verified`；
+- 新增 SEO Review 设置前置命令：`PUT .../seo-review-settings` 只接受 Revision、
+  关键词和 Prompt Selection；服务端解析当前 Project 的 `review` Prompt Snapshot，
+  规范化/去重关键词，并以不含关键词正文的 CAS/Audit 保存；它不调用 Review Provider；
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十八条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 十九条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -490,6 +493,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_article_generation.py` | Project Article Provider、Handler、Draft 变换与 Queue Registry | Prompt Version/目标字数/Published Chunk 身份固定、结构门禁、Raw/Initial Version、无本地文件与 mock 回退、两阶段授权、正文 CAS/Audit、有界停机 |
 | `backend/services/server_humanized_update.py` | 人工审阅 Humanized Markdown 的纯 Task 变换 | 结构/数字/FAQ/表格/列表/必须短语门禁、Version 与下游失效；不知道 HTTP/RBAC/PostgreSQL/本地 Prompt |
 | `backend/services/server_link_restoration.py` | Project Link Restore Provider、Handler、确定性提交变换与 Queue Registry | Template/Initial/Humanized/Final Check 身份固定、模型候选与提交分离、精确链接/可见正文门禁、两阶段授权、CAS/Audit、有界停机 |
+| `backend/services/server_seo_review_settings.py` | SEO Review 设置的纯 Task 变换 | Keyword 规范化/去重/长度门禁与已解析 Review Prompt 身份；不知道 HTTP/RBAC/PostgreSQL/Provider |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -1316,7 +1320,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十八条 Task 写操作、`product_rediscovery/titles/outline/article/restore_links` 的
+身份代码链、十九条 Task 写操作、`product_rediscovery/titles/outline/article/restore_links` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
@@ -1521,3 +1525,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      身份，且 Provider 只能产生候选、不能绕过确定性 Link/Text 校验直接提交？
 110. Template/Article 漂移、撤权、非法 URL、正文变化、Audit 或 CAS 失败时，是否都
      保持旧 `linked_article`、Revision 和下游产物不变，公开 Job/Audit 不泄露正文或 Hash？
+111. SEO Review Settings 是否只接受关键词和 Prompt Selection，由服务器解析
+     Project `review` Snapshot，并以 CAS/Audit 保存而不接受 Prompt 正文或 Provider 字段？
+112. 关键词或 Prompt 内容是否都不进入 Audit，且 Settings 成功是否不会伪造 Review
+     Run、调用模型或把仍为 Local Only 的 `seo_review` Operation 标成已迁移？

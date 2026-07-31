@@ -86,6 +86,15 @@ from services.server_humanized_update import (
     ServerHumanizedArticleError,
     apply_reviewed_humanized_article,
 )
+from services.server_seo_review_settings import (
+    ServerSeoReviewSettingsError,
+    apply_server_seo_review_settings,
+)
+from services.server_project_prompts import (
+    ServerProjectPromptError,
+    ServerProjectPromptServiceFactory,
+    ServerProjectPromptUnavailable,
+)
 from services.server_delivery_package import (
     ServerDeliveryPackage,
     ServerDeliveryPackageError,
@@ -176,6 +185,23 @@ class ProjectRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=0)
+
+
+class ProjectSeoReviewSettingsRequest(BaseModel):
+    """Save SEO Review inputs without accepting Prompt content or identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    primary_keyword: str = Field(default="", max_length=240)
+    long_tail_keywords: list[str] = Field(
+        default_factory=list,
+        max_length=30,
+    )
+    prompt_selection: str = Field(
+        default="project_default",
+        max_length=128,
+    )
 
 
 class ProjectTitleSelectionRequest(BaseModel):
@@ -682,6 +708,23 @@ def _link_restoration(
             detail="Server link restoration is not available.",
         )
     return registry
+
+
+def _project_prompt_service(
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+):
+    factory = getattr(
+        request.app.state,
+        "server_project_prompt_service_factory",
+        None,
+    )
+    if not isinstance(factory, ServerProjectPromptServiceFactory):
+        raise HTTPException(
+            status_code=503,
+            detail="Project prompt management is not available.",
+        )
+    return factory.create(authorized)
 
 
 def _require_project_permission(
@@ -1324,6 +1367,92 @@ def read_project_task_link_restoration_job(
             detail="Server link restoration is not available.",
         ) from exc
     return LinkRestorationJobResponse.model_validate(job)
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/seo-review-settings",
+    response_model=TaskRecord,
+)
+def update_project_task_seo_review_settings(
+    project: str,
+    task_id: str,
+    payload: ProjectSeoReviewSettingsRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    selection = payload.prompt_selection.strip() or "project_default"
+    try:
+        snapshot = _project_prompt_service(
+            request,
+            authorized,
+        ).resolve(
+            authorized.actor,
+            kind="review",
+            selection=selection,
+        )
+        keyword_count, prompt_source, prompt_version = (
+            apply_server_seo_review_settings(
+                task,
+                primary_keyword=payload.primary_keyword,
+                long_tail_keywords=payload.long_tail_keywords,
+                prompt_selection=selection,
+                resolved_prompt=snapshot,
+            )
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except (
+        ServerProjectPromptError,
+        ServerSeoReviewSettingsError,
+    ) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ServerProjectPromptUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project prompt management is temporarily unavailable.",
+        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.seo_review_settings.updated",
+        details={
+            "long_tail_keyword_count": keyword_count,
+            "prompt_source": prompt_source,
+            "prompt_version": prompt_version,
+        },
+    )
 
 
 @router.put(
@@ -2883,6 +3012,7 @@ __all__ = [
     "ProductRediscoveryJobResponse",
     "ProductRediscoveryRequest",
     "ProjectAssetDownload",
+    "ProjectSeoReviewSettingsRequest",
     "TitleGenerationJobResponse",
     "require_server_actor",
     "require_server_project_access",

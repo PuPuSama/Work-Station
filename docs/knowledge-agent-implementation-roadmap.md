@@ -212,7 +212,7 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让十八条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让十九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
@@ -233,6 +233,10 @@
   重新授权并复核 Final AI Check 身份，模型只返回候选，只有精确链接集合与非链接
   可见正文门禁全部通过才追加 Linked Version、进入 `links_verified` 并以 CAS/Audit
   原子提交；公开 Job/Audit 不返回正文、文章 Hash、URL 或原始 Provider Error；
+- 已新增 Project-scoped SEO Review Settings：只接受 Revision、关键词和 Prompt
+  Selection，由服务端解析当前 Project 的不可变 `review` Prompt Snapshot；关键词
+  规范化/去重后通过 Task CAS 与 `article.seo_review_settings.updated` Audit 原子保存，
+  Audit 不含关键词或 Prompt 正文。Review 生成/Change/Preview/Finalize 仍为 Local Only；
 - 已新增 Project-scoped `outline` PostgreSQL Job：客户端只提交 Revision，Enqueue
   固定不可变 Prompt ID + Version 和当前 Published Chunk ID；Claim/Handler 两阶段要求
   `article.edit`，执行时复核 Prompt 与 Chunk Scope，Provider 失败脱敏且不生成 mock；

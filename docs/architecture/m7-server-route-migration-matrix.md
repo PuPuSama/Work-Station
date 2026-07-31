@@ -56,6 +56,7 @@
 | 最终 AI 截图 | `POST .../checks/final-ai/screenshot` | `article.review` | 私有 PNG Asset + CAS + Audit | Server Ready |
 | 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
 | 恢复首稿链接 | `POST .../restore-links`、`GET .../restore-links/jobs/{job_id}` | `article.edit` | PostgreSQL Job + Template/Article Hash + 确定性校验 + CAS/Audit | Server Ready |
+| 保存 SEO Review 设置 | `PUT .../seo-review-settings` | `article.edit` | Project Review Prompt 解析 + Keyword 门禁 + CAS/Audit | Server Ready |
 | 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |
 | 生成 TDK DOCX | `POST .../generate-tdk` | `article.deliver` | 私有 TDK Asset + CAS + Audit | Server Ready |
 | 打包交付 ZIP | `POST .../package-delivery` | `article.deliver` | 私有 ZIP Asset + CAS + Audit | Server Ready |
@@ -73,7 +74,7 @@
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Review Worker 继续接线；旧路由继续关闭 |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
-| Humanize Job/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 正式 Prompt 准源、最小权限、可恢复版本 |
+| Humanize Job/SEO Review 生成与修改应用 | Local TaskStore + LLM | Project Job/Review Command | SEO Settings 已迁移；仍需 Published Context、Server Provider、Review Run/Change/Finalize CAS/Audit |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
