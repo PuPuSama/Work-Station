@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Literal, cast
@@ -28,11 +29,24 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
+from services.server_request_security import AuthorizedProjectRequest
 
 
 PromptKind = Literal["outline", "article", "review"]
 PromptStatus = Literal["active", "archived"]
 PromptSource = Literal["system", "project_default", "library"]
+
+
+@dataclass(frozen=True, slots=True)
+class ServerProjectPromptItem:
+    snapshot: PromptSnapshot
+    status: PromptStatus
+
+
+@dataclass(frozen=True, slots=True)
+class ServerProjectPromptDirectory:
+    prompts: tuple[ServerProjectPromptItem, ...]
+    defaults: dict[PromptKind, PromptSnapshot]
 
 
 class ServerProjectPromptError(ValueError):
@@ -380,13 +394,18 @@ class PostgresProjectPromptService:
         actor: ActorIdentity,
         *,
         prompt_id: str,
+        expected_version: int,
         active: bool,
-    ) -> PromptStatus:
+    ) -> ServerProjectPromptItem:
         normalized_id = _required_text(
             prompt_id,
             "prompt_id",
             max_length=255,
         )
+        if expected_version <= 0:
+            raise ServerProjectPromptError(
+                "expected_version must be positive"
+            )
         status: PromptStatus = "active" if active else "archived"
         try:
             with self._engine.begin() as connection:
@@ -398,8 +417,18 @@ class PostgresProjectPromptService:
                 )
                 if current is None:
                     raise KeyError(normalized_id)
+                if int(current["current_version"]) != expected_version:
+                    raise ServerProjectPromptConflict(
+                        "project prompt version conflict"
+                    )
                 if current["status"] == status:
-                    return status
+                    return ServerProjectPromptItem(
+                        snapshot=self._snapshot(
+                            current,
+                            source="library",
+                        ),
+                        status=status,
+                    )
                 connection.execute(
                     project_prompt_heads.update()
                     .where(
@@ -433,8 +462,19 @@ class PostgresProjectPromptService:
                         "version": int(current["current_version"]),
                     },
                 )
-                return status
-        except (KeyError, ProjectAccessDenied):
+                return ServerProjectPromptItem(
+                    snapshot=self._snapshot(
+                        current,
+                        source="library",
+                    ),
+                    status=status,
+                )
+        except (
+            KeyError,
+            ProjectAccessDenied,
+            ServerProjectPromptConflict,
+            ServerProjectPromptError,
+        ):
             raise
         except (SQLAlchemyError, RuntimeError) as exc:
             raise ServerProjectPromptUnavailable(
@@ -633,6 +673,127 @@ class PostgresProjectPromptService:
                     "selected prompt is unavailable"
                 )
             return self._snapshot(row, source="library")
+
+    def list(
+        self,
+        actor: ActorIdentity,
+    ) -> ServerProjectPromptDirectory:
+        self._require_read(actor)
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(
+                    project_prompt_heads.c.prompt_id,
+                    project_prompt_heads.c.kind,
+                    project_prompt_heads.c.status,
+                    project_prompt_versions.c.version,
+                    project_prompt_versions.c.name,
+                    project_prompt_versions.c.content,
+                    project_prompt_versions.c.created_at,
+                )
+                .select_from(
+                    project_prompt_heads.join(
+                        project_prompt_versions,
+                        sa.and_(
+                            project_prompt_versions.c.organization_id
+                            == project_prompt_heads.c.organization_id,
+                            project_prompt_versions.c.project_id
+                            == project_prompt_heads.c.project_id,
+                            project_prompt_versions.c.prompt_id
+                            == project_prompt_heads.c.prompt_id,
+                            project_prompt_versions.c.kind
+                            == project_prompt_heads.c.kind,
+                            project_prompt_versions.c.version
+                            == project_prompt_heads.c.current_version,
+                        ),
+                    )
+                )
+                .where(
+                    project_prompt_heads.c.organization_id
+                    == self.organization_id,
+                    project_prompt_heads.c.project_id == self.project_id,
+                )
+                .order_by(
+                    project_prompt_heads.c.status,
+                    project_prompt_heads.c.kind,
+                    sa.func.lower(project_prompt_versions.c.name),
+                    project_prompt_heads.c.prompt_id,
+                )
+            ).mappings().all()
+            default_rows = connection.execute(
+                sa.select(
+                    project_prompt_defaults.c.kind,
+                    project_prompt_defaults.c.prompt_id,
+                    project_prompt_defaults.c.version,
+                    project_prompt_versions.c.name,
+                    project_prompt_versions.c.content,
+                    project_prompt_versions.c.created_at,
+                )
+                .select_from(
+                    project_prompt_defaults.join(
+                        project_prompt_versions,
+                        sa.and_(
+                            project_prompt_versions.c.organization_id
+                            == project_prompt_defaults.c.organization_id,
+                            project_prompt_versions.c.project_id
+                            == project_prompt_defaults.c.project_id,
+                            project_prompt_versions.c.prompt_id
+                            == project_prompt_defaults.c.prompt_id,
+                            project_prompt_versions.c.kind
+                            == project_prompt_defaults.c.kind,
+                            project_prompt_versions.c.version
+                            == project_prompt_defaults.c.version,
+                        ),
+                    )
+                )
+                .where(
+                    project_prompt_defaults.c.organization_id
+                    == self.organization_id,
+                    project_prompt_defaults.c.project_id
+                    == self.project_id,
+                )
+            ).mappings().all()
+        prompts = tuple(
+            ServerProjectPromptItem(
+                snapshot=self._snapshot(row, source="library"),
+                status=cast(PromptStatus, row["status"]),
+            )
+            for row in rows
+        )
+        defaults = {
+            cast(PromptKind, row["kind"]): self._snapshot(
+                row,
+                source="project_default",
+            )
+            for row in default_rows
+        }
+        return ServerProjectPromptDirectory(
+            prompts=prompts,
+            defaults=defaults,
+        )
+
+
+class ServerProjectPromptServiceFactory:
+    """Construct prompt services only from an already authorized scope."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        audit: AuditEventWriter | None = None,
+    ) -> None:
+        self._engine = engine
+        self._audit = audit
+
+    def create(
+        self,
+        authorized: AuthorizedProjectRequest,
+    ) -> PostgresProjectPromptService:
+        return PostgresProjectPromptService(
+            self._engine,
+            organization_id=authorized.actor.organization_id,
+            project_id=authorized.project_id,
+            audit=self._audit,
+        )
 __all__ = [
     "PostgresProjectPromptService",
     "PromptKind",
@@ -640,4 +801,7 @@ __all__ = [
     "ServerProjectPromptConflict",
     "ServerProjectPromptError",
     "ServerProjectPromptUnavailable",
+    "ServerProjectPromptDirectory",
+    "ServerProjectPromptItem",
+    "ServerProjectPromptServiceFactory",
 ]

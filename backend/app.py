@@ -211,6 +211,9 @@ from services.server_request_security import (
     server_http_route_available,
 )
 from services.server_project_tasks import ServerProjectTaskStoreFactory
+from services.server_project_prompts import (
+    ServerProjectPromptServiceFactory,
+)
 from services.server_product_selection import (
     PostgresConfirmedProductSelection,
 )
@@ -279,6 +282,7 @@ from server_team_http import router as server_team_router
 from server_identity_http import router as server_identity_router
 from server_invitation_http import router as server_invitation_router
 from server_job_http import router as server_job_router
+from server_prompt_http import router as server_prompt_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -302,6 +306,11 @@ async def app_lifespan(application: FastAPI):
     previous_server_project_task_store_factory = getattr(
         application.state,
         "server_project_task_store_factory",
+        None,
+    )
+    previous_server_project_prompt_service_factory = getattr(
+        application.state,
+        "server_project_prompt_service_factory",
         None,
     )
     previous_server_project_directory = getattr(
@@ -370,6 +379,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_mode_enabled = server_mode
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
+    application.state.server_project_prompt_service_factory = None
     application.state.server_project_directory = None
     application.state.server_project_memberships = None
     application.state.server_project_object_service = None
@@ -435,6 +445,9 @@ async def app_lifespan(application: FastAPI):
             application.state.server_oidc_login = server_oidc_login
         application.state.server_project_task_store_factory = (
             ServerProjectTaskStoreFactory(server_engine, cfg)
+        )
+        application.state.server_project_prompt_service_factory = (
+            ServerProjectPromptServiceFactory(server_engine)
         )
         application.state.server_project_directory = (
             PostgresProjectDirectory(server_engine)
@@ -541,6 +554,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_task_store_factory = (
                 previous_server_project_task_store_factory
+            )
+            application.state.server_project_prompt_service_factory = (
+                previous_server_project_prompt_service_factory
             )
             application.state.server_project_directory = (
                 previous_server_project_directory
@@ -756,6 +772,9 @@ async def app_lifespan(application: FastAPI):
         application.state.server_project_task_store_factory = (
             previous_server_project_task_store_factory
         )
+        application.state.server_project_prompt_service_factory = (
+            previous_server_project_prompt_service_factory
+        )
         application.state.server_project_directory = (
             previous_server_project_directory
         )
@@ -802,6 +821,7 @@ app.include_router(server_team_router)
 app.include_router(server_identity_router)
 app.include_router(server_invitation_router)
 app.include_router(server_job_router)
+app.include_router(server_prompt_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

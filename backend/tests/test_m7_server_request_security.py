@@ -405,10 +405,10 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/projects/example.com/tasks",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             server_http_route_available(
                 "GET",
-                "/api/projects/example.com/prompts",
+                "/api/projects/example.com/prompt-snapshots",
             )
         )
         self.assertTrue(
@@ -450,6 +450,42 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "GET",
+                "/api/projects/example.com/prompt-snapshots",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/projects/example.com/prompt-snapshots",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "GET",
+                "/api/projects/example.com/prompts",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/prompt-snapshots/prompt-a",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/prompt-snapshots/prompt-a/active",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/prompt-defaults/outline",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "POST",
                 "/api/projects/example.com/tasks/task-a/"
                 "outline/restore-version",
@@ -483,6 +519,18 @@ class ServerRequestSecurityTests(unittest.TestCase):
             server_http_route_available(
                 "POST",
                 "/api/projects/example.com/tasks/task-a/outline",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "DELETE",
+                "/api/projects/example.com/prompt-snapshots/prompt-a",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/prompt-defaults/unknown",
             )
         )
         self.assertFalse(

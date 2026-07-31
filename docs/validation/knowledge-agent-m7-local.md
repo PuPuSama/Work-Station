@@ -920,6 +920,29 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
 - Alembic Current 与 Head 均为 `20260731_0015`。
 
+### M7 Project Prompt HTTP
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_prompts `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 18 tests 全部通过；
+- GET 目录允许 Viewer；创建、追加版本、归档/恢复和 Default 切换要求 Editor；
+- Body 额外 Role 字段返回 422，版本追加/Active 切换的旧 Expected Version 返回 409，
+  跨 Project 返回 403；
+- 归档返回公开 Snapshot 并清除 Default，但保留全部不可变历史 Version；
+- HTTP Audit 不含 Prompt 名称/正文，启动后未创建本地 Task/Prompt SQLite 路径；
+- Local Mode 返回 404，路由门只开放列出的精确 Method + Segment；
+- 完整后端回归 609 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
+- Alembic Current 与 Head 均为 `20260731_0015`。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell

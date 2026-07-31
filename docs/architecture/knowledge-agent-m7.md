@@ -164,6 +164,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 `PostgresProjectPromptService`：读取要求 `project.view`，创建、追加版本、归档/
   恢复和默认指针切换在事务内重新锁定 `article.edit`，并与不含 Prompt 正文/名称的
   Audit 原子提交；Audit 失败回滚全部业务写入。
+- 新增 Project-scoped Prompt HTTP：目录、创建、追加版本、归档/恢复与精确 Default
+  切换全部走 PostgreSQL Snapshot Service；Body 字段严格白名单，旧无 Server Scope 的
+  `/api/projects/{customer}/prompts` Handler 不复用，Local Mode 不挂载新接口。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -422,6 +425,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/migrations/versions/20260731_0014_workspace_invitations.py` | 一次性 Workspace Invitation Schema 准源 | Token 只存 Hash、复合租户 FK、状态/过期约束、每 User/Issuer 单 Pending、可升降级 |
 | `backend/migrations/versions/20260731_0015_project_prompt_snapshots.py` | Project Prompt Snapshot Schema 准源 | Head/不可变 Version/精确 Default 指针、复合 Project/User FK、Append-only Trigger |
 | `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
+| `backend/server_prompt_http.py` | Project Prompt 目录、创建、版本、Active 与 Default HTTP | Project Scope、严格 Body、统一 403/404/409/422/503、公开响应不含内部 Actor/Hash |
 | `backend/services/workspace_invitations.py` | 邀请目录、签发、撤销与 Verified Identity 兑换事务 | Active Org Admin、一次返回 Token、过期/重放拒绝、Identity/Invitation/Audit 同事务 |
 | `backend/server_invitation_http.py` | Organization-scoped 邀请管理 HTTP | 创建响应与目录响应分型，Token 只出现在创建响应，输入白名单、稳定分页、统一安全错误 |
 | `backend/migrations/versions/20260730_0010_external_identities.py` | External Identity Schema 准源 | Issuer/Subject 唯一、复合租户 FK、可升降级 |
@@ -1368,5 +1372,14 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 85. Prompt Audit 是否只记录 Kind、Version、状态和字符数，不记录名称、正文或内容 Hash？
 86. Audit 失败、撤权、旧 Expected Version 或 Kind 不匹配是否不留下 Head、Version 或
     Default 部分写入？
-87. Server Prompt HTTP 与生成 Worker 尚未接线时，旧 `/api/projects/{customer}/prompts`
-    是否仍在 Server Mode 保持关闭而不回退 SQLite？
+87. Server Prompt HTTP 已接线但生成 Worker 尚未接线时，旧
+    `/api/projects/{customer}/prompts` 是否仍在 Server Mode 保持关闭而不回退 SQLite？
+88. Prompt HTTP 是否只开放精确 Method + Segment，且所有路径显式包含 Project？
+89. Prompt 目录是否允许 Viewer 读取，但所有写操作仍由事务服务重新锁定
+    `article.edit`，而不是信任路由先验判断？
+90. Prompt HTTP 是否拒绝额外 Role/Organization/Status/Version 字段，并把数据库/Audit
+    异常统一为不含正文的 503？
+91. Local Mode 是否不挂载 Project-scoped Prompt HTTP，Server Mode 是否不调用
+    `ProjectPromptRepository` 或创建本地 SQLite 文件？
+92. Prompt 追加版本与 Active 切换是否都要求 Expected Version，并在旧值时返回 409
+    而不追加 Audit？

@@ -212,7 +212,23 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
 - Viewer 可解析已授权项目 Prompt，但创建/更新/归档/默认切换要求 `article.edit`；
 - 写操作在事务内重新锁定权限，Audit 故障必须同时回滚 Head/Version/Default；
 - Audit 不含 Prompt 名称、正文或 Hash；
-- Server Prompt HTTP 与生成 Worker 接线前，旧 Local Prompt API 继续 fail closed。
+- Project-scoped Prompt HTTP 目录/创建/更新/Active/Default 必须通过精确路由白名单；
+  Viewer 仅可读，Editor 才可写，Local Mode 返回 404；
+- 生成 Worker 接线前，旧 Local Prompt API 继续 fail closed，不能混用两套准源。
+
+Prompt HTTP 冒烟：
+
+```text
+GET  /api/projects/{project}/prompt-snapshots
+POST /api/projects/{project}/prompt-snapshots
+PUT  /api/projects/{project}/prompt-snapshots/{prompt_id}
+PUT  /api/projects/{project}/prompt-snapshots/{prompt_id}/active
+PUT  /api/projects/{project}/prompt-defaults/{outline|article|review}
+```
+
+请求不得携带 Organization、Actor、Role、Status、Content Hash 或服务端 Version 字段；
+追加版本和 Active 切换都必须提交 `expected_version`，旧值返回 409。归档必须清除
+指向该 Prompt 的 Default，但不得删除历史 Version。
 
 ### ProjectMembership 授权与撤销
 

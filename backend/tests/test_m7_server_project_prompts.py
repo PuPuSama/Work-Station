@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import sqlalchemy as sa
+from fastapi.testclient import TestClient
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -33,6 +37,11 @@ from services.server_project_prompts import (  # noqa: E402
     ServerProjectPromptConflict,
     ServerProjectPromptError,
     ServerProjectPromptUnavailable,
+    ServerProjectPromptServiceFactory,
+)
+from services.server_auth import (  # noqa: E402
+    SERVER_AUTH_COOKIE_NAME,
+    ServerActorSessionCodec,
 )
 
 
@@ -257,14 +266,13 @@ class ServerProjectPromptTests(unittest.TestCase):
             kind="article",
             prompt_id=created.prompt_id,
         )
-        self.assertEqual(
-            self.service.set_active(
-                self.editor,
-                prompt_id=created.prompt_id,
-                active=False,
-            ),
-            "archived",
+        archived = self.service.set_active(
+            self.editor,
+            prompt_id=created.prompt_id,
+            expected_version=1,
+            active=False,
         )
+        self.assertEqual(archived.status, "archived")
         resolved = self.service.resolve(
             self.viewer,
             kind="article",
@@ -280,6 +288,7 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.service.set_active(
             self.editor,
             prompt_id=created.prompt_id,
+            expected_version=1,
             active=True,
         )
         self.assertEqual(
@@ -606,6 +615,196 @@ class ServerProjectPromptTests(unittest.TestCase):
             "ix_project_prompt_heads_directory",
             indexes,
         )
+
+    def test_project_scoped_http_uses_postgres_and_exact_bodies(
+        self,
+    ) -> None:
+        import app as app_module
+
+        codec = ServerActorSessionCodec(b"p" * 32)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "p" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = RecordingAuditWriter()
+                client.app.state.server_project_prompt_service_factory = (
+                    ServerProjectPromptServiceFactory(
+                        self.engine,
+                        audit=audit,
+                    )
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(self.viewer),
+                )
+                base_path = (
+                    f"/api/projects/{self.project_id}/prompt-snapshots"
+                )
+                self.assertEqual(
+                    client.get(base_path).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    client.post(
+                        base_path,
+                        json={
+                            "name": "Denied",
+                            "kind": "outline",
+                            "content": "Must not persist.",
+                        },
+                    ).status_code,
+                    403,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(self.editor),
+                )
+                self.assertEqual(
+                    client.post(
+                        base_path,
+                        json={
+                            "name": "Unsafe",
+                            "kind": "outline",
+                            "content": "Prompt.",
+                            "role": "admin",
+                        },
+                    ).status_code,
+                    422,
+                )
+                created = client.post(
+                    base_path,
+                    json={
+                        "name": "HTTP outline",
+                        "kind": "outline",
+                        "content": "Version one.",
+                    },
+                )
+                self.assertEqual(created.status_code, 201, created.text)
+                prompt_id = created.json()["prompt_id"]
+                updated = client.put(
+                    f"{base_path}/{prompt_id}",
+                    json={
+                        "expected_version": 1,
+                        "name": "HTTP outline v2",
+                        "content": "Version two.",
+                    },
+                )
+                self.assertEqual(updated.status_code, 200, updated.text)
+                self.assertEqual(updated.json()["version"], 2)
+                self.assertEqual(
+                    client.put(
+                        f"{base_path}/{prompt_id}",
+                        json={
+                            "expected_version": 1,
+                            "name": "Stale",
+                            "content": "Must not persist.",
+                        },
+                    ).status_code,
+                    409,
+                )
+                default = client.put(
+                    f"/api/projects/{self.project_id}/"
+                    "prompt-defaults/outline",
+                    json={"prompt_id": prompt_id},
+                )
+                self.assertEqual(default.status_code, 200, default.text)
+                self.assertEqual(default.json()["version"], 2)
+                self.assertEqual(
+                    client.put(
+                        f"{base_path}/{prompt_id}/active",
+                        json={
+                            "expected_version": 1,
+                            "active": False,
+                        },
+                    ).status_code,
+                    409,
+                )
+                archived = client.put(
+                    f"{base_path}/{prompt_id}/active",
+                    json={
+                        "expected_version": 2,
+                        "active": False,
+                    },
+                )
+                self.assertEqual(
+                    archived.status_code,
+                    200,
+                    archived.text,
+                )
+                self.assertEqual(
+                    archived.json()["status"],
+                    "archived",
+                )
+                listing = client.get(base_path)
+                self.assertEqual(listing.status_code, 200)
+                self.assertEqual(
+                    listing.json()["prompts"][0]["status"],
+                    "archived",
+                )
+                self.assertNotIn(
+                    "outline",
+                    listing.json()["defaults"],
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/api/projects/{self.other_project_id}/"
+                        "prompt-snapshots",
+                        json={
+                            "name": "Cross project",
+                            "kind": "outline",
+                            "content": "Must not persist.",
+                        },
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "project_prompt.created",
+                        "project_prompt.version.created",
+                        "project_prompt.default.updated",
+                        "project_prompt.status.updated",
+                    ],
+                )
+                self.assertNotIn("Version one", str(audit.events))
+                self.assertNotIn("Version two", str(audit.events))
+                self.assertFalse(local_state.exists())
+
+    def test_project_prompt_http_is_not_added_to_local_mode(self) -> None:
+        import app as app_module
+
+        previous_mode = getattr(
+            app_module.app.state,
+            "server_mode_enabled",
+            None,
+        )
+        app_module.app.state.server_mode_enabled = False
+        try:
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_id}/prompt-snapshots"
+                ).status_code,
+                404,
+            )
+        finally:
+            app_module.app.state.server_mode_enabled = previous_mode
 
 
 if __name__ == "__main__":

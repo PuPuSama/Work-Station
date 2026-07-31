@@ -36,6 +36,7 @@
 | Knowledge API | `/api/knowledge/projects/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
+| Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 
 ## 3. Task 写操作矩阵
 
@@ -66,7 +67,7 @@
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
-| Project Prompt Library | Local HTTP 仍使用 SQLite；PostgreSQL Snapshot 服务已完成 | Project Prompt Snapshot | Server HTTP/Worker 接线；旧路由继续关闭 |
+| Project Prompt Library | Project-scoped PostgreSQL HTTP 已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧数据显式迁移、生成 Worker 消费；旧路由继续关闭 |
 | Title/Product/Outline/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Provider 错误脱敏、CAS/Audit |
 | Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
@@ -143,4 +144,5 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 15. 大纲恢复是否只按当前 Task 的 Version Index 读取 `outline/outline_draft`，并拒绝
     Article Version 与客户端历史正文？
 16. Prompt Default 是否绑定精确不可变 Version，而不是只指向会漂移的可变正文？
-17. Server Prompt HTTP/Worker 未接线前，旧 Local Prompt API 是否仍保持关闭？
+17. Server Prompt HTTP 已接线后，旧 Local Prompt API 是否仍保持关闭，且 Worker 未接线
+    前不会混用 PostgreSQL/SQLite Prompt？

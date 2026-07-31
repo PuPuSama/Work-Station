@@ -112,6 +112,42 @@ def server_http_route_available(method: str, path: str) -> bool:
     ):
         return True
     if (
+        normalized_method in {"GET", "POST"}
+        and len(parts) == 5
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "prompt-snapshots"
+    ):
+        return True
+    if (
+        normalized_method == "PUT"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "prompt-snapshots"
+        and bool(parts[5])
+    ):
+        return True
+    if (
+        normalized_method == "PUT"
+        and len(parts) == 7
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "prompt-snapshots"
+        and bool(parts[5])
+        and parts[6] == "active"
+    ):
+        return True
+    if (
+        normalized_method == "PUT"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "prompt-defaults"
+        and parts[5] in {"outline", "article", "review"}
+    ):
+        return True
+    if (
         normalized_method in {"PUT", "DELETE"}
         and len(parts) == 6
         and parts[1:3] == ["api", "projects"]
