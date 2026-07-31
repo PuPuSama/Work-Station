@@ -506,9 +506,9 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-二十条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+二十三条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.outline_version.restored`、
@@ -518,6 +518,8 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   `article.links.restored`、
   `article.seo_review_settings.updated`、
   `article.seo_review.generated`、
+  `article.seo_review.change.updated`、`article.seo_review.applied`、
+  `article.seo_review.completed`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
   `article.docx.exported`、`article.tdk.generated`、
@@ -568,7 +570,11 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   Published Context，不读取本地 Customer Context、不补 mock。成功只追加 Open Review
   Run，不修改文章或 Workflow Status；Audit 只记录安全计数、Prompt 身份与
   Publish-ready 布尔值，不记录文章、Report、Change、Prompt 或 Knowledge 正文。
-  Change/Preview/Apply/Complete 仍为 Local Only；
+  Change/Preview/Apply/Complete 必须走下述独立人工命令；
+- Review Change/Preview/Complete 要求 `article.review`，Apply 要求 `article.edit`。
+  Review/Change ID 只来自路径；Body 不能提交 Prompt、正文全文或服务端身份。Preview
+  只读，Apply 必须携带当前 Revision 与 Preview Hash，服务端重新构建和验证全文后才
+  追加 Initial Version；Change/Apply/Complete 的 CAS 与 Audit 同事务；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/

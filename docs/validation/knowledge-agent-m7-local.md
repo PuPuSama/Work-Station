@@ -521,9 +521,10 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 二十条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+- 二十三条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
   initial-ai-screenshot/initial-ai-check/humanized-update/products/section/images/docx/tdk/final-ai-screenshot/
-  final-ai-check/link-restoration/seo-review-settings/seo-review-generation/delivery-package Action；
+  final-ai-check/link-restoration/seo-review-settings/seo-review-generation/
+  seo-review-change/seo-review-apply/seo-review-complete/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
 - 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
@@ -1187,7 +1188,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   数量和 Prompt Source/Version，不记录关键词或 Prompt 正文；
 - Viewer、跨 Project、旧 Revision、额外字段与 Local Mode fail closed；在该设置切片
   验收时 SEO Review 生成、Change、Preview、Apply/Complete 仍为 Local Only；下节记录
-  随后完成的 Server 生成接线，人工裁决接口仍未迁移。
+  随后完成的 Server 生成接线与人工裁决接线见后续两节。
 - 完整后端回归 644 tests 全部通过，2 tests 按显式外部环境门禁跳过；本切片不改
   Frontend 或 Schema，前一切片的 ESLint、TypeScript、Next production build 与
   Alembic `20260731_0015` Current/Head 证据继续有效。
@@ -1232,6 +1233,37 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   有界停机；SEO Review 的 Enqueue、权限、私有 Request 和 Handler 保持独立，旧
   Operation Registry 暂不批量重构；
 - 完整后端回归 652 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 Next.js
+  production build、ESLint 与 TypeScript 全部通过；Alembic Current 与 Head 均为
+  `20260731_0015`。
+
+### M7 Server SEO Review Human Commands
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_seo_review_commands `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_seo_review_decision_preview_and_apply_are_scoped `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_seo_review_complete_rolls_back_on_audit_failure `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_task_commands -q
+```
+
+结果：
+
+- 19 tests 全部通过；
+- Change 路由只从路径读取 Review/Change ID，Body 严格限制 Revision、Decision、
+  Reviewed Text 与 Risk Confirmation；Preview 只读且要求当前 Revision；
+- Reviewer 可裁决、Preview 和无修改 Complete；Apply 额外要求 `article.edit`，并必须
+  提交 Preview 的 SHA-256。服务端重新构建完整文章，Hash 漂移时不写 Task；
+- Apply 成功标记 Review 为 Applied、追加 `seo_review:{review_id}` Initial Version，
+  更新 Initial Article 并使其下游失效；生成与人工应用保持两个独立事务；
+- 非 Open Review、Source Article 漂移、无 Accepted Change、未确认 Pending、错误
+  Preview Hash、跨 Project、旧 Revision、额外身份字段和 Local Mode 均 fail closed；
+- Change/Apply/Complete 分别写安全 Audit，Details 只含 Decision、风险与状态计数，不含
+  Review/Change ID、文章、Report、Proposed Text 或 Hash；
+- 完整后端回归 658 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 Next.js
   production build、ESLint 与 TypeScript 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
 

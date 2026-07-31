@@ -135,13 +135,16 @@ M7 不一次性切换整个应用。采用 expand/contract：
   入队固定 Initial Article Hash、Project Review Prompt Version、checked-in System
   Template Hash 与当前 Published Chunk ID；Worker 只追加 Open Review Run，不自动
   Apply/Complete，公开 Job 与 Audit 均不返回文章、Prompt、Chunk 正文或 Hash；
+- 新增 SEO Review 人工裁决命令：Reviewer 可按精确 Review/Change ID 保存决定和生成
+  无写入 Preview，也可在没有 Accepted Change 时 Complete；Apply 额外要求
+  `article.edit`、当前 Revision 和精确 Preview Hash，成功才替换 Initial Article；
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 二十条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 二十三条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -502,6 +505,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_seo_review_settings.py` | SEO Review 设置的纯 Task 变换 | Keyword 规范化/去重/长度门禁与已解析 Review Prompt 身份；不知道 HTTP/RBAC/PostgreSQL/Provider |
 | `backend/services/server_project_job_registry.py` | 单 Operation 的共享 Project Runner 生命周期与公开 Job 投影 | 只抽取 Runner/Queue/Stop/Get 样板；业务 Enqueue、权限、私有 Request 与 Handler 仍由各 Operation 定义 |
 | `backend/services/server_seo_review_generation.py` | Project SEO Review Provider、Handler、Review Run 变换与 Queue Registry | Prompt/Template/Initial Article/Published Chunk 身份固定、只用注入 Context、两阶段授权、只追加 Open Run、CAS/Audit、有界停机 |
+| `backend/services/server_seo_review_commands.py` | SEO Review Change/Preview/Apply/Complete 的纯 Task 变换 | 精确 Review/Change 身份、Open/Article Hash 门禁、风险确认、Preview Hash、生成与提交分离；不知道 HTTP/RBAC/PostgreSQL |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -1154,9 +1158,12 @@ GET /api/projects/{project}/tasks/{task_id}/seo-reviews/jobs/{job_id}
 
 生成与人工裁决是两个事务边界。生成 Job 不接受 Prompt 正文、Chunk ID、模型参数或
 Review 结果，也不修改 `article`、Workflow Status 或任何 Proposed Change；它只把一次
-可追溯的模型输出追加为 Open Review Run。后续 Change/Preview/Apply/Complete 必须使用
-独立 Project-scoped 命令、当前 Revision 和精确 Review/Change ID，不能让 Provider
-直接提交文章。
+可追溯的模型输出追加为 Open Review Run。Change/Preview/Apply/Complete 已使用独立
+Project-scoped 命令、当前 Revision 和精确 Review/Change ID；Provider 不能直接提交文章。
+Reviewer 可保存 Accepted/Rejected/Pending 决定、风险二次确认、生成完整正文 Preview，
+或在没有 Accepted Change 时 Complete。Apply 还要求 `article.edit`，并且只提交最近
+Preview 的 SHA-256；服务端重新构建全文，Hash 不同就拒绝，成功后追加 Initial Version
+并使其下游失效。
 
 `build_seo_review_prompt` 保留 Local 默认行为，但 Server Provider 必须显式注入
 `published_generation_context_text(...)`；这条兼容接缝用于阻止 Server Worker 读取
@@ -1368,7 +1375,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、二十条 Task 写操作、
+身份代码链、二十三条 Task 写操作、
 `product_rediscovery/titles/outline/article/restore_links/seo_review` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
@@ -1585,3 +1592,9 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      Context、不补 mock，且生成只追加 Open Review Run、不修改文章或自动 Apply/Complete？
 115. Prompt/Template/Article/Chunk 漂移、执行前撤权、Provider、CAS 或 Audit 失败时，
      是否都不留下部分 Review Run，公开 Job/Audit 是否不泄露正文、Hash 或原始错误？
+116. Change/Preview/Apply/Complete 是否都从路径取得精确 Review/Change ID，并拒绝
+     Body 覆盖身份、旧 Revision、非 Open Run 或已漂移 Source Article？
+117. Reviewer 是否可裁决和 Complete，但 Apply 是否仍额外要求 `article.edit` 与精确
+     Preview Hash，且服务端必须重新构建并验证完整文章？
+118. Change/Apply/Complete 的 Task CAS 与安全 Audit 是否原子，Preview 是否只读且不把
+     Article、Report、Proposed Text、Review/Change ID 或 Hash 写入 Audit？

@@ -37,6 +37,9 @@ ServerTaskAuditAction = Literal[
     "article.links.restored",
     "article.seo_review_settings.updated",
     "article.seo_review.generated",
+    "article.seo_review.change.updated",
+    "article.seo_review.applied",
+    "article.seo_review.completed",
     "article.products.confirmed",
     "article.section.replaced",
     "article.images.prepared",
@@ -63,6 +66,9 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.links.restored": "article.edit",
     "article.seo_review_settings.updated": "article.edit",
     "article.seo_review.generated": "article.review",
+    "article.seo_review.change.updated": "article.review",
+    "article.seo_review.applied": "article.edit",
+    "article.seo_review.completed": "article.review",
     "article.products.confirmed": "article.edit",
     "article.section.replaced": "article.edit",
     "article.images.prepared": "article.edit",
@@ -148,6 +154,25 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "prompt_source",
             "prompt_version",
             "publish_ready",
+        }
+    ),
+    "article.seo_review.change.updated": frozenset(
+        {"decision", "risk_confirmed", "risk_count"}
+    ),
+    "article.seo_review.applied": frozenset(
+        {
+            "accepted_count",
+            "invalid_count",
+            "pending_count",
+            "rejected_count",
+        }
+    ),
+    "article.seo_review.completed": frozenset(
+        {
+            "accepted_count",
+            "invalid_count",
+            "pending_count",
+            "rejected_count",
         }
     ),
     "article.products.confirmed": frozenset({"product_count"}),

@@ -45,7 +45,13 @@ from knowledge_agent.schema import (  # noqa: E402
     snapshot_assets,
     source_snapshots,
 )
-from models import PromptSnapshot, TaskRecord  # noqa: E402
+from models import (  # noqa: E402
+    PromptSnapshot,
+    SeoReviewChange,
+    SeoReviewDimension,
+    SeoReviewRun,
+    TaskRecord,
+)
 from server_schema import (  # noqa: E402
     article_tasks,
     background_jobs,
@@ -369,6 +375,12 @@ class RecordingAuditWriter:
         if not connection.in_transaction():
             raise AssertionError("audit must share the Task transaction")
         self.events.append(event)
+
+
+class FailingAuditWriter:
+    def append(self, connection, event) -> None:
+        del connection, event
+        raise RuntimeError("private audit failure")
 
 
 @unittest.skipUnless(
@@ -1769,6 +1781,23 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/seo-reviews/jobs/job-a",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-reviews/review-a/preview",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-reviews/review-a/"
+                    "changes/change-a",
+                    json={"revision": 0, "decision": "rejected"},
                 ).status_code,
                 404,
             )
@@ -4679,6 +4708,293 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         self.assertEqual(persisted["revision"], 0)
         self.assertEqual(persisted["status"], "draft_ready")
         self.assertEqual(persisted["seo_reviews"], [])
+
+    def test_server_seo_review_decision_preview_and_apply_are_scoped(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.strip()
+        target = "Keep the original evidence guidance."
+        proposed = "Compare the original evidence before approval."
+        start = article.index(target)
+        review = SeoReviewRun(
+            id="review-server-a",
+            source_article=article,
+            source_article_hash=content_hash(article),
+            source_revision=0,
+            score=80,
+            dimensions=[
+                SeoReviewDimension(
+                    key="intent",
+                    name="Intent",
+                    score=8,
+                    target_score=9,
+                )
+            ],
+            report="Private review report.",
+            changes=[
+                SeoReviewChange(
+                    id="change-server-a",
+                    operation="replace",
+                    title="Clarify evidence",
+                    target_text=target,
+                    model_proposed_text=proposed,
+                    reviewed_text=proposed,
+                    source_start=start,
+                    source_end=start + len(target),
+                )
+            ],
+            prompt_snapshot=PromptSnapshot(
+                kind="review",
+                source="system",
+                content="Private rubric.",
+            ),
+            created_at="2026-07-31T00:00:00+00:00",
+        )
+        record.update(
+            {
+                "status": "draft_ready",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+                "seo_reviews": [review.model_dump(mode="json")],
+            }
+        )
+        repository.upsert(record)
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="reviewer")
+            )
+        codec = ServerActorSessionCodec(b"z" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            isolated = replace(
+                base_config,
+                data_file=Path(directory) / "must-not-exist" / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "z" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    app_module.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                base = (
+                    f"/api/projects/{self.project_a}/tasks/{self.task_a}"
+                    "/seo-reviews/review-server-a"
+                )
+                invalid = client.put(
+                    f"{base}/changes/change-server-a",
+                    json={
+                        "revision": 0,
+                        "decision": "accepted",
+                        "reviewed_text": proposed,
+                        "review_id": "attacker",
+                    },
+                )
+                self.assertEqual(invalid.status_code, 422)
+                decided = client.put(
+                    f"{base}/changes/change-server-a",
+                    json={
+                        "revision": 0,
+                        "decision": "accepted",
+                        "reviewed_text": proposed,
+                    },
+                )
+                self.assertEqual(decided.status_code, 200, decided.text)
+                self.assertEqual(decided.json()["revision"], 1)
+                preview = client.post(
+                    f"{base}/preview",
+                    json={"revision": 1},
+                )
+                self.assertEqual(preview.status_code, 200, preview.text)
+                self.assertIn(proposed, preview.json()["article"])
+                apply_payload = {
+                    "revision": 1,
+                    "preview_hash": preview.json()["article_hash"],
+                    "confirm_pending": True,
+                }
+                self.assertEqual(
+                    client.post(
+                        f"{base}/apply",
+                        json=apply_payload,
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                applied = client.post(
+                    f"{base}/apply",
+                    json=apply_payload,
+                )
+                self.assertEqual(applied.status_code, 200, applied.text)
+                body = applied.json()
+                self.assertEqual(body["revision"], 2)
+                self.assertEqual(
+                    body["seo_reviews"][0]["status"],
+                    "applied",
+                )
+                self.assertIn(proposed, body["initial_article"])
+                self.assertEqual(body["status"], "draft_ready")
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.seo_review.change.updated",
+                        "article.seo_review.applied",
+                    ],
+                )
+                self.assertNotIn(
+                    "Private review report.",
+                    str(audit.events),
+                )
+                self.assertNotIn(proposed, str(audit.events))
+                self.assertEqual(
+                    client.post(
+                        f"{base}/complete",
+                        json={
+                            "revision": 2,
+                            "confirm_pending": True,
+                        },
+                    ).status_code,
+                    409,
+                )
+                self.assertFalse(isolated.data_file.exists())
+
+    def test_server_seo_review_complete_rolls_back_on_audit_failure(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.strip()
+        review = SeoReviewRun(
+            id="review-server-rollback",
+            source_article=article,
+            source_article_hash=content_hash(article),
+            source_revision=0,
+            score=90,
+            report="Private report.",
+            changes=[],
+            prompt_snapshot=PromptSnapshot(
+                kind="review",
+                source="system",
+                content="Private rubric.",
+            ),
+            created_at="2026-07-31T00:00:00+00:00",
+        )
+        record.update(
+            {
+                "status": "draft_ready",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+                "seo_reviews": [review.model_dump(mode="json")],
+            }
+        )
+        repository.upsert(record)
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="reviewer")
+            )
+        codec = ServerActorSessionCodec(b"z" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            isolated = replace(
+                base_config,
+                data_file=Path(directory) / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "z" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_project_task_store_factory = (
+                    ServerProjectTaskStoreFactory(
+                        self.engine,
+                        isolated,
+                        audit=FailingAuditWriter(),
+                    )
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                response = client.post(
+                    (
+                        f"/api/projects/{self.project_a}/tasks/"
+                        f"{self.task_a}/seo-reviews/"
+                        "review-server-rollback/complete"
+                    ),
+                    json={"revision": 0, "confirm_pending": True},
+                )
+                self.assertEqual(response.status_code, 503, response.text)
+                self.assertNotIn("private audit failure", response.text)
+
+        persisted = repository.get(self.task_a)
+        assert persisted is not None
+        self.assertEqual(persisted["revision"], 0)
+        self.assertEqual(
+            persisted["seo_reviews"][0]["status"],  # type: ignore[index]
+            "open",
+        )
 
     def test_link_worker_rejects_article_hash_drift_before_provider(
         self,

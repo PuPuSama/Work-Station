@@ -23,6 +23,8 @@ from models import (
     STATUS_FINAL_AI_CHECKED,
     STATUS_INITIAL_AI_CHECKED,
     AICheck,
+    SeoReviewChangeDecision,
+    SeoReviewPreview,
     TaskRecord,
 )
 from services.article_validation import visible_word_count
@@ -93,6 +95,15 @@ from services.server_seo_review_settings import (
 from services.server_seo_review_generation import (
     SeoReviewGenerationUnavailable,
     ServerSeoReviewGenerationRegistry,
+)
+from services.server_seo_review_commands import (
+    ServerSeoReviewConflict,
+    ServerSeoReviewNotFound,
+    ServerSeoReviewValidationError,
+    apply_server_seo_review,
+    build_server_seo_review_preview,
+    complete_server_seo_review,
+    update_server_seo_review_change,
 )
 from services.server_project_prompts import (
     ServerProjectPromptError,
@@ -206,6 +217,36 @@ class ProjectSeoReviewSettingsRequest(BaseModel):
         default="project_default",
         max_length=128,
     )
+
+
+class ProjectSeoReviewChangeRequest(BaseModel):
+    """Record one human decision without accepting Review identity in Body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    decision: SeoReviewChangeDecision = "pending"
+    reviewed_text: str = Field(default="", max_length=40000)
+    confirm_risks: bool = False
+
+
+class ProjectSeoReviewApplyRequest(BaseModel):
+    """Apply only the article returned by the latest exact preview."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    preview_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirm_pending: bool = False
+
+
+class ProjectSeoReviewCompleteRequest(BaseModel):
+    """Finalize without changing the article."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    confirm_pending: bool = False
 
 
 class ProjectTitleSelectionRequest(BaseModel):
@@ -1562,6 +1603,223 @@ def read_project_task_seo_review_job(
             detail="Server SEO review generation is not available.",
         ) from exc
     return SeoReviewGenerationJobResponse.model_validate(job)
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/seo-reviews/{review_id}/changes/{change_id}",
+    response_model=TaskRecord,
+)
+def update_project_task_seo_review_change(
+    project: str,
+    task_id: str,
+    review_id: str,
+    change_id: str,
+    payload: ProjectSeoReviewChangeRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    try:
+        task = _task_store(request, authorized).get(task_id)
+        summary = update_server_seo_review_change(
+            task,
+            review_id=review_id,
+            change_id=change_id,
+            decision=payload.decision,
+            reviewed_text=payload.reviewed_text,
+            confirm_risks=payload.confirm_risks,
+            actor_user_id=authorized.actor.user_id,
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="SEO review or change was not found.",
+        ) from None
+    except ServerSeoReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerSeoReviewValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.seo_review.change.updated",
+        details={
+            "decision": summary.decision,
+            "risk_confirmed": summary.risk_confirmed,
+            "risk_count": summary.risk_count,
+        },
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/seo-reviews/{review_id}/preview",
+    response_model=SeoReviewPreview,
+)
+def preview_project_task_seo_review(
+    project: str,
+    task_id: str,
+    review_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> SeoReviewPreview:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    try:
+        task = _task_store(request, authorized).get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail="Task revision changed.",
+        )
+    try:
+        return build_server_seo_review_preview(
+            task,
+            review_id=review_id,
+        )
+    except ServerSeoReviewNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail="SEO review was not found.",
+        ) from None
+    except ServerSeoReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerSeoReviewValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/seo-reviews/{review_id}/apply",
+    response_model=TaskRecord,
+)
+def apply_project_task_seo_review(
+    project: str,
+    task_id: str,
+    review_id: str,
+    payload: ProjectSeoReviewApplyRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        task = _task_store(request, authorized).get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_UPDATE_ARTICLE)
+        summary = apply_server_seo_review(
+            task,
+            review_id=review_id,
+            preview_hash=payload.preview_hash,
+            confirm_pending=payload.confirm_pending,
+            actor_user_id=authorized.actor.user_id,
+        )
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerSeoReviewNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail="SEO review was not found.",
+        ) from None
+    except ServerSeoReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerSeoReviewValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.seo_review.applied",
+        details={
+            "accepted_count": summary.accepted_count,
+            "invalid_count": summary.invalid_count,
+            "pending_count": summary.pending_count,
+            "rejected_count": summary.rejected_count,
+        },
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/seo-reviews/{review_id}/complete",
+    response_model=TaskRecord,
+)
+def complete_project_task_seo_review(
+    project: str,
+    task_id: str,
+    review_id: str,
+    payload: ProjectSeoReviewCompleteRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    try:
+        task = _task_store(request, authorized).get(task_id)
+        summary = complete_server_seo_review(
+            task,
+            review_id=review_id,
+            confirm_pending=payload.confirm_pending,
+            actor_user_id=authorized.actor.user_id,
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="SEO review was not found.",
+        ) from None
+    except ServerSeoReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerSeoReviewValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.seo_review.completed",
+        details={
+            "accepted_count": summary.accepted_count,
+            "invalid_count": summary.invalid_count,
+            "pending_count": summary.pending_count,
+            "rejected_count": summary.rejected_count,
+        },
+    )
 
 
 @router.put(
@@ -3121,6 +3379,9 @@ __all__ = [
     "ProductRediscoveryJobResponse",
     "ProductRediscoveryRequest",
     "ProjectAssetDownload",
+    "ProjectSeoReviewApplyRequest",
+    "ProjectSeoReviewChangeRequest",
+    "ProjectSeoReviewCompleteRequest",
     "ProjectSeoReviewSettingsRequest",
     "SeoReviewGenerationJobResponse",
     "TitleGenerationJobResponse",

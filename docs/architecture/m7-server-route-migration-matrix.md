@@ -58,6 +58,7 @@
 | 恢复首稿链接 | `POST .../restore-links`、`GET .../restore-links/jobs/{job_id}` | `article.edit` | PostgreSQL Job + Template/Article Hash + 确定性校验 + CAS/Audit | Server Ready |
 | 保存 SEO Review 设置 | `PUT .../seo-review-settings` | `article.edit` | Project Review Prompt 解析 + Keyword 门禁 + CAS/Audit | Server Ready |
 | 生成 SEO Review Run | `POST .../seo-reviews`、`GET .../seo-reviews/jobs/{job_id}` | `article.review` | PostgreSQL Job + Prompt/Template/Article/Published Chunk 身份 + CAS/Audit | Server Ready |
+| 裁决/预览/应用/完成 SEO Review | `PUT .../seo-reviews/{review}/changes/{change}`、`POST .../{preview|apply|complete}` | `article.review`；Apply 为 `article.edit` | 精确 ID + Open/Source Hash + Preview Hash + CAS/Audit | Server Ready |
 | 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |
 | 生成 TDK DOCX | `POST .../generate-tdk` | `article.deliver` | 私有 TDK Asset + CAS + Audit | Server Ready |
 | 打包交付 ZIP | `POST .../package-delivery` | `article.deliver` | 私有 ZIP Asset + CAS + Audit | Server Ready |
@@ -75,7 +76,7 @@
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
-| Humanize Job/SEO Review 修改应用 | Local TaskStore + LLM | Project Job/Review Command | SEO Settings 与 Review 生成已迁移；仍需 Humanize Server Prompt，以及 Review Change/Preview/Apply/Complete CAS/Audit |
+| Humanize Job | Local TaskStore + LLM | Project Job | 仍需正式 Server Prompt Snapshot/Provider；SEO Review 全闭环已迁移 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
@@ -138,9 +139,10 @@ checked-in Template Hash、Initial/Humanized Article Hash、来源链接数和 F
 只接受 Revision，固定 Initial Article、精确 Project Review Prompt Version、
 checked-in System Template Hash 与当前 Published Chunk ID。Provider 只能读取注入的
 Published Context，不能调用本地 Customer Context 或生成 mock；成功只追加 Open
-Review Run，不修改文章或 Workflow Status。Change/Preview/Apply/Complete 继续 Local
-Only，直到它们分别具备 Project Scope、精确 Review/Change 身份、Revision CAS 与安全
-Audit。
+Review Run，不修改文章或 Workflow Status。Change/Preview/Apply/Complete 已拆成
+Project-scoped 人工命令：Change/Preview/Complete 要求 `article.review`，Apply 额外要求
+`article.edit`；路径固定 Review/Change ID，Body 不能覆盖身份。Apply 必须重新构建完整
+Preview 并匹配 SHA-256，Change/Apply/Complete 使用 Revision CAS 与安全 Audit。
 
 ## 6. 已完成闭环：Project Job Control
 
@@ -200,3 +202,7 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     Status、Revision 和已有 Review Run 不变？
 23. `ServerProjectJobRegistry` 后续被旧 Operation 采用时，是否仍把业务 Enqueue、
     权限、私有 Request 与 Handler 留在 Operation-specific 层？
+24. Review Change/Preview/Apply/Complete 是否仍使用精确路径身份、Open/Source Article
+    Hash 门禁，并拒绝 Body 注入 Review/Change ID？
+25. Apply 是否仍要求 `article.edit` 和精确 Preview Hash，而 Complete 只允许没有
+    Accepted Change 的 Open Run？
