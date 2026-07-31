@@ -55,7 +55,9 @@ from services.server_docx_export import (
 )
 from services.server_outline_update import (
     ServerOutlineUpdateError,
+    ServerOutlineVersionNotFound,
     apply_reviewed_outline,
+    restore_reviewed_outline_version,
 )
 from services.server_delivery_package import (
     ServerDeliveryPackage,
@@ -164,6 +166,15 @@ class ProjectOutlineUpdateRequest(BaseModel):
     revision: int = Field(ge=0)
     outline: str = Field(min_length=1, max_length=40000)
     confirmed: bool = True
+
+
+class ProjectOutlineVersionRestoreRequest(BaseModel):
+    """Restore only a server-owned outline Version into the draft field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    version_index: int = Field(ge=0, le=9999)
 
 
 class ProjectMembershipUpdateRequest(BaseModel):
@@ -1052,6 +1063,68 @@ def update_project_task_outline(
         details={
             "confirmed": payload.confirmed,
             "outline_characters": len(outline),
+        },
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/outline/restore-version",
+    response_model=TaskRecord,
+)
+def restore_project_task_outline_version(
+    project: str,
+    task_id: str,
+    payload: ProjectOutlineVersionRestoreRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        ensure_action_allowed(task, ACTION_UPDATE_OUTLINE)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    try:
+        restored_from = restore_reviewed_outline_version(
+            task,
+            version_index=payload.version_index,
+        )
+    except ServerOutlineVersionNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail="Outline version was not found.",
+        ) from None
+    except ServerOutlineUpdateError:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected version cannot be restored as an outline.",
+        ) from None
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.outline_version.restored",
+        details={
+            "restored_from": restored_from,
+            "version_index": payload.version_index,
         },
     )
 

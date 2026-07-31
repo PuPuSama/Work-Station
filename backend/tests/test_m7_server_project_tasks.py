@@ -1229,6 +1229,197 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertFalse(local_state.exists())
 
+    def test_server_restores_only_owned_outline_version_to_draft(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "revision": 0,
+                "status": "outline_confirmed",
+                "selected_title": "Current title",
+                "outline": "## Current confirmed outline",
+                "outline_draft": "## Current confirmed outline",
+                "article": "current downstream article",
+                "article_versions": [
+                    {
+                        "kind": "outline",
+                        "content": "## Earlier outline",
+                        "source_kind": "manual_confirmed",
+                    },
+                    {
+                        "kind": "article",
+                        "content": "private article version",
+                        "source_kind": "first_version",
+                    },
+                ],
+            }
+        )
+        repository.upsert(record)
+        codec = ServerActorSessionCodec(b"s" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "s" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline/restore-version"
+                )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={"revision": 0, "version_index": 0},
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={
+                            "revision": 0,
+                            "version_index": 0,
+                            "outline": "caller replacement",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={"revision": 0, "version_index": 99},
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={"revision": 0, "version_index": 1},
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_a}/outline/restore-version"
+                        ),
+                        json={"revision": 0, "version_index": 0},
+                    ).status_code,
+                    403,
+                )
+                restored = client.post(
+                    path,
+                    json={"revision": 0, "version_index": 0},
+                )
+                self.assertEqual(
+                    restored.status_code,
+                    200,
+                    restored.text,
+                )
+                body = restored.json()
+                self.assertEqual(body["revision"], 1)
+                self.assertEqual(
+                    body["outline"],
+                    "## Current confirmed outline",
+                )
+                self.assertEqual(
+                    body["outline_draft"],
+                    "## Earlier outline",
+                )
+                self.assertEqual(
+                    body["article"],
+                    "current downstream article",
+                )
+                self.assertEqual(
+                    body["status"],
+                    "outline_confirmed",
+                )
+                self.assertEqual(
+                    body["article_versions"][-1]["kind"],
+                    "outline_draft",
+                )
+                self.assertEqual(
+                    body["article_versions"][-1]["source_kind"],
+                    "restored",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.outline_version.restored"],
+                )
+                self.assertEqual(
+                    audit.events[0].details,
+                    {
+                        "from_revision": 0,
+                        "to_revision": 1,
+                        "status": "outline_confirmed",
+                        "restored_from": "outline",
+                        "version_index": 0,
+                    },
+                )
+                self.assertNotIn(
+                    "Earlier outline",
+                    str(audit.events),
+                )
+                stale = client.post(
+                    path,
+                    json={"revision": 0, "version_index": 0},
+                )
+                self.assertEqual(stale.status_code, 409)
+                self.assertEqual(len(audit.events), 1)
+                stored = repository.get(self.task_a)
+                assert stored is not None
+                self.assertEqual(stored["revision"], 1)
+                self.assertEqual(
+                    stored["outline_draft"],
+                    "## Earlier outline",
+                )
+                self.assertFalse(local_state.exists())
+
     def test_server_task_api_is_not_added_to_local_mode(self) -> None:
         import app as app_module
 
@@ -1269,6 +1460,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/selected-title",
                     json={"revision": 0, "candidate_index": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/outline/restore-version",
+                    json={"revision": 0, "version_index": 0},
                 ).status_code,
                 404,
             )

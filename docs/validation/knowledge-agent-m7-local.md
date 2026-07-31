@@ -521,7 +521,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十一条 HTTP Task 写操作分别记录 rewrite/title-selection/outline/products/section/images/docx/tdk/
+- 十二条 HTTP Task 写操作分别记录 rewrite/title-selection/outline/outline-restore/products/section/images/docx/tdk/
   final-ai-screenshot/final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
@@ -918,6 +918,31 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   Local Only；
 - 完整后端回归 597 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - 前端 ESLint、TypeScript 和 Next.js production build 全部通过；
+- Alembic Current 与 Head 均为 `20260731_0014`。
+
+### M7 Task 历史大纲恢复
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_restores_only_owned_outline_version_to_draft `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_task_commands `
+  tests.test_m7_server_request_security -q
+```
+
+结果：
+
+- 14 tests 全部通过；
+- 恢复命令只接受 Revision 与 Version Index，额外 Outline 正文返回 422；
+- 越界索引返回 404，Article Version 返回 422，Viewer 与跨项目请求 fail closed；
+- 成功时只把服务器已有 Outline Version 恢复为新 `outline_draft` Version；当前确认大纲、
+  正文、Status 与下游产物保持不变；
+- `article.outline_version.restored` Audit 只记录来源类型和索引，不含历史正文；
+- 旧 Revision 返回 409 且不追加 Version/Audit；Local Mode 不挂载该接口；
+- 完整后端回归 599 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过；
 - Alembic Current 与 Head 均为 `20260731_0014`。
 
 ### M7 Task 大纲草稿与确认

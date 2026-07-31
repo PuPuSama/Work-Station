@@ -439,11 +439,12 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十一条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十二条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、选择标题候选、保存/确认大纲、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、选择标题候选、保存/确认大纲、恢复历史大纲草稿、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.title.selected`、`article.outline.updated`、
+  `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
   `article.docx.exported`、`article.tdk.generated`、
@@ -458,6 +459,8 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   的 `title_candidates` 取值，越界、空候选、旧 Revision 和跨项目请求均不写 Task/Audit；
 - 大纲保存只提交有界 Markdown 与 Confirmed 标志；草稿保留当前确认大纲和下游，确认
   才使下游失效；Audit 只记录 Confirmed 与字符数，不记录 Markdown；
+- 大纲恢复只提交 Version Index，只允许当前 Task 的 Outline Version 恢复成草稿；
+  Article Version、越界索引和客户端历史正文均拒绝，Audit 不记录版本正文；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/

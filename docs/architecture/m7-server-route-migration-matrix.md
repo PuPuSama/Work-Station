@@ -44,6 +44,7 @@
 | 完全重写 | `POST .../rewrite-from-scratch` | `article.edit` | PostgreSQL CAS + Audit | Server Ready |
 | 选择当前标题候选 | `PUT .../selected-title` | `article.edit` | Server-owned Candidate + CAS + Audit | Server Ready |
 | 保存/确认已审阅大纲 | `PUT .../outline` | `article.edit` | PostgreSQL Version + CAS + Audit | Server Ready |
+| 恢复历史大纲为草稿 | `POST .../outline/restore-version` | `article.edit` | Server-owned Version + CAS + Audit | Server Ready |
 | 选择已确认产品 | `PUT .../products` | `article.edit` | Published Evidence 投影 + CAS + Audit | Server Ready |
 | 产品重新发现 | `POST .../product-rediscovery` | `knowledge.edit` | PostgreSQL Job + S3 Inbox Evidence | Server Ready |
 | 替换指定章节 | `PUT .../article/sections` | `article.edit` | Heading Scope + Version + CAS + Audit | Server Ready |
@@ -98,6 +99,8 @@ Local Only。已迁移的 `selected-title` 命令只允许客户端提交当前 
 运行链，因此不进入 PostgreSQL Worker Operation 集合。已迁移的 `PUT .../outline`
 只保存编辑者已审阅的 Markdown；草稿追加 `outline_draft` Version 但保留当前确认大纲
 和下游产物，确认则追加 `outline` Version 并使正文、图片、检查与交付产物失效。
+`POST .../outline/restore-version` 只接受 Version Index，从当前 Task 的服务器版本历史
+恢复 `outline/outline_draft` 为新草稿；它不接受客户端历史正文，也不恢复 Article Version。
 
 ## 6. 已完成闭环：Project Job Control
 
@@ -137,3 +140,5 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 12. `titles` Job 是否在发布知识上下文接线前继续保持 Local Only？
 13. 大纲草稿是否仍保留当前确认大纲和下游产物，而确认大纲才执行下游失效？
 14. `outline` 生成 Job 是否在 Server Prompt/LLM 边界接线前继续保持 Local Only？
+15. 大纲恢复是否只按当前 Task 的 Version Index 读取 `outline/outline_draft`，并拒绝
+    Article Version 与客户端历史正文？

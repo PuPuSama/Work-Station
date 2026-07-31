@@ -16,12 +16,20 @@ class ServerOutlineUpdateError(ValueError):
     """The reviewed outline cannot be applied to the Task."""
 
 
+class ServerOutlineVersionNotFound(LookupError):
+    """The requested version index does not exist on the scoped Task."""
+
+
 def _append_outline_version(
     task: TaskRecord,
     *,
     kind: Literal["outline", "outline_draft"],
     content: str,
-    source_kind: Literal["manual_confirmed", "manual_draft"],
+    source_kind: Literal[
+        "manual_confirmed",
+        "manual_draft",
+        "restored",
+    ],
 ) -> None:
     """Append a reviewed snapshot without duplicating the latest version."""
 
@@ -73,3 +81,34 @@ def apply_reviewed_outline(
         invalidate_downstream(task, "outline")
         transition_task(task, STATUS_OUTLINE_CONFIRMED)
     return normalized
+
+
+def restore_reviewed_outline_version(
+    task: TaskRecord,
+    *,
+    version_index: int,
+) -> Literal["outline", "outline_draft"]:
+    """Restore one server-owned outline snapshot into the editable draft."""
+
+    if version_index >= len(task.article_versions):
+        raise ServerOutlineVersionNotFound(
+            "outline version was not found"
+        )
+    version = task.article_versions[version_index]
+    if version.kind not in {"outline", "outline_draft"}:
+        raise ServerOutlineUpdateError(
+            "selected version is not an outline"
+        )
+    content = version.content.strip()
+    if not content:
+        raise ServerOutlineUpdateError(
+            "selected outline version is empty"
+        )
+    task.outline_draft = content
+    _append_outline_version(
+        task,
+        kind="outline_draft",
+        content=content,
+        source_kind="restored",
+    )
+    return version.kind
