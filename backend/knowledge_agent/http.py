@@ -25,6 +25,12 @@ from services.server_knowledge_commands import (
     PostgresServerKnowledgeCommands,
     ServerKnowledgeCommandUnavailable,
 )
+from services.server_private_document_ingestion import (
+    PostgresServerPrivateDocumentIngestion,
+    ServerPrivateDocumentUploadConflict,
+    ServerPrivateDocumentUploadUnavailable,
+    default_private_source_id,
+)
 
 from .artifact_store import ArtifactStoreError
 from .assets import KnowledgeAssetRepositoryError
@@ -140,6 +146,7 @@ class KnowledgeUploadResponse(KnowledgeApiModel):
     parser_version: str
     chunk_count: int
     asset_count: int
+    created: bool
     message: str
 
 
@@ -514,6 +521,25 @@ def _server_knowledge_commands(
         catalog=runtime.catalog_repository,
         publication=runtime.publication,
     )
+
+
+def _server_private_document_ingestion(
+    request: Request,
+) -> PostgresServerPrivateDocumentIngestion:
+    configured = getattr(
+        request.app.state,
+        "server_private_document_ingestion",
+        None,
+    )
+    if not isinstance(
+        configured,
+        PostgresServerPrivateDocumentIngestion,
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Server private document ingestion is not available.",
+        )
+    return configured
 
 
 def _research_enqueue(request: Request):
@@ -1532,6 +1558,7 @@ def upload_private_knowledge(
 ) -> KnowledgeUploadResponse:
     runtime = _runtime(request)
     project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
     filename = PurePath(file.filename or "").name
     content = file.file.read(MAX_KNOWLEDGE_UPLOAD_BYTES + 1)
     if len(content) > MAX_KNOWLEDGE_UPLOAD_BYTES:
@@ -1539,9 +1566,69 @@ def upload_private_knowledge(
     if not content:
         raise HTTPException(status_code=422, detail="Knowledge file is empty.")
     resolved_source_id = (source_id or "").strip() or (
-        f"upload_{sha256((filename + ':').encode('utf-8') + content).hexdigest()[:20]}"
+        default_private_source_id(filename, content)
+        if server_context is not None
+        else (
+            "upload_"
+            + sha256(
+                (filename + ":").encode("utf-8") + content
+            ).hexdigest()[:20]
+        )
     )
     resolved_display_name = (display_name or "").strip() or filename
+    if server_context is not None:
+        actor, authorized_project_id = server_context
+        try:
+            upload = _server_private_document_ingestion(
+                request
+            ).upload(
+                actor=actor,
+                project_id=authorized_project_id,
+                source_id=resolved_source_id,
+                display_name=resolved_display_name,
+                document_input=DocumentInput(
+                    filename=filename,
+                    content=content,
+                    content_type=file.content_type,
+                ),
+                trust_tier=trust_tier,
+            )
+        except ProjectAccessDenied as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="project access denied",
+            ) from exc
+        except DocumentParserError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ServerPrivateDocumentUploadConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Private document conflicts with existing evidence.",
+            ) from exc
+        except ServerPrivateDocumentUploadUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Private document ingestion is temporarily unavailable.",
+            ) from exc
+        result = upload.result
+        return KnowledgeUploadResponse(
+            project_id=authorized_project_id,
+            source_id=result.source.source_id,
+            snapshot_id=result.snapshot.snapshot_id,
+            status=result.source.status,
+            parser_name=result.snapshot.parser_name,
+            parser_version=result.snapshot.parser_version,
+            chunk_count=len(result.chunks),
+            asset_count=len(result.assets),
+            created=upload.created,
+            message=(
+                "File parsed and stored in the Research Inbox."
+                if upload.created
+                else "The same immutable upload is already in the Research Inbox."
+            ),
+        )
     try:
         runtime.repository.upsert_project(
             KnowledgeProject(
@@ -1576,6 +1663,7 @@ def upload_private_knowledge(
         parser_version=result.snapshot.parser_version,
         chunk_count=len(result.chunks),
         asset_count=len(result.assets),
+        created=True,
         message="File parsed and stored in the Research Inbox.",
     )
 

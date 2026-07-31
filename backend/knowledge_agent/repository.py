@@ -175,6 +175,36 @@ class PostgresKnowledgeRepository:
         snapshot: SourceSnapshot,
         chunks: Sequence[KnowledgeChunk],
     ) -> None:
+        try:
+            with self._engine.begin() as connection:
+                self.store_snapshot_in_transaction(
+                    connection,
+                    project_id,
+                    snapshot,
+                    chunks,
+                )
+        except IntegrityError as exc:
+            raise KnowledgeConflictError(
+                "snapshot conflicts with an existing project-scoped record"
+            ) from exc
+
+    def store_snapshot_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        snapshot: SourceSnapshot,
+        chunks: Sequence[KnowledgeChunk],
+    ) -> bool:
+        """Store one immutable snapshot inside a caller-owned transaction.
+
+        Returns ``True`` only when the snapshot and chunks were inserted.
+        An identical immutable retry returns ``False`` after full verification.
+        """
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "knowledge snapshot writes require a business transaction"
+            )
         normalized_project_id = require_project_scope(
             project_id,
             (snapshot, *chunks),
@@ -197,70 +227,65 @@ class PostgresKnowledgeRepository:
         if len({chunk.ordinal for chunk in chunks}) != len(chunks):
             raise ValueError("chunk ordinals must be unique within a snapshot")
 
-        try:
-            with self._engine.begin() as connection:
-                snapshot_insert = (
-                    insert(source_snapshots)
-                    .values(
-                        project_id=snapshot.project_id,
-                        snapshot_id=snapshot.snapshot_id,
-                        source_id=snapshot.source_id,
-                        content_hash=snapshot.content_hash,
-                        parser_name=snapshot.parser_name,
-                        parser_version=snapshot.parser_version,
-                        raw_artifact_uri=snapshot.raw_artifact_uri,
-                        normalized_artifact_uri=snapshot.normalized_artifact_uri,
-                        fetched_at=snapshot.fetched_at,
-                        metadata=dict(snapshot.metadata),
-                    )
-                    .on_conflict_do_nothing()
-                    .returning(source_snapshots.c.snapshot_id)
+        snapshot_insert = (
+            insert(source_snapshots)
+            .values(
+                project_id=snapshot.project_id,
+                snapshot_id=snapshot.snapshot_id,
+                source_id=snapshot.source_id,
+                content_hash=snapshot.content_hash,
+                parser_name=snapshot.parser_name,
+                parser_version=snapshot.parser_version,
+                raw_artifact_uri=snapshot.raw_artifact_uri,
+                normalized_artifact_uri=snapshot.normalized_artifact_uri,
+                fetched_at=snapshot.fetched_at,
+                metadata=dict(snapshot.metadata),
+            )
+            .on_conflict_do_nothing()
+            .returning(source_snapshots.c.snapshot_id)
+        )
+        inserted_snapshot_id = connection.execute(
+            snapshot_insert
+        ).scalar_one_or_none()
+        if inserted_snapshot_id is None:
+            existing = connection.execute(
+                sa.select(source_snapshots).where(
+                    source_snapshots.c.project_id
+                    == normalized_project_id,
+                    source_snapshots.c.snapshot_id
+                    == snapshot.snapshot_id,
                 )
-                inserted_snapshot_id = connection.execute(
-                    snapshot_insert
-                ).scalar_one_or_none()
-                if inserted_snapshot_id is None:
-                    existing = connection.execute(
-                        sa.select(source_snapshots).where(
-                            source_snapshots.c.project_id
-                            == normalized_project_id,
-                            source_snapshots.c.snapshot_id
-                            == snapshot.snapshot_id,
-                        )
-                    ).mappings().one_or_none()
-                    if existing is None:
-                        raise KnowledgeConflictError(
-                            "snapshot conflicts with an existing immutable record"
-                        )
-                    self._verify_snapshot_retry(
-                        connection,
-                        snapshot=snapshot,
-                        chunks=chunks,
-                        stored_snapshot=existing,
-                    )
-                    return
+            ).mappings().one_or_none()
+            if existing is None:
+                raise KnowledgeConflictError(
+                    "snapshot conflicts with an existing immutable record"
+                )
+            self._verify_snapshot_retry(
+                connection,
+                snapshot=snapshot,
+                chunks=chunks,
+                stored_snapshot=existing,
+            )
+            return False
 
-                connection.execute(
-                    knowledge_chunks.insert(),
-                    [
-                        {
-                            "project_id": chunk.project_id,
-                            "chunk_id": chunk.chunk_id,
-                            "source_id": chunk.source_id,
-                            "snapshot_id": chunk.snapshot_id,
-                            "ordinal": chunk.ordinal,
-                            "heading_path": list(chunk.heading_path),
-                            "text": chunk.text,
-                            "locator": dict(chunk.locator),
-                            "metadata": dict(chunk.metadata),
-                        }
-                        for chunk in chunks
-                    ],
-                )
-        except IntegrityError as exc:
-            raise KnowledgeConflictError(
-                "snapshot conflicts with an existing project-scoped record"
-            ) from exc
+        connection.execute(
+            knowledge_chunks.insert(),
+            [
+                {
+                    "project_id": chunk.project_id,
+                    "chunk_id": chunk.chunk_id,
+                    "source_id": chunk.source_id,
+                    "snapshot_id": chunk.snapshot_id,
+                    "ordinal": chunk.ordinal,
+                    "heading_path": list(chunk.heading_path),
+                    "text": chunk.text,
+                    "locator": dict(chunk.locator),
+                    "metadata": dict(chunk.metadata),
+                }
+                for chunk in chunks
+            ],
+        )
+        return True
 
     def _verify_snapshot_retry(
         self,

@@ -29,12 +29,14 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ServerPrivateDocumentUpload } from "@/components/server-private-document-upload";
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 import type {
   AccessibleProject,
   KnowledgeLibrary,
   KnowledgeProductSummary,
   KnowledgeSourceSummary,
+  KnowledgeUploadResult,
 } from "@/types";
 
 type ReviewDecision = "approve" | "needs_review" | "reject";
@@ -408,6 +410,16 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
     }
   }
 
+  async function uploaded(result: KnowledgeUploadResult) {
+    setError("");
+    setMessage(
+      result.created
+        ? `${result.message} 已生成 ${result.chunk_count} 个知识块、登记 ${result.asset_count} 个内嵌资产。`
+        : `${result.message} 本次没有重复创建 Snapshot 或 Audit 记录。`,
+    );
+    await load();
+  }
+
   const sortedSources = useMemo(
     () =>
       [...(library?.sources || [])].sort((left, right) => {
@@ -453,9 +465,9 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           </div>
           <h1 className="text-2xl font-semibold">知识来源审阅</h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-            Rediscovery 只把来源、产品和图片证据放入 Inbox。这里负责人工分类、发布
-            Snapshot 与确认产品身份；上传、WordPress Sync、Research Run 和原始对象打开
-            仍保持 Server 关闭。
+            私有资料上传与 Rediscovery 都只把来源、产品和图片证据放入
+            Inbox。这里负责人工分类、发布 Snapshot 与确认产品身份；WordPress
+            Sync、Research Run 和原始对象打开仍保持 Server 关闭。
           </p>
         </div>
         <Button
@@ -516,6 +528,29 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
         </Alert>
       ) : null}
 
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="rounded-2xl border border-dashed bg-muted/10 p-5">
+          <div className="flex items-start gap-3">
+            <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-background text-muted-foreground shadow-sm">
+              <ShieldCheck className="size-5" />
+            </span>
+            <div>
+              <h2 className="font-semibold">私有资料安全边界</h2>
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
+                上传先写入项目隔离、内容寻址的私有对象；数据库提交前会重新检查
+                knowledge.edit，并把 Source、Snapshot、Chunk、Asset 关系和脱敏
+                Audit 放进同一个事务。权限在上传期间被撤销时，不会留下可查询的半成品。
+              </p>
+            </div>
+          </div>
+        </div>
+        <ServerPrivateDocumentUpload
+          editable={editable}
+          projectPath={projectPath}
+          onUploaded={uploaded}
+        />
+      </section>
+
       <section className="grid gap-4">
         <div>
           <h2 className="text-lg font-semibold">来源队列</h2>
@@ -547,8 +582,8 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
             <Inbox className="mb-3 size-8 text-muted-foreground" />
             <div className="font-medium">当前 Project 的 Inbox 为空</div>
             <p className="mt-1 max-w-xl text-sm text-muted-foreground">
-              从文章 Setup 发起 Product Rediscovery 后，结果会出现在这里；成功 Job
-              不会自动改变 Task 产品。
+              上传私有资料，或从文章 Setup 发起 Product Rediscovery。成功上传和
+              Job 都只进入 Inbox，不会自动发布知识或改变 Task 产品。
             </p>
           </div>
         )}

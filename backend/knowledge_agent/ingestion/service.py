@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import PurePath
@@ -102,7 +102,7 @@ def _normalized_document_bytes(document: ParsedDocument) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
-    """Reviewable result; successful ingestion does not imply publication."""
+    """Prepared reviewable result; database commit does not imply publication."""
 
     source: KnowledgeSource
     snapshot: SourceSnapshot
@@ -142,6 +142,62 @@ class PrivateDocumentIngestionService:
         metadata: Mapping[str, object] | None = None,
         fetched_at: datetime | None = None,
     ) -> IngestionResult:
+        prepared = self.prepare(
+            project_id=project_id,
+            source_id=source_id,
+            display_name=display_name,
+            document_input=document_input,
+            trust_tier=trust_tier,
+            metadata=metadata,
+            fetched_at=fetched_at,
+        )
+        self._repository.upsert_source(prepared.source)
+        self._repository.store_snapshot(
+            project_id,
+            prepared.snapshot,
+            prepared.chunks,
+        )
+        stored_assets: list[KnowledgeAsset] = []
+        stored_asset_ids: dict[str, str] = {}
+        for asset in prepared.assets:
+            stored = self._asset_repository.put_asset(asset)
+            stored_assets.append(stored)
+            stored_asset_ids[asset.asset_id] = stored.asset_id
+        stored_links: list[SnapshotAsset] = []
+        for link in prepared.snapshot_assets:
+            stored_link = replace(
+                link,
+                asset_id=stored_asset_ids.get(
+                    link.asset_id,
+                    link.asset_id,
+                ),
+            )
+            self._asset_repository.link_snapshot_asset(stored_link)
+            stored_links.append(stored_link)
+        return replace(
+            prepared,
+            assets=tuple(stored_assets),
+            snapshot_assets=tuple(stored_links),
+        )
+
+    def prepare(
+        self,
+        *,
+        project_id: str,
+        source_id: str,
+        display_name: str,
+        document_input: DocumentInput,
+        trust_tier: TrustTier = "reference_material",
+        metadata: Mapping[str, object] | None = None,
+        fetched_at: datetime | None = None,
+    ) -> IngestionResult:
+        """Parse and persist immutable artifacts without database mutation.
+
+        Server mode uses this as phase one, then reauthorizes and commits all
+        PostgreSQL rows plus Audit in one transaction. Object-store orphans
+        from a rejected phase-two commit are handled by delayed reconciliation.
+        """
+
         parsed = self._parser_router.parse(document_input)
         existing_snapshot = (
             None
@@ -219,10 +275,7 @@ class PrivateDocumentIngestionService:
             },
         )
 
-        self._repository.upsert_source(source)
-        self._repository.store_snapshot(project_id, snapshot, chunks)
-
-        stored_assets: list[KnowledgeAsset] = []
+        prepared_assets: list[KnowledgeAsset] = []
         snapshot_asset_links: list[SnapshotAsset] = []
         for parsed_asset in parsed.assets:
             artifact_uri = self._artifact_store.put(
@@ -232,35 +285,32 @@ class PrivateDocumentIngestionService:
                 filename=parsed_asset.filename,
                 content=parsed_asset.content,
             )
-            stored_asset = self._asset_repository.put_asset(
-                KnowledgeAsset(
-                    project_id=project_id,
-                    asset_id=_asset_id(parsed_asset.content_hash),
-                    content_hash=parsed_asset.content_hash,
-                    artifact_uri=artifact_uri,
-                    content_type=parsed_asset.content_type,
-                    byte_size=len(parsed_asset.content),
-                    metadata=dict(parsed_asset.metadata),
-                )
+            prepared_asset = KnowledgeAsset(
+                project_id=project_id,
+                asset_id=_asset_id(parsed_asset.content_hash),
+                content_hash=parsed_asset.content_hash,
+                artifact_uri=artifact_uri,
+                content_type=parsed_asset.content_type,
+                byte_size=len(parsed_asset.content),
+                metadata=dict(parsed_asset.metadata),
             )
             link = SnapshotAsset(
                 project_id=project_id,
                 source_id=source_id,
                 snapshot_id=snapshot_id,
-                asset_id=stored_asset.asset_id,
+                asset_id=prepared_asset.asset_id,
                 evidence_kind="embedded",
                 ordinal=parsed_asset.ordinal,
                 locator=dict(parsed_asset.locator),
                 metadata={"original_filename": parsed_asset.filename},
             )
-            self._asset_repository.link_snapshot_asset(link)
-            stored_assets.append(stored_asset)
+            prepared_assets.append(prepared_asset)
             snapshot_asset_links.append(link)
 
         return IngestionResult(
             source=source,
             snapshot=snapshot,
             chunks=chunks,
-            assets=tuple(stored_assets),
+            assets=tuple(prepared_assets),
             snapshot_assets=tuple(snapshot_asset_links),
         )

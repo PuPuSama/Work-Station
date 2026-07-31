@@ -57,8 +57,6 @@ def server_knowledge_route_ready(method: str, route_path: str) -> bool:
     normalized_path = route_path.rstrip("/")
     if "/wordpress/" in normalized_path:
         return False
-    if normalized_path.endswith("/sources/upload"):
-        return False
     if normalized_path.endswith("/raw"):
         return False
     if normalized_path.endswith("/retrieval-plan"):

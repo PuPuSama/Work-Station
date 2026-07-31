@@ -34,13 +34,18 @@
 | External Identity 管理 | `/api/organizations/{org}/external-identities/*` | PostgreSQL | Active Org Admin | Server Ready |
 | Project Directory/Metadata/Membership | `/api/projects`、`/api/projects/{project}/metadata`、`/api/projects/{project}/members/*` | PostgreSQL | Project RBAC；Metadata 写入要求 `project.members.manage` + Revision CAS + Audit | Server Ready |
 | Project Product/Image Catalog | `/api/projects/{project}/catalog` | PostgreSQL Current Published Evidence | `project.view`；最小无 URL DTO | Server Ready |
-| Knowledge API | `/api/knowledge/projects/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
+| Knowledge API | `/api/knowledge/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Task Intake | `POST /api/projects/{project}/tasks`、`/task-imports` | PostgreSQL Task + Intake Receipt + Audit | `article.edit`；服务端 ID/序号 | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
-| Server Knowledge Inbox | `/projects/{project}/knowledge` | Knowledge Library + 原子 Review/Publish/Confirm 命令；Embedding prepare 与 Current Snapshot 激活分离 | `project.view` / `knowledge.edit` / `knowledge.publish`；写事务重锁权限并追加脱敏 Audit | Server Narrow |
+| Server Knowledge Inbox | `/projects/{project}/knowledge` | Knowledge Library + 私有文档两阶段入库 + 原子 Review/Publish/Confirm；对象 Prepare、Embedding Prepare 与最终数据库切换分离 | `project.view` / `knowledge.edit` / `knowledge.publish`；上传前和写事务内重验权限并追加脱敏 Audit | Server Narrow |
+
+私有文档上传 `POST /api/knowledge/{project}/sources/upload` 已迁移为 Server Narrow：
+原始/标准化/内嵌资产写入 Project-scoped ObjectStore，随后 Source/Snapshot/Chunk/Asset
+Link 与 Audit 在一个 PostgreSQL 事务提交。WordPress Sync、Raw Artifact 和
+Research Run Start/Resume 仍保持关闭，不能因 Upload 已开放而整体放开 Knowledge 路由组。
 
 ## 3. Task 写操作矩阵
 

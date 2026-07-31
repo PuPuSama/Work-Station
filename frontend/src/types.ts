@@ -700,6 +700,7 @@ export type KnowledgeUploadResult = {
   parser_version: string;
   chunk_count: number;
   asset_count: number;
+  created: boolean;
   message: string;
 };
 

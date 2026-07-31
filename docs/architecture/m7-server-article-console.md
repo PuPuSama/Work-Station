@@ -222,15 +222,23 @@ Local
 Server
   -> ServerKnowledgeInbox
        -> GET /api/knowledge/{project}
+       -> ServerPrivateDocumentUpload
+            -> POST .../sources/upload
        -> PUT .../sources/{source}/review
        -> POST .../sources/{source}/publish
        -> POST .../products/{product}/confirm
 ```
 
-Server 分支只挂已完成 PostgreSQL Project Scope 和 Knowledge 权限映射的入口。依赖本地
-ArtifactStore/SQLite Queue 的 Upload、WordPress Sync、Research Run Start/Resume、
-Task Retrieval Plan Compatibility 和 Raw Artifact 均不渲染；不能因为 URL 存在就把
-503 路径显示成可操作能力。
+Server 分支只挂已完成 PostgreSQL Project Scope 和 Knowledge 权限映射的入口。私有
+Upload 已改为 Project-scoped ObjectStore Prepare + PostgreSQL/Audit 原子提交，因此可
+渲染；仍依赖旧路径的 WordPress Sync、Research Run Start/Resume、Task Retrieval Plan
+Compatibility 和 Raw Artifact 不渲染。不能因为同组一个 URL 已迁移就整体放开 503 路径。
+
+Upload 也不是单事务伪装：先在初次授权后解析并写内容寻址对象，再在 PostgreSQL 事务内
+重新锁定可撤权事实、Active Project 和 Source，把 Source/Snapshot/Chunk/Asset Link 与
+脱敏 Audit 一次提交。Phase 2 失败只可能留下延迟对账的对象 orphan，不留下可查询的
+半成品。完整结构和重构接缝见
+`docs/architecture/m7-server-private-document-ingestion.md`。
 
 来源审阅和发布是两个显式步骤：审阅保存 Source Kind、Trust Tier、Decision 与有界
 Reason；只有 `inbox` 且包含 Chunk 的来源显示发布按钮。发布调用 Embedding Provider，
@@ -274,7 +282,7 @@ Decision、Source Kind 和 Trust Tier；Publish 只含不可变 Snapshot ID、Ch
 
 前端 Effective Role 只控制提示：Reviewer/Viewer 为只读，Editor/Lead/Admin 显示命令；
 Router 仍分别要求 `project.view`、`knowledge.edit` 和 `knowledge.publish`。Server 页面
-不提供 Raw Evidence 链接，也不复用 Local 文件上传或研究组件。
+不提供 Raw Evidence 链接，也不复用 Local 文件持久化或研究组件。
 
 ## 10. Project-scoped Job Control
 
@@ -358,11 +366,15 @@ Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Kn
 18. Server Batch/Job UI 是否仍使用 Project 路径、公共 DTO 与空 Cancel/Retry Body？
 19. Catalog 是否仍只列出当前 Published Snapshot，且不返回对象位置、哈希或来源 URL？
 20. 短时图片 URL 是否仍只存在于组件内存，产品图是否仍不能由 Hero 选择器覆盖？
-21. Knowledge 页面是否仍按 Auth Status 分流，Server 分支是否没有挂载 Upload、
-    WordPress Sync、Research/Evidence 或 Raw Artifact？
+21. Knowledge 页面是否仍按 Auth Status 分流，Server Upload 是否只走 Project-scoped
+    ObjectStore/PostgreSQL，且仍未挂载 WordPress Sync、Research/Evidence 或 Raw Artifact？
 22. 来源 Review/Publish 是否仍为两个动作，产品 Confirm 是否仍不能绕过文章选择时的
     Published Current Evidence 门禁？
 23. Task Intake 是否仍不接受客户端 Task ID、序号、客户、状态、Revision 或本地路径？
 24. 同一 Intake ID 的同内容重试是否仍只产生一批 Task 和一条 Audit，不同内容是否 409？
 25. Task、Intake Receipt 与安全 Audit 是否仍为同一事务，Audit 是否仍不含 Topic/URL/
     Source Digest？
+26. 私有文档上传是否在对象写前和数据库事务内两次重验 `knowledge.edit`，并把
+    Source/Snapshot/Chunk/Asset Link/Audit 原子提交？
+27. 去重 Asset 是否使用 Repository 实际返回的 Asset ID，Phase 2 失败是否只留下受
+    延迟对账保护的对象 orphan？

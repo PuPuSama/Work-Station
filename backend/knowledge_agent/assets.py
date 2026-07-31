@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from .schema import knowledge_assets, snapshot_assets
@@ -232,6 +232,25 @@ class PostgresKnowledgeAssetRepository:
         self._engine = engine
 
     def put_asset(self, asset: KnowledgeAsset) -> KnowledgeAsset:
+        try:
+            with self._engine.begin() as connection:
+                return self.put_asset_in_transaction(connection, asset)
+        except IntegrityError as exc:
+            raise KnowledgeAssetConflictError(
+                "asset conflicts with an existing project-scoped record"
+            ) from exc
+
+    def put_asset_in_transaction(
+        self,
+        connection: Connection,
+        asset: KnowledgeAsset,
+    ) -> KnowledgeAsset:
+        """Store or verify an immutable asset in a business transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "knowledge asset writes require a business transaction"
+            )
         statement = (
             insert(knowledge_assets)
             .values(
@@ -247,36 +266,52 @@ class PostgresKnowledgeAssetRepository:
             )
             .on_conflict_do_nothing()
         )
-        try:
-            with self._engine.begin() as connection:
-                connection.execute(statement)
-                stored_row = connection.execute(
-                    sa.select(knowledge_assets).where(
-                        knowledge_assets.c.project_id == asset.project_id,
-                        knowledge_assets.c.content_hash == asset.content_hash,
-                    )
-                ).mappings().one_or_none()
-                if stored_row is None:
-                    reused_id = connection.execute(
-                        sa.select(knowledge_assets.c.asset_id).where(
-                            knowledge_assets.c.project_id == asset.project_id,
-                            knowledge_assets.c.asset_id == asset.asset_id,
-                        )
-                    ).scalar_one_or_none()
-                    if reused_id is not None:
-                        raise KnowledgeAssetConflictError(
-                            "asset ID is already used by different content"
-                        )
-                    raise KnowledgeAssetConflictError(
-                        "asset could not be stored in the requested project"
-                    )
-                return _asset_from_row(stored_row)
-        except IntegrityError as exc:
+        connection.execute(statement)
+        stored_row = connection.execute(
+            sa.select(knowledge_assets).where(
+                knowledge_assets.c.project_id == asset.project_id,
+                knowledge_assets.c.content_hash == asset.content_hash,
+            )
+        ).mappings().one_or_none()
+        if stored_row is None:
+            reused_id = connection.execute(
+                sa.select(knowledge_assets.c.asset_id).where(
+                    knowledge_assets.c.project_id == asset.project_id,
+                    knowledge_assets.c.asset_id == asset.asset_id,
+                )
+            ).scalar_one_or_none()
+            if reused_id is not None:
+                raise KnowledgeAssetConflictError(
+                    "asset ID is already used by different content"
+                )
             raise KnowledgeAssetConflictError(
-                "asset conflicts with an existing project-scoped record"
-            ) from exc
+                "asset could not be stored in the requested project"
+            )
+        return _asset_from_row(stored_row)
 
     def link_snapshot_asset(self, link: SnapshotAsset) -> None:
+        try:
+            with self._engine.begin() as connection:
+                self.link_snapshot_asset_in_transaction(connection, link)
+        except IntegrityError as exc:
+            raise KnowledgeAssetNotFound(
+                "asset or source snapshot was not found in the requested project"
+            ) from exc
+
+    def link_snapshot_asset_in_transaction(
+        self,
+        connection: Connection,
+        link: SnapshotAsset,
+    ) -> bool:
+        """Link immutable evidence in a caller transaction.
+
+        Returns ``True`` for a new link and ``False`` for an exact retry.
+        """
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "snapshot asset links require a business transaction"
+            )
         statement = (
             insert(snapshot_assets)
             .values(
@@ -295,27 +330,22 @@ class PostgresKnowledgeAssetRepository:
             )
             .on_conflict_do_nothing()
         )
-        try:
-            with self._engine.begin() as connection:
-                result = connection.execute(statement)
-                if result.rowcount == 1:
-                    return
-                stored = connection.execute(
-                    sa.select(snapshot_assets).where(
-                        snapshot_assets.c.project_id == link.project_id,
-                        snapshot_assets.c.source_id == link.source_id,
-                        snapshot_assets.c.snapshot_id == link.snapshot_id,
-                        snapshot_assets.c.asset_id == link.asset_id,
-                    )
-                ).mappings().one_or_none()
-                if stored is None or _snapshot_asset_from_row(stored) != link:
-                    raise KnowledgeAssetConflictError(
-                        "snapshot asset conflicts with an existing immutable record"
-                    )
-        except IntegrityError as exc:
-            raise KnowledgeAssetNotFound(
-                "asset or source snapshot was not found in the requested project"
-            ) from exc
+        result = connection.execute(statement)
+        if result.rowcount == 1:
+            return True
+        stored = connection.execute(
+            sa.select(snapshot_assets).where(
+                snapshot_assets.c.project_id == link.project_id,
+                snapshot_assets.c.source_id == link.source_id,
+                snapshot_assets.c.snapshot_id == link.snapshot_id,
+                snapshot_assets.c.asset_id == link.asset_id,
+            )
+        ).mappings().one_or_none()
+        if stored is None or _snapshot_asset_from_row(stored) != link:
+            raise KnowledgeAssetConflictError(
+                "snapshot asset conflicts with an existing immutable record"
+            )
+        return False
 
     def get_asset(self, project_id: str, asset_id: str) -> KnowledgeAsset | None:
         normalized_project_id = _required_text(project_id, "project_id")

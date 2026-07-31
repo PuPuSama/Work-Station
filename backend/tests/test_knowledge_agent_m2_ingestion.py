@@ -97,14 +97,17 @@ class FakeAssetRepository:
         )
 
 
+def image_bytes() -> bytes:
+    image = BytesIO()
+    Image.new("RGB", (10, 10), color=(80, 40, 20)).save(image, format="PNG")
+    return image.getvalue()
+
+
 def document_bytes() -> bytes:
     document = Document()
     document.add_heading("Fastener Specification", level=1)
     document.add_paragraph("A" * 420)
-    image = BytesIO()
-    Image.new("RGB", (10, 10), color=(80, 40, 20)).save(image, format="PNG")
-    image.seek(0)
-    document.add_picture(image)
+    document.add_picture(BytesIO(image_bytes()))
     output = BytesIO()
     document.save(output)
     return output.getvalue()
@@ -221,6 +224,51 @@ class PrivateDocumentIngestionServiceTests(unittest.TestCase):
         self.assertNotEqual(
             first.snapshot.raw_artifact_uri,
             first.snapshot.normalized_artifact_uri,
+        )
+
+    def test_ingestion_links_the_asset_id_selected_by_deduplication(
+        self,
+    ) -> None:
+        knowledge_repository = FakeKnowledgeRepository()
+        asset_repository = FakeAssetRepository()
+        digest = sha256(image_bytes()).hexdigest()
+        asset_repository.assets["legacy-image"] = KnowledgeAsset(
+            project_id="project-a",
+            asset_id="legacy-image",
+            content_hash=digest,
+            artifact_uri=f"file:///legacy/{digest}.png",
+            content_type="image/png",
+            byte_size=len(image_bytes()),
+            width=10,
+            height=10,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = PrivateDocumentIngestionService(
+                repository=knowledge_repository,  # type: ignore[arg-type]
+                asset_repository=asset_repository,
+                artifact_store=LocalKnowledgeArtifactStore(Path(directory)),
+            )
+            result = service.ingest(
+                project_id="project-a",
+                source_id="private-spec",
+                display_name="Private specification",
+                document_input=DocumentInput(
+                    filename="spec.docx",
+                    content=document_bytes(),
+                ),
+            )
+
+        self.assertEqual(
+            [asset.asset_id for asset in result.assets],
+            ["legacy-image"],
+        )
+        self.assertEqual(
+            [link.asset_id for link in result.snapshot_assets],
+            ["legacy-image"],
+        )
+        self.assertEqual(
+            [link.asset_id for link in asset_repository.links],
+            ["legacy-image"],
         )
 
 if __name__ == "__main__":

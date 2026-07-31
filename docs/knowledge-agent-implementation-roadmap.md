@@ -153,6 +153,13 @@
   Review/Current Snapshot 激活/Product Confirm 分别与脱敏 append-only Audit 原子提交。
   Publication 拆为外部 Embedding Prepare 与最终激活两阶段，撤权、Provider 或 Audit
   失败时旧 Snapshot 继续服务；重复激活/确认不重复记成功 Audit，Local 路径保持原行为；
+- 已接入 Server 私有资料上传：同一 `/api/knowledge/{project}/sources/upload` 在
+  Local/Server 显式分流；Server 先在授权后把 Raw/Normalized/Embedded Asset 写入
+  Project-scoped 内容寻址 ObjectStore，再在事务内重新锁定 `knowledge.edit` 与 Active
+  Project，把 Source/Snapshot/Chunk/Asset Link 和脱敏 Audit 原子提交。相同不可变重试
+  不重复 Audit，撤权或 Audit 故障不留下数据库半成品；前端上传入口只挂
+  `ServerKnowledgeInbox`。结构记录见
+  `docs/architecture/m7-server-private-document-ingestion.md`；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
   调用 fail closed；产品重新发现、标题、大纲、正文初稿、自动 Humanize、链接恢复和
   SEO Review 生成已有独立

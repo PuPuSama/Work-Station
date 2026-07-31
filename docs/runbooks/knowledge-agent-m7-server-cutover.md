@@ -392,6 +392,20 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
   `ServerKnowledgeInbox`，导航显示 Knowledge；
 - Viewer/Reviewer 只能读取；Editor 可保存 Source Kind、Trust Tier、Decision 和
   Reason，发布与产品确认仍由后端要求 `knowledge.publish`；
+- Editor 上传一份不含真实客户正文的 DOCX/PDF/XLSX 测试资料，确认只进入 Inbox，
+  `created=true` 且 `current_snapshot_id` 仍为空；相同文件重试必须返回
+  `created=false`，Source/Snapshot/Audit 数量不增加；
+- 显式复用已有 Published Source ID 上传新内容必须返回 409，原显示名、Trust Tier、
+  Metadata 和 Current Snapshot 不变；在引入 Snapshot 级 Review 前不得产生无法审阅的
+  Pending Snapshot；
+- 预置同 Hash 的 `file://`、错误 Bucket、错误 Organization/Project S3 Asset 后上传
+  必须返回 409，Snapshot Link 不得复用 Server 无法授权读取的历史位置；
+- Viewer 上传必须在任何 ObjectStore Put 前返回 403；在第一个对象写入后撤销 Editor
+  Membership，最终数据库不得出现 Source/Snapshot/Chunk/Link 或成功 Audit；
+- 注入 Audit 故障时 Source/Snapshot/Chunk/Asset Link 必须整笔回滚；已写对象作为
+  orphan 候选由延迟对账处理，不在请求失败路径立即删除；
+- Upload Audit 只含 Snapshot ID、Parser 和 Chunk/Asset 数量；公开响应与 Audit 不得
+  出现文件名、正文、Hash、Bucket、Object Key、Artifact URI 或 Provider Secret；
 - Review 与 Publish 是两个请求；Embedding 失败后来源不得显示为 Published，旧
   Published Snapshot 继续服务；
 - 在 Review/Publish/Confirm 的 Router 授权后撤销 Actor Membership，命令事务必须再次
@@ -406,8 +420,8 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
 - 检查三类 Audit：Review 只含 Decision/Source Kind/Trust Tier，Publish 只含不可变
   Snapshot ID/Chunk Count/Embedding Model，Confirm 只含确认状态；正文、Reason、URL、
   原始 Content Hash、Artifact URI 和 Secret 均不得出现；
-- Server DOM 与网络不得出现 Upload、WordPress Sync、Research Run Start/Resume、
-  Raw Artifact 或 Local `/api/config` 请求；
+- Server DOM 与网络允许且只允许 Project-scoped 私有 Upload；不得出现 WordPress
+  Sync、Research Run Start/Resume、Raw Artifact 或 Local `/api/config` 请求；
 - Product Confirm 不代表文章可选择；必须再验证 Project Catalog 只投影当前 Published
   Snapshot Evidence。
 

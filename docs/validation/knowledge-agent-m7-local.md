@@ -1434,9 +1434,9 @@ node .\node_modules\next\dist\bin\next build
 - Knowledge Page 新增 Auth Status 分流：Local 仍挂
   `ProjectKnowledgeLibrary/ProjectResearchWorkspace/ProjectEvidenceWorkbench`；
   Server 只挂 `ServerKnowledgeInbox`，Project Navigation 新增 Knowledge 入口；
-- Server Inbox 只消费已完成 Server Scope 的 Knowledge Library、Source Review、
-  Source Publish 和 Product Confirm 路由，不渲染 Upload、WordPress Sync、Research
-  Run、Evidence Workbench 或 Raw Artifact；
+- Server Inbox 在该次初始验收只消费 Knowledge Library、Source Review、Source
+  Publish 和 Product Confirm；后续已新增 Project-scoped 私有 Upload，WordPress
+  Sync、Research Run、Evidence Workbench 和 Raw Artifact 仍不渲染；
 - 来源 Review 只提交 Source Kind、Trust Tier、Decision 和 1–500 字 Reason；Publish
   是第二个显式动作，只在服务端 `review_decision=approve`、状态为 Inbox 且有 Chunk 时
   显示；
@@ -1455,8 +1455,8 @@ node .\node_modules\next\dist\bin\next build
   Approved Inbox、Needs Review、Published 分层，Published 来源不显示分类编辑；
 - 只有 Approved Inbox 显示 1 个 Publish 按钮；2 个 Review 表单均在 Reason 为空时
   禁用，填写第一个 Reason 后仅第一个 Save 启用；Candidate Product 显示 1 个 Confirm；
-- 页面没有 Upload、WordPress Sync、Research 或 Raw Artifact 操作控件；QA 不执行任何
-  写命令，浏览器无 Warning/Error；
+- 该次历史 QA 页面没有 Upload、WordPress Sync、Research 或 Raw Artifact；后续
+  Upload 验收见“M7 Server 私有资料上传”，其余三类能力仍关闭；
 - 375×812 覆盖下实际文档 Client Width 与 Scroll Width 都是 360，无水平溢出；
   QA 后恢复视口、关闭页面并删除临时服务；
 - 完整后端回归 672 tests 全部通过，2 tests 按显式外部环境门禁跳过；
@@ -1750,3 +1750,39 @@ Set-Location frontend
 - 前端 TypeScript、全量 ESLint 与 Next.js 16.2.10 production build 串行通过；
 - 数据库中非零 Metadata Revision 为 0 后执行 `0018 -> 0017 -> 0018` 往返成功，
   重复 `upgrade head` 成功；Alembic Current 与 Head 均为 `20260731_0018`。
+
+### M7 Server 私有资料上传
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\backend\.venv\Scripts\python.exe -m unittest `
+  backend.tests.test_m7_server_private_document_ingestion -v
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -q
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini current
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini heads
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini upgrade head
+
+Set-Location frontend
+& '<工作区 Node 绝对路径>' node_modules/typescript/bin/tsc --noEmit
+& '<工作区 Node 绝对路径>' node_modules/eslint/bin/eslint.js .
+& '<工作区 Node 绝对路径>' node_modules/next/dist/bin/next build
+```
+
+结果：
+
+- 新增 10 项真实 PostgreSQL/HTTP 专用测试全部通过：新建与精确重试、跨 Project 和
+  Viewer 拒绝、对象写后撤权、Audit 故障回滚、底层对象错误脱敏、历史 Asset ID 去重
+  回映射、Local/错误 S3 Scope 拒绝，以及复用 Published Source ID 上传新内容时
+  409 且旧 Source/Current Snapshot 不变；
+- Local M2 `ingest()` 继续保留原接口，并新增 Asset 去重实际 ID 回映射回归；完整后端
+  回归 699 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- HTTP 成功响应新增 `created`：新 Snapshot 为 `true`，完全相同的不可变重试为
+  `false`；响应不含 Hash、对象位置或 Provider 错误；
+- Server UI 在独立组件中提供可见 Label、格式/25 MiB 提示、只读权限提示、选中文件
+  摘要、加载和就地错误反馈；Local Knowledge 组件树不变；
+- 前端 TypeScript、全量 ESLint 与 Next.js 16.2.10 production build 全部通过；
+- 本切片不修改 Schema；Alembic Current/Head 均为 `20260731_0018`，连续两次
+  `upgrade head` 成功；`pip check` 无损坏依赖；
+- 测试使用内存 Fake ObjectStore 和测试 DOCX，不调用生产对象供应商、真实客户资料或
+  外部模型；生产 S3/恢复演练仍属于 M7 External Gate。

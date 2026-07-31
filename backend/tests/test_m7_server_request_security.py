@@ -179,7 +179,6 @@ class ServerRequestSecurityTests(unittest.TestCase):
     def test_unmigrated_server_routes_fail_closed(self) -> None:
         blocked_knowledge_routes = (
             ("POST", "/api/knowledge/{project}/wordpress/sync"),
-            ("POST", "/api/knowledge/{project}/sources/upload"),
             ("POST", "/api/knowledge/{project}/research-runs"),
             (
                 "POST",
@@ -200,6 +199,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 self.assertFalse(
                     server_knowledge_route_ready(method, path)
                 )
+        self.assertTrue(
+            server_knowledge_route_ready(
+                "POST",
+                "/api/knowledge/{project}/sources/upload",
+            )
+        )
         self.assertTrue(
             server_knowledge_route_ready(
                 "GET",

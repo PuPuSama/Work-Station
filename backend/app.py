@@ -199,6 +199,9 @@ from services.oidc_login import (
 from services.project_directory import PostgresProjectDirectory
 from services.project_memberships import PostgresProjectMembershipService
 from services.server_project_metadata import PostgresServerProjectMetadata
+from services.server_private_document_ingestion import (
+    PostgresServerPrivateDocumentIngestion,
+)
 from services.team_administration import PostgresTeamAdministrationService
 from services.workspace_users import PostgresWorkspaceUserService
 from services.server_auth import (
@@ -365,6 +368,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_object_service",
         None,
     )
+    previous_server_private_document_ingestion = getattr(
+        application.state,
+        "server_private_document_ingestion",
+        None,
+    )
     previous_server_project_catalog = getattr(
         application.state,
         "server_project_catalog",
@@ -462,6 +470,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_metadata = None
     application.state.server_project_memberships = None
     application.state.server_project_object_service = None
+    application.state.server_private_document_ingestion = None
     application.state.server_project_catalog = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
@@ -571,6 +580,13 @@ async def app_lifespan(application: FastAPI):
                         server_engine
                     ),
                     access=server_access,
+                )
+            )
+            application.state.server_private_document_ingestion = (
+                PostgresServerPrivateDocumentIngestion(
+                    server_engine,
+                    store=server_object_store,
+                    bucket=object_settings.bucket,
                 )
             )
             rediscovery_handler = ServerProductRediscoveryHandler(
@@ -809,6 +825,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_object_service = (
                 previous_server_project_object_service
+            )
+            application.state.server_private_document_ingestion = (
+                previous_server_private_document_ingestion
             )
             application.state.server_project_catalog = (
                 previous_server_project_catalog
@@ -1062,6 +1081,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_object_service = (
             previous_server_project_object_service
+        )
+        application.state.server_private_document_ingestion = (
+            previous_server_private_document_ingestion
         )
         application.state.server_project_catalog = (
             previous_server_project_catalog
