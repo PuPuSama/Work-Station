@@ -646,7 +646,7 @@ project_prompt_heads = sa.Table(
         name="ck_project_prompt_heads_identity_nonempty",
     ),
     sa.CheckConstraint(
-        "kind IN ('outline', 'article', 'review')",
+        "kind IN ('outline', 'article', 'review', 'humanize')",
         name="ck_project_prompt_heads_kind",
     ),
     sa.CheckConstraint(
@@ -696,7 +696,7 @@ project_prompt_versions = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.CheckConstraint(
-        "kind IN ('outline', 'article', 'review')",
+        "kind IN ('outline', 'article', 'review', 'humanize')",
         name="ck_project_prompt_versions_kind",
     ),
     sa.CheckConstraint(
@@ -773,7 +773,7 @@ project_prompt_defaults = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.CheckConstraint(
-        "kind IN ('outline', 'article', 'review')",
+        "kind IN ('outline', 'article', 'review', 'humanize')",
         name="ck_project_prompt_defaults_kind",
     ),
     sa.CheckConstraint(

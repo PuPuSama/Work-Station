@@ -149,12 +149,12 @@
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
-  调用 fail closed；产品重新发现、标题、大纲、正文初稿、链接恢复和 SEO Review
-  生成已有独立
+  调用 fail closed；产品重新发现、标题、大纲、正文初稿、自动 Humanize、链接恢复和
+  SEO Review 生成已有独立
   Project-scoped PostgreSQL Runner，
   其余通用 Batch/Worker 尚未接线；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery/titles/outline/article/restore_links/seo_review`，公开
+  只展示 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`，公开
   DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
@@ -189,7 +189,12 @@
   自动跳过 Humanize/终检的隐式捷径；
 - 已接通人工 Humanized Article 保存命令：客户端只提交 Revision 与有界 Markdown，
   服务端验证结构和不可变事实、追加 `external_manual` Version、进入
-  `humanized_ready` 并清空旧下游；自动 Humanize Job 仍因本地 Prompt 文件依赖保持关闭；
+  `humanized_ready` 并清空旧下游；
+- 已接通 Project-scoped 自动 Humanize Job：客户端只提交 Revision；服务端要求显式
+  Project `humanize` Default Prompt，入队固定精确 Prompt Version 与源文章 Hash，
+  Claim/Handler 两阶段要求 `article.edit`；Provider 与提交变换分别执行结构/事实门禁，
+  成功追加 `initial/rehumanized` 来源的 Humanized Version。Server 不读取本地
+  `humanize_prompt_path`、SQLite Prompt 或 System 回退，也不注入 Published Context；
 - 已接通 Server Delivery ZIP：服务端只读取 Task 已绑定且逐项复核的文章 DOCX、
   `D.docx`、Prepared WebP 和已确认终审截图，在内存生成确定性扁平 ZIP；Task 只保存
   私有 `delivery_zip` Asset 身份，通用 Viewer 下载隐藏，专用下载重新授权；
@@ -214,7 +219,7 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让二十三条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让二十四条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
@@ -261,9 +266,10 @@
 - 已新增旧 SQLite Prompt 当前 Snapshot 的显式一次性导入：保留 Prompt ID、当前
   Version、Active/Archived 与 Default 精确版本，导入后在同一事务复核内容摘要并写
   安全 Audit；非空差异目标拒绝覆盖，旧库未保存的历史 Version 不会被伪造；
-- Outline/Article Worker 已消费精确 PostgreSQL Prompt Snapshot；旧 Prompt API 在
-  Server Mode 仍继续关闭，Review Worker 尚未接线，且 Humanize/Review/Link 等后处理
-  Operation 仍未迁移，不能把正文初稿完成描述成整条生成链已迁移；
+- Outline/Article/Humanize/SEO Review Worker 已消费精确 PostgreSQL Prompt Snapshot；
+  旧 Prompt API 在 Server Mode 仍继续关闭。Link Restore 使用独立 checked-in Template；
+  这些后处理入口已经迁移，但未迁移的其余 Task/Job 写路径仍阻止整条服务器工作流被
+  描述为已完成；
 - 已接通 Project-scoped Server Prompt HTTP：Viewer 可读目录，Editor 可创建、追加版本、
   归档/恢复和切换精确 Default；严格 Body 与路由白名单不允许客户端提交 Actor、Role、
   Status 或内容 Hash；旧 SQLite Prompt API 仍不在 Server Mode 开放；

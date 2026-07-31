@@ -53,6 +53,7 @@
 | 初稿 AI 截图 | `POST .../checks/initial-ai/screenshot` | `article.review` | 私有 Initial PNG Asset + CAS + Audit | Server Ready |
 | 初稿 AI 确认 | `PUT .../checks/initial-ai` | `article.review` | Initial Article Hash 绑定 + CAS + Audit | Server Ready |
 | 保存人工审阅 Humanized Article | `PUT .../humanized-article` | `article.edit` | 结构/事实门禁 + Version + CAS + Audit | Server Ready |
+| 自动生成 Humanized Article | `POST .../humanize`、`GET .../humanize/jobs/{job_id}` | `article.edit` | PostgreSQL Job + Project Humanize Prompt Version + Source Article Hash + 双重确定性门禁 + CAS/Audit | Server Ready |
 | 最终 AI 截图 | `POST .../checks/final-ai/screenshot` | `article.review` | 私有 PNG Asset + CAS + Audit | Server Ready |
 | 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
 | 恢复首稿链接 | `POST .../restore-links`、`GET .../restore-links/jobs/{job_id}` | `article.edit` | PostgreSQL Job + Template/Article Hash + 确定性校验 + CAS/Audit | Server Ready |
@@ -76,7 +77,6 @@
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
-| Humanize Job | Local TaskStore + LLM | Project Job | 仍需正式 Server Prompt Snapshot/Provider；SEO Review 全闭环已迁移 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
@@ -88,11 +88,11 @@
 | `titles` | Project-scoped、固定 Task Revision/Template Hash/Published Chunk ID | Project Registry，只写候选 | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `outline` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | Project Registry，只写 Review Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `article` | Project-scoped、固定 Task Revision/Prompt Version/目标字数/Published Chunk ID | Project Registry，只写 Raw/Initial Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
+| `humanize` | Project-scoped、固定 Task Revision/Project Humanize Prompt Version/Source Article Hash | 共享 Project Registry；Provider 产候选，提交前再次确定性校验并写 Humanized Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `restore_links` | Project-scoped、固定 Task Revision/Template Hash/Initial 与 Humanized Hash/链接数 | Project Registry；模型只产候选，确定性校验后写 Linked Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `seo_review` | Project-scoped、固定 Task Revision/Initial Article Hash/Prompt Version/System Template Hash/Published Chunk ID | 共享 Lifecycle + Operation-specific Enqueue/Handler；只追加 Open Review Run | `article.review` | `article.review` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
-| `humanize` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `knowledge_research` | Local Research Queue | Local Runner | 无完整 Server 链 | 无完整 Server 链 | Local Only |
 
 不能因为 `PostgresJobQueue` 支持任意 Operation 字符串，就把某个 Operation 标成已迁移。
@@ -123,11 +123,13 @@ Prompt/Chunk 漂移、撤权或 Task CAS 冲突均 fail closed，不生成 mock�
 都使 Job 失败，不补 mock、不写本地 Artifact。成功追加 Raw/Initial Version 并进入
 `draft_ready`，但不会自动确认 AI 检查、Humanize、链接、图片或交付。
 
-人工 `PUT .../humanized-article` 与自动 `humanize` Job 是两个边界：前者只接受 Revision
-和有界 Markdown，服务端复用结构、数字事实、FAQ、表格、列表与必须短语校验，成功追加
-`external_manual` Version 并进入 `humanized_ready`；它不读取本地 Prompt。自动 Job
-仍依赖 `humanize_prompt_path` 外部文件，在正式 Prompt Snapshot 或其他服务器准源接线前
-保持 Local Only。
+人工 `PUT .../humanized-article` 与自动 `POST .../humanize` 是两个边界：前者接受
+Revision 和编辑者已审阅的有界 Markdown，追加 `external_manual` Version；自动 Job
+只接受 Revision，服务端要求显式 Project `humanize` Default，固定精确 Prompt Version
+与源文章 Hash，两阶段要求 `article.edit`。自动 Provider 产出候选后，提交变换再次独立
+执行结构、数字事实、FAQ、表格、列表与必须短语校验，再追加 `initial/rehumanized`
+来源的 Humanized Version。Server 不读取 `humanize_prompt_path`、SQLite Prompt 或
+System 回退，也不注入 Published Context；没有 Default 时在创建 Job 前 fail closed。
 
 `restore_links` 已从该 Local 组合中拆出。Server Enqueue 只接受 Revision，并固定
 checked-in Template Hash、Initial/Humanized Article Hash、来源链接数和 Final Check
@@ -147,7 +149,7 @@ Preview 并匹配 SHA-256，Change/Apply/Complete 使用 Revision CAS 与安全 
 ## 6. 已完成闭环：Project Job Control
 
 已为迁移完成的
-`product_rediscovery/titles/outline/article/restore_links/seo_review` 增加：
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 增加：
 
 ```text
 GET  /api/projects/{project}/batches
@@ -190,8 +192,8 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
 16. `article` Job 是否固定 Prompt Version、目标字数和 Published Chunk ID，只写
     Raw/Initial Draft，并在结构错误时失败而不补 mock 或触发下游阶段？
 17. Prompt Default 是否绑定精确不可变 Version，而不是只指向会漂移的可变正文？
-18. Server Outline/Article Worker 接线后，旧 Local Prompt API 是否仍保持关闭，且 Worker
-    只读取 PostgreSQL 不可变 Prompt Version、不混用 SQLite Prompt？
+18. Server Outline/Article/Humanize Worker 接线后，旧 Local Prompt API 是否仍保持
+    关闭，且 Worker 只读取 PostgreSQL 不可变 Prompt Version、不混用 SQLite Prompt？
 19. SQLite Prompt 是否只通过显式一次性导入进入指定 Project，且非空差异目标不会被
     覆盖、旧库未保存的历史 Version 不会被伪造？
 20. `seo_review` Job 是否只接受 Revision，并固定 Initial Article、Review Prompt
@@ -206,3 +208,9 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     Hash 门禁，并拒绝 Body 注入 Review/Change ID？
 25. Apply 是否仍要求 `article.edit` 和精确 Preview Hash，而 Complete 只允许没有
     Accepted Change 的 Open Run？
+26. `humanize` Job 是否只接受 Revision、要求显式 Project Default，并固定 Prompt
+    Version 与源文章 Hash，不读取 `humanize_prompt_path` 或回退 System Prompt？
+27. Humanize Provider 与提交变换是否分别执行结构/事实门禁，且自动与人工入口仍保留
+    独立 Version 来源和事务边界？
+28. Humanize 的 Prompt/Article/Revision 漂移、执行前撤权、非法输出或 Audit/CAS
+    故障是否都不会留下部分 Humanized Version 或泄露正文/Prompt/Hash？

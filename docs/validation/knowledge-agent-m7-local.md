@@ -3,7 +3,7 @@
 - 日期：2026-07-31
 - 分支：`feature/knowledge-agent-m7`
 - 基线：`cc4bbf2 feat: add M6 retrieval evaluation framework`
-- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL、私有对象存储与 append-only 审计底座
+- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL、私有对象存储、Project Prompt 与 append-only 审计底座
 
 ## 环境
 
@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260731_0015`
+- Alembic Head：`20260731_0016`
 
 ## 已通过验证
 
@@ -521,7 +521,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 二十三条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+- 本切片验收时的二十三条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
   initial-ai-screenshot/initial-ai-check/humanized-update/products/section/images/docx/tdk/final-ai-screenshot/
   final-ai-check/link-restoration/seo-review-settings/seo-review-generation/
   seo-review-change/seo-review-apply/seo-review-complete/delivery-package Action；
@@ -1119,8 +1119,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   不变；
 - 成功追加 `humanized/external_manual` Version、进入 `humanized_ready` 并清空终检、
   Link、Image 与 Delivery 下游；Audit 只含字数，不含正文；
-- Viewer、跨 Project、旧 Revision 与 Local Mode fail closed；自动 `humanize` Job
-  仍因 `humanize_prompt_path` 本地文件依赖保持 Local Only；
+- Viewer、跨 Project、旧 Revision 与 Local Mode fail closed；本切片验收时自动
+  `humanize` 仍为 Local Only，随后完成的 Server Job 见“Server Humanize Job”一节；
 - 完整后端回归 631 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
   TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
@@ -1155,8 +1155,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   恢复链接数；
 - Template/Article 漂移、跨 Project、Viewer、Claim 后撤权、Audit 失败和 Local Mode
   均 fail closed；撤权发生在 Provider 前，Audit 失败完整回滚 Revision/Linked Version；
-- 自动 `humanize` Job 仍因外部 `humanize_prompt_path` 保持 Local Only；本次只迁移
-  Link Restore，不扩大到 SEO Review 或其他本地 Operation。
+- 本 Link Restore 切片验收时自动 `humanize` 仍为 Local Only；随后完成的独立 Server
+  Humanize Job 见后续记录，本段不作为当前状态。
 - 完整后端回归 641 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
   TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
@@ -1267,6 +1267,56 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   production build、ESLint 与 TypeScript 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
 
+### M7 Server Humanize Job
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_humanize_generation `
+  tests.test_m7_server_project_prompts.ServerProjectPromptTests.test_humanize_prompt_requires_one_article_placeholder `
+  tests.test_m7_server_project_prompts.ServerProjectPromptTests.test_schema_exposes_prompt_constraints_and_indexes `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_humanize_uses_pinned_project_prompt `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_humanize_requires_explicit_project_default `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_humanize_worker_rejects_source_article_drift `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_humanize_prompt_resolution_errors_are_sanitized `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_humanize_audit_failure_rolls_back_task `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_humanize_worker_reauthorizes_before_provider_call `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_request_security.ServerRequestSecurityTests.test_unmigrated_server_routes_fail_closed `
+  tests.test_m7_server_job_control.ServerJobControlTests.test_public_projection_is_scoped_and_omits_private_fields `
+  tests.test_m7_server_job_control.ServerJobControlTests.test_humanize_control_requires_edit_permission `
+  tests.test_m7_server_task_commands `
+  tests.test_m7_deployment_readiness `
+  tests.test_m7_object_orphan_reconciliation.ObjectOrphanReconciliationTests.test_schema_has_project_fk_checks_index_and_current_head
+```
+
+结果：
+
+- 28 个 Humanize/Prompt/Route/Job Control/Head 定向测试全部通过；
+- `POST /api/projects/{project}/tasks/{task_id}/humanize` 只接受 Revision；GET 只公开
+  Job 状态，额外 Prompt/Article/Actor 字段返回 422，Viewer、跨 Project 与 Local Mode
+  fail closed；
+- 新增不可变 Project Prompt Kind `humanize`，内容必须恰好包含一个 `{{ARTICLE}}`；
+  Enqueue 只接受显式 Project Default，无 Default 返回 409 且不创建 Job，不回退
+  System、SQLite 或 `humanize_prompt_path`；
+- Enqueue 固定 Prompt ID/Version/Content Hash、Source Article Hash 与 Task Revision；
+  Worker Claim/Handler 两阶段要求 `article.edit`，执行前复核全部身份；
+- Provider 只接收固定 Prompt 和源文章，不读取 Published Context；Provider 错误和 Prompt
+  Store 错误均脱敏。Provider 校验通过后，提交变换再次独立验证结构、数字事实、FAQ、
+  表格、列表和必须短语；
+- 成功追加 `humanized` Version、进入 `humanized_ready`；Rehumanize 使用身份完整的
+  当前 Humanized Article 并清空旧终检/Link/Image/Delivery 下游。自动与人工
+  `external_manual` 入口保持独立；
+- Source Article 漂移、执行前撤权、非法 Provider 输出、Task CAS 或 Audit 故障不留下
+  Humanized Version 或 Revision 部分写入；公开 Job/Audit 不含正文、Prompt 或 Hash；
+- Project-scoped Job Control 已显式包含 `humanize`，取消/重试要求 `article.edit`；
+- Alembic Current/Head 为 `20260731_0016`，重复 `upgrade head` 成功；三张 Prompt 表的
+  Kind CHECK 均包含 `humanize`。已有 Humanize Prompt 历史时，`0016 -> 0015` 会按设计
+  拒绝收窄 CHECK 并事务回滚，不删除不可变历史来迁就降级；
+- 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js production build、ESLint 与 TypeScript 串行复核全部通过。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell
@@ -1366,17 +1416,18 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   标题/大纲/正文初稿生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
   私有图片准备和文章 DOCX 导出/下载，并为
-  `product_rediscovery/titles/outline/article/restore_links/seo_review` 提供窄范围
+  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 提供窄范围
   Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery/titles/outline/article/restore_links/seo_review`
+  Task 命令和 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`
   Job 为单写，其余路径尚未成为 PostgreSQL
   准源；
-- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲、正文初稿、链接
-  恢复与 SEO Review 生成已有项目级 PostgreSQL Runner 和两阶段授权，Enqueue、终态
-  Audit 与有界 drain/join 报告已完成；这六个 Operation 的 Project-scoped 列表、取消和
+- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲、正文初稿、
+  Humanize、链接恢复与 SEO Review 生成已有项目级 PostgreSQL Runner 和两阶段授权，
+  Enqueue、终态 Audit 与有界 drain/join 报告已完成；这七个 Operation 的
+  Project-scoped 列表、取消和
   重试也已完成；但其他 Operation 的
   Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与

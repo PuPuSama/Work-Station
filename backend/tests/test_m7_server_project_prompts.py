@@ -433,6 +433,41 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertNotIn("First", str(self.audit.events))
         self.assertNotIn("Second", str(self.audit.events))
 
+    def test_humanize_prompt_requires_one_article_placeholder(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ServerProjectPromptError,
+            "exactly one",
+        ):
+            self.service.create(
+                self.editor,
+                name="Invalid humanizer",
+                kind="humanize",
+                content="Rewrite without an article placeholder.",
+            )
+        created = self.service.create(
+            self.editor,
+            name="Project humanizer",
+            kind="humanize",
+            content="Rewrite safely.\n\n{{ARTICLE}}",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="humanize",
+            prompt_id=created.prompt_id,
+        )
+
+        resolved = self.service.resolve(
+            self.viewer,
+            kind="humanize",
+            selection="project_default",
+        )
+
+        self.assertEqual(resolved.prompt_id, created.prompt_id)
+        self.assertEqual(resolved.kind, "humanize")
+        self.assertEqual(resolved.content.count("{{ARTICLE}}"), 1)
+
     def test_archive_clears_default_without_deleting_versions(self) -> None:
         created = self.service.create(
             self.editor,
@@ -739,18 +774,26 @@ class ServerProjectPromptTests(unittest.TestCase):
                 "project_prompt_defaults",
             }.issubset(inspector.get_table_names())
         )
-        head_checks = {
-            item["name"]
+        head_check_rows = {
+            item["name"]: str(item.get("sqltext") or "")
             for item in inspector.get_check_constraints(
                 "project_prompt_heads"
             )
         }
-        version_checks = {
-            item["name"]
+        version_check_rows = {
+            item["name"]: str(item.get("sqltext") or "")
             for item in inspector.get_check_constraints(
                 "project_prompt_versions"
             )
         }
+        default_check_rows = {
+            item["name"]: str(item.get("sqltext") or "")
+            for item in inspector.get_check_constraints(
+                "project_prompt_defaults"
+            )
+        }
+        head_checks = set(head_check_rows)
+        version_checks = set(version_check_rows)
         head_foreign_keys = {
             item["name"]
             for item in inspector.get_foreign_keys(
@@ -782,6 +825,16 @@ class ServerProjectPromptTests(unittest.TestCase):
             "ck_project_prompt_versions_kind",
             version_checks,
         )
+        self.assertIn(
+            "ck_project_prompt_defaults_kind",
+            default_check_rows,
+        )
+        for expression in (
+            head_check_rows["ck_project_prompt_heads_kind"],
+            version_check_rows["ck_project_prompt_versions_kind"],
+            default_check_rows["ck_project_prompt_defaults_kind"],
+        ):
+            self.assertIn("humanize", expression.lower())
         self.assertIn(
             "fk_project_prompt_heads_current_version",
             head_foreign_keys,

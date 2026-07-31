@@ -32,7 +32,7 @@ from services.audit_log import (
 from services.server_request_security import AuthorizedProjectRequest
 
 
-PromptKind = Literal["outline", "article", "review"]
+PromptKind = Literal["outline", "article", "review", "humanize"]
 PromptStatus = Literal["active", "archived"]
 PromptSource = Literal["system", "project_default", "library"]
 
@@ -70,7 +70,7 @@ def _system_snapshot(kind: PromptKind) -> PromptSnapshot:
 
 
 def _validate_kind(kind: str) -> PromptKind:
-    if kind not in {"outline", "article", "review"}:
+    if kind not in {"outline", "article", "review", "humanize"}:
         raise ServerProjectPromptError("prompt kind is unsupported")
     return cast(PromptKind, kind)
 
@@ -89,6 +89,16 @@ def _required_text(
     if len(normalized) > max_length:
         raise ServerProjectPromptError(f"{field_name} is too long")
     return normalized
+
+
+def _validate_content_contract(
+    kind: PromptKind,
+    content: str,
+) -> None:
+    if kind == "humanize" and content.count("{{ARTICLE}}") != 1:
+        raise ServerProjectPromptError(
+            "humanize prompt must contain exactly one {{ARTICLE}} placeholder"
+        )
 
 
 class PostgresProjectPromptService:
@@ -241,6 +251,7 @@ class PostgresProjectPromptService:
             "content",
             max_length=40000,
         )
+        _validate_content_contract(kind, cleaned_content)
         prompt_id = uuid.uuid4().hex
         try:
             with self._engine.begin() as connection:
@@ -332,6 +343,10 @@ class PostgresProjectPromptService:
                     raise ServerProjectPromptConflict(
                         "project prompt version conflict"
                     )
+                _validate_content_contract(
+                    _validate_kind(str(current["kind"])),
+                    cleaned_content,
+                )
                 next_version = expected_version + 1
                 connection.execute(
                     project_prompt_versions.insert().values(

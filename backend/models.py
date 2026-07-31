@@ -160,7 +160,7 @@ class TdkMetadata(WorkflowModel):
     prompt_version: str = "tdk-v1"
 
 
-PromptKind = Literal["outline", "article", "review"]
+PromptKind = Literal["outline", "article", "review", "humanize"]
 
 
 class PromptLibraryItem(WorkflowModel):

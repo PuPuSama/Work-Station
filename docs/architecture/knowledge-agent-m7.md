@@ -124,6 +124,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增人工 Humanized Article 保存命令：`PUT .../humanized-article` 只接受 Revision
   与有界 Markdown，服务端校验标题层级、数字事实、FAQ、表格、列表和必须短语，追加
   `external_manual` Version 并进入 `humanized_ready`；不读取本地 Humanize Prompt；
+- 新增 Project-scoped 自动 Humanize Job：`POST .../humanize` 只接受 Revision，
+  服务端要求显式配置的 Project `humanize` Default Prompt，并固定精确 Prompt ID +
+  Version 与源文章 Hash；Worker 两阶段要求 `article.edit`，提交前再次执行结构/事实
+  门禁，成功追加 `humanized` Version；不读取 `humanize_prompt_path`，也不回退 System/
+  SQLite Prompt；
 - 新增 Project-scoped Link Restore Job：`POST .../restore-links` 只接受 Revision，
   入队固定 checked-in Template Hash、Initial/Humanized Article Hash 和来源链接数；
   Worker 在两阶段重授权后复核 Final AI Check 身份，模型只产生候选，只有链接集合完全
@@ -144,7 +149,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 二十三条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 二十四条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -206,6 +211,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Default 的精确版本；旧库没有不可变历史行，因此只迁移可证明存在的当前 Snapshot，
   不伪造早期版本。目标非空且摘要不同会拒绝覆盖，重复执行仅在内容完全一致时返回
   `already_matched`；导入、校验和不含正文/名称/Hash 的 Audit 在同一事务。
+- Alembic `20260731_0016` 把 `humanize` 加入 Project Prompt Head、Version 与 Default
+  的数据库 Kind CHECK；服务层另外要求内容恰好包含一个 `{{ARTICLE}}`。降级时若仍有
+  Humanize Prompt 历史，PostgreSQL 在事务内拒绝收窄 CHECK，避免删除不可变版本来迁就
+  旧 Schema。
 - `AuthorizedPostgresJobQueue` 在读取 Request Payload 前只检查 Job ID、Operation 和
   Requester，撤权或无 Requester 的 Job 直接变为通用 conflict；
 - `ReauthorizingJobHandler` 在进入业务 Handler 前再次授权，覆盖 Claim 后撤权竞态；
@@ -218,7 +227,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
   当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
 - 对象存储未配置时，产品发现历史 Job 状态仍可读取但新发现 Job 返回 503；Outline
   Provider 未配置时新生成 Job 返回 503。应用重启按各自配置只恢复
-  `product_rediscovery/titles/outline/article/restore_links/seo_review` 的 Active
+  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 的 Active
   PostgreSQL Job。
 - 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
   释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
@@ -236,7 +245,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
   组织级确认入口；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前
-  `product_rediscovery/titles/outline/article/restore_links/seo_review` 六条
+  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 七条
   Operation-specific Job 入口使用
   PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
@@ -467,6 +476,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/oidc_login.py` | Authorization Code + PKCE 登录事务 | HMAC State Cookie、Nonce、PKCE Verifier、本地 Redirect、只输出 Actor Session |
 | `backend/migrations/versions/20260731_0014_workspace_invitations.py` | 一次性 Workspace Invitation Schema 准源 | Token 只存 Hash、复合租户 FK、状态/过期约束、每 User/Issuer 单 Pending、可升降级 |
 | `backend/migrations/versions/20260731_0015_project_prompt_snapshots.py` | Project Prompt Snapshot Schema 准源 | Head/不可变 Version/精确 Default 指针、复合 Project/User FK、Append-only Trigger |
+| `backend/migrations/versions/20260731_0016_humanize_prompt_kind.py` | Server Humanize Prompt Kind 迁移 | 三张 Prompt 表同步 Kind CHECK、保留不可变历史、含 Humanize 数据时降级 fail closed |
 | `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
 | `backend/services/server_project_prompt_migration.py` | SQLite Prompt 当前 Snapshot 一次性导入 | 显式 Customer 到 Project 映射、版本/状态/Default 保留、摘要复核、差异目标不覆盖、导入与安全 Audit 同事务 |
 | `backend/server_prompt_http.py` | Project Prompt 目录、创建、版本、Active 与 Default HTTP | Project Scope、严格 Body、统一 403/404/409/422/503、公开响应不含内部 Actor/Hash |
@@ -501,6 +511,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_title_generation.py` | Project Title Provider、模板身份、Handler 与 Queue Registry | 系统模板 Hash/Published Chunk 身份固定、完整候选门禁、无本地文件与 mock 回退、两阶段授权、候选 CAS/Audit、有界停机 |
 | `backend/services/server_article_generation.py` | Project Article Provider、Handler、Draft 变换与 Queue Registry | Prompt Version/目标字数/Published Chunk 身份固定、结构门禁、Raw/Initial Version、无本地文件与 mock 回退、两阶段授权、正文 CAS/Audit、有界停机 |
 | `backend/services/server_humanized_update.py` | 人工审阅 Humanized Markdown 的纯 Task 变换 | 结构/数字/FAQ/表格/列表/必须短语门禁、Version 与下游失效；不知道 HTTP/RBAC/PostgreSQL/本地 Prompt |
+| `backend/services/server_humanize_generation.py` | Project Humanize Provider、Handler、Task 变换与 Queue Registry | 显式 Project Default、精确 Prompt Version/源文章 Hash、无本地/System 回退、Provider 与提交双重校验、两阶段授权、CAS/Audit、有界停机 |
 | `backend/services/server_link_restoration.py` | Project Link Restore Provider、Handler、确定性提交变换与 Queue Registry | Template/Initial/Humanized/Final Check 身份固定、模型候选与提交分离、精确链接/可见正文门禁、两阶段授权、CAS/Audit、有界停机 |
 | `backend/services/server_seo_review_settings.py` | SEO Review 设置的纯 Task 变换 | Keyword 规范化/去重/长度门禁与已解析 Review Prompt 身份；不知道 HTTP/RBAC/PostgreSQL/Provider |
 | `backend/services/server_project_job_registry.py` | 单 Operation 的共享 Project Runner 生命周期与公开 Job 投影 | 只抽取 Runner/Queue/Stop/Get 样板；业务 Enqueue、权限、私有 Request 与 Handler 仍由各 Operation 定义 |
@@ -766,7 +777,7 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
 已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
-`product_rediscovery/titles/outline/article/restore_links/seo_review` 已有独立
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 已有独立
 PostgreSQL Job API/Runner。
 其余正文后处理写入、通用 Batch 和 Worker 尚未接线。因此
 不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
@@ -784,7 +795,7 @@ Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一�
 Lifespan 明确失败且不释放数据库 Engine。
 
 这套语义当前接到
-`product_rediscovery/titles/outline/article/restore_links/seo_review`。仍没有全部 Operation
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`。仍没有全部 Operation
 的 Runner 和正式环境排空演练，所以 `worker_reauthorizes` 与
 `postgres_job_single_write` 仍保持 false，不能把单条 Operation 的证据扩写成整体
 Worker Cutover 已完成。
@@ -1054,7 +1065,8 @@ GET /api/projects/{project}/tasks/{task_id}/checks/initial-ai/screenshot/downloa
 确认要求当前 Initial Article 非空、Hash 一致且 confirmed 时已有初检截图；AICheck
 绑定精确 Article Hash，Task CAS 与不含 Report/Score 值的 Audit 同事务。Server 只推进
 到 `initial_ai_checked`，不会按 Local `ai_pass_threshold` 自动复制正文、伪造终检或跳过
-Humanize。后续 Humanize/Skip Policy 迁移必须使用显式命令和独立证据。
+Humanize。自动 Humanize 已由下节迁移为显式 Project Job；Skip Policy 仍需独立命令和
+证据，不能重新引入基于分数的隐式跳过。
 
 #### D1.4 已实现：Server 最终 AI-rate Review 与截图
 
@@ -1102,6 +1114,49 @@ report，并以 `article_hash` 防止上游正文修改后继续沿用旧确认�
 留下内容寻址截图 orphan，继续进入延迟对账。Delivery ZIP 与 Delivery Console 已由
 后续两节迁移。
 
+#### D1.4a 已实现：Server Humanize
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/humanize
+body: { revision }
+  -> project.view + article.edit
+  -> Task Action/Revision 与源文章自身 Hash 门禁
+  -> 只解析显式 Project Default humanize Prompt
+  -> 固定 Prompt ID + Version + Content Hash + Source Article Hash
+  -> PostgreSQL Job(requested_by_user_id)
+  -> Claim 前与 Handler 前重新授权 article.edit
+  -> 加载精确不可变 Prompt Version，恰好替换一个 {{ARTICLE}}
+  -> Provider 产生候选；Provider 层先做结构/事实校验
+  -> 提交变换再次独立校验结构、数字、FAQ、表格、列表和必须短语
+  -> Humanized Version + humanized_ready + Task CAS + Audit
+
+GET /api/projects/{project}/tasks/{task_id}/humanize/jobs/{job_id}
+  -> project.view
+  -> 只返回公开 Job 状态，不返回 Request/Requester/Prompt/Article/Error
+```
+
+自动与人工 Humanize 是两个入口、同一业务不变量。人工
+`PUT .../humanized-article` 接收编辑者已经审阅的 Markdown，版本
+`source_kind=external_manual`；自动 Job 只消费入队时固定的 Project Prompt 和源文章，
+版本来源为 `initial` 或 `rehumanized`。初次生成读取 `initial_article`；仅当 Task 已在
+`humanized_ready/final_ai_checked` 且现有 Humanized Article 身份完整时，重新 Humanize
+才读取现有 Humanized Article。两者最终都通过同一结构/事实门禁并清空终检之后的下游。
+
+`humanize` Prompt 是独立的不可变 Project Prompt Kind，内容必须恰好包含一个
+`{{ARTICLE}}`。没有 Project Default 时 Enqueue 返回冲突且不创建 Job；Provider 未配置
+时返回 503。Server 不读取 `humanize_prompt_path`、不解析 Local SQLite Prompt、不自动
+回退 System Prompt，也不注入 Published Context：这一阶段唯一正文输入是固定的源文章，
+Task 中的产品名、Topic/Competitor Keyword 只作为不可漂移短语门禁。
+
+Prompt Default 在入队后切换不会改变已排队 Job；精确 Version 不存在、内容 Hash 漂移、
+源文章或 Task Revision 漂移、执行前撤权、Provider 输出非法、CAS 或 Audit 失败，都不会
+留下 Humanized Version 或部分 Task 更新。公开 Job 和 Audit 只记录 Operation、Revision、
+Prompt Source/Version、字符数与是否 Rehumanize，不记录文章、Prompt 正文或 Hash。
+
+重构时可把 Outline/Article/Humanize 的 Prompt 固定与 Job Enqueue 样板抽成共享组件，
+但不得合并它们的输入策略：Outline/Article 使用 Published Context，Humanize 明确不
+使用；也不得把 Provider 的首轮校验当作提交授权，写入前的独立确定性校验必须保留。
+
 #### D1.4b 已实现：Server Link Restore
 
 ```text
@@ -1128,12 +1183,10 @@ Humanized Article 的可见正文不变。没有缺失链接时仍走同一确�
 Template、Revision、Initial/Humanized 或 Final Check 身份漂移，以及撤权、非法新增
 URL、空输出、正文变化、CAS/Audit 失败都会保留旧 Task，不产生部分 Linked Version。
 
-已有 Operation Registry 仍保留重复调度样板；SEO Review 首次把其中稳定的 Project
-Runner 生命周期抽为 `ServerProjectJobRegistry`，但只由该新 Operation 使用，避免一次
-大改同时触碰已验收链路。后续可以逐条迁移旧 Registry，但必须保持 Operation-specific
-Enqueue/Scope、私有 Request、权限映射、公开 DTO 和有界 drain 语义不变。自动
-`humanize` 仍依赖外部
-`humanize_prompt_path`，继续 Local Only，不能与已迁移的 Link Restore 合并判定。
+已有旧 Operation Registry 仍保留重复调度样板；SEO Review 首次抽出的
+`ServerProjectJobRegistry` 现同时承载 SEO Review 与 Humanize 的稳定 Runner 生命周期。
+两者仍分别保留 Operation-specific Enqueue/Scope、私有 Request、权限映射、Handler
+和公开 DTO。后续逐条迁移旧 Registry 时必须保持这些业务边界与有界 drain 语义不变。
 
 #### D1.4c 已实现：Server SEO Review 生成
 
@@ -1293,7 +1346,7 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
 分页；当前可见 Operation 是
-`product_rediscovery/titles/outline/article/restore_links/seo_review`。旧
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`。旧
 `/api/batches*` 继续 503，未迁移的 `products/rewrite_article/...` 即使误写入
 PostgreSQL 也不会出现在控制面。
 
@@ -1375,8 +1428,8 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、二十三条 Task 写操作、
-`product_rediscovery/titles/outline/article/restore_links/seo_review` 的
+身份代码链、二十四条 Task 写操作、
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
@@ -1496,7 +1549,7 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
     Requester、Operation 或 Task？
 65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
-66. `product_rediscovery/titles/outline/article/restore_links/seo_review` 以外的
+66. `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 以外的
     Operation 是否仍不出现在列表、详情、取消或
     重试接口？
 67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
@@ -1576,25 +1629,31 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      `article.edit` 与 `ACTION_UPDATE_HUMANIZED`？
 107. 标题层级、数字事实、FAQ、表格、列表或必须短语漂移时是否在 CAS 前失败且不追加
      Version/Audit？
-108. 成功是否追加 `humanized/external_manual` Version、清空下游且不读取
-     `humanize_prompt_path`，自动 Humanize Job 是否仍保持 Local Only？
-109. `restore_links` Job 是否固定 Template、Initial/Humanized Article 与 Final Check
+108. 人工保存成功是否追加 `humanized/external_manual` Version、清空下游且不读取
+     `humanize_prompt_path`？
+109. `humanize` Job 是否只接受 Revision，要求显式 Project Default，并固定精确 Prompt
+     Version 与源文章 Hash，而不回退 System/SQLite/本地文件？
+110. Humanize Provider 与提交变换是否分别校验结构、数字、FAQ、表格、列表和必须短语，
+     且 Rehumanize 只读取身份完整的当前 Humanized Article？
+111. Prompt/Article/Revision 漂移、执行前撤权、Provider、CAS 或 Audit 失败时，是否都
+     不留下部分 Humanized Version，公开 Job/Audit 是否不泄露正文、Prompt 或 Hash？
+112. `restore_links` Job 是否固定 Template、Initial/Humanized Article 与 Final Check
      身份，且 Provider 只能产生候选、不能绕过确定性 Link/Text 校验直接提交？
-110. Template/Article 漂移、撤权、非法 URL、正文变化、Audit 或 CAS 失败时，是否都
+113. Template/Article 漂移、撤权、非法 URL、正文变化、Audit 或 CAS 失败时，是否都
      保持旧 `linked_article`、Revision 和下游产物不变，公开 Job/Audit 不泄露正文或 Hash？
-111. SEO Review Settings 是否只接受关键词和 Prompt Selection，由服务器解析
+114. SEO Review Settings 是否只接受关键词和 Prompt Selection，由服务器解析
      Project `review` Snapshot，并以 CAS/Audit 保存而不接受 Prompt 正文或 Provider 字段？
-112. 关键词或 Prompt 内容是否都不进入 Audit，且 Settings 成功是否不会伪造 Review
+115. 关键词或 Prompt 内容是否都不进入 Audit，且 Settings 成功是否不会伪造 Review
      Run 或调用模型？
-113. `seo_review` Job 是否只接受 Revision，并固定 Initial Article、精确 Review
+116. `seo_review` Job 是否只接受 Revision，并固定 Initial Article、精确 Review
      Prompt Version、System Template Hash 与 Published Current Chunk ID？
-114. Server Provider 是否仍只消费注入的 Published Context，不读取本地 Customer
+117. Server Provider 是否仍只消费注入的 Published Context，不读取本地 Customer
      Context、不补 mock，且生成只追加 Open Review Run、不修改文章或自动 Apply/Complete？
-115. Prompt/Template/Article/Chunk 漂移、执行前撤权、Provider、CAS 或 Audit 失败时，
+118. Prompt/Template/Article/Chunk 漂移、执行前撤权、Provider、CAS 或 Audit 失败时，
      是否都不留下部分 Review Run，公开 Job/Audit 是否不泄露正文、Hash 或原始错误？
-116. Change/Preview/Apply/Complete 是否都从路径取得精确 Review/Change ID，并拒绝
+119. Change/Preview/Apply/Complete 是否都从路径取得精确 Review/Change ID，并拒绝
      Body 覆盖身份、旧 Revision、非 Open Run 或已漂移 Source Article？
-117. Reviewer 是否可裁决和 Complete，但 Apply 是否仍额外要求 `article.edit` 与精确
+120. Reviewer 是否可裁决和 Complete，但 Apply 是否仍额外要求 `article.edit` 与精确
      Preview Hash，且服务端必须重新构建并验证完整文章？
-118. Change/Apply/Complete 的 Task CAS 与安全 Audit 是否原子，Preview 是否只读且不把
+121. Change/Apply/Complete 的 Task CAS 与安全 Audit 是否原子，Preview 是否只读且不把
      Article、Report、Proposed Text、Review/Change ID 或 Hash 写入 Audit？

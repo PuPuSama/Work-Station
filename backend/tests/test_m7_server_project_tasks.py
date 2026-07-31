@@ -111,6 +111,14 @@ from services.server_seo_review_generation import (  # noqa: E402
     ServerSeoReviewGenerationHandler,
     ServerSeoReviewGenerationRegistry,
 )
+from services.server_humanize_generation import (  # noqa: E402
+    HumanizeGenerationUnavailable,
+    ServerHumanizeGenerationHandler,
+    ServerHumanizeGenerationRegistry,
+)
+from services.server_project_prompts import (  # noqa: E402
+    PostgresProjectPromptService,
+)
 from services.server_project_tasks import (  # noqa: E402
     ServerProjectTaskStoreFactory,
 )
@@ -331,6 +339,22 @@ class RecordingSeoReviewProvider:
             ),
             brand_name=task.brand_name,
         )
+
+
+class RecordingHumanizeProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(self, task, *, source_article, prompt_snapshot):
+        self.calls.append(
+            {
+                "task_id": task.id,
+                "source_hash": content_hash(source_article),
+                "prompt_id": prompt_snapshot.prompt_id,
+                "prompt_version": prompt_snapshot.version,
+            }
+        )
+        return source_article
 
 
 class FakeDownloadStore:
@@ -738,6 +762,30 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         )
         repository.upsert(record)
         return repository, source, candidate
+
+    def _prepare_humanize_task(
+        self,
+    ) -> tuple[PostgresTaskRepository, str]:
+        article = SERVER_ARTICLE.strip()
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "status": "initial_ai_checked",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+                "humanized_article": "",
+                "humanized_article_hash": "",
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+        return repository, article
 
     def _store_outline_context(
         self,
@@ -1781,6 +1829,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/seo-reviews/jobs/job-a",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/humanize",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/humanize/jobs/job-a",
                 ).status_code,
                 404,
             )
@@ -4525,6 +4588,460 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertNotIn(article, str(audit.events))
                 self.assertNotIn("No blocking issue.", str(audit.events))
                 self.assertFalse(local_state.exists())
+
+    def test_server_humanize_uses_pinned_project_prompt(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.strip()
+        record.update(
+            {
+                "status": "initial_ai_checked",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+            }
+        )
+        repository.upsert(record)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        prompt = PromptSnapshot(
+            prompt_id="server-humanize-v1",
+            name="Server Humanize",
+            kind="humanize",
+            content="Rewrite safely.\n\n{{ARTICLE}}",
+            version=1,
+            source="project_default",
+            captured_at="2026-07-31T00:00:00+00:00",
+        )
+        provider = RecordingHumanizeProvider()
+        audit = RecordingAuditWriter()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        registry = ServerHumanizeGenerationRegistry(
+            self.engine,
+            access=access,
+            handler=ServerHumanizeGenerationHandler(
+                self.engine,
+                provider=provider,
+                audit=audit,
+            ),
+            audit=audit,
+        )
+        self.addCleanup(registry.stop)
+        codec = ServerActorSessionCodec(b"z" * 32)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.object(
+                    PostgresProjectPromptService,
+                    "resolve",
+                    return_value=prompt,
+                ),
+                patch(
+                    "services.server_humanize_generation."
+                    "load_pinned_project_prompt",
+                    return_value=prompt,
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "z" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_humanize_generation = registry
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/humanize"
+                )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={"revision": 0, "prompt_id": "attacker"},
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(path, json={"revision": 0}).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/humanize"
+                        ),
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                queued = client.post(path, json={"revision": 0})
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertNotIn("request", public_job)
+                terminal = None
+                for _attempt in range(100):
+                    response = client.get(
+                        f"{path}/jobs/{public_job['job_id']}"
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    terminal = response.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(
+                    terminal["status"],
+                    "succeeded",
+                    terminal,
+                )
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    provider.calls[0]["prompt_id"],
+                    prompt.prompt_id,
+                )
+                stored = repository.get(self.task_a)
+                assert stored is not None
+                self.assertEqual(stored["revision"], 1)
+                self.assertEqual(stored["status"], "humanized_ready")
+                self.assertEqual(stored["humanized_article"], article)
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.humanize.queued",
+                        "article.humanized.generated",
+                        "background_job.terminal",
+                    ],
+                )
+                self.assertNotIn(article, str(audit.events))
+                self.assertFalse(local_state.exists())
+
+    def test_server_humanize_requires_explicit_project_default(
+        self,
+    ) -> None:
+        _repository, _article = self._prepare_humanize_task()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        registry = ServerHumanizeGenerationRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=None,
+        )
+        self.addCleanup(registry.stop)
+
+        with self.assertRaisesRegex(
+            JobConflict,
+            "project humanize prompt is not configured",
+        ):
+            registry.enqueue(
+                actor=ActorIdentity(self.org_a, self.user_a),
+                project_id=self.project_a,
+                task_id=self.task_a,
+                source_revision=0,
+            )
+
+        with self.engine.connect() as connection:
+            queued = connection.execute(
+                sa.select(sa.func.count())
+                .select_from(background_jobs)
+                .where(
+                    background_jobs.c.organization_id == self.org_a,
+                    background_jobs.c.project_id == self.project_a,
+                    background_jobs.c.operation == "humanize",
+                )
+            ).scalar_one()
+        self.assertEqual(queued, 0)
+
+    def test_humanize_worker_rejects_source_article_drift(
+        self,
+    ) -> None:
+        repository, article = self._prepare_humanize_task()
+        prompt = PromptSnapshot(
+            prompt_id="server-humanize-v1",
+            name="Server Humanize",
+            kind="humanize",
+            content="Rewrite safely.\n\n{{ARTICLE}}",
+            version=1,
+            source="project_default",
+            captured_at="2026-07-31T00:00:00+00:00",
+        )
+        reference = ProjectPromptReference.from_snapshot(prompt)
+        job = {
+            "operation": "humanize",
+            "organization_id": self.org_a,
+            "project_id": self.project_a,
+            "task_id": self.task_a,
+            "requested_by_user_id": self.user_a,
+            "source_revision": 0,
+            "request": {
+                **reference.private_values(),
+                "source_article_hash": content_hash(article),
+            },
+        }
+        changed = repository.get(self.task_a)
+        assert changed is not None
+        changed_article = article.replace(
+            "Keep the original evidence guidance.",
+            "Keep updated evidence guidance.",
+        )
+        changed["initial_article"] = changed_article
+        changed["initial_article_hash"] = content_hash(changed_article)
+        changed["article"] = changed_article
+        repository.upsert(changed)
+        provider = RecordingHumanizeProvider()
+        handler = ServerHumanizeGenerationHandler(
+            self.engine,
+            provider=provider,
+        )
+
+        with self.assertRaisesRegex(
+            JobConflict,
+            "source article changed",
+        ):
+            handler(job, lambda: False)
+
+        self.assertEqual(provider.calls, [])
+        persisted = repository.get(self.task_a)
+        assert persisted is not None
+        self.assertEqual(persisted["revision"], 0)
+        self.assertEqual(persisted["humanized_article"], "")
+
+    def test_humanize_prompt_resolution_errors_are_sanitized(
+        self,
+    ) -> None:
+        self._prepare_humanize_task()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        registry = ServerHumanizeGenerationRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=None,
+        )
+        self.addCleanup(registry.stop)
+        secret = "private-prompt-store-detail"
+
+        with (
+            patch.object(
+                PostgresProjectPromptService,
+                "resolve",
+                side_effect=RuntimeError(secret),
+            ),
+            self.assertRaises(
+                HumanizeGenerationUnavailable
+            ) as raised,
+        ):
+            registry.enqueue(
+                actor=ActorIdentity(self.org_a, self.user_a),
+                project_id=self.project_a,
+                task_id=self.task_a,
+                source_revision=0,
+            )
+
+        self.assertNotIn(secret, str(raised.exception))
+
+    def test_humanize_audit_failure_rolls_back_task(self) -> None:
+        repository, article = self._prepare_humanize_task()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        prompt = PromptSnapshot(
+            prompt_id="server-humanize-v1",
+            name="Server Humanize",
+            kind="humanize",
+            content="Rewrite safely.\n\n{{ARTICLE}}",
+            version=1,
+            source="project_default",
+            captured_at="2026-07-31T00:00:00+00:00",
+        )
+        reference = ProjectPromptReference.from_snapshot(prompt)
+        handler = ServerHumanizeGenerationHandler(
+            self.engine,
+            provider=RecordingHumanizeProvider(),
+            audit=FailingAuditWriter(),
+        )
+        job = {
+            "operation": "humanize",
+            "organization_id": self.org_a,
+            "project_id": self.project_a,
+            "task_id": self.task_a,
+            "requested_by_user_id": self.user_a,
+            "source_revision": 0,
+            "request": {
+                **reference.private_values(),
+                "source_article_hash": content_hash(article),
+            },
+        }
+
+        with (
+            patch(
+                "services.server_humanize_generation."
+                "load_pinned_project_prompt",
+                return_value=prompt,
+            ),
+            self.assertRaises(ServerTaskCommandUnavailable) as raised,
+        ):
+            handler(job, lambda: False)
+
+        self.assertNotIn("private audit failure", str(raised.exception))
+        persisted = repository.get(self.task_a)
+        assert persisted is not None
+        self.assertEqual(persisted["revision"], 0)
+        self.assertEqual(persisted["status"], "initial_ai_checked")
+        self.assertEqual(persisted["humanized_article"], "")
+        self.assertEqual(persisted["article_versions"], [])
+
+    def test_humanize_worker_reauthorizes_before_provider_call(
+        self,
+    ) -> None:
+        _repository, article = self._prepare_humanize_task()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="editor")
+            )
+        prompt = PromptSnapshot(
+            prompt_id="server-humanize-v1",
+            name="Server Humanize",
+            kind="humanize",
+            content="Rewrite safely.\n\n{{ARTICLE}}",
+            version=1,
+            source="project_default",
+            captured_at="2026-07-31T00:00:00+00:00",
+        )
+        reference = ProjectPromptReference.from_snapshot(prompt)
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        batch = raw_queue.create_batch(
+            "humanize",
+            [
+                {
+                    "task_id": self.task_a,
+                    "source_revision": 0,
+                    "customer": self.project_a,
+                    "topic_index": 2,
+                    "request": {
+                        **reference.private_values(),
+                        "source_article_hash": content_hash(article),
+                    },
+                }
+            ],
+            customer=self.project_a,
+            requested_by_user_id=self.user_a,
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="viewer")
+            )
+        provider = RecordingHumanizeProvider()
+        registry = ServerHumanizeGenerationRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=ServerHumanizeGenerationHandler(
+                self.engine,
+                provider=provider,
+            ),
+            audit=RecordingAuditWriter(),
+        )
+        self.addCleanup(registry.stop)
+
+        registry.start_existing()
+
+        current = None
+        for _attempt in range(100):
+            current = raw_queue.get_job(job_id)
+            if current["status"] == "conflict":
+                break
+            time.sleep(0.02)
+        assert current is not None
+        self.assertEqual(current["status"], "conflict")
+        self.assertEqual(
+            current["error"],
+            "job actor is not authorized",
+        )
+        self.assertEqual(provider.calls, [])
 
     def test_seo_review_worker_reauthorizes_before_provider_call(
         self,

@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260731_0015`；
+- `alembic_version = 20260731_0016`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -212,6 +212,8 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
 - Viewer 可解析已授权项目 Prompt，但创建/更新/归档/默认切换要求 `article.edit`；
 - 写操作在事务内重新锁定权限，Audit 故障必须同时回滚 Head/Version/Default；
 - Audit 不含 Prompt 名称、正文或 Hash；
+- `20260731_0016` 同步扩展三张表的 Kind CHECK 以支持 `humanize`；若数据库仍有
+  Humanize 历史，降级会在事务内拒绝收窄 CHECK，不允许删除不可变 Version 规避门禁；
 - Project-scoped Prompt HTTP 目录/创建/更新/Active/Default 必须通过精确路由白名单；
   Viewer 仅可读，Editor 才可写，Local Mode 返回 404；
 - 旧 SQLite Prompt 只能在冻结旧写入口后，由操作员显式调用
@@ -221,8 +223,9 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
   导入后以相同输入重跑必须得到 `already_matched=True`；
 - 目标已有任意不同 Prompt/Default 时必须停止并调查，不允许清空、覆盖或合并猜测；
   旧 SQLite 只保存当前版本，因此导入保留当前 Version 号但不补造更早正文；
-- Outline/Article Worker 已接线后，旧 Local Prompt API 仍继续 fail closed；Worker
-  只能读取入队时固定的 PostgreSQL Prompt Version，Review Worker 尚未迁移。
+- Outline/Article/Humanize/SEO Review Worker 已接线后，旧 Local Prompt API 仍继续
+  fail closed；Worker 只能读取入队时固定的 PostgreSQL Prompt Version。Humanize
+  Prompt 必须恰好包含一个 `{{ARTICLE}}`，且必须配置显式 Project Default。
 
 Prompt HTTP 冒烟：
 
@@ -506,15 +509,16 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-二十三条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+二十四条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、自动生成 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.outline_version.restored`、
   `article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
   `article.humanized.updated`、
+  `article.humanized.generated`、
   `article.links.restored`、
   `article.seo_review_settings.updated`、
   `article.seo_review.generated`、
@@ -553,13 +557,19 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - 人工 Humanized Article 保存只提交 Revision 与有界 Markdown；服务端必须拒绝标题
   层级、数字事实、FAQ、表格、列表或必须短语漂移，成功追加 `external_manual` Version、
   进入 `humanized_ready` 并清空终检之后的旧产物。Audit 只记录字数，不含正文；
+- 自动 Humanize 只提交 Revision；Enqueue 必须解析显式 Project `humanize` Default，
+  固定 Prompt ID/Version/Content Hash 与 Source Article Hash，公开 Job 不返回这些身份。
+  Worker 两阶段要求 `article.edit`，加载精确不可变 Prompt 后才调用 Provider；Provider
+  与提交变换分别执行结构/事实门禁。成功追加 `initial/rehumanized` 来源 Version，
+  进入 `humanized_ready` 并清空下游；Server 不读取本地 Prompt 文件、SQLite Prompt、
+  System 回退或 Published Context；
 - Link Restore 只提交 Revision；Enqueue 固定 checked-in Template Hash、Initial/
   Humanized Article Hash、来源链接数和 Final Check 绑定，公开 Job 不返回这些身份。
   Worker 两阶段重授权并在 Provider 前复核固定身份；模型只返回候选，确定性校验必须
   证明 Markdown Link/URL 多重集合与 Initial Article 完全相同，非链接可见正文与
   Humanized Article 相同。成功只追加 `linked` Version、进入 `links_verified` 并
   记录来源/恢复链接数；模板或正文漂移、撤权、非法 URL、正文变化、Audit/CAS 失败
-  不得留下 Task 部分写入，自动 Humanize 仍为 Local Only；
+  不得留下 Task 部分写入；
 - SEO Review Settings 只提交 Revision、关键词和 Prompt Selection；服务端必须解析
   当前 Project 的 `review` Prompt，不接受 Prompt 正文/Version/Provider。关键词规范化、
   去重并限制数量/长度；Audit 只记录长尾关键词数量和 Prompt Source/Version，不记录
@@ -617,6 +627,27 @@ Outline 生成冒烟必须通过
 - Task CAS、撤权或 Audit 失败不留下 Draft/Version/Prompt Snapshot 部分写入，日志和
   Audit 不含 Prompt 正文、Knowledge 正文或 Provider 原始响应。
 
+Humanize 生成冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/humanize`，随后只使用响应 Job ID 调用
+`GET /api/projects/{project}/tasks/{task_id}/humanize/jobs/{job_id}`。至少验证：
+
+- Body 只允许当前 Revision；Prompt ID/正文/Hash、Article Hash、Actor、Role、Provider
+  或模型参数均返回 422；
+- Viewer 与跨 Project 请求返回 403，可信 Requester 在 Claim 前和 Handler 前都要求
+  `article.edit`；
+- Project 必须有 Active `humanize` Default Prompt，且内容恰好包含一个
+  `{{ARTICLE}}`；无 Default 时 409 且不创建 Job，Provider 未配置时 503；
+- 入队固定精确 Prompt ID/Version/Content Hash、Task Revision 和 Source Article Hash；
+  Default 切换、Prompt 不可用或 Article/Revision 漂移必须在 Provider 前停止；
+- Server Provider 不读取 `humanize_prompt_path`、SQLite Prompt、System 回退或
+  Published Context；异常、空输出或非法 Markdown 只返回脱敏失败；
+- Provider 返回后，提交变换必须再次独立验证标题层级、数字事实、FAQ、表格、列表和
+  必须短语；成功只追加 Humanized Version、进入 `humanized_ready` 并清空下游；
+- 执行前撤权、Task CAS 或 Audit 故障不留下部分 Humanized Version；公开 Job/Audit
+  不含 Article、Prompt、Hash、Requester 或原始错误；
+- 已处于 `humanized_ready/final_ai_checked` 的 Task 重新 Humanize 时只读取身份完整的
+  当前 Humanized Article，并在成功后使旧终检、Link/Image/Delivery 失效。
+
 SEO Review 生成冒烟必须通过
 `POST /api/projects/{project}/tasks/{task_id}/seo-reviews`，随后只使用响应 Job ID 调用
 `GET /api/projects/{project}/tasks/{task_id}/seo-reviews/jobs/{job_id}`。至少验证：
@@ -639,7 +670,7 @@ SEO Review 生成冒烟必须通过
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery/titles/outline/article/restore_links/seo_review`，并且响应不存在 Request、Requester、URL、Prompt/
+  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`，并且响应不存在 Request、Requester、URL、Prompt/
   Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
 - Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
   `knowledge.edit/article.edit/article.review`，且撤权后即使 Cookie 与页面仍有效也必须失败；

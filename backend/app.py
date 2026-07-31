@@ -247,6 +247,11 @@ from services.server_seo_review_generation import (
     ServerSeoReviewGenerationHandler,
     ServerSeoReviewGenerationRegistry,
 )
+from services.server_humanize_generation import (
+    LlmServerHumanizeProvider,
+    ServerHumanizeGenerationHandler,
+    ServerHumanizeGenerationRegistry,
+)
 from services.server_job_control import PostgresServerJobControlService
 from storage import (
     RevisionConflictError,
@@ -388,6 +393,11 @@ async def app_lifespan(application: FastAPI):
         "server_seo_review_generation",
         None,
     )
+    previous_server_humanize_generation = getattr(
+        application.state,
+        "server_humanize_generation",
+        None,
+    )
     previous_server_job_control = getattr(
         application.state,
         "server_job_control",
@@ -429,6 +439,7 @@ async def app_lifespan(application: FastAPI):
     server_article_generation = None
     server_link_restoration = None
     server_seo_review_generation = None
+    server_humanize_generation = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
@@ -445,6 +456,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_article_generation = None
     application.state.server_link_restoration = None
     application.state.server_seo_review_generation = None
+    application.state.server_humanize_generation = None
     application.state.server_job_control = None
     application.state.server_oidc_login = None
     application.state.server_actor_session_revocation = None
@@ -652,6 +664,24 @@ async def app_lifespan(application: FastAPI):
         application.state.server_seo_review_generation = (
             server_seo_review_generation
         )
+        humanize_provider = LlmServerHumanizeProvider(cfg)
+        humanize_handler = (
+            ServerHumanizeGenerationHandler(
+                server_engine,
+                provider=humanize_provider,
+            )
+            if humanize_provider.ready
+            else None
+        )
+        server_humanize_generation = ServerHumanizeGenerationRegistry(
+            server_engine,
+            access=server_access,
+            handler=humanize_handler,
+        )
+        server_humanize_generation.start_existing()
+        application.state.server_humanize_generation = (
+            server_humanize_generation
+        )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -724,6 +754,12 @@ async def app_lifespan(application: FastAPI):
                     shutdown_error = RuntimeError(
                         "server SEO review generation did not drain"
                     )
+            if server_humanize_generation is not None:
+                stop_report = server_humanize_generation.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server humanize generation did not drain"
+                    )
             if server_oidc_login is not None:
                 server_oidc_login.close()
             if knowledge_runtime is not None:
@@ -771,6 +807,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_seo_review_generation = (
                 previous_server_seo_review_generation
+            )
+            application.state.server_humanize_generation = (
+                previous_server_humanize_generation
             )
             application.state.server_job_control = previous_server_job_control
             application.state.server_oidc_login = (
@@ -968,6 +1007,8 @@ async def app_lifespan(application: FastAPI):
             server_link_restoration.stop()
         if server_seo_review_generation is not None:
             server_seo_review_generation.stop()
+        if server_humanize_generation is not None:
+            server_humanize_generation.stop()
         if server_oidc_login is not None:
             server_oidc_login.close()
         if knowledge_runtime is not None:
@@ -1013,6 +1054,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_seo_review_generation = (
             previous_server_seo_review_generation
+        )
+        application.state.server_humanize_generation = (
+            previous_server_humanize_generation
         )
         application.state.server_job_control = previous_server_job_control
         application.state.server_oidc_login = previous_server_oidc_login

@@ -378,6 +378,12 @@ class ServerJobControlTests(unittest.TestCase):
             self.task_ids[2],
             operation="article",
         )
+        self.queue_a.cancel_batch(str(batch_a["id"]))
+        humanize_batch = self._create_job(
+            self.queue_a,
+            self.task_ids[0],
+            operation="humanize",
+        )
         hidden_batch = self._create_job(
             self.queue_a,
             self.task_ids[3],
@@ -401,13 +407,14 @@ class ServerJobControlTests(unittest.TestCase):
             project_id=self.project_a,
         )
 
-        self.assertEqual(len(page.items), 5)
+        self.assertEqual(len(page.items), 6)
         self.assertEqual(
             {item.batch_id for item in page.items},
             {
                 batch_a["id"],
                 title_batch["id"],
                 article_batch["id"],
+                humanize_batch["id"],
                 link_batch["id"],
                 seo_review_batch["id"],
             },
@@ -552,6 +559,40 @@ class ServerJobControlTests(unittest.TestCase):
             job_id=job_id,
         )
 
+        self.assertEqual(cancelled.status, "cancelled")
+
+    def test_humanize_control_requires_edit_permission(self) -> None:
+        batch = self._create_job(
+            self.queue_a,
+            self.task_ids[0],
+            operation="humanize",
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        reviewer = ActorIdentity(self.org_a, self.viewer_a)
+        service = self._service()
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.viewer_a,
+                )
+                .values(role="reviewer")
+            )
+
+        with self.assertRaises(ProjectAccessDenied):
+            service.cancel_job(
+                actor=reviewer,
+                project_id=self.project_a,
+                job_id=job_id,
+            )
+
+        cancelled = service.cancel_job(
+            actor=ActorIdentity(self.org_a, self.editor_a),
+            project_id=self.project_a,
+            job_id=job_id,
+        )
         self.assertEqual(cancelled.status, "cancelled")
 
     def test_retry_conflict_does_not_change_active_job(self) -> None:

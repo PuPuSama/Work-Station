@@ -34,6 +34,7 @@ ServerTaskAuditAction = Literal[
     "article.initial_ai_screenshot.uploaded",
     "article.initial_ai_check.updated",
     "article.humanized.updated",
+    "article.humanized.generated",
     "article.links.restored",
     "article.seo_review_settings.updated",
     "article.seo_review.generated",
@@ -63,6 +64,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.initial_ai_screenshot.uploaded": "article.review",
     "article.initial_ai_check.updated": "article.review",
     "article.humanized.updated": "article.edit",
+    "article.humanized.generated": "article.edit",
     "article.links.restored": "article.edit",
     "article.seo_review_settings.updated": "article.edit",
     "article.seo_review.generated": "article.review",
@@ -132,6 +134,14 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
     ),
     "article.humanized.updated": frozenset(
         {"humanized_word_count"}
+    ),
+    "article.humanized.generated": frozenset(
+        {
+            "article_characters",
+            "prompt_source",
+            "prompt_version",
+            "rehumanizing",
+        }
     ),
     "article.links.restored": frozenset(
         {

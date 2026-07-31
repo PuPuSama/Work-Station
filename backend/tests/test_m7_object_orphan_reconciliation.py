@@ -270,7 +270,7 @@ class ObjectOrphanReconciliationTests(unittest.TestCase):
                     )
                 ).scalars()
             )
-        self.assertEqual(revision, "20260731_0015")
+        self.assertEqual(revision, "20260731_0016")
         self.assertTrue(
             {
                 "pk_object_orphan_observations",

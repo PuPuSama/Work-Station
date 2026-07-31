@@ -330,6 +330,7 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[6]
         in {
             "article",
+            "humanize",
             "outline",
             "restore-links",
             "seo-reviews",
@@ -483,6 +484,7 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[6]
         in {
             "article",
+            "humanize",
             "outline",
             "restore-links",
             "seo-reviews",

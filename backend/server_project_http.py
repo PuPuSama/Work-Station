@@ -88,6 +88,10 @@ from services.server_humanized_update import (
     ServerHumanizedArticleError,
     apply_reviewed_humanized_article,
 )
+from services.server_humanize_generation import (
+    HumanizeGenerationUnavailable,
+    ServerHumanizeGenerationRegistry,
+)
 from services.server_seo_review_settings import (
     ServerSeoReviewSettingsError,
     apply_server_seo_review_settings,
@@ -455,6 +459,10 @@ class SeoReviewGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public Review Job state; Prompt, Chunk, and Article inputs stay hidden."""
 
 
+class HumanizeGenerationJobResponse(ProductRediscoveryJobResponse):
+    """Public Humanize Job state; Prompt and Article identities stay hidden."""
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -771,6 +779,22 @@ def _seo_review_generation(
         raise HTTPException(
             status_code=503,
             detail="Server SEO review generation is not available.",
+        )
+    return registry
+
+
+def _humanize_generation(
+    request: Request,
+) -> ServerHumanizeGenerationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_humanize_generation",
+        None,
+    )
+    if not isinstance(registry, ServerHumanizeGenerationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server humanize generation is not available.",
         )
     return registry
 
@@ -2320,6 +2344,91 @@ def confirm_project_task_initial_ai(
     )
 
 
+@router.post(
+    "/{project}/tasks/{task_id}/humanize",
+    response_model=HumanizeGenerationJobResponse,
+)
+def enqueue_project_task_humanize(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> HumanizeGenerationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _humanize_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HumanizeGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server humanize generation is not available.",
+        ) from exc
+    return HumanizeGenerationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/humanize/jobs/{job_id}",
+    response_model=HumanizeGenerationJobResponse,
+)
+def read_project_task_humanize_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> HumanizeGenerationJobResponse:
+    del project
+    try:
+        job = _humanize_generation(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Humanize job was not found.",
+        ) from None
+    except HumanizeGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server humanize generation is not available.",
+        ) from exc
+    return HumanizeGenerationJobResponse.model_validate(job)
+
+
 @router.put(
     "/{project}/tasks/{task_id}/humanized-article",
     response_model=TaskRecord,
@@ -3374,6 +3483,7 @@ __all__ = [
     "ArticleGenerationJobResponse",
     "ArticleSectionRewriteRequest",
     "ConfirmedProductsUpdateRequest",
+    "HumanizeGenerationJobResponse",
     "LinkRestorationJobResponse",
     "OutlineGenerationJobResponse",
     "ProductRediscoveryJobResponse",
