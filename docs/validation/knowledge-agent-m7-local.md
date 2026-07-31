@@ -1331,8 +1331,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 截图上传后先重新读取最新 Revision 再确认；Job 页面轮询超时不发送取消；
 - 图片 UI 只提交 Hero Asset ID 与当前 Task Product ID 到 H2 的锚点，不显示或提交
   Bucket、Object Key、本地 Path、产品事实或图片 URL；
-- 当前明确未接入 SEO Change 逐条裁决、Product Rediscovery、Outline Version 恢复、
-  章节重写、全局 Job Control、可视化 Asset Picker 和 Server Task 导入/创建，不能将
+- 该主链入口提交时尚未接入 SEO Change 逐条裁决、Product Rediscovery、Outline
+  Version 恢复、章节重写、全局 Job Control、可视化 Asset Picker 和 Server Task
+  导入/创建；后续接入的前三项见下方“Server 受控编辑面板”记录，仍不能将
   本切片描述为完整 Local UI 等价迁移；
 - 详细组件拓扑、接口作用和重构清单见
   `docs/architecture/m7-server-article-console.md`。
@@ -1357,6 +1358,39 @@ node .\node_modules\next\dist\bin\next build
 - 首轮完整回归暴露既有 Audit 测试在同一事务内只按 `created_at` 排序。PostgreSQL
   `now()` 在事务内稳定，两条事件时间相同时顺序未定义；测试改为按 Event ID 映射核对
   Action，不再把未定义的物理返回顺序当业务契约。隔离测试与完整回归均通过。
+
+### M7 Server 受控编辑面板
+
+实现边界：
+
+- `server-seo-review-panel.tsx` 接入 Review 输入、Run 选择、Dimension 汇总、逐条
+  Change 裁决、Risk Confirmation、Preview、Apply 与 Complete；每次 Change 写入只提交
+  当前 Revision、Decision、Reviewed Text 与 Risk Confirmation，旧 Preview 在客户端
+  立即丢弃；
+- Apply 仅在存在 Accepted Change 且已取得当前精确 Preview 时启用，只提交
+  `preview_hash`；Pending Change 必须由操作者显式确认，Complete 在存在 Accepted
+  Change 时禁用；
+- `server-outline-history.tsx` 使用 Task `article_versions` 的原始数组索引，只提交
+  Revision 与 `version_index`；恢复结果明确是草稿，不自动确认；
+- `server-section-rewrite-panel.tsx` 从当前 Initial Article 提取 H2-H6 路径供选择，
+  只提交 Heading Path 与 Replacement Body。客户端解析只用于选择辅助，后端仍重新
+  解析 Markdown、验证唯一性/结构/链接并保存 Before/After Version；
+- 三个面板从 `server-article-workbench.tsx` 抽离，接口作用、状态机、下游失效和未来
+  AST 编辑器重构边界已写入 `docs/architecture/m7-server-article-console.md`。
+
+验证结果：
+
+- 前端 TypeScript、全量 ESLint 与 Next.js production build 全部通过；
+- 使用不调用外部模型、对象存储或业务数据库的 Mock Server API 打开真实 Server
+  Workbench：SEO Review 显示 2 个 Dimension、1 个受保护事实 Risk 与显式 Pending
+  Confirmation；点击“生成精确预览”后显示完整候选正文和“结构校验通过”，浏览器无
+  Warning/Error；
+- 大纲面板按服务端原始索引显示 2 个版本和 2 个“恢复为草稿”操作；章节面板从样例
+  Markdown 正确提取 8 条 H2/H3 路径，Replacement Body 为空时保存按钮保持禁用；
+- 375×812 响应式覆盖下文档视口无水平溢出，五阶段导航仍可达；测试后恢复默认视口并
+  关闭 QA 页面与临时服务；
+- 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
 
 ### M7 Task 历史大纲恢复
 

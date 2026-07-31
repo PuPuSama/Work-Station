@@ -411,7 +411,8 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
   重新要求 `article.deliver` 并签发不超过一小时的 URL；
 - 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
 - Server Article Console 已接通现有 Task 的标题到交付主链，Delivery ZIP 与下载也已接线；
-  SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control、可视化
+  SEO Change 裁决/Preview/Apply/Complete、历史大纲恢复和章节重写已有专用 Server
+  面板；Product Rediscovery、Rewrite From Scratch、全局 Job Control、可视化
   Asset Picker、Server Task 导入/创建和 Batch 等界面仍未迁移，发布证据不得写成
   “全部操作员工作流已上线”。
 

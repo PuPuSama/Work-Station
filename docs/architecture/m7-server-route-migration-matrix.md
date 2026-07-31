@@ -138,7 +138,8 @@ checked-in Template Hash、Initial/Humanized Article Hash、来源链接数和 F
 一致、非链接可见正文与 Humanized Article 一致。模板或正文漂移、撤权、Provider
 失败、CAS/Audit 失败均不写 Task，也不向公开 Job/Audit 暴露正文、Hash 或 URL。
 
-`seo_review` 生成也已从 Local 组合中拆出，但人工修改/应用仍未迁移。Server Enqueue
+`seo_review` 生成已从 Local 组合中拆出，人工修改/应用也已有 Project-scoped 命令和
+专用 Server UI。Server Enqueue
 只接受 Revision，固定 Initial Article、精确 Project Review Prompt Version、
 checked-in System Template Hash 与当前 Published Chunk ID。Provider 只能读取注入的
 Published Context，不能调用本地 Customer Context 或生成 mock；成功只追加 Open
@@ -219,3 +220,7 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     `/api/tasks*`、`/api/dashboard`、`/api/config` 或本地文件 API？
 30. Server 产品与图片 UI 是否仍分别只提交 Product ID 和 Asset ID/Heading Anchor，
     而不接受客户端产品事实、对象路径或图片 URL？
+31. SEO Review UI 是否仍按 Change 单条保存并在每次 Task Revision 变化后丢弃旧
+    Preview，Apply 只提交精确 Preview Hash？
+32. 大纲恢复和章节重写 UI 是否仍分别只提交 Version Index 与
+    Heading Path/Replacement Body，不回传历史大纲或整篇文章？

@@ -264,6 +264,10 @@
 - 已新增服务器历史大纲恢复命令：客户端只提交 Version Index，服务端只从当前 Task 的
   `outline/outline_draft` 历史恢复新草稿；Article Version、越界索引和客户端正文均
   fail closed，当前确认大纲与下游保持不变；
+- Server Article Console 已接入历史大纲恢复、章节级受控重写与完整 SEO Review
+  裁决台：大纲恢复只发服务端 Version Index；章节重写只发 Heading Path 与 Replacement
+  Body；Review 按单 Change 保存并在 Apply 前要求精确 Preview Hash、显式 Risk/Pending
+  确认。三个 UI 都继续把权限、Markdown 解析、Revision CAS 和状态机留给后端准源；
 - 已新增 PostgreSQL Project Prompt Snapshot 底座：Head、不可变 Version 与精确
   Default 指针分表；编辑只追加新 Version，默认不会自动漂移；读取与写入分别要求
   `project.view/article.edit`，写操作重新锁定可撤权事实并与安全 Audit 同事务；

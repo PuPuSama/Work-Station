@@ -33,6 +33,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import { ServerOutlineHistory } from "@/components/server-outline-history";
+import { ServerSectionRewritePanel } from "@/components/server-section-rewrite-panel";
+import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
 import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
@@ -181,8 +184,6 @@ export function ServerArticleWorkbench({
   const [productAnchors, setProductAnchors] = useState<Record<string, string>>(
     {},
   );
-  const [primaryKeyword, setPrimaryKeyword] = useState("");
-  const [longTailKeywords, setLongTailKeywords] = useState("");
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
   const taskApi = `${projectApi}/tasks/${encodeURIComponent(taskId)}`;
@@ -238,8 +239,6 @@ export function ServerArticleWorkbench({
         : String(task.final_ai_check.score),
     );
     setFinalReport(task.final_ai_check?.report || "");
-    setPrimaryKeyword(task.seo_primary_keyword || "");
-    setLongTailKeywords((task.seo_long_tail_keywords || []).join("\n"));
     setProductAnchors(
       Object.fromEntries(
         task.products.flatMap((product) =>
@@ -687,6 +686,14 @@ export function ServerArticleWorkbench({
                   确认大纲
                 </Button>
               </div>
+              <ServerOutlineHistory
+                task={task}
+                taskApi={taskApi}
+                pending={pending}
+                editAllowed={editAllowed}
+                updateAllowed={allowed.has("update_outline")}
+                runAction={runAction}
+              />
             </CardContent>
           </Card>
         )}
@@ -810,6 +817,15 @@ export function ServerArticleWorkbench({
                 </Button>
               </CardContent>
             </Card>
+
+            <ServerSectionRewritePanel
+              task={task}
+              taskApi={taskApi}
+              pending={pending}
+              editAllowed={editAllowed}
+              updateAllowed={allowed.has("update_article")}
+              runAction={runAction}
+            />
           </div>
         )}
 
@@ -988,83 +1004,15 @@ export function ServerArticleWorkbench({
                 </CardContent>
               </Card>
 
-              <Card>
-                <CardHeader className="border-b">
-                  <CardTitle>SEO Review</CardTitle>
-                  <CardDescription>
-                    设置和生成均使用 Project Prompt；变更裁决将在专用审阅面板继续接入。
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="grid gap-3">
-                  <div className="grid gap-2">
-                    <Label htmlFor="primary-keyword">Primary Keyword</Label>
-                    <Input
-                      id="primary-keyword"
-                      value={primaryKeyword}
-                      disabled={Boolean(pending) || !editAllowed}
-                      onChange={(event) => setPrimaryKeyword(event.target.value)}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="long-tail-keywords">
-                      Long-tail Keywords（每行一个）
-                    </Label>
-                    <Textarea
-                      id="long-tail-keywords"
-                      value={longTailKeywords}
-                      disabled={Boolean(pending) || !editAllowed}
-                      className="min-h-24 resize-y"
-                      onChange={(event) =>
-                        setLongTailKeywords(event.target.value)
-                      }
-                    />
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="min-h-11 flex-1"
-                      disabled={Boolean(pending) || !editAllowed}
-                      onClick={() =>
-                        void runAction("保存 SEO 设置", () =>
-                          apiPut<TaskRecord>(`${taskApi}/seo-review-settings`, {
-                            revision: task.revision ?? 0,
-                            primary_keyword: primaryKeyword,
-                            long_tail_keywords: longTailKeywords
-                              .split("\n")
-                              .map((value) => value.trim())
-                              .filter(Boolean),
-                            prompt_selection: "project_default",
-                          }),
-                        )
-                      }
-                    >
-                      保存设置
-                    </Button>
-                    <Button
-                      type="button"
-                      className="min-h-11 flex-1"
-                      disabled={Boolean(pending) || !reviewAllowed}
-                      onClick={() =>
-                        void runJob("生成 SEO Review", "seo-reviews")
-                      }
-                    >
-                      {pending === "生成 SEO Review" ? (
-                        <Loader2 className="animate-spin" />
-                      ) : (
-                        <Sparkles />
-                      )}
-                      生成 Review
-                    </Button>
-                  </div>
-                  {(task.seo_reviews || []).length > 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      已保存 {task.seo_reviews?.length} 次 Review；最新状态：{" "}
-                      {task.seo_reviews?.at(-1)?.status}
-                    </p>
-                  )}
-                </CardContent>
-              </Card>
+              <ServerSeoReviewPanel
+                task={task}
+                taskApi={taskApi}
+                pending={pending}
+                editAllowed={editAllowed}
+                reviewAllowed={reviewAllowed}
+                runAction={runAction}
+                runJob={runJob}
+              />
             </div>
           </div>
         )}
