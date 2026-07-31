@@ -510,9 +510,12 @@ class M7AccessControlPostgresTests(unittest.TestCase):
                     project_memberships.c.user_id == target_user_id,
                 )
             ).scalar_one()
-            audit_actions = tuple(
+            audit_actions = dict(
                 connection.execute(
-                    sa.select(audit_events.c.action)
+                    sa.select(
+                        audit_events.c.event_id,
+                        audit_events.c.action,
+                    )
                     .where(
                         audit_events.c.organization_id == self.org_a,
                         audit_events.c.event_id.in_(
@@ -522,17 +525,16 @@ class M7AccessControlPostgresTests(unittest.TestCase):
                             )
                         ),
                     )
-                    .order_by(audit_events.c.created_at)
-                ).scalars()
+                ).all()
             )
             self.assertTrue(revoked)
             self.assertEqual(remaining, 0)
             self.assertEqual(
                 audit_actions,
-                (
-                    "project.membership.granted",
-                    "project.membership.revoked",
-                ),
+                {
+                    f"{self.prefix}-grant": "project.membership.granted",
+                    f"{self.prefix}-revoke": "project.membership.revoked",
+                },
             )
         finally:
             transaction.rollback()
