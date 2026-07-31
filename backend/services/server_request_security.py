@@ -68,6 +68,17 @@ def server_knowledge_route_ready(method: str, route_path: str) -> bool:
         # Server Plans are derived from a locked PostgreSQL Task outline; the
         # generic client-authored Plan endpoint remains Local-only.
         return False
+    if normalized_method == "POST" and (
+        normalized_path.endswith("/research-assistant/messages")
+        or normalized_path.endswith("/evidence-packs")
+        or normalized_path.endswith("/evidence-links")
+        or normalized_path.endswith("/evidence-links/review-stale")
+    ):
+        # These M3/M5 compatibility writes are not Server-ready. They are not
+        # bound to a PostgreSQL Task revision and do not reauthorize or append
+        # an Audit event in the commit transaction. Keep them available in
+        # Local mode only until dedicated Server commands replace them.
+        return False
     return True
 
 

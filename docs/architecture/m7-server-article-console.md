@@ -355,7 +355,9 @@ Task 单条创建与规范化行导入已经接入，但以下 Local 能力没�
   先设计私有 Topic Asset、内容哈希和 Parser Version，不能把本地路径带进 Intake；
 - `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` 仍是 Local 兼容路径；Server
   目录直接读取 Project-scoped PostgreSQL Task；
-- Project Brand/Context 元数据编辑仍缺独立 PostgreSQL Metadata Service。
+- Project Brand/Domain 元数据已由独立 PostgreSQL Metadata Service 接管；自由事实与
+  写作规则继续分别进入 Published Knowledge 与不可变 Prompt Snapshot，不恢复旧
+  Brand/Context 本地路由。
 
 Product Rediscovery 的创建与 Job 状态已接入；结果由独立 Server Knowledge Inbox
 审阅，不在文章工作台复制来源、发布或产品确认状态机。

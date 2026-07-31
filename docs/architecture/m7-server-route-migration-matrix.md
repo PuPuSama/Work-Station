@@ -48,7 +48,10 @@
 Link 与 Audit 在一个 PostgreSQL 事务提交。Research Plan/Start/Resume 已通过独立
 Server Registry、私有 Job 和安全 DTO 开放；通用 Plan POST、WordPress Sync 与 Raw
 Artifact 仍保持关闭，不能因同组窄路径已开放而整体放开 Knowledge 路由组。结构记录见
-`docs/architecture/m7-server-knowledge-research.md`。
+`docs/architecture/m7-server-knowledge-research.md`。Research Chat、通用 Evidence Pack
+Build、客户端 Evidence Link Write 与 Stale Review 也继续关闭；Server Plan 读取仅展示
+由已确认 Task 大纲生成的 Plan，结构记录见
+`docs/architecture/m7-server-knowledge-route-hardening.md`。
 
 ## 3. Task 写操作矩阵
 

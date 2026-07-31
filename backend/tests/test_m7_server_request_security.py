@@ -32,6 +32,13 @@ from services.server_request_security import (  # noqa: E402
     server_http_route_available,
     server_knowledge_route_ready,
 )
+from knowledge_agent.library import KnowledgeSourceSummary  # noqa: E402
+from knowledge_agent.retrieval_plan_generation import (  # noqa: E402
+    generate_retrieval_plan,
+)
+from services.server_knowledge_research import (  # noqa: E402
+    is_server_generated_retrieval_plan,
+)
 
 
 class FakeAccessRepository:
@@ -195,6 +202,24 @@ class ServerRequestSecurityTests(unittest.TestCase):
             (
                 "POST",
                 "/api/knowledge/{project}/retrieval-plans",
+            ),
+            (
+                "POST",
+                "/api/knowledge/{project}/research-assistant/messages",
+            ),
+            (
+                "POST",
+                "/api/knowledge/{project}/retrieval-plans/{plan_id}/"
+                "scopes/{scope_id}/evidence-packs",
+            ),
+            (
+                "POST",
+                "/api/knowledge/{project}/evidence-links",
+            ),
+            (
+                "POST",
+                "/api/knowledge/{project}/articles/{article_id}/"
+                "evidence-links/review-stale",
             ),
         )
         for method, path in blocked_knowledge_routes:
@@ -787,6 +812,55 @@ class ServerRequestSecurityTests(unittest.TestCase):
             server_http_route_available("GET", "/api/tasks")
         )
 
+    def test_server_plan_marker_is_explicit_and_not_an_execution_gate(self) -> None:
+        plan = generate_retrieval_plan(
+            project_id="example.com",
+            article_id="topic_006",
+            task_id="task-a",
+            outline_version=1,
+            outline="## Product selection",
+            topic="Fastener selection",
+        )
+
+        self.assertTrue(is_server_generated_retrieval_plan(plan))
+        self.assertFalse(
+            is_server_generated_retrieval_plan(
+                replace(
+                    plan,
+                    metadata={"generated_from": "client_payload"},
+                )
+            )
+        )
+
+    def test_server_library_projection_omits_unavailable_raw_route(self) -> None:
+        from knowledge_agent.http import _source_response
+
+        source = KnowledgeSourceSummary(
+            project_id="example.com",
+            source_id="source-a",
+            display_name="Private source",
+            source_kind="private_file",
+            trust_tier="hard_fact",
+            status="published",
+            public_source=False,
+            canonical_url=None,
+            current_snapshot_id="snapshot-a",
+            snapshot_count=1,
+            chunk_count=1,
+            asset_count=0,
+            latest_fetched_at=None,
+            latest_snapshot_id="snapshot-a",
+            metadata={},
+        )
+
+        self.assertIsNotNone(_source_response(source).raw_evidence_url)
+        self.assertIsNone(
+            _source_response(
+                source,
+                include_raw_evidence_url=False,
+            ).raw_evidence_url
+        )
+
     def test_every_knowledge_route_remains_project_scoped(self) -> None:
         from knowledge_agent.http import router
 
@@ -862,6 +936,19 @@ class ServerRequestSecurityTests(unittest.TestCase):
             repository.facts = ProjectAccessFacts(
                 organization_role="org_admin"
             )
+            for path in (
+                "/api/knowledge/example.com/research-assistant/messages",
+                "/api/knowledge/example.com/retrieval-plans/plan-a/"
+                "scopes/scope-a/evidence-packs",
+                "/api/knowledge/example.com/evidence-links",
+                "/api/knowledge/example.com/articles/topic_006/"
+                "evidence-links/review-stale",
+            ):
+                with self.subTest(path=path):
+                    self.assertEqual(
+                        client.post(path, json={}).status_code,
+                        503,
+                    )
             self.assertEqual(
                 client.post(
                     "/api/knowledge/example.com/research-runs",

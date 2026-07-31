@@ -29,6 +29,7 @@ from services.server_knowledge_commands import (
 from services.server_knowledge_research import (
     ServerKnowledgeResearchRegistry,
     ServerKnowledgeResearchUnavailable,
+    is_server_generated_retrieval_plan,
 )
 from services.server_private_document_ingestion import (
     PostgresServerPrivateDocumentIngestion,
@@ -603,11 +604,13 @@ def _project_id(value: str) -> str:
 
 def _source_response(
     item: KnowledgeSourceSummary,
+    *,
+    include_raw_evidence_url: bool = True,
 ) -> KnowledgeSourceResponse:
     snapshot_id = item.current_snapshot_id or item.latest_snapshot_id
     raw_url = (
         None
-        if snapshot_id is None
+        if snapshot_id is None or not include_raw_evidence_url
         else (
             f"/api/knowledge/{quote(item.project_id, safe='')}/sources/"
             f"{quote(item.source_id, safe='')}/snapshots/"
@@ -1047,6 +1050,7 @@ def sync_wordpress_category(
 def read_knowledge_library(project: str, request: Request) -> KnowledgeLibraryResponse:
     runtime = _runtime(request)
     project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
     summary = runtime.library.summary(project_id)
     sources = runtime.library.list_sources(project_id)
     products = runtime.catalog_repository.list_products(project_id)
@@ -1058,7 +1062,13 @@ def read_knowledge_library(project: str, request: Request) -> KnowledgeLibraryRe
         product_count=summary.product_count,
         confirmed_product_count=summary.confirmed_product_count,
         asset_count=summary.asset_count,
-        sources=[_source_response(item) for item in sources],
+        sources=[
+            _source_response(
+                item,
+                include_raw_evidence_url=server_context is None,
+            )
+            for item in sources
+        ],
         products=[_product_response(item) for item in products],
     )
 
@@ -1133,6 +1143,7 @@ def list_retrieval_plans(
     limit: int = 100,
 ) -> list[RetrievalPlanResponse]:
     runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
     try:
         plans = runtime.retrieval_plan_repository.list_retrieval_plans(
             _project_id(project),
@@ -1141,6 +1152,12 @@ def list_retrieval_plans(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if server_context is not None:
+        plans = [
+            plan
+            for plan in plans
+            if is_server_generated_retrieval_plan(plan)
+        ]
     return [_plan_response(plan) for plan in plans]
 
 
@@ -1154,11 +1171,17 @@ def read_retrieval_plan(
     request: Request,
 ) -> RetrievalPlanResponse:
     runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
     plan = runtime.retrieval_plan_repository.get_retrieval_plan(
         _project_id(project),
         retrieval_plan_id,
     )
     if plan is None:
+        raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
+    if (
+        server_context is not None
+        and not is_server_generated_retrieval_plan(plan)
+    ):
         raise HTTPException(status_code=404, detail="Retrieval plan was not found.")
     return _plan_response(plan)
 

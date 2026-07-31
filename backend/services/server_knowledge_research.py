@@ -134,9 +134,27 @@ def _article_id(task: TaskRecord) -> str:
     return f"topic_{task.topic_index:03d}"
 
 
+def is_server_generated_retrieval_plan(plan: RetrievalPlan) -> bool:
+    """Identify Plans created from the confirmed PostgreSQL Task boundary.
+
+    This marker controls Server read visibility only. Execution still calls
+    ``_validate_plan_task`` so a current Task, outline version and outline hash
+    must match before a Research Job can be queued.
+    """
+
+    metadata = dict(plan.metadata)
+    outline_hash = str(metadata.get("outline_hash") or "").strip()
+    return (
+        metadata.get("generated_from") == "confirmed_task_outline"
+        and bool(str(metadata.get("task_id") or "").strip())
+        and len(outline_hash) == 64
+        and all(character in "0123456789abcdef" for character in outline_hash)
+    )
+
+
 def _validate_plan_task(plan: RetrievalPlan, task: TaskRecord) -> None:
     metadata = dict(plan.metadata)
-    if metadata.get("generated_from") != "confirmed_task_outline":
+    if not is_server_generated_retrieval_plan(plan):
         raise JobConflict("retrieval plan is not server-generated")
     if str(metadata.get("task_id") or "") != task.id:
         raise JobConflict("retrieval plan does not match the source task")
@@ -1195,4 +1213,5 @@ __all__ = [
     "ServerKnowledgeResearchRegistry",
     "ServerKnowledgeResearchUnavailable",
     "create_server_research_execution",
+    "is_server_generated_retrieval_plan",
 ]

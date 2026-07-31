@@ -1651,12 +1651,13 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   标题/大纲/正文初稿生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
   私有图片准备和文章 DOCX 导出/下载，并为
-  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 提供窄范围
-  Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
+  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`
+  提供窄范围 Batch/Job 读取；Research 因 Checkpoint 语义继续禁用通用 Cancel/Retry，
+  也不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`
+  Task 命令和 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`
   Job 为单写，其余路径尚未成为 PostgreSQL
   准源；
 - Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲、正文初稿、
@@ -1829,3 +1830,42 @@ Set-Location ..\frontend
   M7 External Gate；
 - 组件职责、事务顺序、公共/私有字段、失败语义和后续重构接缝记录在
   `docs/architecture/m7-server-knowledge-research.md`。
+
+### M7 Server Knowledge 写边界收口
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\backend\.venv\Scripts\python.exe -m unittest -v `
+  backend.tests.test_m7_server_request_security `
+  backend.tests.test_m7_server_knowledge_research `
+  backend.tests.test_knowledge_agent_m2_http
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -p 'test_*.py'
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini upgrade head
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini current
+
+Set-Location frontend
+& '<工作区 Node 绝对路径>' node_modules\eslint\bin\eslint.js .
+& '<工作区 Node 绝对路径>' node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- 22 项定向测试全部通过，覆盖 Server 安全依赖提前阻断四类旧 Knowledge 写入、
+  Server Plan 来源标记、真实 PostgreSQL Research Job，以及 Local M2 Raw Artifact 继续
+  可读；
+- 已验证 Server Mode 的 Research Chat、通用 Evidence Pack Build、客户端 Evidence
+  Link Write 与 Stale Review 在业务 Body、Provider 或 Repository 执行前返回 503；
+- Server Retrieval Plan 列表/单条读取只接受 `confirmed_task_outline` 来源标记；该标记
+  仅控制可见性，Research Enqueue 仍验证真实 Task、Article、Outline Version/Hash 与
+  事务内权限；
+- Server Knowledge Library 的 `raw_evidence_url` 为 `null`；Local 原始证据链接和下载
+  回归保持通过；
+- 完整后端回归 705 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端全量 ESLint 与 Next.js 16.2.10 production build 全部通过，Build 内 TypeScript
+  检查通过；
+- 本切片不修改 Schema；Alembic Current/Head 均为 `20260731_0018`，重复
+  `upgrade head` 成功；
+- 通用写接口的专用 Server Command、来源级原子 Web Evidence Ingestion 与 Server Raw
+  Artifact Download 仍是后续切片，不能因本次收口描述为已经迁移。结构与重构接缝见
+  `docs/architecture/m7-server-knowledge-route-hardening.md`。

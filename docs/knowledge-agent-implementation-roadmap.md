@@ -168,6 +168,12 @@
   与轮询恢复，Local Research 保持原组件树。通用 Plan POST、Research Cancel/Retry、
   WordPress 和 Raw Artifact 继续关闭。结构记录见
   `docs/architecture/m7-server-knowledge-research.md`；
+- 已收紧 Server Knowledge 兼容写边界：Research Chat、通用 Evidence Pack Build、
+  客户端 Evidence Link Write 与 Stale Review 因尚未绑定 PostgreSQL Task Revision、
+  事务内撤权复核和 Audit，在 Server Mode 明确 503；Local Mode 保持不变。Server Plan
+  读取只展示由已确认 Task 大纲生成的 Plan，Knowledge Library 不再返回不可用的 Raw
+  Artifact URL。结构记录见
+  `docs/architecture/m7-server-knowledge-route-hardening.md`；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
   调用 fail closed；产品重新发现、标题、大纲、正文初稿、自动 Humanize、链接恢复和
   SEO Review 生成已有独立

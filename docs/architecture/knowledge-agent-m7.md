@@ -239,7 +239,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 对象存储未配置时，产品发现历史 Job 状态仍可读取但新发现 Job 返回 503；Outline
   Provider 未配置时新生成 Job 返回 503。应用重启按各自配置只恢复
   `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 的 Active
-  PostgreSQL Job。
+  PostgreSQL Job；`knowledge_research` 由独立 Registry 按 Checkpoint 语义恢复。
 - 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
   释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
   数据库 Engine，不宣称已经排空。
@@ -257,8 +257,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前
   `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 七条
-  Operation-specific Job 入口使用
-  PostgreSQL 单写；
+  Operation-specific Job 入口与独立的 `knowledge_research` 入口使用 PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接邮件发送服务与生产 IdP Provider 配置管理；Organization Admin Console 已接入
   Workspace User、全会话撤销、Team、TeamMembership、Invitation 与 External Identity 映射，
@@ -802,7 +801,8 @@ SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fai
 项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
 已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 已有独立
-PostgreSQL Job API/Runner。
+PostgreSQL Job API/Runner；`knowledge_research` 另有绑定 Plan/Run/Checkpoint 的专用
+API/Runner。
 其余正文后处理写入、通用 Batch 和 Worker 尚未接线。因此
 不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
 Runner 描述成“服务器 Job 单写已完成”。
@@ -1386,7 +1386,7 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
 分页；当前可见 Operation 是
-`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`。旧
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`。旧
 `/api/batches*` 继续 503，未迁移的 `products/rewrite_article/...` 即使误写入
 PostgreSQL 也不会出现在控制面。
 
@@ -1469,9 +1469,9 @@ URL、密钥或供应商错误正文。
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
 身份代码链、二十四条 Task 写操作、
-`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 的
-Enqueue/Runner 和窄范围
-Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
+`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`
+的 Enqueue/Runner 和窄范围 Batch/Job Control 已接线；Research 仍禁用通用 Cancel/Retry。
+其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
@@ -1589,9 +1589,9 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
     Requester、Operation 或 Task？
 65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
-66. `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 以外的
+66. `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research` 以外的
     Operation 是否仍不出现在列表、详情、取消或
-    重试接口？
+    重试接口；`knowledge_research` 是否仍只可列出而不能通用取消/重试？
 67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
     别名？
 68. 新 Operation 加入控制面前，是否已经具备可信 Enqueue、两阶段 Worker 授权、
