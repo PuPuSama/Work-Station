@@ -283,6 +283,19 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "POST",
+                "/api/projects/example.com/tasks/task-a/seo-reviews",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/projects/example.com/tasks/task-a/"
+                "seo-reviews/jobs/job-a",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "DELETE",
                 "/api/projects/project-a/members/user-a",
             )
@@ -291,6 +304,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
             server_http_route_available(
                 "POST",
                 "/api/projects/project-a/members/user-a",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/tasks/task-a/seo-reviews",
             )
         )
         self.assertTrue(

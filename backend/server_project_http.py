@@ -90,6 +90,10 @@ from services.server_seo_review_settings import (
     ServerSeoReviewSettingsError,
     apply_server_seo_review_settings,
 )
+from services.server_seo_review_generation import (
+    SeoReviewGenerationUnavailable,
+    ServerSeoReviewGenerationRegistry,
+)
 from services.server_project_prompts import (
     ServerProjectPromptError,
     ServerProjectPromptServiceFactory,
@@ -406,6 +410,10 @@ class LinkRestorationJobResponse(ProductRediscoveryJobResponse):
     """Public link Job state; article and template identities stay hidden."""
 
 
+class SeoReviewGenerationJobResponse(ProductRediscoveryJobResponse):
+    """Public Review Job state; Prompt, Chunk, and Article inputs stay hidden."""
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -706,6 +714,22 @@ def _link_restoration(
         raise HTTPException(
             status_code=503,
             detail="Server link restoration is not available.",
+        )
+    return registry
+
+
+def _seo_review_generation(
+    request: Request,
+) -> ServerSeoReviewGenerationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_seo_review_generation",
+        None,
+    )
+    if not isinstance(registry, ServerSeoReviewGenerationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server SEO review generation is not available.",
         )
     return registry
 
@@ -1453,6 +1477,91 @@ def update_project_task_seo_review_settings(
             "prompt_version": prompt_version,
         },
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/seo-reviews",
+    response_model=SeoReviewGenerationJobResponse,
+)
+def enqueue_project_task_seo_review(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> SeoReviewGenerationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    try:
+        job = _seo_review_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SeoReviewGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server SEO review generation is not available.",
+        ) from exc
+    return SeoReviewGenerationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/seo-reviews/jobs/{job_id}",
+    response_model=SeoReviewGenerationJobResponse,
+)
+def read_project_task_seo_review_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> SeoReviewGenerationJobResponse:
+    del project
+    try:
+        job = _seo_review_generation(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="SEO review generation job was not found.",
+        ) from None
+    except SeoReviewGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server SEO review generation is not available.",
+        ) from exc
+    return SeoReviewGenerationJobResponse.model_validate(job)
 
 
 @router.put(
@@ -3013,6 +3122,7 @@ __all__ = [
     "ProductRediscoveryRequest",
     "ProjectAssetDownload",
     "ProjectSeoReviewSettingsRequest",
+    "SeoReviewGenerationJobResponse",
     "TitleGenerationJobResponse",
     "require_server_actor",
     "require_server_project_access",

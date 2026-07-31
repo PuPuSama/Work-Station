@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -44,7 +45,7 @@ from knowledge_agent.schema import (  # noqa: E402
     snapshot_assets,
     source_snapshots,
 )
-from models import TaskRecord  # noqa: E402
+from models import PromptSnapshot, TaskRecord  # noqa: E402
 from server_schema import (  # noqa: E402
     article_tasks,
     background_jobs,
@@ -81,6 +82,7 @@ from services.server_product_rediscovery import (  # noqa: E402
 )
 from services.server_outline_generation import (  # noqa: E402
     PostgresPublishedOutlineContext,
+    ProjectPromptReference,
     ServerOutlineGenerationHandler,
     ServerOutlineGenerationRegistry,
 )
@@ -98,6 +100,11 @@ from services.server_link_restoration import (  # noqa: E402
     ServerLinkRestorationHandler,
     ServerLinkRestorationRegistry,
 )
+from services.server_seo_review_generation import (  # noqa: E402
+    ReviewTemplateReference,
+    ServerSeoReviewGenerationHandler,
+    ServerSeoReviewGenerationRegistry,
+)
 from services.server_project_tasks import (  # noqa: E402
     ServerProjectTaskStoreFactory,
 )
@@ -105,6 +112,10 @@ from services.server_task_commands import (  # noqa: E402
     ServerTaskCommandUnavailable,
 )
 from storage import content_hash  # noqa: E402
+from services.seo_review import (  # noqa: E402
+    effective_review_prompt_snapshot,
+    parse_seo_review_response,
+)
 
 
 SERVER_ARTICLE = """# Example Buyer Guide
@@ -262,6 +273,58 @@ class RecordingLinkRestorationProvider:
             }
         )
         return source_article
+
+
+class RecordingSeoReviewProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        task,
+        *,
+        article,
+        prompt_snapshot,
+        context_chunks,
+    ):
+        self.calls.append(
+            {
+                "task_id": task.id,
+                "article_hash": content_hash(article),
+                "prompt_source": prompt_snapshot.source,
+                "chunk_ids": [
+                    chunk.chunk_id for chunk in context_chunks
+                ],
+                "chunk_text": [
+                    chunk.text for chunk in context_chunks
+                ],
+            }
+        )
+        return parse_seo_review_response(
+            json.dumps(
+                {
+                    "publish_ready": True,
+                    "publish_recommendation": "Ready for human review.",
+                    "dimensions": [
+                        {
+                            "key": "eeat",
+                            "name": "E-E-A-T",
+                            "score": 9,
+                            "target_score": 9,
+                            "main_issue": "",
+                            "needs_revision": False,
+                        }
+                    ],
+                    "report": "## Review\n\nNo blocking issue.",
+                    "changes": [],
+                }
+            ),
+            source_article=article,
+            prompt_snapshot=effective_review_prompt_snapshot(
+                prompt_snapshot
+            ),
+            brand_name=task.brand_name,
+        )
 
 
 class FakeDownloadStore:
@@ -1691,6 +1754,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/selected-title",
                     json={"revision": 0, "candidate_index": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-reviews",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-reviews/jobs/job-a",
                 ).status_code,
                 404,
             )
@@ -4223,6 +4301,384 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 assert stored is not None
                 self.assertEqual(stored["revision"], 1)
                 self.assertFalse(local_state.exists())
+
+    def test_server_seo_review_uses_pinned_prompt_and_published_scope(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.strip()
+        record.update(
+            {
+                "status": "draft_ready",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+                "seo_primary_keyword": "buyer guide",
+                "seo_long_tail_keywords": ["supplier checks"],
+                "seo_review_prompt_selection": "system",
+                "seo_reviews": [],
+            }
+        )
+        repository.upsert(record)
+        published_chunk = self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-review-published",
+            text=(
+                "Selected topic 2 Topic 2 buyer guide supplier checks "
+                "published SEO review evidence."
+            ),
+        )
+        self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-review-inbox",
+            text="Unpublished review evidence.",
+            status="inbox",
+        )
+        self._store_outline_context(
+            project_id=self.project_b,
+            suffix=f"{self.task_b}-review-published",
+            text="Cross-project review evidence.",
+        )
+        provider = RecordingSeoReviewProvider()
+        audit = RecordingAuditWriter()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        handler = ServerSeoReviewGenerationHandler(
+            self.engine,
+            provider=provider,
+            audit=audit,
+        )
+        registry = ServerSeoReviewGenerationRegistry(
+            self.engine,
+            access=access,
+            handler=handler,
+            audit=audit,
+        )
+        self.addCleanup(registry.stop)
+        codec = ServerActorSessionCodec(b"z" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "z" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_seo_review_generation = (
+                    registry
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/seo-reviews"
+                )
+                self.assertEqual(
+                    client.post(path, json={"revision": 0}).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="reviewer")
+                    )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={
+                            "revision": 0,
+                            "prompt_snapshot": {"content": "attacker"},
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/seo-reviews"
+                        ),
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                queued = client.post(path, json={"revision": 0})
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertEqual(public_job["operation"], "seo_review")
+                self.assertNotIn("request", public_job)
+                self.assertNotIn("requested_by_user_id", public_job)
+                status_path = f"{path}/jobs/{public_job['job_id']}"
+                terminal = None
+                for _attempt in range(100):
+                    response = client.get(status_path)
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+                    terminal = response.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(
+                    terminal["status"],
+                    "succeeded",
+                    terminal,
+                )
+                self.assertEqual(terminal["result_revision"], 1)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    provider.calls[0]["chunk_ids"],
+                    [published_chunk],
+                )
+                self.assertNotIn(
+                    "Unpublished review evidence.",
+                    str(provider.calls),
+                )
+                self.assertNotIn(
+                    "Cross-project review evidence.",
+                    str(provider.calls),
+                )
+                stored_payload = repository.get(self.task_a)
+                assert stored_payload is not None
+                stored = TaskRecord.model_validate(stored_payload)
+                self.assertEqual(stored.revision, 1)
+                self.assertEqual(stored.status, "draft_ready")
+                self.assertEqual(stored.initial_article, article)
+                self.assertEqual(len(stored.seo_reviews), 1)
+                self.assertEqual(stored.seo_reviews[0].status, "open")
+                self.assertTrue(stored.seo_reviews[0].publish_ready)
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.seo_review.queued",
+                        "article.seo_review.generated",
+                        "background_job.terminal",
+                    ],
+                )
+                self.assertNotIn(article, str(audit.events))
+                self.assertNotIn("No blocking issue.", str(audit.events))
+                self.assertFalse(local_state.exists())
+
+    def test_seo_review_worker_reauthorizes_before_provider_call(
+        self,
+    ) -> None:
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.strip()
+        record.update(
+            {
+                "status": "draft_ready",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+                "seo_review_prompt_selection": "system",
+                "seo_reviews": [],
+            }
+        )
+        repository.upsert(record)
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="reviewer")
+            )
+        prompt = ProjectPromptReference.from_snapshot(
+            PromptSnapshot(
+                kind="review",
+                source="system",
+                captured_at="2026-07-31T00:00:00+00:00",
+            )
+        )
+        template = ReviewTemplateReference.current()
+        raw_queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        batch = raw_queue.create_batch(
+            "seo_review",
+            [
+                {
+                    "task_id": self.task_a,
+                    "source_revision": 0,
+                    "customer": self.project_a,
+                    "topic_index": 2,
+                    "request": {
+                        **prompt.private_values(),
+                        **template.private_values(),
+                        "context_chunk_ids": [],
+                        "source_article_hash": content_hash(article),
+                    },
+                }
+            ],
+            customer=self.project_a,
+            requested_by_user_id=self.user_a,
+        )
+        job_id = str(batch["jobs"][0]["id"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="viewer")
+            )
+        provider = RecordingSeoReviewProvider()
+        registry = ServerSeoReviewGenerationRegistry(
+            self.engine,
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+            handler=ServerSeoReviewGenerationHandler(
+                self.engine,
+                provider=provider,
+            ),
+            audit=RecordingAuditWriter(),
+        )
+        self.addCleanup(registry.stop)
+
+        registry.start_existing()
+
+        current = None
+        for _attempt in range(100):
+            current = raw_queue.get_job(job_id)
+            if current["status"] == "conflict":
+                break
+            time.sleep(0.02)
+        assert current is not None
+        self.assertEqual(current["status"], "conflict")
+        self.assertEqual(
+            current["error"],
+            "job actor is not authorized",
+        )
+        self.assertEqual(provider.calls, [])
+
+    def test_seo_review_audit_failure_rolls_back_review_run(
+        self,
+    ) -> None:
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        article = SERVER_ARTICLE.strip()
+        record.update(
+            {
+                "status": "draft_ready",
+                "initial_article": article,
+                "initial_article_hash": content_hash(article),
+                "article": article,
+                "seo_review_prompt_selection": "system",
+                "seo_reviews": [],
+            }
+        )
+        repository.upsert(record)
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_memberships.update()
+                .where(
+                    project_memberships.c.organization_id == self.org_a,
+                    project_memberships.c.project_id == self.project_a,
+                    project_memberships.c.user_id == self.user_a,
+                )
+                .values(role="reviewer")
+            )
+
+        class FailingAudit:
+            def append(self, connection, event) -> None:
+                del connection, event
+                raise RuntimeError("private audit failure")
+
+        prompt = ProjectPromptReference.from_snapshot(
+            PromptSnapshot(
+                kind="review",
+                source="system",
+                captured_at="2026-07-31T00:00:00+00:00",
+            )
+        )
+        template = ReviewTemplateReference.current()
+        handler = ServerSeoReviewGenerationHandler(
+            self.engine,
+            provider=RecordingSeoReviewProvider(),
+            audit=FailingAudit(),
+        )
+        job = {
+            "id": "job-seo-audit-failure",
+            "operation": "seo_review",
+            "organization_id": self.org_a,
+            "project_id": self.project_a,
+            "task_id": self.task_a,
+            "requested_by_user_id": self.user_a,
+            "source_revision": 0,
+            "request": {
+                **prompt.private_values(),
+                **template.private_values(),
+                "context_chunk_ids": [],
+                "source_article_hash": content_hash(article),
+            },
+        }
+
+        with self.assertRaises(ServerTaskCommandUnavailable) as raised:
+            handler(job, lambda: False)
+
+        self.assertNotIn(
+            "private audit failure",
+            str(raised.exception),
+        )
+        persisted = repository.get(self.task_a)
+        assert persisted is not None
+        self.assertEqual(persisted["revision"], 0)
+        self.assertEqual(persisted["status"], "draft_ready")
+        self.assertEqual(persisted["seo_reviews"], [])
 
     def test_link_worker_rejects_article_hash_drift_before_provider(
         self,

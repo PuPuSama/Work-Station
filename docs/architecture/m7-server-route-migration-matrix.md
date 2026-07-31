@@ -57,6 +57,7 @@
 | 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
 | 恢复首稿链接 | `POST .../restore-links`、`GET .../restore-links/jobs/{job_id}` | `article.edit` | PostgreSQL Job + Template/Article Hash + 确定性校验 + CAS/Audit | Server Ready |
 | 保存 SEO Review 设置 | `PUT .../seo-review-settings` | `article.edit` | Project Review Prompt 解析 + Keyword 门禁 + CAS/Audit | Server Ready |
+| 生成 SEO Review Run | `POST .../seo-reviews`、`GET .../seo-reviews/jobs/{job_id}` | `article.review` | PostgreSQL Job + Prompt/Template/Article/Published Chunk 身份 + CAS/Audit | Server Ready |
 | 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |
 | 生成 TDK DOCX | `POST .../generate-tdk` | `article.deliver` | 私有 TDK Asset + CAS + Audit | Server Ready |
 | 打包交付 ZIP | `POST .../package-delivery` | `article.deliver` | 私有 ZIP Asset + CAS + Audit | Server Ready |
@@ -72,9 +73,9 @@
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
-| Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Review Worker 继续接线；旧路由继续关闭 |
+| Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
-| Humanize Job/SEO Review 生成与修改应用 | Local TaskStore + LLM | Project Job/Review Command | SEO Settings 已迁移；仍需 Published Context、Server Provider、Review Run/Change/Finalize CAS/Audit |
+| Humanize Job/SEO Review 修改应用 | Local TaskStore + LLM | Project Job/Review Command | SEO Settings 与 Review 生成已迁移；仍需 Humanize Server Prompt，以及 Review Change/Preview/Apply/Complete CAS/Audit |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
@@ -87,8 +88,8 @@
 | `outline` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | Project Registry，只写 Review Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `article` | Project-scoped、固定 Task Revision/Prompt Version/目标字数/Published Chunk ID | Project Registry，只写 Raw/Initial Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `restore_links` | Project-scoped、固定 Task Revision/Template Hash/Initial 与 Humanized Hash/链接数 | Project Registry；模型只产候选，确定性校验后写 Linked Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
+| `seo_review` | Project-scoped、固定 Task Revision/Initial Article Hash/Prompt Version/System Template Hash/Published Chunk ID | 共享 Lifecycle + Operation-specific Enqueue/Handler；只追加 Open Review Run | `article.review` | `article.review` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
-| `seo_review` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `humanize` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `knowledge_research` | Local Research Queue | Local Runner | 无完整 Server 链 | 无完整 Server 链 | Local Only |
@@ -133,9 +134,18 @@ checked-in Template Hash、Initial/Humanized Article Hash、来源链接数和 F
 一致、非链接可见正文与 Humanized Article 一致。模板或正文漂移、撤权、Provider
 失败、CAS/Audit 失败均不写 Task，也不向公开 Job/Audit 暴露正文、Hash 或 URL。
 
+`seo_review` 生成也已从 Local 组合中拆出，但人工修改/应用仍未迁移。Server Enqueue
+只接受 Revision，固定 Initial Article、精确 Project Review Prompt Version、
+checked-in System Template Hash 与当前 Published Chunk ID。Provider 只能读取注入的
+Published Context，不能调用本地 Customer Context 或生成 mock；成功只追加 Open
+Review Run，不修改文章或 Workflow Status。Change/Preview/Apply/Complete 继续 Local
+Only，直到它们分别具备 Project Scope、精确 Review/Change 身份、Revision CAS 与安全
+Audit。
+
 ## 6. 已完成闭环：Project Job Control
 
-已为迁移完成的 `product_rediscovery/titles/outline/article/restore_links` 增加：
+已为迁移完成的
+`product_rediscovery/titles/outline/article/restore_links/seo_review` 增加：
 
 ```text
 GET  /api/projects/{project}/batches
@@ -182,3 +192,11 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     只读取 PostgreSQL 不可变 Prompt Version、不混用 SQLite Prompt？
 19. SQLite Prompt 是否只通过显式一次性导入进入指定 Project，且非空差异目标不会被
     覆盖、旧库未保存的历史 Version 不会被伪造？
+20. `seo_review` Job 是否只接受 Revision，并固定 Initial Article、Review Prompt
+    Version、System Template Hash 与 Published Current Chunk ID？
+21. Server Review Provider 是否只读取注入 Context、不触碰本地 Customer 文件、不补
+    mock，且只追加 Open Review Run？
+22. Review 生成失败、身份漂移、撤权或 Audit/CAS 回滚时，是否保持文章、Workflow
+    Status、Revision 和已有 Review Run 不变？
+23. `ServerProjectJobRegistry` 后续被旧 Operation 采用时，是否仍把业务 Enqueue、
+    权限、私有 Request 与 Handler 留在 Operation-specific 层？

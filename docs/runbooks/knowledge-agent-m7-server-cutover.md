@@ -506,17 +506,18 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十九条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+二十条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、保存 SEO Review 设置、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
-  `article.outline.updated`、`article.draft.generated`、
+  `article.outline.updated`、`article.outline_version.restored`、
+  `article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
   `article.humanized.updated`、
   `article.links.restored`、
   `article.seo_review_settings.updated`、
-  `article.outline_version.restored`、
+  `article.seo_review.generated`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
   `article.docx.exported`、`article.tdk.generated`、
@@ -560,8 +561,14 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - SEO Review Settings 只提交 Revision、关键词和 Prompt Selection；服务端必须解析
   当前 Project 的 `review` Prompt，不接受 Prompt 正文/Version/Provider。关键词规范化、
   去重并限制数量/长度；Audit 只记录长尾关键词数量和 Prompt Source/Version，不记录
-  关键词或 Prompt 正文。该命令不得创建 Review Run，`seo_review` Job/Change/Finalize
-  在正式 Server Provider 与 Published Context 接线前仍保持 Local Only；
+  关键词或 Prompt 正文。该命令不得创建 Review Run；
+- SEO Review 生成只提交 Revision；Enqueue 固定 Initial Article Hash、精确 Review
+  Prompt Version、checked-in System Template Hash 与当前 Published Chunk ID，公开
+  Job 不返回这些身份。Worker 两阶段要求 `article.review`，Provider 只读取注入的
+  Published Context，不读取本地 Customer Context、不补 mock。成功只追加 Open Review
+  Run，不修改文章或 Workflow Status；Audit 只记录安全计数、Prompt 身份与
+  Publish-ready 布尔值，不记录文章、Report、Change、Prompt 或 Knowledge 正文。
+  Change/Preview/Apply/Complete 仍为 Local Only；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/
@@ -604,13 +611,32 @@ Outline 生成冒烟必须通过
 - Task CAS、撤权或 Audit 失败不留下 Draft/Version/Prompt Snapshot 部分写入，日志和
   Audit 不含 Prompt 正文、Knowledge 正文或 Provider 原始响应。
 
+SEO Review 生成冒烟必须通过
+`POST /api/projects/{project}/tasks/{task_id}/seo-reviews`，随后只使用响应 Job ID 调用
+`GET /api/projects/{project}/tasks/{task_id}/seo-reviews/jobs/{job_id}`。至少验证：
+
+- Body 只允许当前 Revision；Prompt/Chunk/Article Hash、Actor、Role、Provider 或模型
+  参数均返回 422；
+- Viewer 与跨 Project 请求返回 403，可信 Requester 在 Claim 前和 Handler 前都要求
+  `article.review`；
+- 入队固定 Task 已选择的精确 Project Review Prompt Version、System Template Hash、
+  Initial Article Hash 与当前 Published Chunk ID；任一身份漂移必须在 Provider 或提交
+  前停止；
+- Context 只包含同 Project 的 Published Current Snapshot；Inbox、旧 Snapshot 和跨
+  Project Chunk 不得传给 Provider，Server Provider 不读取本地 Customer Context；
+- Provider 未配置、异常、空输出或非法 JSON 只返回脱敏失败，不回退 mock，也不把文章、
+  Prompt、Knowledge、Report 或 Proposed Change 写入 Job/Audit；
+- 成功只追加一个 Open Review Run 并使 Revision 加一；文章、Workflow Status 和已有
+  Review Run 保持原语义，不自动 Change/Preview/Apply/Complete；
+- 执行前撤权、Task CAS 或 Audit 故障不留下部分 Review Run；同一 Job ID 不得重复追加。
+
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery/titles/outline/article/restore_links`，并且响应不存在 Request、Requester、URL、Prompt/
+  `product_rediscovery/titles/outline/article/restore_links/seo_review`，并且响应不存在 Request、Requester、URL、Prompt/
   Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
 - Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
-  `knowledge.edit/article.edit`，且撤权后即使 Cookie 与页面仍有效也必须失败；
+  `knowledge.edit/article.edit/article.review`，且撤权后即使 Cookie 与页面仍有效也必须失败；
 - Batch/Job ID 从另一 Project 或 Organization 带入当前路径时返回 404，不能读取后
   再由应用层过滤；
 - `POST .../cancel` 使用空 Body；Queued/Retry-wait 直接成为 Cancelled，Running 只设置

@@ -242,6 +242,11 @@ from services.server_link_restoration import (
     ServerLinkRestorationHandler,
     ServerLinkRestorationRegistry,
 )
+from services.server_seo_review_generation import (
+    LlmServerSeoReviewProvider,
+    ServerSeoReviewGenerationHandler,
+    ServerSeoReviewGenerationRegistry,
+)
 from services.server_job_control import PostgresServerJobControlService
 from storage import (
     RevisionConflictError,
@@ -378,6 +383,11 @@ async def app_lifespan(application: FastAPI):
         "server_link_restoration",
         None,
     )
+    previous_server_seo_review_generation = getattr(
+        application.state,
+        "server_seo_review_generation",
+        None,
+    )
     previous_server_job_control = getattr(
         application.state,
         "server_job_control",
@@ -418,6 +428,7 @@ async def app_lifespan(application: FastAPI):
     server_title_generation = None
     server_article_generation = None
     server_link_restoration = None
+    server_seo_review_generation = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
@@ -433,6 +444,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_title_generation = None
     application.state.server_article_generation = None
     application.state.server_link_restoration = None
+    application.state.server_seo_review_generation = None
     application.state.server_job_control = None
     application.state.server_oidc_login = None
     application.state.server_actor_session_revocation = None
@@ -620,6 +632,26 @@ async def app_lifespan(application: FastAPI):
         application.state.server_link_restoration = (
             server_link_restoration
         )
+        seo_review_provider = LlmServerSeoReviewProvider(cfg)
+        seo_review_handler = (
+            ServerSeoReviewGenerationHandler(
+                server_engine,
+                provider=seo_review_provider,
+            )
+            if seo_review_provider.ready
+            else None
+        )
+        server_seo_review_generation = (
+            ServerSeoReviewGenerationRegistry(
+                server_engine,
+                access=server_access,
+                handler=seo_review_handler,
+            )
+        )
+        server_seo_review_generation.start_existing()
+        application.state.server_seo_review_generation = (
+            server_seo_review_generation
+        )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -686,6 +718,12 @@ async def app_lifespan(application: FastAPI):
                     shutdown_error = RuntimeError(
                         "server link restoration did not drain"
                     )
+            if server_seo_review_generation is not None:
+                stop_report = server_seo_review_generation.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server SEO review generation did not drain"
+                    )
             if server_oidc_login is not None:
                 server_oidc_login.close()
             if knowledge_runtime is not None:
@@ -730,6 +768,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_link_restoration = (
                 previous_server_link_restoration
+            )
+            application.state.server_seo_review_generation = (
+                previous_server_seo_review_generation
             )
             application.state.server_job_control = previous_server_job_control
             application.state.server_oidc_login = (
@@ -925,6 +966,8 @@ async def app_lifespan(application: FastAPI):
             server_article_generation.stop()
         if server_link_restoration is not None:
             server_link_restoration.stop()
+        if server_seo_review_generation is not None:
+            server_seo_review_generation.stop()
         if server_oidc_login is not None:
             server_oidc_login.close()
         if knowledge_runtime is not None:
@@ -967,6 +1010,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_link_restoration = (
             previous_server_link_restoration
+        )
+        application.state.server_seo_review_generation = (
+            previous_server_seo_review_generation
         )
         application.state.server_job_control = previous_server_job_control
         application.state.server_oidc_login = previous_server_oidc_login

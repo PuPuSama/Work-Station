@@ -32,6 +32,7 @@ SERVER_JOB_CONTROL_OPERATIONS = frozenset(
         "outline",
         "product_rediscovery",
         "restore_links",
+        "seo_review",
         "titles",
     }
 )

@@ -131,13 +131,17 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增 SEO Review 设置前置命令：`PUT .../seo-review-settings` 只接受 Revision、
   关键词和 Prompt Selection；服务端解析当前 Project 的 `review` Prompt Snapshot，
   规范化/去重关键词，并以不含关键词正文的 CAS/Audit 保存；它不调用 Review Provider；
+- 新增 Project-scoped SEO Review 生成 Job：`POST .../seo-reviews` 只接受 Revision，
+  入队固定 Initial Article Hash、Project Review Prompt Version、checked-in System
+  Template Hash 与当前 Published Chunk ID；Worker 只追加 Open Review Run，不自动
+  Apply/Complete，公开 Job 与 Audit 均不返回文章、Prompt、Chunk 正文或 Hash；
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十九条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 二十条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -211,7 +215,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
   当前产品；旧产品与已发布快照继续服务，确认替换必须走独立产品选择命令；
 - 对象存储未配置时，产品发现历史 Job 状态仍可读取但新发现 Job 返回 503；Outline
   Provider 未配置时新生成 Job 返回 503。应用重启按各自配置只恢复
-  `product_rediscovery/titles/outline/article/restore_links` 的 Active PostgreSQL Job。
+  `product_rediscovery/titles/outline/article/restore_links/seo_review` 的 Active
+  PostgreSQL Job。
 - 产品重新发现 Runner 已实现有界停机报告：停止新 Claim 后等待已领取工作，协作式停机
   释放为 `queued` 而不是伪装成用户取消；超时仍有在途 Job 时 Lifespan 明确失败并保留
   数据库 Engine，不宣称已经排空。
@@ -228,7 +233,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
   组织级确认入口；
 - 不给旧项目自动补一个虚构 Organization；
 - 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前
-  `product_rediscovery/titles/outline/article/restore_links` 五条 Operation-specific Job 入口使用
+  `product_rediscovery/titles/outline/article/restore_links/seo_review` 六条
+  Operation-specific Job 入口使用
   PostgreSQL 单写；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接邮件发送服务与生产 IdP Provider 配置管理；Organization Admin Console 已接入
@@ -494,6 +500,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_humanized_update.py` | 人工审阅 Humanized Markdown 的纯 Task 变换 | 结构/数字/FAQ/表格/列表/必须短语门禁、Version 与下游失效；不知道 HTTP/RBAC/PostgreSQL/本地 Prompt |
 | `backend/services/server_link_restoration.py` | Project Link Restore Provider、Handler、确定性提交变换与 Queue Registry | Template/Initial/Humanized/Final Check 身份固定、模型候选与提交分离、精确链接/可见正文门禁、两阶段授权、CAS/Audit、有界停机 |
 | `backend/services/server_seo_review_settings.py` | SEO Review 设置的纯 Task 变换 | Keyword 规范化/去重/长度门禁与已解析 Review Prompt 身份；不知道 HTTP/RBAC/PostgreSQL/Provider |
+| `backend/services/server_project_job_registry.py` | 单 Operation 的共享 Project Runner 生命周期与公开 Job 投影 | 只抽取 Runner/Queue/Stop/Get 样板；业务 Enqueue、权限、私有 Request 与 Handler 仍由各 Operation 定义 |
+| `backend/services/server_seo_review_generation.py` | Project SEO Review Provider、Handler、Review Run 变换与 Queue Registry | Prompt/Template/Initial Article/Published Chunk 身份固定、只用注入 Context、两阶段授权、只追加 Open Run、CAS/Audit、有界停机 |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -754,7 +762,8 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
 已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
-`product_rediscovery/titles/outline/article/restore_links` 已有独立 PostgreSQL Job API/Runner。
+`product_rediscovery/titles/outline/article/restore_links/seo_review` 已有独立
+PostgreSQL Job API/Runner。
 其余正文后处理写入、通用 Batch 和 Worker 尚未接线。因此
 不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
 Runner 描述成“服务器 Job 单写已完成”。
@@ -770,7 +779,8 @@ Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一�
 退出的非用户取消 Job 释放回 `queued`，并返回有界 Join 报告。若报告仍有在途 Job，
 Lifespan 明确失败且不释放数据库 Engine。
 
-这套语义当前接到 `product_rediscovery/titles/outline/article/restore_links`。仍没有全部 Operation
+这套语义当前接到
+`product_rediscovery/titles/outline/article/restore_links/seo_review`。仍没有全部 Operation
 的 Runner 和正式环境排空演练，所以 `worker_reauthorizes` 与
 `postgres_job_single_write` 仍保持 false，不能把单条 Operation 的证据扩写成整体
 Worker Cutover 已完成。
@@ -1114,10 +1124,47 @@ Humanized Article 的可见正文不变。没有缺失链接时仍走同一确�
 Template、Revision、Initial/Humanized 或 Final Check 身份漂移，以及撤权、非法新增
 URL、空输出、正文变化、CAS/Audit 失败都会保留旧 Task，不产生部分 Linked Version。
 
-当前每个 Operation Registry 仍有重复调度样板，这是有意保留的迁移结构痕迹。后续可
-抽取共享 Registry，但必须保持 Operation-specific Scope、私有 Request、权限映射、
-公开 DTO 和有界 drain 语义不变。自动 `humanize` 仍依赖外部
+已有 Operation Registry 仍保留重复调度样板；SEO Review 首次把其中稳定的 Project
+Runner 生命周期抽为 `ServerProjectJobRegistry`，但只由该新 Operation 使用，避免一次
+大改同时触碰已验收链路。后续可以逐条迁移旧 Registry，但必须保持 Operation-specific
+Enqueue/Scope、私有 Request、权限映射、公开 DTO 和有界 drain 语义不变。自动
+`humanize` 仍依赖外部
 `humanize_prompt_path`，继续 Local Only，不能与已迁移的 Link Restore 合并判定。
+
+#### D1.4c 已实现：Server SEO Review 生成
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/seo-reviews
+body: { revision }
+  -> project.view + article.review
+  -> 固定 Task SEO Settings 解析出的 Project Review Prompt ID + Version
+  -> 固定 checked-in seo_review System Template Hash
+  -> 固定 Initial Article Hash、Task Revision 和当前 Published Chunk ID
+  -> PostgreSQL Job(requested_by_user_id)
+  -> Claim 前与 Handler 前重新授权
+  -> 复核 Task/Article/Prompt/Template/Chunk 身份
+  -> Provider 只使用注入的 Published Context，不读取本地 Customer Context
+  -> 解析并验证 Review JSON
+  -> 只追加 Open SeoReviewRun + Task CAS + Audit
+
+GET /api/projects/{project}/tasks/{task_id}/seo-reviews/jobs/{job_id}
+  -> project.view
+  -> 只返回公开 Job 状态，不返回 Request/Requester/Prompt/Chunk/Article/Error
+```
+
+生成与人工裁决是两个事务边界。生成 Job 不接受 Prompt 正文、Chunk ID、模型参数或
+Review 结果，也不修改 `article`、Workflow Status 或任何 Proposed Change；它只把一次
+可追溯的模型输出追加为 Open Review Run。后续 Change/Preview/Apply/Complete 必须使用
+独立 Project-scoped 命令、当前 Revision 和精确 Review/Change ID，不能让 Provider
+直接提交文章。
+
+`build_seo_review_prompt` 保留 Local 默认行为，但 Server Provider 必须显式注入
+`published_generation_context_text(...)`；这条兼容接缝用于阻止 Server Worker 读取
+Customer 文件。入队后 Prompt Default 切换不会改变已固定 Version；任一固定 Chunk
+不再属于该 Project 的 Published Current Snapshot、Initial Article 或系统模板漂移、
+执行前撤权、Provider 失败、CAS/Audit 失败，都不会留下部分 Review Run。Review ID 从
+Job ID 稳定派生，重放同一 Job 不会重复追加；Review 内部 Proposed Change ID 仍由一次
+成功解析产生，不能作为跨 Job 幂等键。
 
 #### D1.5 已实现：Server Delivery ZIP 组装与下载
 
@@ -1238,7 +1285,8 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 `ServerJobSummary/ServerBatchSummary` 是独立公开投影，只返回稳定身份、状态、Revision、
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
-分页；当前可见 Operation 是 `product_rediscovery/titles/outline/article/restore_links`。旧
+分页；当前可见 Operation 是
+`product_rediscovery/titles/outline/article/restore_links/seo_review`。旧
 `/api/batches*` 继续 503，未迁移的 `products/rewrite_article/...` 即使误写入
 PostgreSQL 也不会出现在控制面。
 
@@ -1320,7 +1368,8 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十九条 Task 写操作、`product_rediscovery/titles/outline/article/restore_links` 的
+身份代码链、二十条 Task 写操作、
+`product_rediscovery/titles/outline/article/restore_links/seo_review` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
@@ -1440,7 +1489,8 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 64. Retry HTTP 是否仍只接受空 Body，且不能替换服务端保存的 Request、Source Revision、
     Requester、Operation 或 Task？
 65. 取消终态、操作者命令 Audit 和状态变化是否仍在一个事务，Audit 失败是否完整回滚？
-66. `product_rediscovery/titles/outline/article/restore_links` 以外的 Operation 是否仍不出现在列表、详情、取消或
+66. `product_rediscovery/titles/outline/article/restore_links/seo_review` 以外的
+    Operation 是否仍不出现在列表、详情、取消或
     重试接口？
 67. 旧 `/api/batches*` 是否仍在 Server Mode 关闭，避免建立没有 Project Scope 的兼容
     别名？
@@ -1528,4 +1578,10 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
 111. SEO Review Settings 是否只接受关键词和 Prompt Selection，由服务器解析
      Project `review` Snapshot，并以 CAS/Audit 保存而不接受 Prompt 正文或 Provider 字段？
 112. 关键词或 Prompt 内容是否都不进入 Audit，且 Settings 成功是否不会伪造 Review
-     Run、调用模型或把仍为 Local Only 的 `seo_review` Operation 标成已迁移？
+     Run 或调用模型？
+113. `seo_review` Job 是否只接受 Revision，并固定 Initial Article、精确 Review
+     Prompt Version、System Template Hash 与 Published Current Chunk ID？
+114. Server Provider 是否仍只消费注入的 Published Context，不读取本地 Customer
+     Context、不补 mock，且生成只追加 Open Review Run、不修改文章或自动 Apply/Complete？
+115. Prompt/Template/Article/Chunk 漂移、执行前撤权、Provider、CAS 或 Audit 失败时，
+     是否都不留下部分 Review Run，公开 Job/Audit 是否不泄露正文、Hash 或原始错误？

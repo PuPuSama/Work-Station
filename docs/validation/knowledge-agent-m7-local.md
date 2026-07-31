@@ -521,9 +521,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十九条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+- 二十条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
   initial-ai-screenshot/initial-ai-check/humanized-update/products/section/images/docx/tdk/final-ai-screenshot/
-  final-ai-check/link-restoration/seo-review-settings/delivery-package Action；
+  final-ai-check/link-restoration/seo-review-settings/seo-review-generation/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
 - 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
@@ -1185,12 +1185,55 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   240 字符。成功只更新 Task Settings，不创建 Review Run、不调用模型；
 - Task CAS 与 `article.seo_review_settings.updated` Audit 同事务；Audit 只记录 Long-tail
   数量和 Prompt Source/Version，不记录关键词或 Prompt 正文；
-- Viewer、跨 Project、旧 Revision、额外字段与 Local Mode fail closed；SEO Review
-  生成、Change、Preview、Apply/Complete 仍为 Local Only，等待 Published Context 和
-  Server Provider 接线。
+- Viewer、跨 Project、旧 Revision、额外字段与 Local Mode fail closed；在该设置切片
+  验收时 SEO Review 生成、Change、Preview、Apply/Complete 仍为 Local Only；下节记录
+  随后完成的 Server 生成接线，人工裁决接口仍未迁移。
 - 完整后端回归 644 tests 全部通过，2 tests 按显式外部环境门禁跳过；本切片不改
   Frontend 或 Schema，前一切片的 ESLint、TypeScript、Next production build 与
   Alembic `20260731_0015` Current/Head 证据继续有效。
+
+### M7 Server SEO Review Generation
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_seo_review_generation `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_seo_review_uses_pinned_prompt_and_published_scope `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_seo_review_worker_reauthorizes_before_provider_call `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_seo_review_audit_failure_rolls_back_review_run `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_job_control.ServerJobControlTests.test_public_projection_is_scoped_and_omits_private_fields `
+  tests.test_m7_server_job_control.ServerJobControlTests.test_seo_review_control_requires_review_permission `
+  tests.test_m7_server_task_commands `
+  tests.test_seo_review `
+  tests.test_seo_review_api -q
+```
+
+结果：
+
+- 32 tests 全部通过；
+- `POST /api/projects/{project}/tasks/{task_id}/seo-reviews` 只接受 Revision，对应 GET
+  只公开 Job 状态；Request、Requester、Article/Prompt/Template/Chunk 身份和原始
+  Provider Error 均不进入公开 DTO；
+- Enqueue 固定 Initial Article Hash、Task 已选择的精确 Project Review Prompt Version、
+  checked-in `seo_review` System Template Hash 和当前 Published Chunk ID；
+- Worker 两阶段要求 `article.review`，Provider 前复核固定身份；Context 只来自同
+  Project 的 Published Current Snapshot，不包含 Inbox 或跨 Project 数据；
+- Server Provider 通过显式参数注入 Published Context；测试把本地
+  `collect_customer_context()` 替换为立即失败，仍能生成，证明 Server 链不读取本地
+  Customer 文件；Provider 异常/非法 JSON 统一脱敏且不补 mock；
+- 成功只追加 Open `SeoReviewRun`、Revision 加一；文章与 Workflow Status 不变，不自动
+  Change/Preview/Apply/Complete。Review ID 从 Job ID 稳定派生，重复提交同一结果拒绝；
+- System Template 漂移、跨 Project、Viewer、执行前撤权、Audit 故障和 Local Mode 均
+  fail closed；Audit 故障完整回滚 Revision 与 Review Run，私有异常不回显；
+- 首次提取 `ServerProjectJobRegistry` 只复用 Project Runner 生命周期、公开 Job 投影和
+  有界停机；SEO Review 的 Enqueue、权限、私有 Request 和 Handler 保持独立，旧
+  Operation Registry 暂不批量重构；
+- 完整后端回归 652 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 Next.js
+  production build、ESLint 与 TypeScript 全部通过；Alembic Current 与 Head 均为
+  `20260731_0015`。
 
 ### M7 Task 历史大纲恢复
 
@@ -1291,16 +1334,18 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
   标题/大纲/正文初稿生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
   私有图片准备和文章 DOCX 导出/下载，并为
-  `product_rediscovery/titles/outline/article/restore_links` 提供窄范围
+  `product_rediscovery/titles/outline/article/restore_links/seo_review` 提供窄范围
   Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery/titles/outline/article/restore_links` Job 为单写，其余路径尚未成为 PostgreSQL
+  Task 命令和 `product_rediscovery/titles/outline/article/restore_links/seo_review`
+  Job 为单写，其余路径尚未成为 PostgreSQL
   准源；
-- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲与正文初稿生成已有项目级
-  PostgreSQL Runner 和两阶段授权，Enqueue、终态 Audit 与有界 drain/join 报告已完成；
-  这五个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
+- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲、正文初稿、链接
+  恢复与 SEO Review 生成已有项目级 PostgreSQL Runner 和两阶段授权，Enqueue、终态
+  Audit 与有界 drain/join 报告已完成；这六个 Operation 的 Project-scoped 列表、取消和
+  重试也已完成；但其他 Operation 的
   Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；

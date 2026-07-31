@@ -149,11 +149,13 @@
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
-  调用 fail closed；产品重新发现、标题、大纲和正文初稿生成已有独立
+  调用 fail closed；产品重新发现、标题、大纲、正文初稿、链接恢复和 SEO Review
+  生成已有独立
   Project-scoped PostgreSQL Runner，
   其余通用 Batch/Worker 尚未接线；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery/titles/outline/article/restore_links`，公开 DTO 不含私有 Request、Requester、URL、
+  只展示 `product_rediscovery/titles/outline/article/restore_links/seo_review`，公开
+  DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
   返回 422；旧无 Project 的 `/api/batches*` 继续关闭；
@@ -212,7 +214,7 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让十九条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让二十条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
@@ -236,7 +238,13 @@
 - 已新增 Project-scoped SEO Review Settings：只接受 Revision、关键词和 Prompt
   Selection，由服务端解析当前 Project 的不可变 `review` Prompt Snapshot；关键词
   规范化/去重后通过 Task CAS 与 `article.seo_review_settings.updated` Audit 原子保存，
-  Audit 不含关键词或 Prompt 正文。Review 生成/Change/Preview/Finalize 仍为 Local Only；
+  Audit 不含关键词或 Prompt 正文；
+- 已新增 Project-scoped `seo_review` PostgreSQL Job：客户端只提交 Revision，Enqueue
+  固定 Initial Article Hash、精确 Review Prompt Version、checked-in System Template
+  Hash 与当前 Published Chunk ID；Claim/Handler 两阶段要求 `article.review`，Provider
+  只读取注入的 Published Context，不访问本地 Customer Context、不补 mock。成功只追加
+  Open Review Run，不修改文章或 Workflow Status；Change/Preview/Apply/Complete 仍为
+  Local Only；
 - 已新增 Project-scoped `outline` PostgreSQL Job：客户端只提交 Revision，Enqueue
   固定不可变 Prompt ID + Version 和当前 Published Chunk ID；Claim/Handler 两阶段要求
   `article.edit`，执行时复核 Prompt 与 Chunk Scope，Provider 失败脱敏且不生成 mock；

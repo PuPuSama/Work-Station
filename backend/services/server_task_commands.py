@@ -36,6 +36,7 @@ ServerTaskAuditAction = Literal[
     "article.humanized.updated",
     "article.links.restored",
     "article.seo_review_settings.updated",
+    "article.seo_review.generated",
     "article.products.confirmed",
     "article.section.replaced",
     "article.images.prepared",
@@ -61,6 +62,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.humanized.updated": "article.edit",
     "article.links.restored": "article.edit",
     "article.seo_review_settings.updated": "article.edit",
+    "article.seo_review.generated": "article.review",
     "article.products.confirmed": "article.edit",
     "article.section.replaced": "article.edit",
     "article.images.prepared": "article.edit",
@@ -136,6 +138,16 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "long_tail_keyword_count",
             "prompt_source",
             "prompt_version",
+        }
+    ),
+    "article.seo_review.generated": frozenset(
+        {
+            "change_count",
+            "context_chunk_count",
+            "dimension_count",
+            "prompt_source",
+            "prompt_version",
+            "publish_ready",
         }
     ),
     "article.products.confirmed": frozenset({"product_count"}),
