@@ -5,14 +5,15 @@
 import {
   AlertCircle,
   CheckCircle2,
+  Eye,
   FileUp,
   Loader2,
   Pencil,
+  Plus,
   Power,
   PowerOff,
   Save,
   Trash2,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -27,8 +28,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
 import type {
@@ -52,11 +62,15 @@ const EMPTY_LIBRARY: ProjectPromptLibrary = {
   },
 };
 
+type PromptDialogMode = "preview" | "create" | "edit";
+
 export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
   const [library, setLibrary] = useState<ProjectPromptLibrary>(EMPTY_LIBRARY);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [feedback, setFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogMode, setDialogMode] = useState<PromptDialogMode>("preview");
   const [editingId, setEditingId] = useState("");
   const [name, setName] = useState("");
   const [kind, setKind] = useState<PromptKind>("outline");
@@ -103,6 +117,13 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
     outlineDefault !== library.defaults.default_outline_prompt_id ||
     articleDefault !== library.defaults.default_article_prompt_id ||
     reviewDefault !== library.defaults.default_review_prompt_id;
+  const selectedPrompt = library.prompts.find((prompt) => prompt.id === editingId);
+  const promptEditorDirty =
+    dialogMode === "create"
+      ? Boolean(name.trim() || content.trim() || kind !== "outline")
+      : dialogMode === "edit" && selectedPrompt
+        ? name !== selectedPrompt.name || content !== selectedPrompt.content
+        : false;
 
   function resetEditor() {
     setEditingId("");
@@ -112,12 +133,43 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
     if (fileRef.current) fileRef.current.value = "";
   }
 
-  function edit(prompt: PromptLibraryItem) {
+  function populateEditor(prompt: PromptLibraryItem) {
     setEditingId(prompt.id);
     setName(prompt.name);
     setKind(prompt.kind);
     setContent(prompt.content);
     setFeedback(null);
+  }
+
+  function openCreateDialog() {
+    resetEditor();
+    setDialogMode("create");
+    setDialogOpen(true);
+    setFeedback(null);
+  }
+
+  function openPreviewDialog(prompt: PromptLibraryItem) {
+    populateEditor(prompt);
+    setDialogMode("preview");
+    setDialogOpen(true);
+  }
+
+  function openEditDialog(prompt: PromptLibraryItem) {
+    populateEditor(prompt);
+    setDialogMode("edit");
+    setDialogOpen(true);
+  }
+
+  function closeDialog() {
+    if (busy === "prompt") return;
+    if (
+      promptEditorDirty &&
+      !window.confirm("提示词还有未保存修改，确定关闭并放弃这些修改吗？")
+    ) {
+      return;
+    }
+    setDialogOpen(false);
+    resetEditor();
   }
 
   async function savePrompt() {
@@ -136,9 +188,11 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
           { name, kind, content },
         );
       }
-      resetEditor();
       await load();
-      setFeedback({ kind: "success", message: editingId ? "提示词新版本已保存。" : "提示词已加入项目库。" });
+      const successMessage = editingId ? "提示词新版本已保存。" : "提示词已加入项目库。";
+      setDialogOpen(false);
+      resetEditor();
+      setFeedback({ kind: "success", message: successMessage });
     } catch (error) {
       setFeedback({ kind: "error", message: errorMessage(error) });
     } finally {
@@ -222,14 +276,25 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
   }
 
   return (
-    <Card className="rounded-lg">
+    <>
+      <Card className="rounded-lg">
       <CardHeader className="border-b">
         <CardTitle>项目提示词库</CardTitle>
         <CardDescription>
           分别管理完整的大纲、正文和 SEO 质量复检提示词。系统会自动注入文章资料，并始终保留事实、结构和链接硬约束。
         </CardDescription>
         <CardAction>
-          <Badge variant="outline">{library.prompts.length} 份</Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline">{library.prompts.length} 份</Badge>
+            <Button
+              size="sm"
+              onClick={openCreateDialog}
+              disabled={loading || Boolean(busy)}
+            >
+              <Plus />
+              新增提示词
+            </Button>
+          </div>
         </CardAction>
       </CardHeader>
       <CardContent className="grid gap-6">
@@ -289,55 +354,29 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
           </div>
         </div>
 
-        <div className="grid gap-3 rounded-lg border p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="font-medium">{editingId ? "编辑提示词" : "新增提示词"}</div>
-            {editingId && <Button variant="ghost" size="sm" onClick={resetEditor}><X />取消编辑</Button>}
-          </div>
-          <div className="grid gap-3 md:grid-cols-[1fr_180px]">
-            <div className="grid gap-2">
-              <Label htmlFor="prompt-name">名称</Label>
-              <Input id="prompt-name" value={name} maxLength={120} onChange={(event) => setName(event.target.value)} placeholder="例如：产品对比型正文" />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="prompt-kind">类型</Label>
-              <select
-                id="prompt-kind"
-                className="h-9 rounded-md border bg-background px-3 text-sm"
-                value={kind}
-                disabled={Boolean(editingId)}
-                onChange={(event) => setKind(event.target.value as PromptKind)}
-              >
-                <option value="outline">大纲提示词</option>
-                <option value="article">正文提示词</option>
-                <option value="review">复检提示词</option>
-              </select>
-            </div>
-          </div>
-          <div className="grid gap-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <Label htmlFor="prompt-content">提示词内容</Label>
-              <div>
-                <input ref={fileRef} type="file" accept=".txt,text/plain" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void readFile(file); }} />
-                <Button type="button" variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
-                  <FileUp />上传 .txt
-                </Button>
-              </div>
-            </div>
-            <Textarea id="prompt-content" value={content} maxLength={40000} className="min-h-52 resize-y font-mono text-sm" onChange={(event) => setContent(event.target.value)} placeholder="直接粘贴完整提示词，或上传 UTF-8 .txt 文件。无需填写变量。" />
-            <p className="text-right text-xs text-muted-foreground">{content.length.toLocaleString()} / 40,000</p>
-          </div>
-          <div className="flex justify-end">
-            <Button onClick={() => void savePrompt()} disabled={!name.trim() || !content.trim() || Boolean(busy)}>
-              {busy === "prompt" ? <Loader2 className="animate-spin" /> : <Save />}
-              {editingId ? "保存为新版本" : "加入提示词库"}
-            </Button>
-          </div>
-        </div>
-
         <div className="grid gap-3">
-          <div className="font-medium">已保存提示词</div>
-          {!loading && library.prompts.length === 0 && <p className="text-sm text-muted-foreground">还没有项目提示词，可在上方粘贴或上传第一份。</p>}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-medium">已保存提示词</div>
+            <p className="text-xs text-muted-foreground">
+              点击预览查看完整内容；编辑会保存为新版本。
+            </p>
+          </div>
+          {!loading && library.prompts.length === 0 && (
+            <div className="rounded-lg border border-dashed p-6 text-center">
+              <p className="text-sm text-muted-foreground">
+                还没有项目提示词。
+              </p>
+              <Button
+                className="mt-3"
+                variant="outline"
+                size="sm"
+                onClick={openCreateDialog}
+              >
+                <Plus />
+                新增第一份提示词
+              </Button>
+            </div>
+          )}
           {library.prompts.map((prompt) => (
             <div key={prompt.id} className="grid gap-3 rounded-lg border p-4 md:grid-cols-[1fr_auto] md:items-center">
               <div className="min-w-0">
@@ -352,7 +391,14 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
                 <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-sm text-muted-foreground">{prompt.content}</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => edit(prompt)} disabled={Boolean(busy)}><Pencil />编辑</Button>
+                <Button variant="outline" size="sm" onClick={() => openPreviewDialog(prompt)} disabled={Boolean(busy)}>
+                  <Eye />
+                  预览
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => openEditDialog(prompt)} disabled={Boolean(busy)}>
+                  <Pencil />
+                  编辑
+                </Button>
                 <Button variant="outline" size="sm" onClick={() => void toggleActive(prompt)} disabled={Boolean(busy)}>
                   {prompt.active ? <PowerOff /> : <Power />}{prompt.active ? "停用" : "恢复"}
                 </Button>
@@ -364,6 +410,167 @@ export function ProjectPromptLibraryCard({ customer }: { customer: string }) {
           ))}
         </div>
       </CardContent>
-    </Card>
+      </Card>
+
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            setDialogOpen(true);
+          } else {
+            closeDialog();
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-hidden p-0 sm:max-w-3xl">
+          <DialogHeader className="border-b px-5 py-4 pr-12">
+            <DialogTitle>
+              {dialogMode === "preview"
+                ? "预览提示词"
+                : dialogMode === "edit"
+                  ? "编辑提示词"
+                  : "新增提示词"}
+            </DialogTitle>
+            <DialogDescription>
+              {dialogMode === "preview"
+                ? "完整查看项目中保存的提示词内容。"
+                : "系统会在生成时注入文章资料和项目上下文，无需在提示词中填写变量。"}
+            </DialogDescription>
+          </DialogHeader>
+
+          {feedback && (
+            <Alert
+              className="mx-5 w-auto"
+              variant={feedback.kind === "error" ? "destructive" : "default"}
+            >
+              {feedback.kind === "error" ? <AlertCircle /> : <CheckCircle2 />}
+              <AlertTitle>
+                {feedback.kind === "error" ? "操作失败" : "操作成功"}
+              </AlertTitle>
+              <AlertDescription>{feedback.message}</AlertDescription>
+            </Alert>
+          )}
+
+          {dialogMode === "preview" && selectedPrompt ? (
+            <div className="grid min-h-0 gap-4 px-5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-base font-medium">{selectedPrompt.name}</span>
+                <Badge variant="outline">
+                  {selectedPrompt.kind === "outline"
+                    ? "大纲"
+                    : selectedPrompt.kind === "article"
+                      ? "正文"
+                      : "复检"}
+                </Badge>
+                <Badge variant={selectedPrompt.active ? "secondary" : "outline"}>
+                  {selectedPrompt.active ? "使用中" : "已停用"}
+                </Badge>
+                <span className="text-xs text-muted-foreground">
+                  v{selectedPrompt.version} · 已生成 {selectedPrompt.use_count} 次
+                </span>
+              </div>
+              <ScrollArea className="h-[52vh] rounded-lg border bg-muted/20">
+                <pre className="whitespace-pre-wrap break-words p-4 font-mono text-sm leading-6">
+                  {selectedPrompt.content}
+                </pre>
+              </ScrollArea>
+            </div>
+          ) : (
+            <div className="grid min-h-0 gap-4 overflow-y-auto px-5">
+              <div className="grid gap-3 md:grid-cols-[1fr_180px]">
+                <div className="grid gap-2">
+                  <Label htmlFor="prompt-dialog-name">名称</Label>
+                  <Input
+                    id="prompt-dialog-name"
+                    value={name}
+                    maxLength={120}
+                    disabled={busy === "prompt"}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="例如：产品对比型正文"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="prompt-dialog-kind">类型</Label>
+                  <select
+                    id="prompt-dialog-kind"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={kind}
+                    disabled={dialogMode === "edit" || busy === "prompt"}
+                    onChange={(event) => setKind(event.target.value as PromptKind)}
+                  >
+                    <option value="outline">大纲提示词</option>
+                    <option value="article">正文提示词</option>
+                    <option value="review">复检提示词</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label htmlFor="prompt-dialog-content">提示词内容</Label>
+                  <div>
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="hidden"
+                      disabled={busy === "prompt"}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void readFile(file);
+                      }}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={busy === "prompt"}
+                      onClick={() => fileRef.current?.click()}
+                    >
+                      <FileUp />
+                      上传 .txt
+                    </Button>
+                  </div>
+                </div>
+                <Textarea
+                  id="prompt-dialog-content"
+                  value={content}
+                  maxLength={40000}
+                  disabled={busy === "prompt"}
+                  className="min-h-[42vh] resize-y font-mono text-sm leading-6"
+                  onChange={(event) => setContent(event.target.value)}
+                  placeholder="直接粘贴完整提示词，或上传 UTF-8 .txt 文件。无需填写变量。"
+                />
+                <p className="text-right text-xs text-muted-foreground">
+                  {content.length.toLocaleString()} / 40,000
+                </p>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="mx-0 mb-0 px-5 py-4">
+            <Button variant="outline" onClick={closeDialog} disabled={busy === "prompt"}>
+              关闭
+            </Button>
+            {dialogMode === "preview" && selectedPrompt ? (
+              <Button
+                onClick={() => setDialogMode("edit")}
+                disabled={Boolean(busy)}
+              >
+                <Pencil />
+                编辑这份提示词
+              </Button>
+            ) : (
+              <Button
+                onClick={() => void savePrompt()}
+                disabled={!name.trim() || !content.trim() || Boolean(busy)}
+              >
+                {busy === "prompt" ? <Loader2 className="animate-spin" /> : <Save />}
+                {dialogMode === "edit" ? "保存为新版本" : "加入提示词库"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

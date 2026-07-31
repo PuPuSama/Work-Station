@@ -169,6 +169,49 @@ function emptyProduct(): Product {
   return { name: "", url: "", image_path: "", description: "" };
 }
 
+function persistedProductList(products: Product[]) {
+  return products.filter((product) =>
+    [product.name, product.url, product.image_path, product.description].some(
+      (value) => value.trim(),
+    ),
+  );
+}
+
+function comparableProduct(product: Product) {
+  return {
+    product_id: product.product_id ?? "",
+    name: product.name,
+    url: product.url,
+    canonical_url: product.canonical_url ?? "",
+    image_path: product.image_path,
+    description: product.description,
+    reference_summary: product.reference_summary ?? "",
+    reference_facts: product.reference_facts ?? [],
+    specifications: Object.fromEntries(
+      Object.entries(product.specifications ?? {}).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+    reference_path: product.reference_path ?? "",
+    asset_manifest_path: product.asset_manifest_path ?? "",
+    asset_count: product.asset_count ?? 0,
+    selected_asset_id: product.selected_asset_id ?? "",
+    selection_confidence: product.selection_confidence ?? null,
+    selection_reason: product.selection_reason ?? "",
+    discovery_source: product.discovery_source ?? "",
+    detail_page_verified: product.detail_page_verified ?? false,
+    asset_status: product.asset_status ?? "",
+    asset_error: product.asset_error ?? "",
+  };
+}
+
+function sameProducts(left: Product[], right: Product[]) {
+  return (
+    JSON.stringify(left.map(comparableProduct)) ===
+    JSON.stringify(right.map(comparableProduct))
+  );
+}
+
 function normalizeImagePath(value: string) {
   return value.trim().replaceAll("\\", "/").toLowerCase();
 }
@@ -339,6 +382,41 @@ function currentHumanizedVersion(task: TaskRecord | null): string {
   return task.linked_article || task.humanized_article || task.final_article || "";
 }
 
+type ReviewDraft = {
+  humanizedText: string;
+  initialAiScore: string;
+  initialAiReport: string;
+  finalAiScore: string;
+  finalAiReport: string;
+};
+
+function reviewDraftFromTask(task: TaskRecord | null): ReviewDraft {
+  return {
+    humanizedText: currentHumanizedVersion(task),
+    initialAiScore:
+      task?.initial_ai_check?.score == null
+        ? ""
+        : String(task.initial_ai_check.score),
+    initialAiReport:
+      task?.initial_ai_check?.report || task?.zero_gpt_report || "",
+    finalAiScore:
+      task?.final_ai_check?.score == null
+        ? ""
+        : String(task.final_ai_check.score),
+    finalAiReport: task?.final_ai_check?.report || "",
+  };
+}
+
+function sameReviewDraft(left: ReviewDraft, right: ReviewDraft): boolean {
+  return (
+    left.humanizedText === right.humanizedText &&
+    left.initialAiScore === right.initialAiScore &&
+    left.initialAiReport === right.initialAiReport &&
+    left.finalAiScore === right.finalAiScore &&
+    left.finalAiReport === right.finalAiReport
+  );
+}
+
 export function ArticleWorkbench({
   customer,
   initialTaskId,
@@ -393,6 +471,29 @@ export function ArticleWorkbench({
   const lastTabTaskId = useRef("");
   const dirtySectionsRef = useRef<Set<EditableSection>>(new Set());
   const hydratedTaskIdRef = useRef("");
+  const reviewDraftRef = useRef<ReviewDraft>({
+    humanizedText,
+    initialAiScore,
+    initialAiReport,
+    finalAiScore,
+    finalAiReport,
+  });
+
+  useEffect(() => {
+    reviewDraftRef.current = {
+      humanizedText,
+      initialAiScore,
+      initialAiReport,
+      finalAiScore,
+      finalAiReport,
+    };
+  }, [
+    finalAiReport,
+    finalAiScore,
+    humanizedText,
+    initialAiReport,
+    initialAiScore,
+  ]);
 
   const projectName = customer ? decodeURIComponent(customer) : "";
   const taskListPath = projectName
@@ -408,6 +509,44 @@ export function ArticleWorkbench({
       window.history.replaceState(window.history.state, "", url);
     },
     [focusMode],
+  );
+
+  const syncReviewDraftFromTask = useCallback(
+    (task: TaskRecord | null, expectedCurrent?: ReviewDraft) => {
+      const next = reviewDraftFromTask(task);
+      if (
+        expectedCurrent &&
+        sameReviewDraft(reviewDraftRef.current, expectedCurrent)
+      ) {
+        dirtySectionsRef.current.delete("review");
+      }
+      setHumanizedText((current) =>
+        !expectedCurrent || current === expectedCurrent.humanizedText
+          ? next.humanizedText
+          : current,
+      );
+      setInitialAiScore((current) =>
+        !expectedCurrent || current === expectedCurrent.initialAiScore
+          ? next.initialAiScore
+          : current,
+      );
+      setInitialAiReport((current) =>
+        !expectedCurrent || current === expectedCurrent.initialAiReport
+          ? next.initialAiReport
+          : current,
+      );
+      setFinalAiScore((current) =>
+        !expectedCurrent || current === expectedCurrent.finalAiScore
+          ? next.finalAiScore
+          : current,
+      );
+      setFinalAiReport((current) =>
+        !expectedCurrent || current === expectedCurrent.finalAiReport
+          ? next.finalAiReport
+          : current,
+      );
+    },
+    [],
   );
 
   const loadData = useCallback(async (preferredTaskId?: string) => {
@@ -530,21 +669,7 @@ export function ArticleWorkbench({
       setArticleText(currentFirstVersion(selectedTask));
     }
     if (taskChanged || !dirty.has("review")) {
-      setHumanizedText(currentHumanizedVersion(selectedTask));
-      setInitialAiScore(
-        selectedTask?.initial_ai_check?.score == null
-          ? ""
-          : String(selectedTask.initial_ai_check.score),
-      );
-      setInitialAiReport(
-        selectedTask?.initial_ai_check?.report || selectedTask?.zero_gpt_report || "",
-      );
-      setFinalAiScore(
-        selectedTask?.final_ai_check?.score == null
-          ? ""
-          : String(selectedTask.final_ai_check.score),
-      );
-      setFinalAiReport(selectedTask?.final_ai_check?.report || "");
+      syncReviewDraftFromTask(selectedTask);
     }
     if (taskChanged || !dirty.has("media")) {
       setHeroImage(selectedTask?.hero_image || "");
@@ -554,7 +679,7 @@ export function ArticleWorkbench({
       setProducts(selectedTask?.products?.length ? selectedTask.products : [emptyProduct()]);
     }
     hydratedTaskIdRef.current = selectedTask?.id || "";
-  }, [selectedTask]);
+  }, [selectedTask, syncReviewDraftFromTask]);
 
   useEffect(() => {
     if (selectedTask && lastTabTaskId.current !== selectedTask.id) {
@@ -1299,17 +1424,7 @@ export function ArticleWorkbench({
     if (section === "outline") setOutlineText(currentOutlineDraft(latest));
     if (section === "article") setArticleText(currentFirstVersion(latest));
     if (section === "review") {
-      setHumanizedText(currentHumanizedVersion(latest));
-      setInitialAiScore(
-        latest.initial_ai_check?.score == null ? "" : String(latest.initial_ai_check.score),
-      );
-      setInitialAiReport(
-        latest.initial_ai_check?.report || latest.zero_gpt_report || "",
-      );
-      setFinalAiScore(
-        latest.final_ai_check?.score == null ? "" : String(latest.final_ai_check.score),
-      );
-      setFinalAiReport(latest.final_ai_check?.report || "");
+      syncReviewDraftFromTask(latest);
     }
     if (section === "media") {
       setHeroImage(latest.hero_image || "");
@@ -1510,6 +1625,7 @@ export function ArticleWorkbench({
   function saveProducts() {
     if (!selectedId || !selectedTask || !productsDirty) return;
     if (!confirmProductChanges("保存产品修改")) return;
+    const submittedProducts = persistedProducts();
     void runAction(
       "产品已保存",
       () =>
@@ -1517,11 +1633,19 @@ export function ArticleWorkbench({
           `/api/tasks/${selectedId}/products`,
           {
             revision: selectedTask.revision,
-            products: persistedProducts(),
+            products: submittedProducts,
           },
           QUICK_SAVE_TIMEOUT_MS,
         ),
-      undefined,
+      (saved) => {
+        setProducts((current) => {
+          if (!sameProducts(persistedProductList(current), submittedProducts)) {
+            return current;
+          }
+          dirtySectionsRef.current.delete("products");
+          return saved.products?.length ? saved.products : [emptyProduct()];
+        });
+      },
       { key: `task:${selectedId}:products` },
     );
   }
@@ -1563,11 +1687,7 @@ export function ArticleWorkbench({
   }
 
   function persistedProducts() {
-    return products.filter((product) =>
-      [product.name, product.url, product.image_path, product.description].some(
-        (value) => value.trim(),
-      ),
-    );
+    return persistedProductList(products);
   }
 
   function updateProduct(index: number, key: EditableProductField, value: string) {
@@ -1613,6 +1733,13 @@ export function ArticleWorkbench({
         job.task_id === selectedId &&
         ["queued", "running", "retry_wait"].includes(job.status),
     );
+  const latestDeliveryJob = batches
+    .flatMap((batch) => batch.jobs)
+    .filter(
+      (job) =>
+        job.task_id === selectedId && job.operation === "package_delivery",
+    )
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0];
   const savedHeroPreview =
     selectedId && heroImage.trim()
       ? apiFileUrl(
@@ -1672,7 +1799,7 @@ export function ArticleWorkbench({
   );
   const productsDirty = Boolean(
     selectedTask &&
-      JSON.stringify(persistedProducts()) !== JSON.stringify(selectedTask.products || []),
+      !sameProducts(persistedProducts(), selectedTask.products || []),
   );
   const writingSettingsDirty = Boolean(
     selectedTask &&
@@ -2517,16 +2644,27 @@ export function ArticleWorkbench({
                       onUploadScreenshot={uploadAiScreenshot}
                       onConfirmInitial={() => {
                         if (!selectedId) return;
-                        void runAction("ZeroGPT 初检已确认", () =>
-                          apiPut<TaskRecord>(
-                            `/api/tasks/${selectedId}/checks/initial-ai`,
-                            {
-                              revision: selectedTask.revision,
-                              score: optionalScore(initialAiScore),
-                              report: initialAiReport,
-                            },
-                            QUICK_SAVE_TIMEOUT_MS,
-                          ),
+                        const submittedReview = {
+                          humanizedText,
+                          initialAiScore,
+                          initialAiReport,
+                          finalAiScore,
+                          finalAiReport,
+                        };
+                        void runAction(
+                          "ZeroGPT 初检已确认",
+                          () =>
+                            apiPut<TaskRecord>(
+                              `/api/tasks/${selectedId}/checks/initial-ai`,
+                              {
+                                revision: selectedTask.revision,
+                                score: optionalScore(initialAiScore),
+                                report: initialAiReport,
+                              },
+                              QUICK_SAVE_TIMEOUT_MS,
+                            ),
+                          (latest) =>
+                            syncReviewDraftFromTask(latest, submittedReview),
                         );
                       }}
                       onHumanize={() =>
@@ -2534,6 +2672,13 @@ export function ArticleWorkbench({
                       }
                       onSaveHumanized={() => {
                         if (!selectedId) return;
+                        const submittedReview = {
+                          humanizedText,
+                          initialAiScore,
+                          initialAiReport,
+                          finalAiScore,
+                          finalAiReport,
+                        };
                         void runAction(
                           humanizedEditRollsBack
                             ? "正文修改已保存，后续步骤已回退"
@@ -2547,20 +2692,33 @@ export function ArticleWorkbench({
                               },
                               QUICK_SAVE_TIMEOUT_MS,
                             ),
+                          (latest) =>
+                            syncReviewDraftFromTask(latest, submittedReview),
                         );
                       }}
                       onConfirmFinal={() => {
                         if (!selectedId) return;
-                        void runAction("ZeroGPT 复检已确认", () =>
-                          apiPut<TaskRecord>(
-                            `/api/tasks/${selectedId}/checks/final-ai`,
-                            {
-                              revision: selectedTask.revision,
-                              score: optionalScore(finalAiScore),
-                              report: finalAiReport,
-                            },
-                            QUICK_SAVE_TIMEOUT_MS,
-                          ),
+                        const submittedReview = {
+                          humanizedText,
+                          initialAiScore,
+                          initialAiReport,
+                          finalAiScore,
+                          finalAiReport,
+                        };
+                        void runAction(
+                          "ZeroGPT 复检已确认",
+                          () =>
+                            apiPut<TaskRecord>(
+                              `/api/tasks/${selectedId}/checks/final-ai`,
+                              {
+                                revision: selectedTask.revision,
+                                score: optionalScore(finalAiScore),
+                                report: finalAiReport,
+                              },
+                              QUICK_SAVE_TIMEOUT_MS,
+                            ),
+                          (latest) =>
+                            syncReviewDraftFromTask(latest, submittedReview),
                         );
                       }}
                       onRestoreLinks={() =>
@@ -2639,6 +2797,7 @@ export function ArticleWorkbench({
                       config={config}
                       busy={isBusy}
                       hasActiveJob={Boolean(activeTaskJob)}
+                      deliveryJob={latestDeliveryJob}
                       canAction={canAction}
                       onEnqueue={(operation, label) =>
                         void enqueueSingleOperation(operation, label)

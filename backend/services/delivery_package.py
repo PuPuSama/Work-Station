@@ -87,6 +87,19 @@ def _validate_delivery_images(image_sources: list[Path]) -> None:
         seen_hashes[content_hash] = source
 
 
+def _delivery_ai_screenshot(task: TaskRecord) -> Path | None:
+    final_path = str(task.final_ai_check.screenshot_path or "").strip()
+    if final_path:
+        return _required_file(final_path, "Final AI-rate screenshot")
+    if not task.humanization_skipped:
+        return _required_file("", "Final AI-rate screenshot")
+
+    initial_path = str(task.initial_ai_check.screenshot_path or "").strip()
+    if initial_path:
+        return _required_file(initial_path, "Initial AI-rate screenshot")
+    return None
+
+
 def _reset_delivery_directory(task_directory: Path, destination: Path) -> None:
     """Rebuild the generated delivery folder without shipping internal metadata."""
 
@@ -123,10 +136,7 @@ def package_delivery(task: TaskRecord) -> Path:
         raise DeliveryPackageError("No prepared article images are available for delivery.")
     _validate_delivery_images(image_sources)
 
-    final_screenshot = _required_file(
-        task.final_ai_check.screenshot_path,
-        "Final AI-rate screenshot",
-    )
+    final_screenshot = _delivery_ai_screenshot(task)
 
     task_directory = Path(task.task_dir)
     destination = task_directory / official_website_folder_name(task.customer)
@@ -154,7 +164,8 @@ def package_delivery(task: TaskRecord) -> Path:
             _unique_destination(destination, source.name, used_image_names),
         )
 
-    _copy_file(final_screenshot, destination / "final-ai-rate.png")
+    if final_screenshot is not None:
+        _copy_file(final_screenshot, destination / "final-ai-rate.png")
 
     return destination
 

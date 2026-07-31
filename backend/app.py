@@ -2111,6 +2111,17 @@ def cancel_batch_job(job_id: str) -> BatchJobRecord:
     return BatchJobRecord.model_validate(result)
 
 
+@app.delete("/api/batch-jobs/{job_id}", response_model=ApiMessage)
+def delete_batch_job(job_id: str) -> ApiMessage:
+    try:
+        result = batch_queue().delete_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="批量任务条目不存在。") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="请先取消仍在运行或排队的任务，再删除记录。") from exc
+    return ApiMessage(message="队列记录已删除。", data=result)
+
+
 @app.post("/api/batch-jobs/{job_id}/retry", response_model=BatchJobRecord)
 def retry_batch_job(job_id: str) -> BatchJobRecord:
     queue = batch_queue()

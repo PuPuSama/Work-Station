@@ -1,6 +1,15 @@
 "use client";
 
-import { AlertCircle, ExternalLink, Loader2, RotateCcw, Square, TimerReset } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ExternalLink,
+  Loader2,
+  RotateCcw,
+  Square,
+  TimerReset,
+  Trash2,
+} from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -15,8 +24,13 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { apiGet, apiPost } from "@/lib/api";
-import type { BatchJobRecord, BatchOperation, BatchRecord } from "@/types";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
+import type {
+  ApiMessage,
+  BatchJobRecord,
+  BatchOperation,
+  BatchRecord,
+} from "@/types";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "retry_wait"]);
 const RETRYABLE_STATUSES = new Set(["failed", "cancelled", "conflict"]);
@@ -74,6 +88,7 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
   const [batches, setBatches] = useState<BatchRecord[]>([]);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [pending, setPending] = useState<Record<string, string>>({});
 
   const loadBatches = useCallback(async () => {
@@ -114,15 +129,51 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
     [batches],
   );
   const activeJobs = jobs.filter(({ job }) => ACTIVE_STATUSES.has(job.status));
-  const problemJobs = jobs.filter(({ job }) => job.status === "failed" || job.status === "conflict");
-  const visibleJobs = [...activeJobs, ...problemJobs.filter(({ job }) => !activeJobs.some((item) => item.job.id === job.id))].slice(0, 16);
+  const visibleJobs = [...jobs]
+    .sort((left, right) => {
+      const activeDifference =
+        Number(ACTIVE_STATUSES.has(right.job.status)) -
+        Number(ACTIVE_STATUSES.has(left.job.status));
+      return (
+        activeDifference ||
+        right.job.updated_at.localeCompare(left.job.updated_at)
+      );
+    })
+    .slice(0, 16);
 
   async function mutateJob(job: BatchJobRecord, action: "cancel" | "retry") {
     setPending((current) => ({ ...current, [job.id]: action }));
     setError("");
+    setSuccess("");
     try {
       await apiPost<BatchJobRecord>(`/api/batch-jobs/${job.id}/${action}`);
       await loadBatches();
+    } catch (actionError) {
+      setError(message(actionError));
+    } finally {
+      setPending((current) => {
+        const next = { ...current };
+        delete next[job.id];
+        return next;
+      });
+    }
+  }
+
+  async function deleteJob(job: BatchJobRecord) {
+    if (
+      !window.confirm(
+        `删除 topic_${String(job.topic_index).padStart(3, "0")} 的“${operationLabel(job.operation)}”队列记录吗？\n\n这只删除运行记录，不会删除文章内容。`,
+      )
+    ) {
+      return;
+    }
+    setPending((current) => ({ ...current, [job.id]: "delete" }));
+    setError("");
+    setSuccess("");
+    try {
+      const result = await apiDelete<ApiMessage>(`/api/batch-jobs/${job.id}`);
+      await loadBatches();
+      setSuccess(result.message);
     } catch (actionError) {
       setError(message(actionError));
     } finally {
@@ -145,7 +196,7 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
         <DialogHeader>
           <DialogTitle>项目运行队列</DialogTitle>
           <DialogDescription>
-            任务在后台持续执行。可以关闭当前页面，稍后从这里返回对应文章。
+            任务在后台持续执行。历史记录可手动删除，但不会影响已经生成的文章内容。
           </DialogDescription>
         </DialogHeader>
 
@@ -153,6 +204,12 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
           <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
             <span>{error}</span>
+          </div>
+        )}
+        {success && (
+          <div className="flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm text-foreground">
+            <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
+            <span>{success}</span>
           </div>
         )}
 
@@ -192,13 +249,29 @@ export function ProjectJobCenter({ customer }: { customer: string }) {
                         重试
                       </Button>
                     )}
+                    {!active && (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        disabled={Boolean(pending[job.id])}
+                        onClick={() => void deleteJob(job)}
+                      >
+                        {pending[job.id] === "delete" ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <Trash2 />
+                        )}
+                        删除记录
+                      </Button>
+                    )}
                   </div>
                 </div>
               );
             })}
             {!visibleJobs.length && (
               <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-                当前没有运行中或需要处理的后台任务。
+                当前没有队列记录。
               </div>
             )}
           </div>

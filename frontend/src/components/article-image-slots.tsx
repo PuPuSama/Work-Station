@@ -111,23 +111,23 @@ export function ArticleImageSlots({
           <div className="font-medium">官网资产库</div>
           <Badge variant="outline">{assets.length} 张候选</Badge>
         </div>
-        <div className="grid max-h-[420px] gap-2 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+        <div className="grid auto-rows-max content-start items-start gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
           {assets.map(({ product, index }) => {
             const duplicate = (pathCounts.get(normalizeImagePath(product.image_path)) || 0) > 1;
             const preview = apiFileUrl(
               `/api/tasks/${task.id}/images/preview?path=${encodeURIComponent(product.image_path)}`,
             );
             return (
-              <div key={`${product.image_path}-${index}`} className="overflow-hidden rounded-lg border bg-background">
+              <div key={`${product.image_path}-${index}`} className="flex h-full min-w-0 flex-col overflow-hidden rounded-lg border bg-background">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={preview} alt={product.name || `产品图片 ${index + 1}`} className="h-32 w-full bg-white object-contain" />
-                <div className="grid gap-1.5 p-2.5 text-xs">
+                <img src={preview} alt={product.name || `产品图片 ${index + 1}`} className="h-28 w-full shrink-0 border-b bg-white object-contain" />
+                <div className="flex flex-1 flex-col gap-1.5 p-2.5 text-xs">
                   <div className="line-clamp-2 font-medium">{product.name || `产品 ${index + 1}`}</div>
                   <div className="flex flex-wrap gap-1">
                     {product.detail_page_verified && <Badge variant="outline">详情页已核验</Badge>}
                     {duplicate && <Badge variant="destructive">重复候选</Badge>}
                   </div>
-                  <div className="flex flex-wrap gap-1">
+                  <div className="mt-auto flex flex-wrap gap-1 border-t pt-2">
                     <Button type="button" size="xs" variant="outline" onClick={() => onSelectHero(product.image_path)}>
                       设为首图
                     </Button>

@@ -86,6 +86,42 @@ class DeliveryPackageTests(unittest.TestCase):
             with self.assertRaisesRegex(DeliveryPackageError, "Final AI-rate screenshot"):
                 package_delivery(task)
 
+    def test_skipped_humanization_uses_initial_screenshot_as_the_last_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = task_at(root)
+            task.humanization_skipped = True
+            task.final_ai_check = AICheck()
+            for path, content in (
+                (Path(task.docx_path), b"article"),
+                (Path(task.tdk_path), b"tdk"),
+                (Path(task.images[0].prepared_path), b"image"),
+                (Path(task.initial_ai_check.screenshot_path), b"initial"),
+            ):
+                path.write_bytes(content)
+
+            output = package_delivery(task)
+
+            self.assertEqual((output / "final-ai-rate.png").read_bytes(), b"initial")
+
+    def test_skipped_humanization_can_be_packaged_without_a_screenshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = task_at(root)
+            task.humanization_skipped = True
+            task.initial_ai_check = AICheck(score=25, confirmed=True)
+            task.final_ai_check = AICheck(score=25, confirmed=True)
+            for path, content in (
+                (Path(task.docx_path), b"article"),
+                (Path(task.tdk_path), b"tdk"),
+                (Path(task.images[0].prepared_path), b"image"),
+            ):
+                path.write_bytes(content)
+
+            output = package_delivery(task)
+
+            self.assertFalse((output / "final-ai-rate.png").exists())
+
     def test_more_than_three_article_images_cannot_be_packaged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

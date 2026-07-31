@@ -1,19 +1,26 @@
 "use client";
 
-import { Download, Package, Sparkles } from "lucide-react";
+import { AlertCircle, Download, Loader2, Package, Sparkles } from "lucide-react";
 
 import { FileRow, WorkflowStep } from "@/components/article-workbench-ui";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { apiFileUrl } from "@/lib/api";
-import type { BatchOperation, PublicConfig, TaskRecord } from "@/types";
+import type {
+  BatchJobRecord,
+  BatchOperation,
+  PublicConfig,
+  TaskRecord,
+} from "@/types";
 
 export function ArticleDeliveryStep({
   task,
   config,
   busy,
   hasActiveJob,
+  deliveryJob,
   canAction,
   onEnqueue,
 }: {
@@ -21,6 +28,7 @@ export function ArticleDeliveryStep({
   config: PublicConfig | null;
   busy: boolean;
   hasActiveJob: boolean;
+  deliveryJob?: BatchJobRecord;
   canAction: (action: string) => boolean;
   onEnqueue: (operation: BatchOperation, label: string) => void;
 }) {
@@ -100,9 +108,28 @@ export function ArticleDeliveryStep({
               !canAction("package_delivery")
             }
           >
-            <Package />
-            生成交付文件夹
+            {deliveryJob &&
+            ["queued", "running", "retry_wait"].includes(deliveryJob.status) ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Package />
+            )}
+            {deliveryJob &&
+            ["queued", "running", "retry_wait"].includes(deliveryJob.status)
+              ? "正在生成交付文件夹"
+              : "生成交付文件夹"}
           </Button>
+          {deliveryJob &&
+            ["failed", "conflict"].includes(deliveryJob.status) &&
+            !task.delivery_package_path && (
+              <Alert variant="destructive">
+                <AlertCircle />
+                <AlertTitle>交付打包失败</AlertTitle>
+                <AlertDescription>
+                  {deliveryJob.error || "请检查交付文件是否完整后重试。"}
+                </AlertDescription>
+              </Alert>
+            )}
           {task.delivery_package_path && (
             <div className="grid gap-2">
               <Button
