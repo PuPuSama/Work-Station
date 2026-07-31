@@ -521,7 +521,7 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十三条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/products/section/images/docx/tdk/
+- 十四条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/products/section/images/docx/tdk/
   final-ai-screenshot/final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
@@ -1030,6 +1030,41 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 前端 Next.js production build、ESLint 与 TypeScript 复核全部通过；
 - Alembic Current 与 Head 仍为 `20260731_0015`。
 
+### M7 Server Article 初稿生成闭环
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_project_prompts `
+  tests.test_m7_server_project_tasks `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_job_control -q
+```
+
+结果：
+
+- 联合定向回归 59 tests 全部通过；
+- `POST /api/projects/{project}/tasks/{task_id}/article` 只接受 Revision；客户端提交
+  Word Count、Prompt、Context 或正文返回 422，Viewer/跨 Project 返回 403，Local Mode
+  的 POST/GET 状态路由返回 404；
+- Enqueue 固定 Article Prompt ID + Version、服务端目标字数和当前 Published Chunk ID；
+  Default 从 V1 切到 V2 后，已排队 Worker 仍读取 V1；
+- Worker 执行前重新验证 Task Revision/Action、Prompt Version 和 Chunk 当前发布态；
+  Unpublished 与另一 Project 的内容不进入 Provider；
+- Provider 空输出、异常或缺少 H1/过渡段、H2/H3、最终 FAQ 的 Markdown 失败且不补
+  mock，错误不泄露供应商正文或密钥；
+- 成功追加 `raw_draft` 与 `initial` 两个 Article Version，固定
+  `last_article_prompt_snapshot`、进入 `draft_ready` 并清空旧下游；不会自动执行 AI
+  检查、Humanize、链接、图片或交付；
+- 正文与 `article.draft.generated` Audit 在同一 Task CAS 事务；Audit 故障回滚 Raw、
+  Initial、Version、Status、Revision 与 Prompt Snapshot，Audit 不含正文；
+- `article` 已进入 Project-scoped Batch/Job Control；`rewrite_article` 等未迁移
+  Operation 仍不可见；
+- 完整后端回归 626 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
+  TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
+  `20260731_0015`。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell
@@ -1127,17 +1162,18 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   冒烟尚未执行；
 - Knowledge Router 与其内部 Retriever 已接入请求级 RBAC；Project/Article/Task/Batch
   旧路由和通用 Worker 尚未接入；新的项目级 PostgreSQL API 已支持读取、产品重新发现、
-  大纲生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
-  私有图片准备和文章 DOCX 导出/下载，并为 `product_rediscovery/titles/outline` 提供窄范围
+  标题/大纲/正文初稿生成、“完全重写”“从正式目录选择已确认产品”“快照后替换一个已审阅章节”、
+  私有图片准备和文章 DOCX 导出/下载，并为
+  `product_rediscovery/titles/outline/article` 提供窄范围
   Batch/Job 控制；但不代表其余旧路由、Operation、对话式章节生成或完整写路径已经迁移；
 - 私有 Knowledge/Product Asset 已有授权后的短期下载路由；现有 Raw Artifact HTTP
   路由仍是本地文件实现，因此 Server Mode 继续阻断该兼容入口；
 - 本地模式的 Task/Job 仍以 SQLite 为准；Server Mode 只有明确迁移的 PostgreSQL
-  Task 命令和 `product_rediscovery/titles/outline` Job 为单写，其余路径尚未成为 PostgreSQL
+  Task 命令和 `product_rediscovery/titles/outline/article` Job 为单写，其余路径尚未成为 PostgreSQL
   准源；
-- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题生成与大纲生成已有项目级
+- Server Mode 已停止 SQLite Queue/Worker；产品重新发现、标题、大纲与正文初稿生成已有项目级
   PostgreSQL Runner 和两阶段授权，Enqueue、终态 Audit 与有界 drain/join 报告已完成；
-  这三个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
+  这四个 Operation 的 Project-scoped 列表、取消和重试也已完成；但其他 Operation 的
   Server Runner、可信 Enqueue 和正式停机演练未完成，不能算作整体服务器 Job 单写；
 - SQLite Terminal Job 历史导入和冻结窗口双读报告已实现；matched 证据留存流程与
   `app.py` PostgreSQL 单写切换尚未实现；

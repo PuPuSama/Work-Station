@@ -67,8 +67,8 @@
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | SQL Project Dashboard/Import | Project Scope、幂等导入、来源摘要与 Audit |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
-| Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Article/Review Worker 继续逐项接线；旧路由继续关闭 |
-| Product/Article 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
+| Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Review Worker 继续接线；旧路由继续关闭 |
+| Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
 | Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
@@ -80,9 +80,10 @@
 | `product_rediscovery` | Project-scoped、与 Task Revision/Audit 同事务 | Project Registry | `knowledge.edit` | `knowledge.edit` | Project-scoped Batch/Job 列表、取消、重试已完成 |
 | `titles` | Project-scoped、固定 Task Revision/Template Hash/Published Chunk ID | Project Registry，只写候选 | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `outline` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | Project Registry，只写 Review Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
+| `article` | Project-scoped、固定 Task Revision/Prompt Version/目标字数/Published Chunk ID | Project Registry，只写 Raw/Initial Draft | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `seo_review` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
-| `article` / `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `humanize` / `restore_links` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `knowledge_research` | Local Research Queue | Local Runner | 无完整 Server 链 | 无完整 Server 链 | Local Only |
 
@@ -108,9 +109,15 @@ Prompt/Chunk 漂移、撤权或 Task CAS 冲突均 fail closed，不生成 mock�
 `POST .../outline/restore-version` 只接受 Version Index，从当前 Task 的服务器版本历史
 恢复 `outline/outline_draft` 为新草稿；它不接受客户端历史正文，也不恢复 Article Version。
 
+正文初稿 `POST .../article` 只接受当前 Revision；服务端固定 Article Prompt Version、
+目标字数和当前 Published Chunk ID。Worker 重新验证 Task 仍允许生成、Prompt/Chunk
+仍有效后才调用 Provider；Provider 错误、空输出、缺少过渡段、H2/H3 或最终 FAQ 契约
+都使 Job 失败，不补 mock、不写本地 Artifact。成功追加 Raw/Initial Version 并进入
+`draft_ready`，但不会自动确认 AI 检查、Humanize、链接、图片或交付。
+
 ## 6. 已完成闭环：Project Job Control
 
-已为迁移完成的 `product_rediscovery` 和 `outline` 增加：
+已为迁移完成的 `product_rediscovery/titles/outline/article` 增加：
 
 ```text
 GET  /api/projects/{project}/batches
@@ -150,8 +157,10 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     且只写可审阅草稿、不自动确认或生成 mock？
 15. 大纲恢复是否只按当前 Task 的 Version Index 读取 `outline/outline_draft`，并拒绝
     Article Version 与客户端历史正文？
-16. Prompt Default 是否绑定精确不可变 Version，而不是只指向会漂移的可变正文？
-17. Server Outline Worker 接线后，旧 Local Prompt API 是否仍保持关闭，且 Worker
+16. `article` Job 是否固定 Prompt Version、目标字数和 Published Chunk ID，只写
+    Raw/Initial Draft，并在结构错误时失败而不补 mock 或触发下游阶段？
+17. Prompt Default 是否绑定精确不可变 Version，而不是只指向会漂移的可变正文？
+18. Server Outline/Article Worker 接线后，旧 Local Prompt API 是否仍保持关闭，且 Worker
     只读取 PostgreSQL 不可变 Prompt Version、不混用 SQLite Prompt？
-18. SQLite Prompt 是否只通过显式一次性导入进入指定 Project，且非空差异目标不会被
+19. SQLite Prompt 是否只通过显式一次性导入进入指定 Project，且非空差异目标不会被
     覆盖、旧库未保存的历史 Version 不会被伪造？

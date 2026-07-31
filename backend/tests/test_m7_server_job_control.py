@@ -373,10 +373,15 @@ class ServerJobControlTests(unittest.TestCase):
             self.task_ids[1],
             operation="titles",
         )
-        self._create_job(
+        article_batch = self._create_job(
             self.queue_a,
             self.task_ids[2],
             operation="article",
+        )
+        self._create_job(
+            self.queue_a,
+            self.task_ids[3],
+            operation="rewrite_article",
         )
         service = self._service()
 
@@ -385,10 +390,14 @@ class ServerJobControlTests(unittest.TestCase):
             project_id=self.project_a,
         )
 
-        self.assertEqual(len(page.items), 2)
+        self.assertEqual(len(page.items), 3)
         self.assertEqual(
             {item.batch_id for item in page.items},
-            {batch_a["id"], title_batch["id"]},
+            {
+                batch_a["id"],
+                title_batch["id"],
+                article_batch["id"],
+            },
         )
         serialized = str(asdict(page))
         self.assertNotIn(PRIVATE_REQUEST_VALUE, serialized)

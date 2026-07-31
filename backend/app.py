@@ -232,6 +232,11 @@ from services.server_title_generation import (
     ServerTitleGenerationHandler,
     ServerTitleGenerationRegistry,
 )
+from services.server_article_generation import (
+    LlmServerArticleProvider,
+    ServerArticleGenerationHandler,
+    ServerArticleGenerationRegistry,
+)
 from services.server_job_control import PostgresServerJobControlService
 from storage import (
     RevisionConflictError,
@@ -358,6 +363,11 @@ async def app_lifespan(application: FastAPI):
         "server_title_generation",
         None,
     )
+    previous_server_article_generation = getattr(
+        application.state,
+        "server_article_generation",
+        None,
+    )
     previous_server_job_control = getattr(
         application.state,
         "server_job_control",
@@ -396,6 +406,7 @@ async def app_lifespan(application: FastAPI):
     server_product_rediscovery = None
     server_outline_generation = None
     server_title_generation = None
+    server_article_generation = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
@@ -409,6 +420,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_product_rediscovery = None
     application.state.server_outline_generation = None
     application.state.server_title_generation = None
+    application.state.server_article_generation = None
     application.state.server_job_control = None
     application.state.server_oidc_login = None
     application.state.server_actor_session_revocation = None
@@ -559,6 +571,25 @@ async def app_lifespan(application: FastAPI):
         application.state.server_title_generation = (
             server_title_generation
         )
+        article_provider = LlmServerArticleProvider(cfg)
+        article_handler = (
+            ServerArticleGenerationHandler(
+                server_engine,
+                provider=article_provider,
+            )
+            if article_provider.ready
+            else None
+        )
+        server_article_generation = ServerArticleGenerationRegistry(
+            server_engine,
+            config=cfg,
+            access=server_access,
+            handler=article_handler,
+        )
+        server_article_generation.start_existing()
+        application.state.server_article_generation = (
+            server_article_generation
+        )
     knowledge_runtime = None
     application.state.knowledge_agent_runtime = None
     application.state.knowledge_research_enqueue = None
@@ -613,6 +644,12 @@ async def app_lifespan(application: FastAPI):
                     shutdown_error = RuntimeError(
                         "server title generation did not drain"
                     )
+            if server_article_generation is not None:
+                stop_report = server_article_generation.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server article generation did not drain"
+                    )
             if server_oidc_login is not None:
                 server_oidc_login.close()
             if knowledge_runtime is not None:
@@ -651,6 +688,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_title_generation = (
                 previous_server_title_generation
+            )
+            application.state.server_article_generation = (
+                previous_server_article_generation
             )
             application.state.server_job_control = previous_server_job_control
             application.state.server_oidc_login = (
@@ -842,6 +882,8 @@ async def app_lifespan(application: FastAPI):
             server_outline_generation.stop()
         if server_title_generation is not None:
             server_title_generation.stop()
+        if server_article_generation is not None:
+            server_article_generation.stop()
         if server_oidc_login is not None:
             server_oidc_login.close()
         if knowledge_runtime is not None:
@@ -878,6 +920,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_title_generation = (
             previous_server_title_generation
+        )
+        application.state.server_article_generation = (
+            previous_server_article_generation
         )
         application.state.server_job_control = previous_server_job_control
         application.state.server_oidc_login = previous_server_oidc_login

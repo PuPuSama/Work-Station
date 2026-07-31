@@ -58,6 +58,12 @@ from services.server_title_generation import (  # noqa: E402
     TitleGenerationUnavailable,
     TitleTemplateReference,
 )
+from services.server_article_generation import (  # noqa: E402
+    ArticleGenerationUnavailable,
+    LlmServerArticleProvider,
+    ServerArticleGenerationHandler,
+    apply_generated_article_draft,
+)
 from services.server_project_prompt_migration import (  # noqa: E402
     ProjectPromptMigrationConflict,
     ProjectPromptMigrationUnavailable,
@@ -138,6 +144,68 @@ class LeakingTitleLlm:
         if self.response is None:
             raise RuntimeError(
                 "provider leaked private-title-provider-detail"
+            )
+        return self.response
+
+
+VALID_SERVER_ARTICLE = """# Pinned Article
+
+This introduction provides a transition before the detailed sections.
+
+## Buyer Checks
+
+### Confirm requirements
+
+Confirm the application requirements before selection.
+
+### Compare evidence
+
+Compare published evidence before approval.
+
+## FAQ
+
+**Q: What should buyers confirm?**
+
+A: Buyers should confirm application requirements.
+
+**Q: Why compare evidence?**
+
+A: Evidence supports a reliable decision.
+
+**Q: When should approval happen?**
+
+A: Approval should follow the documented checks.
+"""
+
+
+class RecordingArticleProvider:
+    def __init__(self) -> None:
+        self.versions: list[int] = []
+
+    def generate(
+        self,
+        task,
+        *,
+        target_words,
+        prompt_snapshot,
+        context_chunks,
+    ):
+        del task, target_words, context_chunks
+        self.versions.append(prompt_snapshot.version)
+        return VALID_SERVER_ARTICLE
+
+
+class LeakingArticleLlm:
+    ready = True
+
+    def __init__(self, response: str | None = None) -> None:
+        self.response = response
+
+    def chat(self, messages, temperature=0.7, max_tokens=1800):
+        del messages, temperature, max_tokens
+        if self.response is None:
+            raise RuntimeError(
+                "provider leaked private-article-provider-detail"
             )
         return self.response
 
@@ -1171,6 +1239,166 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertEqual(stored.status, "new")
         self.assertEqual(stored.title_candidates, [])
 
+    def test_article_worker_keeps_pinned_prompt_after_default_moves(
+        self,
+    ) -> None:
+        prompt_v1 = self.service.create(
+            self.editor,
+            name="Article v1",
+            kind="article",
+            content="Pinned article instructions v1.",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="article",
+            prompt_id=prompt_v1.prompt_id,
+        )
+        pinned = self.service.resolve(
+            self.editor,
+            kind="article",
+            selection="project_default",
+        )
+        prompt_v2 = self.service.update(
+            self.editor,
+            prompt_id=prompt_v1.prompt_id,
+            expected_version=1,
+            name="Article v2",
+            content="New article instructions v2.",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="article",
+            prompt_id=prompt_v2.prompt_id,
+        )
+        task_id = f"{self.project_id}-article-task"
+        repository = PostgresTaskRepository(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        )
+        repository.upsert(
+            TaskRecord(
+                id=task_id,
+                week_folder="server",
+                customer=self.project_id,
+                topic_index=4,
+                topic="Pinned article topic",
+                status="outline_confirmed",
+                selected_title="Pinned article title",
+                outline="## Buyer Checks\n\n### Requirements\n\n"
+                "### Evidence\n\n## FAQ",
+                task_dir=f"/server/{task_id}",
+                created_at="2026-07-31T00:00:00+00:00",
+                updated_at="2026-07-31T00:00:00+00:00",
+            ).model_dump(mode="json")
+        )
+        provider = RecordingArticleProvider()
+        reference = OutlinePromptReference.from_snapshot(pinned)
+        result_revision = ServerArticleGenerationHandler(
+            self.engine,
+            provider=provider,
+            audit=self.audit,
+        )(
+            {
+                "organization_id": self.organization_id,
+                "project_id": self.project_id,
+                "task_id": task_id,
+                "requested_by_user_id": self.editor_id,
+                "operation": "article",
+                "source_revision": 0,
+                "request": {
+                    **reference.private_values(),
+                    "context_chunk_ids": [],
+                    "target_words": 1100,
+                },
+            },
+            lambda: False,
+        )
+        self.assertEqual(result_revision, 1)
+        self.assertEqual(provider.versions, [1])
+        stored_payload = repository.get(task_id)
+        assert stored_payload is not None
+        stored = TaskRecord.model_validate(stored_payload)
+        self.assertEqual(stored.status, "draft_ready")
+        self.assertEqual(
+            stored.initial_article,
+            VALID_SERVER_ARTICLE.strip(),
+        )
+        assert stored.last_article_prompt_snapshot is not None
+        self.assertEqual(stored.last_article_prompt_snapshot.version, 1)
+        self.assertEqual(
+            stored.last_article_prompt_snapshot.content,
+            "Pinned article instructions v1.",
+        )
+        current_default = self.service.resolve(
+            self.editor,
+            kind="article",
+            selection="project_default",
+        )
+        self.assertEqual(current_default.version, 2)
+
+    def test_article_worker_rolls_back_draft_when_audit_fails(
+        self,
+    ) -> None:
+        task_id = f"{self.project_id}-article-audit-task"
+        repository = PostgresTaskRepository(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        )
+        repository.upsert(
+            TaskRecord(
+                id=task_id,
+                week_folder="server",
+                customer=self.project_id,
+                topic_index=5,
+                topic="Article audit rollback topic",
+                status="outline_confirmed",
+                selected_title="Article audit rollback title",
+                outline="## Buyer Checks\n\n### Requirements\n\n"
+                "### Evidence\n\n## FAQ",
+                task_dir=f"/server/{task_id}",
+                created_at="2026-07-31T00:00:00+00:00",
+                updated_at="2026-07-31T00:00:00+00:00",
+            ).model_dump(mode="json")
+        )
+        system = self.service.resolve(
+            self.editor,
+            kind="article",
+            selection="system",
+        )
+        reference = OutlinePromptReference.from_snapshot(system)
+        with self.assertRaises(ServerTaskCommandUnavailable):
+            ServerArticleGenerationHandler(
+                self.engine,
+                provider=RecordingArticleProvider(),
+                audit=FailingAuditWriter(),
+            )(
+                {
+                    "organization_id": self.organization_id,
+                    "project_id": self.project_id,
+                    "task_id": task_id,
+                    "requested_by_user_id": self.editor_id,
+                    "operation": "article",
+                    "source_revision": 0,
+                    "request": {
+                        **reference.private_values(),
+                        "context_chunk_ids": [],
+                        "target_words": 1100,
+                    },
+                },
+                lambda: False,
+            )
+        stored_payload = repository.get(task_id)
+        assert stored_payload is not None
+        stored = TaskRecord.model_validate(stored_payload)
+        self.assertEqual(stored.revision, 0)
+        self.assertEqual(stored.status, "outline_confirmed")
+        self.assertEqual(stored.raw_draft_article, "")
+        self.assertEqual(stored.initial_article, "")
+        self.assertEqual(stored.article_versions, [])
+        self.assertIsNone(stored.last_article_prompt_snapshot)
+
     def test_prompt_migration_dry_run_and_divergent_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source, _ = self._legacy_source(directory)
@@ -1360,6 +1588,88 @@ class ServerTitleProviderTests(unittest.TestCase):
                 "^pinned title template changed$",
             ):
                 reference.verify_current()
+
+
+class ServerArticleProviderTests(unittest.TestCase):
+    @staticmethod
+    def _task() -> TaskRecord:
+        return TaskRecord(
+            id="article-provider-task",
+            week_folder="server",
+            customer="example.test",
+            topic_index=1,
+            topic="Article provider safety topic",
+            status="outline_confirmed",
+            selected_title="Article provider safety title",
+            outline="## Buyer Checks\n\n### Requirements\n\n"
+            "### Evidence\n\n## FAQ",
+            task_dir="/server/article-provider-task",
+            created_at="2026-07-31T00:00:00+00:00",
+            updated_at="2026-07-31T00:00:00+00:00",
+        )
+
+    def test_provider_error_and_empty_output_do_not_fall_back_to_mock(
+        self,
+    ) -> None:
+        snapshot = PromptSnapshot(
+            kind="article",
+            source="system",
+            captured_at="2026-07-31T00:00:00+00:00",
+        )
+        leaking = LlmServerArticleProvider(
+            load_config(),
+            llm=LeakingArticleLlm(),
+        )
+        with self.assertRaisesRegex(
+            ArticleGenerationUnavailable,
+            "^article provider is temporarily unavailable$",
+        ) as caught:
+            leaking.generate(
+                self._task(),
+                target_words=1100,
+                prompt_snapshot=snapshot,
+                context_chunks=(),
+            )
+        self.assertNotIn(
+            "private-article-provider-detail",
+            str(caught.exception),
+        )
+        empty = LlmServerArticleProvider(
+            load_config(),
+            llm=LeakingArticleLlm(""),
+        )
+        with self.assertRaisesRegex(
+            ArticleGenerationUnavailable,
+            "^article provider returned an invalid result$",
+        ):
+            empty.generate(
+                self._task(),
+                target_words=1100,
+                prompt_snapshot=snapshot,
+                context_chunks=(),
+            )
+
+    def test_invalid_structure_is_rejected_before_task_mutation(
+        self,
+    ) -> None:
+        task = self._task()
+        snapshot = PromptSnapshot(
+            kind="article",
+            source="system",
+            captured_at="2026-07-31T00:00:00+00:00",
+        )
+        with self.assertRaisesRegex(
+            ArticleGenerationUnavailable,
+            "^article provider returned an invalid result$",
+        ):
+            apply_generated_article_draft(
+                task,
+                raw_article="# Missing transition\n\n## FAQ",
+                prompt_snapshot=snapshot,
+            )
+        self.assertEqual(task.raw_draft_article, "")
+        self.assertEqual(task.initial_article, "")
+        self.assertEqual(task.article_versions, [])
 
 
 if __name__ == "__main__":

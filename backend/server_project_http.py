@@ -67,6 +67,10 @@ from services.server_title_generation import (
     ServerTitleGenerationRegistry,
     TitleGenerationUnavailable,
 )
+from services.server_article_generation import (
+    ArticleGenerationUnavailable,
+    ServerArticleGenerationRegistry,
+)
 from services.server_delivery_package import (
     ServerDeliveryPackage,
     ServerDeliveryPackageError,
@@ -338,6 +342,10 @@ class TitleGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public title Job state; private Template and Chunk input stay hidden."""
 
 
+class ArticleGenerationJobResponse(ProductRediscoveryJobResponse):
+    """Public article Job state; private Prompt and Chunk input stay hidden."""
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -606,6 +614,22 @@ def _title_generation(
         raise HTTPException(
             status_code=503,
             detail="Server title generation is not available.",
+        )
+    return registry
+
+
+def _article_generation(
+    request: Request,
+) -> ServerArticleGenerationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_article_generation",
+        None,
+    )
+    if not isinstance(registry, ServerArticleGenerationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server article generation is not available.",
         )
     return registry
 
@@ -1080,6 +1104,91 @@ def read_project_task_title_generation_job(
             detail="Server title generation is not available.",
         ) from exc
     return TitleGenerationJobResponse.model_validate(job)
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/article",
+    response_model=ArticleGenerationJobResponse,
+)
+def enqueue_project_task_article_generation(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ArticleGenerationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _article_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ArticleGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server article generation is not available.",
+        ) from exc
+    return ArticleGenerationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/article/jobs/{job_id}",
+    response_model=ArticleGenerationJobResponse,
+)
+def read_project_task_article_generation_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ArticleGenerationJobResponse:
+    del project
+    try:
+        job = _article_generation(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Article generation job was not found.",
+        ) from None
+    except ArticleGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server article generation is not available.",
+        ) from exc
+    return ArticleGenerationJobResponse.model_validate(job)
 
 
 @router.put(
@@ -2322,6 +2431,7 @@ def read_project_product_rediscovery_job(
 
 
 __all__ = [
+    "ArticleGenerationJobResponse",
     "ArticleSectionRewriteRequest",
     "ConfirmedProductsUpdateRequest",
     "OutlineGenerationJobResponse",

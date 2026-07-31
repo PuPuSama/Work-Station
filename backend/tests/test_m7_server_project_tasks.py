@@ -89,6 +89,10 @@ from services.server_title_generation import (  # noqa: E402
     ServerTitleGenerationRegistry,
     TitleTemplateReference,
 )
+from services.server_article_generation import (  # noqa: E402
+    ServerArticleGenerationHandler,
+    ServerArticleGenerationRegistry,
+)
 from services.server_project_tasks import (  # noqa: E402
     ServerProjectTaskStoreFactory,
 )
@@ -199,6 +203,35 @@ class RecordingTitleProvider:
             f"Server candidate title {index}"
             for index in range(1, title_count + 1)
         )
+
+
+class RecordingArticleProvider:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        task,
+        *,
+        target_words,
+        prompt_snapshot,
+        context_chunks,
+    ):
+        self.calls.append(
+            {
+                "task_id": task.id,
+                "target_words": target_words,
+                "prompt_source": prompt_snapshot.source,
+                "prompt_version": prompt_snapshot.version,
+                "chunk_ids": [
+                    chunk.chunk_id for chunk in context_chunks
+                ],
+                "chunk_text": [
+                    chunk.text for chunk in context_chunks
+                ],
+            }
+        )
+        return SERVER_ARTICLE
 
 
 class FakeDownloadStore:
@@ -1637,6 +1670,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/titles/jobs/job-a",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article/jobs/job-a",
                 ).status_code,
                 404,
             )
@@ -3095,6 +3143,221 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertNotIn(
                     "Generated server outline",
+                    str(audit.events),
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_article_generation_uses_pinned_prompt_and_published_scope(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        record.update(
+            {
+                "status": "outline_confirmed",
+                "selected_title": "Example Buyer Guide",
+                "outline": (
+                    "## Buyer Checks\n\n"
+                    "### Confirm the application\n\n"
+                    "### Compare evidence\n\n"
+                    "## FAQ"
+                ),
+                "outline_draft": (
+                    "## Buyer Checks\n\n"
+                    "### Confirm the application\n\n"
+                    "### Compare evidence\n\n"
+                    "## FAQ"
+                ),
+                "raw_draft_article": "",
+                "initial_article": "",
+                "article": "",
+                "humanized_article": "stale downstream article",
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+        published_chunk = self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-article-published",
+            text=(
+                "Example Buyer Guide for Topic 2 uses one verified "
+                "published project fact."
+            ),
+        )
+        self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-article-inbox",
+            text=(
+                "Example Buyer Guide for Topic 2 must not use this "
+                "unpublished fact."
+            ),
+            status="inbox",
+        )
+        self._store_outline_context(
+            project_id=self.project_b,
+            suffix=f"{self.task_b}-article-published",
+            text=(
+                "Example Buyer Guide for Topic 2 repeated repeated "
+                "is a cross-project fact."
+            ),
+        )
+        provider = RecordingArticleProvider()
+        audit = RecordingAuditWriter()
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(self.engine)
+        )
+        handler = ServerArticleGenerationHandler(
+            self.engine,
+            provider=provider,
+            audit=audit,
+        )
+        codec = ServerActorSessionCodec(b"a" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            registry = ServerArticleGenerationRegistry(
+                self.engine,
+                config=isolated,
+                access=access,
+                handler=handler,
+                audit=audit,
+            )
+            self.addCleanup(registry.stop)
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "a" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                app_module.app.state.server_article_generation = registry
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article"
+                )
+                self.assertEqual(
+                    client.post(path, json={"revision": 0}).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.post(
+                        path,
+                        json={
+                            "revision": 0,
+                            "word_count": 1000,
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/article"
+                        ),
+                        json={"revision": 0},
+                    ).status_code,
+                    403,
+                )
+                queued = client.post(path, json={"revision": 0})
+                self.assertEqual(queued.status_code, 200, queued.text)
+                public_job = queued.json()
+                self.assertEqual(public_job["operation"], "article")
+                self.assertNotIn("request", public_job)
+                self.assertNotIn("requested_by_user_id", public_job)
+                status_path = f"{path}/jobs/{public_job['job_id']}"
+                terminal = None
+                for _attempt in range(100):
+                    response = client.get(status_path)
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+                    terminal = response.json()
+                    if terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert terminal is not None
+                self.assertEqual(terminal["status"], "succeeded")
+                self.assertEqual(terminal["result_revision"], 1)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    provider.calls[0]["chunk_ids"],
+                    [published_chunk],
+                )
+                self.assertEqual(
+                    provider.calls[0]["prompt_source"],
+                    "system",
+                )
+                self.assertEqual(
+                    provider.calls[0]["target_words"],
+                    1200,
+                )
+                stored_payload = repository.get(self.task_a)
+                assert stored_payload is not None
+                stored = TaskRecord.model_validate(stored_payload)
+                self.assertEqual(stored.revision, 1)
+                self.assertEqual(stored.status, "draft_ready")
+                self.assertEqual(
+                    stored.raw_draft_article,
+                    SERVER_ARTICLE.strip(),
+                )
+                self.assertEqual(
+                    stored.initial_article,
+                    SERVER_ARTICLE.strip(),
+                )
+                self.assertEqual(stored.article, stored.initial_article)
+                self.assertEqual(stored.humanized_article, "")
+                self.assertEqual(
+                    [item.kind for item in stored.article_versions],
+                    ["raw_draft", "initial"],
+                )
+                assert stored.last_article_prompt_snapshot is not None
+                self.assertEqual(
+                    stored.last_article_prompt_snapshot.source,
+                    "system",
+                )
+                self.assertNotIn(
+                    "Example Buyer Guide",
                     str(audit.events),
                 )
                 self.assertFalse(local_state.exists())

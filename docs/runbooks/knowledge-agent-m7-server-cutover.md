@@ -221,8 +221,8 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
   导入后以相同输入重跑必须得到 `already_matched=True`；
 - 目标已有任意不同 Prompt/Default 时必须停止并调查，不允许清空、覆盖或合并猜测；
   旧 SQLite 只保存当前版本，因此导入保留当前 Version 号但不补造更早正文；
-- Outline Worker 已接线后，旧 Local Prompt API 仍继续 fail closed；Worker 只能读取
-  入队时固定的 PostgreSQL Prompt Version，Article/Review Worker 尚未迁移。
+- Outline/Article Worker 已接线后，旧 Local Prompt API 仍继续 fail closed；Worker
+  只能读取入队时固定的 PostgreSQL Prompt Version，Review Worker 尚未迁移。
 
 Prompt HTTP 冒烟：
 
@@ -489,12 +489,12 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十三条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十四条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
-  `article.outline.updated`、
+  `article.outline.updated`、`article.draft.generated`、
   `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
@@ -521,6 +521,11 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - 大纲生成只提交当前 Revision；入队时由服务端固定 Prompt ID + Version 与 Published
   Chunk ID，公开 Job 不返回这些私有输入。Worker 执行前复核 Prompt/Chunk Scope，
   成功只写 `outline_draft` 和 `generated` Version，不替换确认大纲、不使下游失效；
+- 正文初稿生成只提交当前 Revision；入队时由服务端固定 Article Prompt ID + Version、
+  目标字数和 Published Chunk ID，公开 Job 不返回这些私有输入。Worker 执行前复核
+  Task/Prompt/Chunk Scope，只接受包含 H1/过渡段、H2/H3 和最终 FAQ 的完整 Markdown；
+  失败不补 mock、不读写本地 Artifact。成功追加 Raw/Initial Version、进入
+  `draft_ready` 并清空旧下游；Audit 只记录字数、Prompt 身份和 Chunk 数，不含正文；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/
@@ -566,7 +571,7 @@ Outline 生成冒烟必须通过
 Project-scoped Job Control 冒烟必须另外验证：
 
 - `GET /api/projects/{project}/batches` 与 Batch Detail 只返回
-  `product_rediscovery/titles/outline`，并且响应不存在 Request、Requester、URL、Prompt/
+  `product_rediscovery/titles/outline/article`，并且响应不存在 Request、Requester、URL、Prompt/
   Chunk 身份、原始 Error、Worker Lease、对象 URI 或签名 URL；
 - Viewer 可读但 Cancel/Retry 返回 403；控制权限按 Operation 分别映射
   `knowledge.edit/article.edit`，且撤权后即使 Cookie 与页面仍有效也必须失败；
