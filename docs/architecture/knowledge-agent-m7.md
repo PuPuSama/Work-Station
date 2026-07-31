@@ -117,13 +117,17 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增最终 AI-rate Review 闭环：Reviewer 通过项目级 multipart 路由上传截图，服务端
   规范化为内容寻址 PNG；确认路由把分数/报告绑定当前 Humanized Article 哈希，且
   confirmed=true 时必须已有截图 Asset；专用下载重新要求 `article.review`；
+- 新增初稿 AI-rate Review 闭环：初检截图使用独立
+  `initial_ai_rate_screenshot` 私有类型，不能冒充终检截图；确认绑定当前 Initial
+  Article Hash 并只推进到 `initial_ai_checked`，不沿用 Local 低分自动跳过
+  Humanize/终检的隐式捷径；
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十四条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 十六条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -503,7 +507,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/tdk.py` | Local/Server 共用的 TDK 校验与 Word 排版核心 | 标题绑定当前文章、描述/关键词硬约束、内存字节输出与 Local 文件入口分离 |
 | `backend/services/server_tdk_export.py` | Server 当前文章到私有 TDK DOCX Asset | `article.deliver`、LLM 错误脱敏、纯内存 `D.docx`、内容寻址输出、Task 不保存路径 |
 | `backend/services/ai_screenshots.py` | Local/Server 共用的截图验证与 PNG 规范化核心 | 无元数据 PNG、像素门禁、Local 文件写入与 Server 对象写入分离 |
-| `backend/services/server_ai_screenshots.py` | Server 最终 AI-rate 截图到私有 Asset | `article.review`、纯内存规范化、内容寻址输出、AICheck 不保存路径 |
+| `backend/services/server_ai_screenshots.py` | Server 初稿/最终 AI-rate 截图到各自私有 Asset | `article.review`、阶段类型隔离、纯内存规范化、内容寻址输出、AICheck 不保存路径 |
 | `backend/services/delivery_package.py` | Local/Server 共用的 Delivery ZIP 组装核心 | 安全文件名、固定顺序/时间戳/权限、扁平确定性 ZIP；Local 另保留目录写入入口 |
 | `backend/services/server_delivery_package.py` | Server 私有交付资产到 Delivery ZIP Asset | `article.deliver`、终审正文哈希绑定、逐对象身份复核、纯内存组装、Task 不保存路径 |
 | `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
@@ -1000,6 +1004,30 @@ LLM 调用发生在 PostgreSQL Task 事务前，避免长事务持锁；生成�
 orphan，继续进入延迟对账，不能在失败请求里直接删除。最终 AI-rate 截图和 Delivery
 ZIP 与 Delivery Console 已由后续各节迁移。
 
+#### D1.3c 已实现：Server 初稿 AI-rate Review 与截图
+
+```text
+POST /api/projects/{project}/tasks/{task_id}/checks/initial-ai/screenshot
+query: revision
+multipart: file
+
+PUT /api/projects/{project}/tasks/{task_id}/checks/initial-ai
+body: revision + score + report + confirmed
+
+GET /api/projects/{project}/tasks/{task_id}/checks/initial-ai/screenshot/download
+```
+
+三条接口均要求 `article.review`。上传先用 Revision 和
+`ACTION_CONFIRM_INITIAL_AI` 阻断错误状态，再在内存移除图片元数据并保存内容寻址
+`initial_ai_rate_screenshot`；它与 `final_ai_rate_screenshot` 是两个互斥访问类型，
+任一专用下载都不能签发另一阶段的 Asset。Task 只保存 Asset ID、Hash、尺寸和固定文件名，
+路径保持空。
+
+确认要求当前 Initial Article 非空、Hash 一致且 confirmed 时已有初检截图；AICheck
+绑定精确 Article Hash，Task CAS 与不含 Report/Score 值的 Audit 同事务。Server 只推进
+到 `initial_ai_checked`，不会按 Local `ai_pass_threshold` 自动复制正文、伪造终检或跳过
+Humanize。后续 Humanize/Skip Policy 迁移必须使用显式命令和独立证据。
+
 #### D1.4 已实现：Server 最终 AI-rate Review 与截图
 
 ```text
@@ -1247,7 +1275,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十四条 Task 写操作、`product_rediscovery/titles/outline/article` 的
+身份代码链、十六条 Task 写操作、`product_rediscovery/titles/outline/article` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
@@ -1434,3 +1462,11 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
     Review/Delivery 下游失效，而不自动推进人工检查？
 101. 正文是否不进入 Audit，`article.draft.generated` 是否只记录安全字数、Prompt 身份和
     Chunk 数，并与 Task Revision CAS 原子提交？
+102. 初检截图是否使用独立 `initial_ai_rate_screenshot` 类型，且通用/终检下载均不能
+     签发该 Asset？
+103. 初检上传/确认/下载是否都重新要求 `article.review`，并在跨项目、撤权、旧
+     Revision 或错误状态时 fail closed？
+104. 初检确认是否绑定当前 Initial Article Hash、confirmed 时要求已有截图，并只推进到
+     `initial_ai_checked`？
+105. Server Mode 是否不沿用 Local 低分自动跳过 Humanize/终检逻辑，初检 Report/Score
+     值是否不进入 Audit？

@@ -19,7 +19,12 @@ from knowledge_agent.object_storage import (
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
 )
-from models import STATUS_FINAL_AI_CHECKED, AICheck, TaskRecord
+from models import (
+    STATUS_FINAL_AI_CHECKED,
+    STATUS_INITIAL_AI_CHECKED,
+    AICheck,
+    TaskRecord,
+)
 from services.access_control import (
     ActorIdentity,
     ProjectAccessDenied,
@@ -48,6 +53,7 @@ from services.server_ai_screenshots import (
     MAX_SERVER_AI_SCREENSHOT_BYTES,
     ServerAiScreenshotError,
     ServerFinalAiScreenshotPreparation,
+    ServerInitialAiScreenshotPreparation,
 )
 from services.server_docx_export import (
     ServerArticleDocxError,
@@ -110,6 +116,7 @@ from services.server_tdk_export import (
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
     ACTION_CONFIRM_FINAL_AI,
+    ACTION_CONFIRM_INITIAL_AI,
     ACTION_DOWNLOAD_DOCX,
     ACTION_EXPORT_DOCX,
     ACTION_GENERATE_TDK,
@@ -243,6 +250,10 @@ class FinalAiCheckUpdateRequest(BaseModel):
     )
     report: str = Field(default="", max_length=30000)
     confirmed: bool = True
+
+
+class InitialAiCheckUpdateRequest(FinalAiCheckUpdateRequest):
+    """Bind a manual initial AI review to the current first draft."""
 
 
 class ArticleSectionRewriteRequest(BaseModel):
@@ -1507,6 +1518,254 @@ def replace_project_task_products(
         expected_revision=payload.revision,
         action="article.products.confirmed",
         details={"product_count": len(task.products)},
+    )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/checks/initial-ai/screenshot",
+    response_model=TaskRecord,
+)
+def upload_project_task_initial_ai_screenshot(
+    project: str,
+    task_id: str,
+    request: Request,
+    revision: int = Query(ge=0),
+    file: UploadFile = File(...),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_CONFIRM_INITIAL_AI)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    content = file.file.read(MAX_SERVER_AI_SCREENSHOT_BYTES + 1)
+    if len(content) > MAX_SERVER_AI_SCREENSHOT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="AI-rate screenshot exceeds 25 MB.",
+        )
+    try:
+        ServerInitialAiScreenshotPreparation(
+            objects=_knowledge_object_service(request),
+        ).prepare(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task=task,
+            content=content,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ServerAiScreenshotError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AI-rate screenshot storage is temporarily unavailable.",
+        ) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=revision,
+        action="article.initial_ai_screenshot.uploaded",
+        details={
+            "screenshot_height": (
+                task.initial_ai_check.screenshot_height or 0
+            ),
+            "screenshot_width": (
+                task.initial_ai_check.screenshot_width or 0
+            ),
+        },
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/checks/initial-ai",
+    response_model=TaskRecord,
+)
+def confirm_project_task_initial_ai(
+    project: str,
+    task_id: str,
+    payload: InitialAiCheckUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_CONFIRM_INITIAL_AI)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    initial = task.initial_article.strip()
+    if not initial:
+        raise HTTPException(
+            status_code=409,
+            detail="Save the initial article before confirming.",
+        )
+    if (
+        task.initial_article_hash.strip()
+        and task.initial_article_hash != content_hash(initial)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The initial article identity changed.",
+        )
+    previous = task.initial_ai_check
+    if payload.confirmed and not previous.screenshot_asset_id.strip():
+        raise HTTPException(
+            status_code=409,
+            detail="Upload the initial AI-rate screenshot before confirming.",
+        )
+    task.initial_ai_check = AICheck(
+        confirmed=payload.confirmed,
+        score=payload.score,
+        report=payload.report,
+        screenshot_path="",
+        screenshot_asset_id=previous.screenshot_asset_id,
+        screenshot_content_hash=previous.screenshot_content_hash,
+        screenshot_filename=previous.screenshot_filename,
+        screenshot_width=previous.screenshot_width,
+        screenshot_height=previous.screenshot_height,
+        confirmed_at=now_iso() if payload.confirmed else "",
+        article_hash=content_hash(initial),
+    )
+    task.zero_gpt_report = payload.report
+    if payload.confirmed:
+        transition_task(task, STATUS_INITIAL_AI_CHECKED)
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.initial_ai_check.updated",
+        details={
+            "confirmed": payload.confirmed,
+            "score_recorded": payload.score is not None,
+        },
+    )
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/checks/initial-ai/screenshot/download",
+    response_model=ProjectAssetDownload,
+)
+def create_project_task_initial_ai_screenshot_download(
+    project: str,
+    task_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectAssetDownload:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    asset_id = task.initial_ai_check.screenshot_asset_id.strip()
+    if not asset_id:
+        raise HTTPException(
+            status_code=404,
+            detail="The initial AI-rate screenshot has not been uploaded.",
+        )
+    try:
+        url = _knowledge_object_service(
+            request
+        ).create_initial_ai_screenshot_download_url(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            asset_id=asset_id,
+            content_hash=(
+                task.initial_ai_check.screenshot_content_hash
+            ),
+            width=task.initial_ai_check.screenshot_width or 0,
+            height=task.initial_ai_check.screenshot_height or 0,
+            expires_seconds=expires_seconds,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeObjectNotFound:
+        raise HTTPException(
+            status_code=404,
+            detail="AI-rate screenshot was not found in the requested project.",
+        ) from None
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AI-rate screenshot download is temporarily unavailable.",
+        ) from exc
+    return ProjectAssetDownload(
+        asset_id=asset_id,
+        url=url,
+        expires_seconds=expires_seconds,
     )
 
 

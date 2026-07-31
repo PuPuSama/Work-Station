@@ -1689,6 +1689,37 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 404,
             )
             self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/checks/initial-ai/screenshot",
+                    params={"revision": 0},
+                    files={
+                        "file": (
+                            "initial.png",
+                            self._image_bytes("white"),
+                            "image/png",
+                        )
+                    },
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/checks/initial-ai",
+                    json={"revision": 0, "confirmed": True},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/checks/initial-ai/"
+                    "screenshot/download",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
                 TestClient(app_module.app).put(
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/products",
@@ -2521,6 +2552,252 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     client.get(package_download_path).status_code,
+                    403,
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_initial_ai_review_uses_private_screenshot_asset(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        initial = SERVER_ARTICLE.strip()
+        record.update(
+            {
+                "status": "draft_ready",
+                "raw_draft_article": initial,
+                "initial_article": initial,
+                "initial_article_hash": hashlib.sha256(
+                    initial.encode("utf-8")
+                ).hexdigest(),
+                "article": initial,
+                "initial_ai_check": {},
+            }
+        )
+        repository.upsert(record)
+
+        codec = ServerActorSessionCodec(b"i" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        private_store = FakeDownloadStore()
+        object_service = ProjectKnowledgeObjectService(
+            store=private_store,
+            bucket="private-bucket",
+            repository=PostgresKnowledgeAssetRepository(self.engine),
+            access=ProjectAccessService(
+                PostgresProjectAccessRepository(self.engine)
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "i" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.app.state.server_project_object_service = (
+                    object_service
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                upload_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/checks/initial-ai/screenshot"
+                )
+                confirm_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/checks/initial-ai"
+                )
+                download_path = f"{upload_path}/download"
+                self.assertEqual(
+                    client.post(
+                        upload_path,
+                        params={"revision": 0},
+                        files={
+                            "file": (
+                                "initial.png",
+                                self._image_bytes("white"),
+                                "image/png",
+                            )
+                        },
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="reviewer")
+                    )
+                self.assertEqual(
+                    client.put(
+                        confirm_path,
+                        json={
+                            "revision": 0,
+                            "score": 12.5,
+                            "report": "Reviewed initial AI result.",
+                        },
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/checks/initial-ai/screenshot"
+                        ),
+                        params={"revision": 0},
+                        files={
+                            "file": (
+                                "cross-project.png",
+                                self._image_bytes("red"),
+                                "image/png",
+                            )
+                        },
+                    ).status_code,
+                    403,
+                )
+                uploaded = client.post(
+                    upload_path,
+                    params={"revision": 0},
+                    files={
+                        "file": (
+                            "initial.png",
+                            self._image_bytes("white"),
+                            "image/png",
+                        )
+                    },
+                )
+                self.assertEqual(
+                    uploaded.status_code,
+                    200,
+                    uploaded.text,
+                )
+                screenshot_task = uploaded.json()
+                self.assertEqual(screenshot_task["revision"], 1)
+                self.assertEqual(
+                    screenshot_task["status"],
+                    "draft_ready",
+                )
+                check = screenshot_task["initial_ai_check"]
+                self.assertEqual(check["screenshot_path"], "")
+                self.assertTrue(check["screenshot_asset_id"])
+                self.assertEqual(
+                    check["screenshot_filename"],
+                    "initial-ai-rate.png",
+                )
+                self.assertEqual(
+                    (
+                        check["screenshot_width"],
+                        check["screenshot_height"],
+                    ),
+                    (320, 240),
+                )
+                download = client.get(download_path)
+                self.assertEqual(download.status_code, 200, download.text)
+                self.assertTrue(
+                    download.json()["url"].startswith(
+                        "https://signed.example.test/"
+                    )
+                )
+                confirmed = client.put(
+                    confirm_path,
+                    json={
+                        "revision": 1,
+                        "score": 12.5,
+                        "report": "Reviewed initial AI result.",
+                        "confirmed": True,
+                    },
+                )
+                self.assertEqual(
+                    confirmed.status_code,
+                    200,
+                    confirmed.text,
+                )
+                confirmed_task = confirmed.json()
+                self.assertEqual(confirmed_task["revision"], 2)
+                self.assertEqual(
+                    confirmed_task["status"],
+                    "initial_ai_checked",
+                )
+                self.assertTrue(
+                    confirmed_task["initial_ai_check"]["confirmed"]
+                )
+                self.assertEqual(
+                    confirmed_task["initial_ai_check"]["article_hash"],
+                    record["initial_article_hash"],
+                )
+                self.assertEqual(
+                    confirmed_task["humanized_article"],
+                    "",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    [
+                        "article.initial_ai_screenshot.uploaded",
+                        "article.initial_ai_check.updated",
+                    ],
+                )
+                self.assertNotIn(
+                    "Reviewed initial AI result.",
+                    str(audit.events),
+                )
+                self.assertEqual(
+                    client.put(
+                        confirm_path,
+                        json={
+                            "revision": 1,
+                            "score": 12.5,
+                            "report": "stale",
+                        },
+                    ).status_code,
+                    409,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="viewer")
+                    )
+                self.assertEqual(
+                    client.get(download_path).status_code,
                     403,
                 )
                 self.assertFalse(local_state.exists())

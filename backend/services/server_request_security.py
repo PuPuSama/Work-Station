@@ -360,7 +360,9 @@ def server_http_route_available(method: str, path: str) -> bool:
         and bool(parts[3])
         and parts[4] == "tasks"
         and bool(parts[5])
-        and parts[6:9] == ["checks", "final-ai", "screenshot"]
+        and parts[6] == "checks"
+        and parts[7] in {"final-ai", "initial-ai"}
+        and parts[8] == "screenshot"
     ):
         return True
     if (
@@ -370,7 +372,8 @@ def server_http_route_available(method: str, path: str) -> bool:
         and bool(parts[3])
         and parts[4] == "tasks"
         and bool(parts[5])
-        and parts[6:8] == ["checks", "final-ai"]
+        and parts[6] == "checks"
+        and parts[7] in {"final-ai", "initial-ai"}
     ):
         return True
     if (
@@ -380,8 +383,9 @@ def server_http_route_available(method: str, path: str) -> bool:
         and bool(parts[3])
         and parts[4] == "tasks"
         and bool(parts[5])
-        and parts[6:10]
-        == ["checks", "final-ai", "screenshot", "download"]
+        and parts[6] == "checks"
+        and parts[7] in {"final-ai", "initial-ai"}
+        and parts[8:10] == ["screenshot", "download"]
     ):
         return True
     if (

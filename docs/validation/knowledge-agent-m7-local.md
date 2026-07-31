@@ -521,8 +521,9 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十四条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/products/section/images/docx/tdk/
-  final-ai-screenshot/final-ai-check/delivery-package Action；
+- 十六条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+  initial-ai-screenshot/initial-ai-check/products/section/images/docx/tdk/final-ai-screenshot/
+  final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
 - 图片/文章 DOCX/TDK DOCX/Review PNG/Delivery ZIP 的 S3 Put 仍不属于 PostgreSQL
@@ -1062,6 +1063,36 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - `article` 已进入 Project-scoped Batch/Job Control；`rewrite_article` 等未迁移
   Operation 仍不可见；
 - 完整后端回归 626 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
+  TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
+  `20260731_0015`。
+
+### M7 Server 初稿 AI-rate Review
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_ai_screenshots `
+  tests.test_m7_knowledge_object_storage `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_initial_ai_review_uses_private_screenshot_asset `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_task_commands -q
+```
+
+结果：
+
+- 23 tests 全部通过；
+- Initial Screenshot 上传/确认/下载都要求 `article.review`，Viewer、跨 Project、
+  撤权、旧 Revision 和错误状态 fail closed；
+- 初检图片在内存规范化为无元数据 PNG，保存为独立
+  `initial_ai_rate_screenshot`；通用下载和 Final Screenshot 专用入口均不能取得；
+- confirmed=true 前必须已有初检截图，确认绑定当前 Initial Article Hash 并只推进到
+  `initial_ai_checked`；低分不自动复制 Humanized Article 或伪造 Final Check；
+- 上传/确认分别以 Task CAS 和安全 Audit 原子提交，Audit 不含 Report、Score 值或图片
+  内容，Task 不保存本地路径；
+- Local Mode 不挂载三条 Project 路由；
+- 完整后端回归 628 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
   TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
 

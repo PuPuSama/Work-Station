@@ -50,6 +50,8 @@
 | 产品重新发现 | `POST .../product-rediscovery` | `knowledge.edit` | PostgreSQL Job + S3 Inbox Evidence | Server Ready |
 | 替换指定章节 | `PUT .../article/sections` | `article.edit` | Heading Scope + Version + CAS + Audit | Server Ready |
 | 准备文章图片 | `POST .../prepare-images` | `article.edit` | 私有 Asset + 内存 WebP + CAS + Audit | Server Ready |
+| 初稿 AI 截图 | `POST .../checks/initial-ai/screenshot` | `article.review` | 私有 Initial PNG Asset + CAS + Audit | Server Ready |
+| 初稿 AI 确认 | `PUT .../checks/initial-ai` | `article.review` | Initial Article Hash 绑定 + CAS + Audit | Server Ready |
 | 最终 AI 截图 | `POST .../checks/final-ai/screenshot` | `article.review` | 私有 PNG Asset + CAS + Audit | Server Ready |
 | 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
 | 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |

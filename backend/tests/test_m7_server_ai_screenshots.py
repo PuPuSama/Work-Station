@@ -16,13 +16,19 @@ if str(BACKEND_DIR) not in sys.path:
 from knowledge_agent.assets import KnowledgeAsset  # noqa: E402
 from knowledge_agent.object_storage import (  # noqa: E402
     FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
+    INITIAL_AI_SCREENSHOT_ARTIFACT_KIND,
 )
-from models import STATUS_HUMANIZED_READY, TaskRecord  # noqa: E402
+from models import (  # noqa: E402
+    STATUS_DRAFT_READY,
+    STATUS_HUMANIZED_READY,
+    TaskRecord,
+)
 from services.access_control import ActorIdentity  # noqa: E402
 from services.server_ai_screenshots import (  # noqa: E402
     MAX_SERVER_AI_SCREENSHOT_BYTES,
     ServerAiScreenshotError,
     ServerFinalAiScreenshotPreparation,
+    ServerInitialAiScreenshotPreparation,
 )
 
 
@@ -66,6 +72,26 @@ class RecordingScreenshotObjects:
             metadata={"artifact_kind": self.artifact_kind},
         )
 
+    def upload_initial_ai_screenshot(
+        self,
+        *,
+        actor,
+        project_id,
+        asset_id,
+        data,
+        width,
+        height,
+    ) -> KnowledgeAsset:
+        self.artifact_kind = INITIAL_AI_SCREENSHOT_ARTIFACT_KIND
+        return self.upload_final_ai_screenshot(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            width=width,
+            height=height,
+        )
+
 
 def screenshot_bytes() -> bytes:
     output = BytesIO()
@@ -93,6 +119,40 @@ def server_task() -> TaskRecord:
 
 
 class ServerAiScreenshotTests(unittest.TestCase):
+    def test_normalizes_initial_review_png_without_local_path(self) -> None:
+        objects = RecordingScreenshotObjects()
+        task = server_task()
+        task.status = STATUS_DRAFT_READY
+        task.initial_article = "# Initial review\n\nReviewed draft."
+        task.humanized_article = ""
+
+        saved = ServerInitialAiScreenshotPreparation(
+            objects=objects,
+        ).prepare(
+            actor=ActorIdentity("org-a", "reviewer-a"),
+            project_id="example.com",
+            task=task,
+            content=screenshot_bytes(),
+        )
+
+        self.assertEqual(saved.initial_ai_check.screenshot_path, "")
+        self.assertTrue(saved.initial_ai_check.screenshot_asset_id)
+        self.assertEqual(
+            saved.initial_ai_check.screenshot_filename,
+            "initial-ai-rate.png",
+        )
+        self.assertEqual(
+            (
+                saved.initial_ai_check.screenshot_width,
+                saved.initial_ai_check.screenshot_height,
+            ),
+            (640, 360),
+        )
+        self.assertEqual(
+            objects.artifact_kind,
+            INITIAL_AI_SCREENSHOT_ARTIFACT_KIND,
+        )
+
     def test_normalizes_private_png_without_local_path(self) -> None:
         objects = RecordingScreenshotObjects()
         task = server_task()

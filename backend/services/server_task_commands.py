@@ -31,6 +31,8 @@ ServerTaskAuditAction = Literal[
     "article.outline.updated",
     "article.outline_version.restored",
     "article.draft.generated",
+    "article.initial_ai_screenshot.uploaded",
+    "article.initial_ai_check.updated",
     "article.products.confirmed",
     "article.section.replaced",
     "article.images.prepared",
@@ -51,6 +53,8 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.outline.updated": "article.edit",
     "article.outline_version.restored": "article.edit",
     "article.draft.generated": "article.edit",
+    "article.initial_ai_screenshot.uploaded": "article.review",
+    "article.initial_ai_check.updated": "article.review",
     "article.products.confirmed": "article.edit",
     "article.section.replaced": "article.edit",
     "article.images.prepared": "article.edit",
@@ -98,6 +102,18 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "prompt_version",
             "raw_word_count",
             "target_words",
+        }
+    ),
+    "article.initial_ai_screenshot.uploaded": frozenset(
+        {
+            "screenshot_height",
+            "screenshot_width",
+        }
+    ),
+    "article.initial_ai_check.updated": frozenset(
+        {
+            "confirmed",
+            "score_recorded",
         }
     ),
     "article.products.confirmed": frozenset({"product_count"}),

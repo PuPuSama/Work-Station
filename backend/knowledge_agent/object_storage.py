@@ -47,6 +47,7 @@ ARTICLE_DOCX_CONTENT_TYPE = (
     "wordprocessingml.document"
 )
 TDK_DOCX_ARTIFACT_KIND = "tdk_docx"
+INITIAL_AI_SCREENSHOT_ARTIFACT_KIND = "initial_ai_rate_screenshot"
 FINAL_AI_SCREENSHOT_ARTIFACT_KIND = "final_ai_rate_screenshot"
 DELIVERY_ZIP_ARTIFACT_KIND = "delivery_zip"
 PRIVATE_TASK_ARTIFACT_KINDS = frozenset(
@@ -54,6 +55,7 @@ PRIVATE_TASK_ARTIFACT_KINDS = frozenset(
         ARTICLE_DOCX_ARTIFACT_KIND,
         DELIVERY_ZIP_ARTIFACT_KIND,
         FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
+        INITIAL_AI_SCREENSHOT_ARTIFACT_KIND,
         TDK_DOCX_ARTIFACT_KIND,
     }
 )
@@ -260,6 +262,32 @@ class ProjectKnowledgeObjectService:
             height=height,
             metadata={
                 "artifact_kind": FINAL_AI_SCREENSHOT_ARTIFACT_KIND
+            },
+        )
+
+    def upload_initial_ai_screenshot(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+        width: int,
+        height: int,
+    ) -> KnowledgeAsset:
+        """Persist a normalized initial AI-rate review screenshot."""
+
+        self._access.require(actor, project_id, "article.review")
+        return self._store_asset(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+            content_type="image/png",
+            width=width,
+            height=height,
+            metadata={
+                "artifact_kind": INITIAL_AI_SCREENSHOT_ARTIFACT_KIND
             },
         )
 
@@ -553,6 +581,41 @@ class ProjectKnowledgeObjectService:
             expires_seconds=expires_seconds,
         )
 
+    def create_initial_ai_screenshot_download_url(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        content_hash: str,
+        width: int,
+        height: int,
+        expires_seconds: int = 300,
+    ) -> str:
+        """Sign an initial-review screenshot after fresh review permission."""
+
+        self._access.require(actor, project_id, "article.review")
+        asset = self._repository.get_asset(project_id, asset_id)
+        if (
+            asset is None
+            or str(asset.metadata.get("artifact_kind") or "")
+            != INITIAL_AI_SCREENSHOT_ARTIFACT_KIND
+            or asset.content_type != "image/png"
+            or asset.content_hash != content_hash.strip().casefold()
+            or asset.width != width
+            or asset.height != height
+        ):
+            raise KnowledgeObjectNotFound("knowledge object not found")
+        key = self._scoped_key(
+            actor=actor,
+            project_id=project_id,
+            asset=asset,
+        )
+        return self._store.create_download_url(
+            key,
+            expires_seconds=expires_seconds,
+        )
+
     def create_delivery_zip_download_url(
         self,
         *,
@@ -590,6 +653,7 @@ __all__ = [
     "ARTICLE_DOCX_CONTENT_TYPE",
     "DELIVERY_ZIP_ARTIFACT_KIND",
     "FINAL_AI_SCREENSHOT_ARTIFACT_KIND",
+    "INITIAL_AI_SCREENSHOT_ARTIFACT_KIND",
     "KnowledgeObjectIntegrityError",
     "KnowledgeObjectNotFound",
     "ProjectKnowledgeObject",

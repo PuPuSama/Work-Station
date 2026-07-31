@@ -18,6 +18,7 @@ from knowledge_agent.object_storage import (  # noqa: E402
     ARTICLE_DOCX_CONTENT_TYPE,
     DELIVERY_ZIP_ARTIFACT_KIND,
     FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
+    INITIAL_AI_SCREENSHOT_ARTIFACT_KIND,
     KnowledgeObjectIntegrityError,
     KnowledgeObjectNotFound,
     ProjectKnowledgeObjectService,
@@ -427,6 +428,44 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             self.access.calls[-1][2],
             "article.review",
         )
+        initial_screenshot = self.service.upload_initial_ai_screenshot(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="initial-ai-screenshot",
+            data=b"normalized-initial-png-bytes",
+            width=800,
+            height=450,
+        )
+        self.assertEqual(
+            initial_screenshot.metadata["artifact_kind"],
+            INITIAL_AI_SCREENSHOT_ARTIFACT_KIND,
+        )
+        initial_url = (
+            self.service.create_initial_ai_screenshot_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=initial_screenshot.asset_id,
+                content_hash=initial_screenshot.content_hash,
+                width=800,
+                height=450,
+                expires_seconds=90,
+            )
+        )
+        self.assertTrue(
+            initial_url.startswith("https://signed.example.test/")
+        )
+        with self.assertRaisesRegex(
+            KnowledgeObjectNotFound,
+            "^knowledge object not found$",
+        ):
+            self.service.create_final_ai_screenshot_download_url(
+                actor=self.actor,
+                project_id="project-a",
+                asset_id=initial_screenshot.asset_id,
+                content_hash=initial_screenshot.content_hash,
+                width=800,
+                height=450,
+            )
         with self.assertRaisesRegex(
             KnowledgeObjectNotFound,
             "^knowledge object not found$",

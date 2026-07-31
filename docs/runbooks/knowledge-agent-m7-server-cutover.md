@@ -427,6 +427,23 @@ TDK DOCX 冒烟必须通过
 - 旧 Revision 在 LLM/对象访问前返回 409；并发 CAS 后的未引用 TDK DOCX 进入内容
   寻址 orphan 对账，不在失败请求中立即删除。
 
+初稿 AI-rate Review 冒烟必须依次使用：
+
+- `POST /api/projects/{project}/tasks/{task_id}/checks/initial-ai/screenshot?revision=...`；
+- `PUT /api/projects/{project}/tasks/{task_id}/checks/initial-ai`；
+- `GET /api/projects/{project}/tasks/{task_id}/checks/initial-ai/screenshot/download`。
+
+并验证：
+
+- 三条接口都要求 `article.review`，Viewer/跨 Project/撤权请求 fail closed；
+- 初检截图在内存规范化为无元数据 PNG，以独立
+  `initial_ai_rate_screenshot` 私有类型保存；通用下载和终检专用下载都不能签发；
+- confirmed=true 前必须已有初检截图，确认绑定当前 Initial Article Hash，只推进到
+  `initial_ai_checked`，低分也不会自动跳过 Humanize 或伪造终检；
+- 上传和确认分别产生 `article.initial_ai_screenshot.uploaded` 与
+  `article.initial_ai_check.updated`，Task CAS/Audit 同事务，Audit 不含 Report 或 Score 值；
+- Local Mode 三条 Project 路由均为 404，Task 不保存本地截图路径。
+
 最终 AI-rate Review 冒烟必须依次使用：
 
 - `POST /api/projects/{project}/tasks/{task_id}/checks/final-ai/screenshot?revision=...`；
@@ -489,12 +506,13 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十四条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十六条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.draft.generated`、
+  `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
   `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
