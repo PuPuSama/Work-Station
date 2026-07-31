@@ -35,6 +35,7 @@ class AccessibleProject:
     project_id: str
     customer_name: str
     official_domain: str
+    revision: int
     effective_role: EffectiveRole
 
 
@@ -81,6 +82,7 @@ class PostgresProjectDirectory:
                     projects.c.project_id,
                     projects.c.customer_name,
                     projects.c.official_domain,
+                    projects.c.revision,
                     owning_team_membership.c.role.label("team_role"),
                     explicit_project_membership.c.role.label(
                         "project_role"
@@ -166,6 +168,7 @@ class PostgresProjectDirectory:
                         project_id=str(row["project_id"]),
                         customer_name=str(row["customer_name"]),
                         official_domain=str(row["official_domain"]),
+                        revision=int(row["revision"]),
                         effective_role=role,
                     )
                 )

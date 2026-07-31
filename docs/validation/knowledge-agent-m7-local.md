@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260731_0017`
+- Alembic Head：`20260731_0018`
 
 ## 已通过验证
 
@@ -1669,10 +1669,10 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   `app.py` PostgreSQL 单写切换尚未实现；
 - S3 对象存储底层、产品资产桥接、文章 DOCX/TDK/Review/Delivery ZIP 私有对象、
   Orphan 双观察延迟清理和 no-go 部署门禁已实现；真实备份恢复演练与生产供应商尚未完成；
-- 前端已新增 Server OIDC、SQL Project Directory、Project Membership Console、窄范围
-  Delivery Console，以及 Organization/Team/User/Session/External Identity/Invitation
-  管理和 `/accept-invite`，并通过 lint/build；Article、Batch 与邮件投递等其余 M7
-  界面或外部集成尚未接入 Server API。
+- 前端已新增 Server OIDC、SQL Project Directory、Article/Batch/Knowledge/Delivery
+  Console、Project Settings，以及 Organization/Team/User/Session/External
+  Identity/Invitation 管理和 `/accept-invite`，并通过 lint/build；邀请邮件投递、
+  生产 IdP/ObjectStore 与其他外部集成尚未验收。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。
 
@@ -1708,3 +1708,45 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
 - 前端 Next.js 16.2.10 production build、全量 ESLint 与 TypeScript 串行通过；
 - 本切片不修改 Schema；连续两次 `upgrade head` 成功，Alembic Current 与 Head 均为
   `20260731_0017`。
+
+### M7 Server Project Metadata 与 Project Settings
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\backend\.venv\Scripts\python.exe -m unittest `
+  backend.tests.test_m7_server_project_metadata `
+  backend.tests.test_m7_server_request_security `
+  backend.tests.test_m7_server_project_tasks `
+  backend.tests.test_m7_deployment_readiness `
+  backend.tests.test_m7_object_orphan_reconciliation -v
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -q
+
+Set-Location frontend
+& '<工作区 Node 绝对路径>' node_modules/typescript/bin/tsc --noEmit
+& '<工作区 Node 绝对路径>' node_modules/eslint/bin/eslint.js .
+& '<工作区 Node 绝对路径>' node_modules/next/dist/bin/next build
+```
+
+结果：
+
+- 65 项 Project Metadata/Request Security/Task/Readiness/Orphan 定向测试全部通过；
+- 新增 6 项真实 PostgreSQL/HTTP 集成验证：Metadata Revision 与规范化、同值幂等、
+  Repository 变更递增、数据库非负约束、跨项目/低权限拒绝、严格 Body、Audit 故障
+  回滚和错误脱敏；
+- `GET /api/projects/{project}/metadata` 只返回 Project ID、显示名、官方域名和
+  Revision；`PUT` 只接受 Revision/显示名/域名，Project ID、Context 等注入字段返回
+  422，旧 Revision 返回 409；
+- 写事务重新锁定 `project.members.manage` 的全部可撤权事实，再锁 Active Project；
+  Metadata CAS 与 `project.metadata.updated` Audit 原子提交。Audit 只含前后 Revision
+  与字段变更布尔值，不含显示名、域名、URL 或 Secret；
+- 同值重试不增加 Revision 或 Audit。已有 Task 不回写；未来 Task Intake 与官网操作
+  使用当前 Project Metadata。自由事实与写作规则继续分别进入 Published Knowledge
+  和不可变 Prompt Snapshot；
+- Server `/settings` 组合 Metadata 与 Membership 两个独立组件/API；Local 仍挂载原
+  Settings。字段有可见 Label、on-blur 校验、显式加载/保存/冲突反馈，关键按钮至少
+  44px，窄屏无固定横向列；
+- 完整后端回归 688 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 TypeScript、全量 ESLint 与 Next.js 16.2.10 production build 串行通过；
+- 数据库中非零 Metadata Revision 为 0 后执行 `0018 -> 0017 -> 0018` 往返成功，
+  重复 `upgrade head` 成功；Alembic Current 与 Head 均为 `20260731_0018`。

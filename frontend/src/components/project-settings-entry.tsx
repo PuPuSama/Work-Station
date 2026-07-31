@@ -6,7 +6,7 @@ import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { ProjectSettings } from "@/components/project-settings";
-import { ServerProjectMembers } from "@/components/server-project-members";
+import { ServerProjectSettings } from "@/components/server-project-settings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { apiGet } from "@/lib/api";
@@ -51,7 +51,7 @@ export function ProjectSettingsEntry({
   }, [resolveMode]);
 
   if (mode === "server") {
-    return <ServerProjectMembers projectId={customer} />;
+    return <ServerProjectSettings projectId={customer} />;
   }
   if (mode === "local") {
     return <ProjectSettings customer={customer} />;

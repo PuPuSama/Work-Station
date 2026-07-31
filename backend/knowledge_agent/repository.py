@@ -82,12 +82,25 @@ class PostgresKnowledgeRepository:
             official_domain=project.official_domain,
             status=project.status,
         )
+        metadata_changed = sa.or_(
+            projects.c.customer_name.is_distinct_from(
+                statement.excluded.customer_name
+            ),
+            projects.c.official_domain.is_distinct_from(
+                statement.excluded.official_domain
+            ),
+            projects.c.status.is_distinct_from(
+                statement.excluded.status
+            ),
+        )
         statement = statement.on_conflict_do_update(
             index_elements=[projects.c.project_id],
             set_={
                 "customer_name": statement.excluded.customer_name,
                 "official_domain": statement.excluded.official_domain,
                 "status": statement.excluded.status,
+                "revision": projects.c.revision
+                + sa.case((metadata_changed, 1), else_=0),
                 "updated_at": sa.func.now(),
             },
         )

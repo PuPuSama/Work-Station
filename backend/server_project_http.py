@@ -115,6 +115,12 @@ from services.server_project_prompts import (
     ServerProjectPromptServiceFactory,
     ServerProjectPromptUnavailable,
 )
+from services.server_project_metadata import (
+    PostgresServerProjectMetadata,
+    ServerProjectMetadata,
+    ServerProjectMetadataConflict,
+    ServerProjectMetadataUnavailable,
+)
 from services.server_project_catalog import PostgresServerProjectCatalog
 from services.server_delivery_package import (
     ServerDeliveryPackage,
@@ -298,6 +304,39 @@ class ProjectTaskIntakeResponse(BaseModel):
     source_digest: str
     created: bool
     tasks: list[ProjectTaskIntakeItemResponse]
+
+
+class ProjectMetadataResponse(BaseModel):
+    """Public Project identity; free-form facts belong in Knowledge."""
+
+    project_id: str
+    customer_name: str
+    official_domain: str
+    revision: int
+
+
+class ProjectMetadataUpdateRequest(BaseModel):
+    """CAS update without accepting Project identity or arbitrary metadata."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    revision: int = Field(ge=0)
+    customer_name: str = Field(min_length=1, max_length=120)
+    official_domain: str = Field(min_length=1, max_length=253)
+
+
+def _project_metadata_response(
+    metadata: ServerProjectMetadata,
+) -> ProjectMetadataResponse:
+    return ProjectMetadataResponse(
+        project_id=metadata.project_id,
+        customer_name=metadata.customer_name,
+        official_domain=metadata.official_domain,
+        revision=metadata.revision,
+    )
 
 
 class ProjectSeoReviewSettingsRequest(BaseModel):
@@ -656,6 +695,22 @@ def _project_directory(request: Request) -> PostgresProjectDirectory:
             detail="Server project directory is not available.",
         )
     return directory
+
+
+def _project_metadata_service(
+    request: Request,
+) -> PostgresServerProjectMetadata:
+    service = getattr(
+        request.app.state,
+        "server_project_metadata",
+        None,
+    )
+    if not isinstance(service, PostgresServerProjectMetadata):
+        raise HTTPException(
+            status_code=503,
+            detail="Server project metadata is not available.",
+        )
+    return service
 
 
 def _project_membership_service(
@@ -1031,6 +1086,82 @@ def list_accessible_projects(
             status_code=403,
             detail="project access denied",
         ) from exc
+
+
+@router.get(
+    "/{project}/metadata",
+    response_model=ProjectMetadataResponse,
+)
+def get_project_metadata(
+    project: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectMetadataResponse:
+    del project
+    try:
+        metadata = _project_metadata_service(request).get(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ServerProjectMetadataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project metadata is temporarily unavailable.",
+        ) from exc
+    return _project_metadata_response(metadata)
+
+
+@router.put(
+    "/{project}/metadata",
+    response_model=ProjectMetadataResponse,
+)
+def update_project_metadata(
+    project: str,
+    payload: ProjectMetadataUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectMetadataResponse:
+    del project
+    _require_project_permission(
+        request,
+        authorized,
+        "project.members.manage",
+    )
+    try:
+        metadata = _project_metadata_service(request).update(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            expected_revision=payload.revision,
+            customer_name=payload.customer_name,
+            official_domain=payload.official_domain,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ServerProjectMetadataConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Project metadata changed. Reload and try again.",
+        ) from exc
+    except ServerProjectMetadataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project metadata is temporarily unavailable.",
+        ) from exc
+    return _project_metadata_response(metadata)
 
 
 @router.get(

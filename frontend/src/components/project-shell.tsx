@@ -151,11 +151,11 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
   const projectHome = serverMode === true
     ? `${projectPath}/articles`
     : `${projectPath}/articles`;
-  const canManageServerMembers =
+  const canManageServerSettings =
     serverRole === "org_admin" || serverRole === "team_lead";
   const sectionLabel =
     section === "settings" && serverMode === true
-      ? "项目成员"
+      ? "项目设置"
       : section
         ? sectionNames[section]
         : customer;
@@ -238,19 +238,15 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
                 </SidebarMenuButton>
               </SidebarMenuItem>
             )}
-            {(serverMode === false || canManageServerMembers) && (
+            {(serverMode === false || canManageServerSettings) && (
               <SidebarMenuItem>
                 <SidebarMenuButton
                   isActive={section === "settings"}
-                  tooltip={
-                    serverMode === true ? "项目成员" : "项目设置"
-                  }
+                  tooltip="项目设置"
                   render={<Link href={`${projectPath}/settings`} />}
                 >
                   <Settings2 />
-                  <span>
-                    {serverMode === true ? "项目成员" : "项目设置"}
-                  </span>
+                  <span>项目设置</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             )}

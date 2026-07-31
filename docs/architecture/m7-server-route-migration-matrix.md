@@ -32,7 +32,7 @@
 | Organization User/Session | `/api/organizations/{org}/users/*` | PostgreSQL | Active Org Admin | Server Ready |
 | Team/TeamMembership | `/api/organizations/{org}/teams/*` | PostgreSQL | Active Org Admin | Server Ready |
 | External Identity 管理 | `/api/organizations/{org}/external-identities/*` | PostgreSQL | Active Org Admin | Server Ready |
-| Project Directory/Membership | `/api/projects`、`/api/projects/{project}/members/*` | PostgreSQL | Project RBAC | Server Ready |
+| Project Directory/Metadata/Membership | `/api/projects`、`/api/projects/{project}/metadata`、`/api/projects/{project}/members/*` | PostgreSQL | Project RBAC；Metadata 写入要求 `project.members.manage` + Revision CAS + Audit | Server Ready |
 | Project Product/Image Catalog | `/api/projects/{project}/catalog` | PostgreSQL Current Published Evidence | `project.view`；最小无 URL DTO | Server Ready |
 | Knowledge API | `/api/knowledge/projects/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
@@ -80,7 +80,7 @@
 | `/api/config`、`/api/settings/llm` | Local Config/.env | Server 管理配置 | Secret Manager、组织/环境权限、公开字段分型 |
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | 不复用；Server 已用 Project Task 目录与 Intake API | 旧路径继续 503，不读本地 Topic Library |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
-| `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
+| `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | 旧路由不迁移；品牌/域名由 `GET/PUT /api/projects/{project}/metadata` 替代，自由 Context 拆入 Published Knowledge 与 Prompt Snapshot | 新 Metadata API 已 Server Ready；旧路由继续 503 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |

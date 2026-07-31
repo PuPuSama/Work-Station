@@ -14,6 +14,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +50,8 @@ import type {
 
 type ServerProjectMembersProps = {
   projectId: string;
+  beforeMemberCards?: ReactNode;
+  pageKind?: "members" | "settings";
 };
 
 type Feedback = {
@@ -119,6 +122,8 @@ function FeedbackAlert({
 
 export function ServerProjectMembers({
   projectId,
+  beforeMemberCards,
+  pageKind = "members",
 }: ServerProjectMembersProps) {
   const encodedProject = encodeURIComponent(projectId);
   const [members, setMembers] = useState<ProjectMembership[]>([]);
@@ -340,11 +345,14 @@ export function ServerProjectMembers({
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                   <ShieldCheck className="size-4" />
                 </span>
-                <h1 className="text-xl font-semibold">项目成员</h1>
+                <h1 className="text-xl font-semibold">
+                  {pageKind === "settings" ? "项目设置" : "项目成员"}
+                </h1>
               </div>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                管理本项目的显式编辑、复核与只读角色。组织管理员和当前负责团队的
-                Team Lead 由上级权限事实决定，不会重复出现在成员表中。
+                {pageKind === "settings"
+                  ? "维护共享项目身份与显式成员权限。项目资料和成员关系由独立服务处理，各自保留授权、并发控制与审计边界。"
+                  : "管理本项目的显式编辑、复核与只读角色。组织管理员和当前负责团队的 Team Lead 由上级权限事实决定，不会重复出现在成员表中。"}
               </p>
             </div>
             <Button
@@ -372,6 +380,7 @@ export function ServerProjectMembers({
       </div>
 
       <div className="mx-auto grid max-w-5xl gap-4 px-5 py-5">
+        {beforeMemberCards}
         {loadError && (
           <Alert variant="destructive">
             <AlertCircle />

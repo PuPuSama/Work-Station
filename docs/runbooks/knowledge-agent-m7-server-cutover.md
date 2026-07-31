@@ -75,7 +75,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260731_0017`；
+- `alembic_version = 20260731_0018`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -287,15 +287,23 @@ Permission。冒烟至少验证：
 - 在读写事务尚未结束时并发撤销 Actor 的 Org Admin、Team Lead 或显式
   ProjectMembership 事实会等待该事务，证明没有 check-then-revoke/read 窗口。
 
-Project Membership Console 已完成显式项目成员管理，Organization Admin Console 已完成
-Workspace User、Team/TeamMembership 与全会话撤销；邀请、外部身份关联和生产 IdP 管理
-仍未实现，不能把当前页面描述为完整身份平台。
+Project Settings 已完成共享 Metadata 与显式项目成员管理，Organization Admin Console 已完成
+Workspace User、Team/TeamMembership、全会话撤销、邀请与外部身份关联；邀请邮件投递和
+生产 IdP 管理仍未实现，不能把当前页面描述为完整身份平台。
 
 前端冒烟从 `/projects/{project}/settings` 开始，至少验证：
 
 - Local Mode 仍显示原品牌/上下文/域名设置；Server Mode 不请求旧 Task/Settings API；
-- `org_admin/team_lead` 在侧栏看到“项目成员”，Editor/Reviewer/Viewer 不显示；直接
+- `org_admin/team_lead` 在侧栏看到“项目设置”，Editor/Reviewer/Viewer 不显示；直接
   深链接仍由后端返回 403，不能把导航隐藏当作授权；
+- Metadata GET 返回不可变 Project ID、显示名、域名和 Revision；PUT 只接受 Revision、
+  `customer_name`、`official_domain`，额外 Project ID/Context/Prompt 字段返回 422；
+- 同值重试不增加 Revision 或 Audit；旧 Revision 返回 409；Audit 故障返回脱敏 503
+  并回滚 Metadata；Editor 和跨项目 Actor 均不得更新；
+- 官网域名只接受规范化 Hostname，不接受 Scheme、Path、Credential 或 Port；Metadata
+  Audit 不含显示名、域名、URL 或 Secret；
+- 更新后新 Task Intake 捕获新身份，已有 Task 不被回写；事实进入 Published Knowledge，
+  写作规则进入 Prompt Snapshot；
 - Roster/Candidate 首屏并行加载，更多按钮按游标追加且无重复；375px 下卡片纵向排列；
 - Disabled 成员不能保存角色但可以撤销；添加、改角色成功后两份列表一起刷新；
 - 保存与撤销期间禁用并发按钮并显示 Loading；失败在对应 Card 就近显示且可刷新恢复；

@@ -1047,6 +1047,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                             "project_id": self.project_a,
                             "customer_name": "Project A",
                             "official_domain": self.project_a,
+                            "revision": 0,
                             "effective_role": "viewer",
                         }
                     ],

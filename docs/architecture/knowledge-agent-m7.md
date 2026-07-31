@@ -54,7 +54,10 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `GET /api/projects/{project}/tasks[/{task_id}]`，请求先按 `project.view`
   重新授权，再读取固定 Organization/Project 的 PostgreSQL TaskStore；
 - 新增 `GET /api/projects` Project Directory：只在 SQL 中返回 Actor 可见的 Active
-  Project，并给出按既有优先级计算的 Effective Role；
+  Project，并给出当前 Metadata Revision 和按既有优先级计算的 Effective Role；
+- 新增 `GET/PUT /api/projects/{project}/metadata`：只读共享显示名、官方域名和
+  Revision；写入要求 `project.members.manage`，事务内重新锁定权限事实并用 Revision
+  CAS 与脱敏 Audit 原子提交。项目 ID、自由 Context、事实正文和 Prompt 不属于此命令；
 - Server Task 兼容适配器禁用 JSON/SQLite Legacy Import，构造时也不创建本地数据目录；
 - 新增第一个 PostgreSQL-only Task 写操作
   `POST /api/projects/{project}/tasks/{task_id}/rewrite-from-scratch`：
@@ -217,6 +220,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
   旧 Schema。
 - Alembic `20260731_0017` 新增 `task_intakes`：只保存 Project-scoped 幂等身份、输入
   SHA-256 摘要、来源标签、Task ID 列表与创建者，不保存 Topic/关键词/URL 正文；
+- Alembic `20260731_0018` 为 M1 `projects` 增加非负 Revision；相同 Metadata
+  upsert 不递增，变更或 Server CAS 成功才递增；
 - 新增 `PostgresServerTaskIntakeService`：单条创建与 1–200 条规范化行导入均在事务内
   重新锁定 `article.edit`，以 Intake ID 串行化重试，由服务端分配 Task ID/Topic Index，
   并原子提交 `article_tasks/task_intakes/AuditEvent`。同 ID 同摘要返回原 Task，不同摘要
@@ -484,7 +489,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/migrations/versions/20260731_0015_project_prompt_snapshots.py` | Project Prompt Snapshot Schema 准源 | Head/不可变 Version/精确 Default 指针、复合 Project/User FK、Append-only Trigger |
 | `backend/migrations/versions/20260731_0016_humanize_prompt_kind.py` | Server Humanize Prompt Kind 迁移 | 三张 Prompt 表同步 Kind CHECK、保留不可变历史、含 Humanize 数据时降级 fail closed |
 | `backend/migrations/versions/20260731_0017_server_task_intakes.py` | Server Task Intake Receipt Schema | Project/Creator 复合 FK、Kind/Digest/Task ID 数量约束、可升降级 |
+| `backend/migrations/versions/20260731_0018_project_metadata_revision.py` | Project Metadata 乐观并发 Schema | `projects.revision` 非空、非负、默认 0，可升降级 |
 | `backend/services/server_task_intake.py` | Task 单条创建与规范化行导入事务服务 | 不读 Local 文件；服务端身份/序号；幂等 Receipt、Task、Audit 原子提交 |
+| `backend/services/server_project_metadata.py` | Project 共享显示名/官方域名读写服务 | Project ID 不变、`project.members.manage`、撤权事实锁、Revision CAS、脱敏 Audit 同事务 |
 | `backend/server_project_http.py` | Project Task Intake HTTP 与其余 Server Task 命令 | 字段白名单、Project Scope、统一 403/409/422/503、最小 Intake 响应 |
 | `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
 | `backend/services/server_project_prompt_migration.py` | SQLite Prompt 当前 Snapshot 一次性导入 | 显式 Customer 到 Project 映射、版本/状态/Default 保留、摘要复核、差异目标不覆盖、导入与安全 Audit 同事务 |
@@ -495,9 +502,10 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/app/login/page.tsx` | 本地密码/Server OIDC 登录入口选择 | 以服务端状态为准、失败不降级、Next Path 只能是本地路径 |
 | `frontend/src/components/project-directory.tsx` | Local/Server 首页组件树分流 | 先读服务端认证状态、失败显式重试、Server 时不挂载 Local 数据请求 |
 | `frontend/src/components/server-project-selector.tsx` | Server 可访问项目入口 | 只渲染 `/api/projects` 的 SQL-scoped 结果、显示有效角色、直达已迁移 Delivery |
-| `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移交付入口；仅 `org_admin/team_lead` 显示成员入口，不启动 Local Job Center |
-| `frontend/src/components/project-settings-entry.tsx` | Local Project Settings 与 Server Project Members 组件树分流 | `/api/auth/status` 失败不降级到 Local，不让 Server 页面发起旧设置 API |
-| `frontend/src/components/server-project-members.tsx` | Server 显式成员 Roster/Candidate、角色更新与撤销 UI | 只消费 Project-scoped API、Disabled 只允许撤销、分页、就近反馈、前端角色不作为安全边界 |
+| `frontend/src/components/project-shell.tsx` | 项目内导航能力门 | Server 只显示已迁移能力；仅 `org_admin/team_lead` 显示项目设置，不启动 Local Job Center |
+| `frontend/src/components/project-settings-entry.tsx` | Local Project Settings 与 Server Project Settings 组件树分流 | `/api/auth/status` 失败不降级到 Local，不让 Server 页面发起旧设置 API |
+| `frontend/src/components/server-project-settings.tsx` | Server Project Metadata 表单与设置页组合 | 只提交 Revision/显示名/域名；字段级校验、冲突重载；不接收自由 Context、Project ID 或 Prompt |
+| `frontend/src/components/server-project-members.tsx` | Server 显式成员 Roster/Candidate、角色更新与撤销 UI | 与 Metadata 组件组合但保持独立 API；Disabled 只允许撤销、分页、就近反馈、前端角色不作为安全边界 |
 | `frontend/src/components/organization-admin-entry.tsx` | `/organization` 的 Server 身份与组织边界入口 | Auth Status 必须明确为 Server 且返回已认证 Organization；失败不降级到 Local |
 | `frontend/src/components/organization-admin-console.tsx` | Workspace User/Session 与 Team/TeamMembership 管理控制台 | 只传字段白名单、后端游标分页、危险操作确认、Manager/Lead 文案分离、前端状态不作为授权 |
 | `frontend/src/components/organization-external-identities.tsx` | External Identity 关联、目录与撤销 UI | Subject 只在受控输入中短暂存在且成功后清空；列表/撤销只持有 Mapping ID；危险操作确认 |
@@ -1309,28 +1317,44 @@ Config、SQLite Task 和上传接口，既产生噪声，也可能诱导未来�
 Server Project Card 只使用 SQL Directory 返回的 Project ID 和 Effective Role，不从
 URL 客户名推导授权。
 
-`ProjectShell` 在 Server 模式展示 Delivery，并且只为 Directory 返回
-`org_admin/team_lead` 的 Actor 显示 Project Members；它仍不挂载 Local Job Center、
-Article、Batch 或本地 Settings 组件。Delivery Console 允许 Reviewer/Viewer 查看 Task 交付状态；
+`ProjectShell` 在 Server 模式展示已迁移的 Article、Batch、Knowledge 与 Delivery，并且
+只为 Directory 返回 `org_admin/team_lead` 的 Actor 显示 Project Settings；它仍不挂载
+Local Job Center 或本地 Settings 组件。Delivery Console 允许 Reviewer/Viewer 查看 Task 交付状态；
 Reviewer 可以查看终审截图，只有 `org_admin/team_lead/editor` 显示 Word、TDK、打包和
 ZIP 下载动作。前端禁用只是可用性提示，后端仍在路由、对象读取/写入和签名前重新授权，
 不能把 Effective Role 当作安全边界。
 
-#### D1.7 已实现：Server Project Membership Console
+#### D1.7 已实现：Server Project Settings
 
 ```text
 /projects/{project_id}/settings
   -> ProjectSettingsEntry
        -> GET /api/auth/status
        -> Local: 原 ProjectSettings
-       -> Server: ServerProjectMembers
-            -> GET members + candidates（并行、各自稳定分页）
-            -> PUT member role / DELETE membership
-            -> 成功后重新读取两份第一页
+       -> Server: ServerProjectSettings
+            -> ProjectMetadataCard
+                 -> GET metadata
+                 -> PUT { revision, customer_name, official_domain }
+            -> ServerProjectMembers
+                 -> GET members + candidates（并行、各自稳定分页）
+                 -> PUT member role / DELETE membership
+                 -> 成功后重新读取两份第一页
 ```
 
 Server 入口复用已有 `/settings` 深链接，但组件树先确认运行模式；状态请求失败时显示重试，
 不能降级挂载 Local Settings 并调用旧 `/api/tasks`、Brand/Context/Domain/Delete API。
+Server Metadata 只维护共享显示名和官方域名：`project_id` 来自路径且不可改，PUT Body
+只接受当前 Revision、`customer_name` 与 `official_domain`。写事务重新锁定
+`project.members.manage` 的全部可撤权事实，锁定 Active Project，执行 CAS 后和
+`project.metadata.updated` Audit 一起提交；Audit 只记录 Revision 与字段是否变化，
+不记录显示名或域名。相同值是无写入、无重复 Audit 的幂等命令。
+
+Metadata 更新只影响未来 Task Intake 和官网操作；既有 Task 保留创建时捕获的
+Customer/Brand/Domain，避免历史任务随设置漂移。自由文本业务事实必须发布到
+Knowledge，写作规则必须进入不可变 Prompt Snapshot。后续即使把 Project 拆成独立
+聚合，也必须保留“不可变 Project ID、Revision CAS、事务内撤权复核、脱敏原子 Audit、
+历史 Task 不回写”五项不变量。
+
 Roster 只展示显式成员；Candidate 只展示后端判定为尚无有效访问的用户。Disabled 成员
 不能改角色但仍可撤销。角色选择、保存、添加和撤销都不携带 Organization、Actor 或
 Permission，撤销使用可聚焦确认对话框；成功/失败在对应 Card 就近反馈。
@@ -1343,8 +1367,8 @@ Component 或共享状态，也必须保留“模式先分流、导航不是授�
 Local 模式继续挂载原 `ProjectSelector`、完整项目导航、Path 状态和文件下载接口。
 Task Type 同时保留 `*_path` 与 `*_asset_id/hash/filename`，直到 Local/Server 模型正式
 拆分；重构时应把“运行模式分流、Task Artifact 展示模型、签名下载动作”拆成稳定接口，
-而不是在各页面散落字符串前缀。当前只开放目录、项目成员与交付的窄闭环，未迁移文章
-编辑、批量任务和本地项目设置仍不得在 Server 导航中重新出现。
+而不是在各页面散落字符串前缀。Server Settings 只开放新的 Metadata 与 Membership
+接口；旧 Local Brand/Context/Domain/Delete 路由仍不得在 Server 导航中重新出现。
 
 #### D1.8 已实现：Project-scoped PostgreSQL Batch/Job Control
 
@@ -1673,3 +1697,15 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      Preview Hash，且服务端必须重新构建并验证完整文章？
 121. Change/Apply/Complete 的 Task CAS 与安全 Audit 是否原子，Preview 是否只读且不把
      Article、Report、Proposed Text、Review/Change ID 或 Hash 写入 Audit？
+122. Project Metadata 是否只允许修改显示名和官方域名，而 `project_id` 仍由路径和
+     PostgreSQL 准源决定、不能被请求 Body 重命名？
+123. Metadata 写入是否在同一事务重新锁定 `project.members.manage` 的全部可撤权事实和
+     Active Project，并以 Expected Revision 执行 CAS？
+124. 相同规范化值是否保持 Revision 和 Audit 不变；旧 Revision、并发撤权或 Audit
+     故障是否不留下部分 Metadata 写入？
+125. `project.metadata.updated` 是否只记录前后 Revision 与字段变更布尔值，不含显示名、
+     域名、URL、Context、Prompt 或 Secret？
+126. 已有 Task 的 Customer/Brand 是否保持创建时快照，只有未来 Intake 与官网操作读取
+     更新后的 Project Metadata？
+127. 自由文本事实和写作规则是否仍分别进入 Published Knowledge 与不可变 Prompt
+     Snapshot，而不重新塞回 Project Settings？

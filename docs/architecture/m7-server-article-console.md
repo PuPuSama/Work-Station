@@ -68,6 +68,9 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 | `server-project-job-center.tsx` | 全局 Server Job 抽屉 | 只展示已迁移 Operation；Cancel/Retry 使用空 Body |
 | `project-shell.tsx` | Server 导航开放 Article/Batch/Delivery | 导航是可用性提示，不是授权准源 |
 | `server-project-selector.tsx` | SQL Project Directory 的默认入口 | 只跳转当前返回的 `project_id` |
+| `project-settings-entry.tsx` | Local/Server 项目设置组件树分流 | Auth 状态失败不挂载旧 Local Settings |
+| `server-project-settings.tsx` | 共享项目身份资料表单 | 只提交 Revision、显示名和官方域名；冲突显式重载，不承载业务事实或 Prompt |
+| `server-project-members.tsx` | 显式成员权限管理 | 与 Metadata 同页但使用独立 Project-scoped API 和事务 |
 
 ## 4. Server 工作台数据流
 
@@ -86,6 +89,22 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 - 写操作在事务内重新锁定可撤权权限；
 - Task 更新使用 Revision CAS；
 - Worker 在 Claim 前和 Handler 前再次授权。
+
+项目设置使用独立数据流，不复用 Task 写入：
+
+```text
+GET /api/projects/{project}/metadata
+  -> project.view
+  -> { project_id, customer_name, official_domain, revision }
+PUT /api/projects/{project}/metadata
+  -> project.members.manage
+  -> transaction re-lock access facts + active project
+  -> Revision CAS + redacted append-only Audit
+  -> affects future Task Intake; never rewrites existing Tasks
+```
+
+Metadata 不接收自由 Context。权威客户/产品事实进入 Published Knowledge，写作规则进入
+不可变 Prompt Snapshot；这条分界避免一个方便的设置表单重新成为不可审计的事实仓库。
 
 ## 5. 主链接口映射
 

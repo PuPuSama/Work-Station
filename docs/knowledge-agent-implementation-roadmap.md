@@ -172,7 +172,13 @@
   Project Scope 与 Revision CAS，且不创建本地 JSON/SQLite/Artifact；
 - 另有一个辅助迁移入口“完全重写”，它不是原计划三个操作之一；其他写路径仍关闭；
 - 已开放 SQL-scoped Project Directory，只返回 Active Actor 在当前 Organization
-  可访问的 Active Project 及 Effective Role；归档 Project 立即 fail closed；
+  可访问的 Active Project、当前 Metadata Revision 及 Effective Role；归档 Project
+  立即 fail closed；
+- 已接入 Project Metadata Service 与 Server Project Settings：共享客户/品牌显示名和
+  官方域名使用 `GET/PUT /api/projects/{project}/metadata`，项目 ID 不允许重命名；
+  写入要求 `project.members.manage`，在事务内重新锁定可撤权事实，以 Project Revision
+  CAS 更新并追加不含显示名/域名的 Audit。自由文本事实继续进入 Published Knowledge，
+  写作规则继续进入不可变 Prompt Snapshot；已有 Task 保留创建时捕获的身份；
 - 已接通私有知识/产品资产的 Server Mode 下载路由：路由授权与签名前授权各执行一次，
   Bucket 和 Organization/Project Key 前缀不一致时不签名；
 - 已接通 Server 私有图片准备：Hero 由项目 Asset ID 指定，产品图只读取 Task 已确认的
@@ -217,7 +223,8 @@
   单条创建和 1–200 条规范化行导入也已接入，服务端分配 Task ID/Topic Index，并以
   Intake Receipt、Task 和安全 Audit 同事务提交；Local UI 不变。组件与接口痕迹见
   `docs/architecture/m7-server-article-console.md`；
-- 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
+- 已接通 Project Settings：仅 `org_admin/team_lead` 显示入口，项目身份资料与
+  Membership Roster/Candidate 分属独立服务和事务；Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不
   降级挂载 Local Settings，前端角色仅作导航提示，后端仍逐请求/事务授权；
 - 已接入 `/organization` Organization Admin Console：仅 Server Auth Status 能提供

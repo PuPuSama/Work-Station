@@ -358,7 +358,15 @@ export type AccessibleProject = {
   project_id: string;
   customer_name: string;
   official_domain: string;
+  revision: number;
   effective_role: "org_admin" | "team_lead" | "editor" | "reviewer" | "viewer";
+};
+
+export type ServerProjectMetadata = {
+  project_id: string;
+  customer_name: string;
+  official_domain: string;
+  revision: number;
 };
 
 export type ServerTaskIntakeItem = {

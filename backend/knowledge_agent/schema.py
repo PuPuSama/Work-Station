@@ -16,6 +16,12 @@ projects = sa.Table(
     sa.Column("official_domain", sa.Text(), nullable=False),
     sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'active'")),
     sa.Column(
+        "revision",
+        sa.Integer(),
+        nullable=False,
+        server_default=sa.text("0"),
+    ),
+    sa.Column(
         "created_at",
         sa.DateTime(timezone=True),
         nullable=False,
@@ -39,6 +45,10 @@ projects = sa.Table(
     sa.CheckConstraint(
         "status IN ('active', 'archived')",
         name="ck_projects_status",
+    ),
+    sa.CheckConstraint(
+        "revision >= 0",
+        name="ck_projects_revision_nonnegative",
     ),
 )
 

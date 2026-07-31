@@ -291,6 +291,19 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/projects/project-a/catalog",
             )
         )
+        for method in ("GET", "PUT"):
+            self.assertTrue(
+                server_http_route_available(
+                    method,
+                    "/api/projects/project-a/metadata",
+                )
+            )
+        self.assertFalse(
+            server_http_route_available(
+                "POST",
+                "/api/projects/project-a/metadata",
+            )
+        )
         self.assertFalse(
             server_http_route_available(
                 "POST",
