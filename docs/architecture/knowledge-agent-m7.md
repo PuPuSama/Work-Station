@@ -506,6 +506,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `frontend/src/components/server-task-intake-panel.tsx` | Server Task 单条创建与 Tab 行导入 | 失败重试保留 Intake ID；输入变化换新身份；不提交 Task/Project/Workflow 字段或本地路径 |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
+| `backend/services/server_knowledge_commands.py` | Server Knowledge Review/Publish/Confirm 事务命令 | Router 授权只作早拒绝；事务内重锁权限；Review/Activate/Confirm 与脱敏 Audit 原子提交；重复激活/确认不重复审计 |
+| `backend/knowledge_agent/publication.py` | Knowledge Snapshot Embedding 与发布编排 | `prepare` 只写未激活向量；Local `publish` 保持兼容；Server 最终激活交给事务命令，失败时旧 Snapshot 继续服务 |
+| `backend/knowledge_agent/repository.py`、`catalog.py` | Knowledge Source/Snapshot/Product SQLAlchemy Core 准源 | 对外方法自建事务；`*_in_transaction` 只接受调用方事务，供权限、业务写入和 Audit 原子组合 |
 | `backend/server_admin_http.py` | Organization-scoped Workspace User 与 Actor Session 管理 API | 输入字段白名单、Cookie Actor 与路径 Organization 一致、内部版本不出响应、统一安全错误 |
 | `backend/services/workspace_users.py` | Workspace User 目录、创建与生命周期事务服务 | Active Org Admin、组织内稳定游标、精确关联计数、最后管理员保护、状态切换递增 Session Version、业务写入与 Audit 同事务 |
 | `backend/server_team_http.py` | Organization-scoped Team/TeamMembership HTTP | 字段/角色白名单、精确路径、Manager 可空语义、归档冲突与安全错误 |
@@ -564,6 +567,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
 | `backend/tests/test_m7_server_auth.py` | Actor Token 与服务器模式测试 | 防篡改、过期、未来签发、Secret 隔离 |
 | `backend/tests/test_m7_server_request_security.py` | 请求授权和真实 Lifespan 接线测试 | 旧 API 阻断、Knowledge 全局依赖、权限语义、本地兼容 |
+| `backend/tests/test_m7_server_knowledge_commands.py` | Knowledge 写命令 PostgreSQL/HTTP 集成测试 | 撤权窗口、跨项目、Audit 回滚/脱敏、旧 Snapshot 保留、重复命令不重复审计 |
 | `backend/tests/test_m7_external_identity.py` | Identity 映射、交换与 PostgreSQL 集成测试 | HTTPS Issuer、跨组织拒绝、状态失效、Link/Revoke 审计 |
 | `backend/tests/test_m7_external_identity_http.py` | External Identity 管理 HTTP 与 PostgreSQL 集成测试 | 稳定分页、Subject 脱敏、幂等 Link、Mapping ID 撤销、跨组织拒绝、Audit 回滚 |
 | `backend/tests/test_m7_oidc_identity.py` | OIDC/JWKS 与浏览器登录流测试 | RSA 签名、Claim/Nonce/PKCE/State、Kid 轮换、重放/开放重定向拒绝、Secret 不泄露 |
@@ -600,7 +604,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 2. 显式 server mode 已接入应用 Lifespan；缺失/篡改 Actor 为 401，数据库拒绝为
    统一 403；
 3. Knowledge Router 已统一要求项目授权；读操作默认 `project.view`，普通写操作
-   默认 `knowledge.edit`，发布/产品确认为 `knowledge.publish`；
+   默认 `knowledge.edit`，发布/产品确认为 `knowledge.publish`；Source Review、
+   Publish 和 Product Confirm 还会在业务事务内重新锁定全部可撤权事实，并将业务变更
+   与安全 Audit 原子提交；
 4. 尚未迁移的 `/api/tasks`、文章、Project、Prompt、Batch 等旧 API 在 Server Mode
    返回 503，不会退回本地全局数据；
 5. 依赖 SQLite Queue 或本地 ArtifactStore 的 WordPress、上传、Research Run

@@ -113,6 +113,7 @@ from .runtime import (
 from .publication import (
     KnowledgePublicationError,
     KnowledgePublicationService,
+    PublicationCandidate,
     PublicationResult,
 )
 from .web_ingestion import (
@@ -358,6 +359,7 @@ __all__ = [
     "ProductCatalogRepositoryError",
     "ProductConfirmationError",
     "ProductSourceEvidence",
+    "PublicationCandidate",
     "PublicationResult",
     "SafeOfficialSiteFetcher",
     "PrivateDocumentIngestionService",

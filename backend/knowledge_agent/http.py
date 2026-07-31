@@ -20,6 +20,12 @@ from fastapi import (
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from services.access_control import ActorIdentity, ProjectAccessDenied
+from services.server_knowledge_commands import (
+    PostgresServerKnowledgeCommands,
+    ServerKnowledgeCommandUnavailable,
+)
+
 from .artifact_store import ArtifactStoreError
 from .assets import KnowledgeAssetRepositoryError
 from .catalog import (
@@ -42,7 +48,7 @@ from .hybrid_retriever import HybridRetrievalConfigurationError
 from .ingestion import DocumentInput, DocumentParserError
 from .embedding import EmbeddingProviderError
 from .library import KnowledgeSourceSummary
-from .repository import KnowledgeRepositoryError
+from .repository import KnowledgeRecordNotFound, KnowledgeRepositoryError
 from .publication import KnowledgePublicationError
 from .runtime import KnowledgeAgentRuntime
 from .research_graph import ResearchGraphRequest, new_research_thread_id
@@ -467,6 +473,47 @@ def _runtime(request: Request) -> KnowledgeAgentRuntime:
     if runtime is None:
         raise HTTPException(status_code=404, detail="Knowledge Agent is disabled.")
     return runtime
+
+
+def _server_knowledge_context(
+    request: Request,
+    project: str,
+) -> tuple[ActorIdentity, str] | None:
+    """Return the trusted dependency result for Server-only write commands."""
+
+    if not bool(
+        getattr(request.app.state, "server_mode_enabled", False)
+    ):
+        return None
+    actor = getattr(request.state, "actor_identity", None)
+    project_id = str(getattr(request.state, "project_id", "")).strip()
+    if not isinstance(actor, ActorIdentity) or not project_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Server authorization context is not available.",
+        )
+    if project_id != _project_id(project):
+        raise HTTPException(status_code=403, detail="project access denied")
+    return actor, project_id
+
+
+def _server_knowledge_commands(
+    request: Request,
+    runtime: KnowledgeAgentRuntime,
+) -> PostgresServerKnowledgeCommands:
+    configured = getattr(
+        request.app.state,
+        "server_knowledge_commands",
+        None,
+    )
+    if isinstance(configured, PostgresServerKnowledgeCommands):
+        return configured
+    return PostgresServerKnowledgeCommands(
+        runtime.engine,
+        repository=runtime.repository,
+        catalog=runtime.catalog_repository,
+        publication=runtime.publication,
+    )
 
 
 def _research_enqueue(request: Request):
@@ -1544,7 +1591,52 @@ def review_knowledge_source(
     request: Request,
 ) -> KnowledgeSourceReviewResponse:
     runtime = _runtime(request)
-    project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
+    project_id = (
+        _project_id(project)
+        if server_context is None
+        else server_context[1]
+    )
+    if server_context is not None:
+        actor, _ = server_context
+        try:
+            reviewed = _server_knowledge_commands(
+                request,
+                runtime,
+            ).review_source(
+                actor=actor,
+                project_id=project_id,
+                source_id=source_id,
+                source_kind=payload.source_kind,
+                trust_tier=payload.trust_tier,
+                decision=payload.decision,
+                reason=payload.reason,
+            )
+        except ProjectAccessDenied as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="project access denied",
+            ) from exc
+        except KnowledgeRecordNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="Knowledge source was not found.",
+            ) from exc
+        except (
+            KnowledgePublicationError,
+            KnowledgeRepositoryError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ServerKnowledgeCommandUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return KnowledgeSourceReviewResponse(
+            project_id=project_id,
+            source_id=source_id,
+            status=reviewed.status,
+            decision=payload.decision,
+        )
+
     source = runtime.library.get_source(project_id, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Knowledge source was not found.")
@@ -1602,16 +1694,39 @@ def publish_knowledge_source(
             status_code=503,
             detail="Embedding Provider is not configured.",
         )
-    project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
+    project_id = (
+        _project_id(project)
+        if server_context is None
+        else server_context[1]
+    )
     try:
-        result = runtime.publication.publish(
-            project_id=project_id,
-            source_id=source_id,
+        result = (
+            runtime.publication.publish(
+                project_id=project_id,
+                source_id=source_id,
+            )
+            if server_context is None
+            else _server_knowledge_commands(
+                request,
+                runtime,
+            ).publish_source(
+                actor=server_context[0],
+                project_id=project_id,
+                source_id=source_id,
+            )
         )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
     except EmbeddingProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (KnowledgePublicationError, KnowledgeRepositoryError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeCommandUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return KnowledgePublicationResponse(
         project_id=result.project_id,
         source_id=result.source_id,
@@ -1632,11 +1747,33 @@ def confirm_knowledge_product(
     request: Request,
 ) -> ProductConfirmResponse:
     runtime = _runtime(request)
-    project_id = _project_id(project)
+    server_context = _server_knowledge_context(request, project)
+    project_id = (
+        _project_id(project)
+        if server_context is None
+        else server_context[1]
+    )
     try:
-        runtime.catalog_repository.confirm_product(project_id, product_id)
+        if server_context is None:
+            runtime.catalog_repository.confirm_product(project_id, product_id)
+        else:
+            _server_knowledge_commands(
+                request,
+                runtime,
+            ).confirm_product(
+                actor=server_context[0],
+                project_id=project_id,
+                product_id=product_id,
+            )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
     except ProductCatalogRepositoryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeCommandUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ProductConfirmResponse(
         project_id=project_id,
         product_id=product_id,

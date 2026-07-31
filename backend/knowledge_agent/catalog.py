@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from .schema import (
@@ -367,45 +367,70 @@ class PostgresProductCatalogRepository:
             ) from exc
 
     def confirm_product(self, project_id: str, product_id: str) -> None:
+        with self._engine.begin() as connection:
+            self.confirm_product_in_transaction(
+                connection,
+                project_id,
+                product_id,
+            )
+
+    def confirm_product_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        product_id: str,
+    ) -> bool:
+        """Confirm a product in the caller's transaction.
+
+        Returns True only when the status changes, so a retried Server command
+        does not append a second audit event for the same confirmed state.
+        """
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "product confirmation requires a business transaction"
+            )
         normalized_project_id = _required_text(project_id, "project_id")
         normalized_product_id = _required_text(product_id, "product_id")
-        with self._engine.begin() as connection:
-            product_exists = connection.execute(
-                sa.select(knowledge_products.c.product_id)
-                .where(
-                    knowledge_products.c.project_id == normalized_project_id,
-                    knowledge_products.c.product_id == normalized_product_id,
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
-            if product_exists is None:
-                raise ProductCatalogNotFound(
-                    "product was not found in the requested project"
-                )
-            primary_detail_exists = connection.execute(
-                sa.select(knowledge_product_source_evidence.c.product_id)
-                .where(
-                    knowledge_product_source_evidence.c.project_id
-                    == normalized_project_id,
-                    knowledge_product_source_evidence.c.product_id
-                    == normalized_product_id,
-                    knowledge_product_source_evidence.c.relation
-                    == "primary_detail",
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            if primary_detail_exists is None:
-                raise ProductConfirmationError(
-                    "product requires primary detail evidence before confirmation"
-                )
-            connection.execute(
-                knowledge_products.update()
-                .where(
-                    knowledge_products.c.project_id == normalized_project_id,
-                    knowledge_products.c.product_id == normalized_product_id,
-                )
-                .values(status="confirmed", updated_at=sa.func.now())
+        product_status = connection.execute(
+            sa.select(knowledge_products.c.status)
+            .where(
+                knowledge_products.c.project_id == normalized_project_id,
+                knowledge_products.c.product_id == normalized_product_id,
             )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if product_status is None:
+            raise ProductCatalogNotFound(
+                "product was not found in the requested project"
+            )
+        if product_status == "confirmed":
+            return False
+        primary_detail_exists = connection.execute(
+            sa.select(knowledge_product_source_evidence.c.product_id)
+            .where(
+                knowledge_product_source_evidence.c.project_id
+                == normalized_project_id,
+                knowledge_product_source_evidence.c.product_id
+                == normalized_product_id,
+                knowledge_product_source_evidence.c.relation
+                == "primary_detail",
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if primary_detail_exists is None:
+            raise ProductConfirmationError(
+                "product requires primary detail evidence before confirmation"
+            )
+        connection.execute(
+            knowledge_products.update()
+            .where(
+                knowledge_products.c.project_id == normalized_project_id,
+                knowledge_products.c.product_id == normalized_product_id,
+            )
+            .values(status="confirmed", updated_at=sa.func.now())
+        )
+        return True
 
     def get_product(
         self, project_id: str, product_id: str

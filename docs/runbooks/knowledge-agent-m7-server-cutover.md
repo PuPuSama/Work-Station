@@ -386,6 +386,18 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
   Reason，发布与产品确认仍由后端要求 `knowledge.publish`；
 - Review 与 Publish 是两个请求；Embedding 失败后来源不得显示为 Published，旧
   Published Snapshot 继续服务；
+- 在 Review/Publish/Confirm 的 Router 授权后撤销 Actor Membership，命令事务必须再次
+  返回 403；Publish 在 Embedding 期间撤权时可以保留 Candidate Vector，但不得切换
+  Current Snapshot 或追加成功 Audit；
+- 在 Embedding 期间写入更新的 Latest Snapshot，未指定 Snapshot 的发布必须返回 409，
+  不得把已经落后的 Candidate 激活为 Current；
+- 注入 Audit Writer 故障后，Review 分类、Current Snapshot 激活和 Product Confirm
+  必须分别回滚；公开 503 不得包含底层错误、Reason、Canonical URL 或对象信息；
+- 重试已经激活的同一 Snapshot 或已经确认的 Product 时保持成功读模型，但不得重复追加
+  `knowledge.source.published` / `knowledge.product.confirmed`；
+- 检查三类 Audit：Review 只含 Decision/Source Kind/Trust Tier，Publish 只含不可变
+  Snapshot ID/Chunk Count/Embedding Model，Confirm 只含确认状态；正文、Reason、URL、
+  原始 Content Hash、Artifact URI 和 Secret 均不得出现；
 - Server DOM 与网络不得出现 Upload、WordPress Sync、Research Run Start/Resume、
   Raw Artifact 或 Local `/api/config` 请求；
 - Product Confirm 不代表文章可选择；必须再验证 Project Catalog 只投影当前 Published

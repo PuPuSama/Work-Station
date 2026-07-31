@@ -218,6 +218,41 @@ Reason；只有 `inbox` 且包含 Chunk 的来源显示发布按钮。发布调�
 失败时 UI 保留当前来源状态并重新读取服务器事实，不伪造已发布结果。产品确认只改变
 Catalog 身份；文章选择器仍以 Published Current Evidence 为二次门禁。
 
+三个 Server 写命令不以 Router 的先验授权作为最终结论。后端统一进入
+`PostgresServerKnowledgeCommands`：
+
+```text
+Review
+  -> 事务内锁定可撤权 Project 事实 (knowledge.edit)
+  -> 锁 Knowledge Source
+  -> 更新分类/Review Metadata
+  -> append knowledge.source.reviewed
+  -> 同一事务提交
+
+Publish
+  -> 初次 knowledge.publish 拒绝无权 Provider 消耗
+  -> prepare: 分批 Embedding + 保存 Candidate Vector
+  -> 最终事务重新锁定 knowledge.publish
+  -> 复核 approve Review + Source/Snapshot/Model
+  -> 切换 Current Snapshot + append knowledge.source.published
+  -> 同一事务提交
+
+Confirm
+  -> 事务内锁定 knowledge.publish
+  -> 复核 Primary Detail Evidence + 更新 Product
+  -> append knowledge.product.confirmed
+  -> 同一事务提交
+```
+
+Embedding 是外部调用，不能伪装成 PostgreSQL 原子事务的一部分。它只准备尚未服务的
+向量；最终激活与 Audit 才原子提交。Provider、撤权或 Audit 在最终提交前失败时，新向量
+可以留作同一快照的幂等重试，但 `current_snapshot_id` 保持旧值。未显式指定 Snapshot
+时，最终事务还会复核 Candidate 仍是 Latest Snapshot，避免并发入库后激活旧版本。
+重复发布同一当前快照和重复确认已确认产品不追加第二条 Audit。Review Audit 只含
+Decision、Source Kind 和 Trust Tier；Publish 只含不可变 Snapshot ID、Chunk Count
+与 Embedding Model；Reason、正文、URL、原始 Content Hash、Artifact URI 和 Secret
+均不进入 Audit。
+
 前端 Effective Role 只控制提示：Reviewer/Viewer 为只读，Editor/Lead/Admin 显示命令；
 Router 仍分别要求 `project.view`、`knowledge.edit` 和 `knowledge.publish`。Server 页面
 不提供 Raw Evidence 链接，也不复用 Local 文件上传或研究组件。

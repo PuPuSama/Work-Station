@@ -40,7 +40,7 @@
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
-| Server Knowledge Inbox | `/projects/{project}/knowledge` | Knowledge Library/Review/Publish/Confirm API | `project.view` / `knowledge.edit` / `knowledge.publish` | Server Narrow |
+| Server Knowledge Inbox | `/projects/{project}/knowledge` | Knowledge Library + 原子 Review/Publish/Confirm 命令；Embedding prepare 与 Current Snapshot 激活分离 | `project.view` / `knowledge.edit` / `knowledge.publish`；写事务重锁权限并追加脱敏 Audit | Server Narrow |
 
 ## 3. Task 写操作矩阵
 

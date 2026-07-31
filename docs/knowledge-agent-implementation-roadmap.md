@@ -148,6 +148,11 @@
   门禁明确 no-go，真实恢复演练与生产供应商仍待确定；
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
+- 已加固 Server Knowledge Inbox 三个写命令：Source Review 以 `knowledge.edit`、
+  Publish/Product Confirm 以 `knowledge.publish` 在业务事务内重新锁定可撤权事实；
+  Review/Current Snapshot 激活/Product Confirm 分别与脱敏 append-only Audit 原子提交。
+  Publication 拆为外部 Embedding Prepare 与最终激活两阶段，撤权、Provider 或 Audit
+  失败时旧 Snapshot 继续服务；重复激活/确认不重复记成功 Audit，Local 路径保持原行为；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
   调用 fail closed；产品重新发现、标题、大纲、正文初稿、自动 Humanize、链接恢复和
   SEO Review 生成已有独立

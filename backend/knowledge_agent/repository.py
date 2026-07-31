@@ -95,6 +95,20 @@ class PostgresKnowledgeRepository:
             connection.execute(statement)
 
     def upsert_source(self, source: KnowledgeSource) -> None:
+        with self._engine.begin() as connection:
+            self.upsert_source_in_transaction(connection, source)
+
+    def upsert_source_in_transaction(
+        self,
+        connection: Connection,
+        source: KnowledgeSource,
+    ) -> None:
+        """Upsert an unpublished source inside the caller's transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "knowledge source writes require a business transaction"
+            )
         if source.status == "published" or source.current_snapshot_id is not None:
             raise ValueError(
                 "activate_snapshot must be used to publish a knowledge source"
@@ -140,8 +154,7 @@ class PostgresKnowledgeRepository:
                 "updated_at": sa.func.now(),
             },
         )
-        with self._engine.begin() as connection:
-            connection.execute(statement)
+        connection.execute(statement)
 
     def store_snapshot(
         self,
@@ -423,81 +436,103 @@ class PostgresKnowledgeRepository:
         snapshot_id: str,
         embedding_model: str,
     ) -> None:
+        with self._engine.begin() as connection:
+            self.activate_snapshot_in_transaction(
+                connection,
+                project_id,
+                source_id,
+                snapshot_id,
+                embedding_model,
+            )
+
+    def activate_snapshot_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+        embedding_model: str,
+    ) -> None:
+        """Activate only after every chunk is embedded in this transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "snapshot activation requires a business transaction"
+            )
         normalized_project_id = _required_text(project_id, "project_id")
         normalized_source_id = _required_text(source_id, "source_id")
         normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
         normalized_model = _required_text(embedding_model, "embedding_model")
 
-        with self._engine.begin() as connection:
-            source_exists = connection.execute(
-                sa.select(knowledge_sources.c.source_id)
-                .where(
-                    knowledge_sources.c.project_id == normalized_project_id,
-                    knowledge_sources.c.source_id == normalized_source_id,
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
-            if source_exists is None:
-                raise KnowledgeRecordNotFound(
-                    "knowledge source was not found in the requested project"
-                )
-
-            snapshot_exists = connection.execute(
-                sa.select(source_snapshots.c.snapshot_id).where(
-                    source_snapshots.c.project_id == normalized_project_id,
-                    source_snapshots.c.source_id == normalized_source_id,
-                    source_snapshots.c.snapshot_id == normalized_snapshot_id,
-                )
-            ).scalar_one_or_none()
-            if snapshot_exists is None:
-                raise KnowledgeRecordNotFound(
-                    "source snapshot was not found in the requested project"
-                )
-
-            total_chunks = connection.execute(
-                sa.select(sa.func.count())
-                .select_from(knowledge_chunks)
-                .where(
-                    knowledge_chunks.c.project_id == normalized_project_id,
-                    knowledge_chunks.c.source_id == normalized_source_id,
-                    knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
-                )
-            ).scalar_one()
-            incomplete_chunks = connection.execute(
-                sa.select(sa.func.count())
-                .select_from(knowledge_chunks)
-                .where(
-                    knowledge_chunks.c.project_id == normalized_project_id,
-                    knowledge_chunks.c.source_id == normalized_source_id,
-                    knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
-                    sa.or_(
-                        knowledge_chunks.c.embedding.is_(None),
-                        knowledge_chunks.c.embedding_model != normalized_model,
-                    ),
-                )
-            ).scalar_one()
-            if total_chunks == 0 or incomplete_chunks:
-                raise SnapshotActivationError(
-                    "snapshot cannot be activated until every chunk has a "
-                    "matching embedding"
-                )
-
-            result = connection.execute(
-                knowledge_sources.update()
-                .where(
-                    knowledge_sources.c.project_id == normalized_project_id,
-                    knowledge_sources.c.source_id == normalized_source_id,
-                )
-                .values(
-                    status="published",
-                    current_snapshot_id=normalized_snapshot_id,
-                    updated_at=sa.func.now(),
-                )
+        source_exists = connection.execute(
+            sa.select(knowledge_sources.c.source_id)
+            .where(
+                knowledge_sources.c.project_id == normalized_project_id,
+                knowledge_sources.c.source_id == normalized_source_id,
             )
-            if result.rowcount != 1:
-                raise KnowledgeRecordNotFound(
-                    "knowledge source disappeared during snapshot activation"
-                )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if source_exists is None:
+            raise KnowledgeRecordNotFound(
+                "knowledge source was not found in the requested project"
+            )
+
+        snapshot_exists = connection.execute(
+            sa.select(source_snapshots.c.snapshot_id).where(
+                source_snapshots.c.project_id == normalized_project_id,
+                source_snapshots.c.source_id == normalized_source_id,
+                source_snapshots.c.snapshot_id == normalized_snapshot_id,
+            )
+        ).scalar_one_or_none()
+        if snapshot_exists is None:
+            raise KnowledgeRecordNotFound(
+                "source snapshot was not found in the requested project"
+            )
+
+        total_chunks = connection.execute(
+            sa.select(sa.func.count())
+            .select_from(knowledge_chunks)
+            .where(
+                knowledge_chunks.c.project_id == normalized_project_id,
+                knowledge_chunks.c.source_id == normalized_source_id,
+                knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
+            )
+        ).scalar_one()
+        incomplete_chunks = connection.execute(
+            sa.select(sa.func.count())
+            .select_from(knowledge_chunks)
+            .where(
+                knowledge_chunks.c.project_id == normalized_project_id,
+                knowledge_chunks.c.source_id == normalized_source_id,
+                knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
+                sa.or_(
+                    knowledge_chunks.c.embedding.is_(None),
+                    knowledge_chunks.c.embedding_model != normalized_model,
+                ),
+            )
+        ).scalar_one()
+        if total_chunks == 0 or incomplete_chunks:
+            raise SnapshotActivationError(
+                "snapshot cannot be activated until every chunk has a "
+                "matching embedding"
+            )
+
+        result = connection.execute(
+            knowledge_sources.update()
+            .where(
+                knowledge_sources.c.project_id == normalized_project_id,
+                knowledge_sources.c.source_id == normalized_source_id,
+            )
+            .values(
+                status="published",
+                current_snapshot_id=normalized_snapshot_id,
+                updated_at=sa.func.now(),
+            )
+        )
+        if result.rowcount != 1:
+            raise KnowledgeRecordNotFound(
+                "knowledge source disappeared during snapshot activation"
+            )
 
     def get_chunks(
         self,

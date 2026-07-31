@@ -13,7 +13,9 @@ class KnowledgePublicationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class PublicationResult:
+class PublicationCandidate:
+    """Fully embedded snapshot that has not necessarily been activated."""
+
     project_id: str
     source_id: str
     snapshot_id: str
@@ -21,8 +23,13 @@ class PublicationResult:
     chunk_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class PublicationResult(PublicationCandidate):
+    """Snapshot activated as the source's current published version."""
+
+
 class KnowledgePublicationService:
-    """Embed a reviewed snapshot and atomically switch the current source."""
+    """Prepare embeddings, then atomically switch the current source."""
 
     def __init__(
         self,
@@ -48,6 +55,34 @@ class KnowledgePublicationService:
         source_id: str,
         snapshot_id: str | None = None,
     ) -> PublicationResult:
+        candidate = self.prepare(
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+        self._repository.activate_snapshot(
+            candidate.project_id,
+            candidate.source_id,
+            candidate.snapshot_id,
+            candidate.embedding_model,
+        )
+        return PublicationResult(
+            project_id=candidate.project_id,
+            source_id=candidate.source_id,
+            snapshot_id=candidate.snapshot_id,
+            embedding_model=candidate.embedding_model,
+            chunk_count=candidate.chunk_count,
+        )
+
+    def prepare(
+        self,
+        *,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str | None = None,
+    ) -> PublicationCandidate:
+        """Embed a reviewed snapshot without changing the serving pointer."""
+
         source = self._library.get_source(project_id, source_id)
         if source is None:
             raise KnowledgePublicationError(
@@ -107,13 +142,7 @@ class KnowledgePublicationService:
                 ),
             )
 
-        self._repository.activate_snapshot(
-            project_id,
-            source_id,
-            selected_snapshot.snapshot_id,
-            self._embedding_provider.model_id,
-        )
-        return PublicationResult(
+        return PublicationCandidate(
             project_id=project_id,
             source_id=source_id,
             snapshot_id=selected_snapshot.snapshot_id,

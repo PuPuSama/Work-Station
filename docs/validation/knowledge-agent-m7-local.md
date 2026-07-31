@@ -1675,3 +1675,36 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   界面或外部集成尚未接入 Server API。
 
 这些项目属于后续 M7-B/C/D，不得把本记录描述为“多人服务器版已上线”。
+
+### M7 Server Knowledge 写命令原子审计
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\backend\.venv\Scripts\python.exe -m unittest `
+  backend.tests.test_m7_server_request_security `
+  backend.tests.test_knowledge_agent_m1_postgres `
+  backend.tests.test_knowledge_agent_m2_catalog `
+  backend.tests.test_knowledge_agent_m2_http `
+  backend.tests.test_m7_server_knowledge_commands -q
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -q
+```
+
+结果：
+
+- 32 项定向 Knowledge/M1/M2/M7 测试全部通过；
+- 新增 7 项真实 PostgreSQL/HTTP 集成测试，覆盖 Review/Publish/Confirm 的事务内撤权
+  重检、跨项目拒绝、Audit 故障回滚、错误脱敏、旧 Snapshot 保留、Latest Snapshot
+  漂移拒绝与重复命令审计去重；
+- Publication 明确拆为 `prepare` 和最终激活：Embedding Candidate 可以先持久化，但只有
+  Current Snapshot 切换与 `knowledge.source.published` Audit 在同一事务成功后才对检索
+  生效；Embedding 期间撤权或 Audit 故障均保持旧 Snapshot 服务；
+- Source Review 与 Product Confirm 分别和 `knowledge.source.reviewed`、
+  `knowledge.product.confirmed` Audit 原子提交；Audit 不含 Reason、正文、URL、Hash、
+  Artifact URI 或 Secret；Publish Audit 只额外保留追溯所需的不可变 Snapshot ID、
+  Chunk Count 与 Embedding Model；
+- Local Knowledge HTTP 仍使用原 Publication/Repository 路径，既有 M2 行为未改变；
+- 完整后端回归 682 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 前端 Next.js 16.2.10 production build、全量 ESLint 与 TypeScript 串行通过；
+- 本切片不修改 Schema；连续两次 `upgrade head` 成功，Alembic Current 与 Head 均为
+  `20260731_0017`。
