@@ -1722,6 +1722,17 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             self.assertEqual(
                 TestClient(app_module.app).put(
                     f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/humanized-article",
+                    json={
+                        "revision": 0,
+                        "article": SERVER_ARTICLE,
+                    },
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/products",
                     json={
                         "revision": 0,
@@ -2553,6 +2564,166 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     client.get(package_download_path).status_code,
                     403,
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_saves_reviewed_humanized_article_with_cas(
+        self,
+    ) -> None:
+        import app as app_module
+
+        repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        record = repository.get(self.task_a)
+        assert record is not None
+        initial = SERVER_ARTICLE.strip()
+        record.update(
+            {
+                "status": "initial_ai_checked",
+                "initial_article": initial,
+                "article": initial,
+                "humanized_article": "",
+                "final_article": "stale final article",
+                "article_versions": [],
+            }
+        )
+        repository.upsert(record)
+        candidate = initial.replace(
+            "Keep the original application guidance.",
+            "Use the reviewed application guidance.",
+        )
+
+        codec = ServerActorSessionCodec(b"h" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "h" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                audit = self._install_recording_audit(
+                    client.app,
+                    isolated,
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/humanized-article"
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "article": candidate,
+                        },
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "article": candidate,
+                            "status": "caller-controlled",
+                        },
+                    ).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/humanized-article"
+                        ),
+                        json={
+                            "revision": 0,
+                            "article": candidate,
+                        },
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "article": candidate.replace(
+                                "## Buyer Checks",
+                                "## Changed Buyer Checks",
+                            ),
+                        },
+                    ).status_code,
+                    422,
+                )
+                saved = client.put(
+                    path,
+                    json={
+                        "revision": 0,
+                        "article": candidate,
+                    },
+                )
+                self.assertEqual(saved.status_code, 200, saved.text)
+                body = saved.json()
+                self.assertEqual(body["revision"], 1)
+                self.assertEqual(body["status"], "humanized_ready")
+                self.assertEqual(body["humanized_article"], candidate)
+                self.assertEqual(body["article"], candidate)
+                self.assertEqual(body["final_article"], "")
+                self.assertEqual(
+                    body["article_versions"][-1]["kind"],
+                    "humanized",
+                )
+                self.assertEqual(
+                    body["article_versions"][-1]["source_kind"],
+                    "external_manual",
+                )
+                self.assertEqual(
+                    [event.action for event in audit.events],
+                    ["article.humanized.updated"],
+                )
+                self.assertNotIn(candidate, str(audit.events))
+                self.assertEqual(
+                    client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "article": candidate,
+                        },
+                    ).status_code,
+                    409,
                 )
                 self.assertFalse(local_state.exists())
 

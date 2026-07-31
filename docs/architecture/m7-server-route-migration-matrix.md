@@ -52,6 +52,7 @@
 | 准备文章图片 | `POST .../prepare-images` | `article.edit` | 私有 Asset + 内存 WebP + CAS + Audit | Server Ready |
 | 初稿 AI 截图 | `POST .../checks/initial-ai/screenshot` | `article.review` | 私有 Initial PNG Asset + CAS + Audit | Server Ready |
 | 初稿 AI 确认 | `PUT .../checks/initial-ai` | `article.review` | Initial Article Hash 绑定 + CAS + Audit | Server Ready |
+| 保存人工审阅 Humanized Article | `PUT .../humanized-article` | `article.edit` | 结构/事实门禁 + Version + CAS + Audit | Server Ready |
 | 最终 AI 截图 | `POST .../checks/final-ai/screenshot` | `article.review` | 私有 PNG Asset + CAS + Audit | Server Ready |
 | 最终 AI 确认 | `PUT .../checks/final-ai` | `article.review` | Article Hash 绑定 + CAS + Audit | Server Ready |
 | 导出文章 DOCX | `POST .../export-docx` | `article.deliver` | 私有 DOCX Asset + CAS + Audit | Server Ready |
@@ -71,7 +72,7 @@
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | Project Metadata Service | PostgreSQL Schema、CAS/Audit、官网域名安全门 |
 | Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | Review Worker 继续接线；旧路由继续关闭 |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
-| Humanize/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 原文哈希、最小权限、可恢复版本 |
+| Humanize Job/Link Restore/SEO Review | Local TaskStore + LLM | Project Job/Review Command | 正式 Prompt 准源、原文哈希、最小权限、可恢复版本 |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
@@ -116,6 +117,12 @@ Prompt/Chunk 漂移、撤权或 Task CAS 冲突均 fail closed，不生成 mock�
 仍有效后才调用 Provider；Provider 错误、空输出、缺少过渡段、H2/H3 或最终 FAQ 契约
 都使 Job 失败，不补 mock、不写本地 Artifact。成功追加 Raw/Initial Version 并进入
 `draft_ready`，但不会自动确认 AI 检查、Humanize、链接、图片或交付。
+
+人工 `PUT .../humanized-article` 与自动 `humanize` Job 是两个边界：前者只接受 Revision
+和有界 Markdown，服务端复用结构、数字事实、FAQ、表格、列表与必须短语校验，成功追加
+`external_manual` Version 并进入 `humanized_ready`；它不读取本地 Prompt。自动 Job
+仍依赖 `humanize_prompt_path` 外部文件，在正式 Prompt Snapshot 或其他服务器准源接线前
+保持 Local Only。
 
 ## 6. 已完成闭环：Project Job Control
 

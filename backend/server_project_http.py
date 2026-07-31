@@ -25,6 +25,7 @@ from models import (
     AICheck,
     TaskRecord,
 )
+from services.article_validation import visible_word_count
 from services.access_control import (
     ActorIdentity,
     ProjectAccessDenied,
@@ -77,6 +78,10 @@ from services.server_article_generation import (
     ArticleGenerationUnavailable,
     ServerArticleGenerationRegistry,
 )
+from services.server_humanized_update import (
+    ServerHumanizedArticleError,
+    apply_reviewed_humanized_article,
+)
 from services.server_delivery_package import (
     ServerDeliveryPackage,
     ServerDeliveryPackageError,
@@ -125,6 +130,7 @@ from workflow.state_machine import (
     ACTION_REWRITE_FROM_SCRATCH,
     ACTION_SELECT_TITLE,
     ACTION_UPDATE_ARTICLE,
+    ACTION_UPDATE_HUMANIZED,
     ACTION_UPDATE_OUTLINE,
     ACTION_UPDATE_PRODUCTS,
     WorkflowActionNotAllowed,
@@ -254,6 +260,15 @@ class FinalAiCheckUpdateRequest(BaseModel):
 
 class InitialAiCheckUpdateRequest(FinalAiCheckUpdateRequest):
     """Bind a manual initial AI review to the current first draft."""
+
+
+class ReviewedHumanizedArticleRequest(BaseModel):
+    """Save externally reviewed humanized Markdown under Task CAS."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(ge=0)
+    article: str = Field(min_length=1, max_length=200000)
 
 
 class ArticleSectionRewriteRequest(BaseModel):
@@ -1696,6 +1711,67 @@ def confirm_project_task_initial_ai(
         details={
             "confirmed": payload.confirmed,
             "score_recorded": payload.score is not None,
+        },
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/humanized-article",
+    response_model=TaskRecord,
+)
+def save_project_task_humanized_article(
+    project: str,
+    task_id: str,
+    payload: ReviewedHumanizedArticleRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    try:
+        ensure_action_allowed(task, ACTION_UPDATE_HUMANIZED)
+    except WorkflowActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        candidate = apply_reviewed_humanized_article(
+            task,
+            article=payload.article,
+        )
+    except ServerHumanizedArticleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.humanized.updated",
+        details={
+            "humanized_word_count": visible_word_count(candidate),
         },
     )
 

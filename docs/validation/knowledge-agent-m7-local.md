@@ -521,8 +521,8 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   再按 Action 固定的 `article.edit/article.review/article.deliver` 权限决策；
 - Task CAS 与 append-only Audit Event 在同一事务；注入 Audit 失败会同时回滚；
 - 撤权和旧 Revision 不修改 Task、不产生 Audit；确定性 Event ID 不依赖客户端输入；
-- 十六条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
-  initial-ai-screenshot/initial-ai-check/products/section/images/docx/tdk/final-ai-screenshot/
+- 十七条 HTTP Task 写操作分别记录 rewrite/title-generation/title-selection/outline/outline-restore/article-generation/
+  initial-ai-screenshot/initial-ai-check/humanized-update/products/section/images/docx/tdk/final-ai-screenshot/
   final-ai-check/delivery-package Action；
 - Audit Details 只含 Revision、Status、产品/图片/TDK 数量、Heading 深度、截图尺寸
   或布尔门禁，不含正文、Report 或 score 值；
@@ -1093,6 +1093,34 @@ $env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
   内容，Task 不保存本地路径；
 - Local Mode 不挂载三条 Project 路由；
 - 完整后端回归 628 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
+  TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
+  `20260731_0015`。
+
+### M7 人工 Humanized Article 保存
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\.venv\Scripts\python.exe -m unittest `
+  tests.test_m7_server_humanized_update `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_saves_reviewed_humanized_article_with_cas `
+  tests.test_m7_server_project_tasks.ServerProjectTaskApiTests.test_server_task_api_is_not_added_to_local_mode `
+  tests.test_m7_server_request_security `
+  tests.test_m7_server_task_commands -q
+```
+
+结果：
+
+- 16 tests 全部通过；
+- `PUT /api/projects/{project}/tasks/{task_id}/humanized-article` 只接受 Revision 与
+  200,000 字符内 Markdown；额外 Status/Actor 字段返回 422；
+- 服务端拒绝标题层级、数字事实、FAQ、表格、列表与必须短语漂移；校验失败时 Task
+  不变；
+- 成功追加 `humanized/external_manual` Version、进入 `humanized_ready` 并清空终检、
+  Link、Image 与 Delivery 下游；Audit 只含字数，不含正文；
+- Viewer、跨 Project、旧 Revision 与 Local Mode fail closed；自动 `humanize` Job
+  仍因 `humanize_prompt_path` 本地文件依赖保持 Local Only；
+- 完整后端回归 631 tests 全部通过，2 tests 按显式外部环境门禁跳过；前端 ESLint、
   TypeScript 与 Next.js production build 全部通过；Alembic Current 与 Head 均为
   `20260731_0015`。
 

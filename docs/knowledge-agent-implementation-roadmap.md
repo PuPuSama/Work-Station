@@ -185,6 +185,9 @@
 - 已接通 Server 初稿 AI-rate Review：初检截图使用独立私有 Asset 类型，不能冒充终检；
   确认绑定当前 Initial Article Hash 并只推进到 `initial_ai_checked`，不沿用 Local 低分
   自动跳过 Humanize/终检的隐式捷径；
+- 已接通人工 Humanized Article 保存命令：客户端只提交 Revision 与有界 Markdown，
+  服务端验证结构和不可变事实、追加 `external_manual` Version、进入
+  `humanized_ready` 并清空旧下游；自动 Humanize Job 仍因本地 Prompt 文件依赖保持关闭；
 - 已接通 Server Delivery ZIP：服务端只读取 Task 已绑定且逐项复核的文章 DOCX、
   `D.docx`、Prepared WebP 和已确认终审截图，在内存生成确定性扁平 ZIP；Task 只保存
   私有 `delivery_zip` Asset 身份，通用 Viewer 下载隐藏，专用下载重新授权；
@@ -209,7 +212,7 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让十六条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让十七条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，

@@ -121,13 +121,16 @@ M7 不一次性切换整个应用。采用 expand/contract：
   `initial_ai_rate_screenshot` 私有类型，不能冒充终检截图；确认绑定当前 Initial
   Article Hash 并只推进到 `initial_ai_checked`，不沿用 Local 低分自动跳过
   Humanize/终检的隐式捷径；
+- 新增人工 Humanized Article 保存命令：`PUT .../humanized-article` 只接受 Revision
+  与有界 Markdown，服务端校验标题层级、数字事实、FAQ、表格、列表和必须短语，追加
+  `external_manual` Version 并进入 `humanized_ready`；不读取本地 Humanize Prompt；
 - 新增 Server Delivery ZIP：只从 Task 已绑定且重新校验过的文章 DOCX、TDK DOCX、
   Prepared WebP 和已确认终审截图在内存组装确定性扁平 ZIP；Task 只保存私有 Asset
   身份与哈希，专用下载重新要求 `article.deliver`；
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 十六条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- 十七条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -481,6 +484,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_outline_generation.py` | Project Outline Context、Provider、Handler 与 Queue Registry | Prompt Version/Published Chunk 身份固定、无本地文件与 mock 回退、Provider 错误脱敏、两阶段授权、草稿 CAS/Audit、有界停机 |
 | `backend/services/server_title_generation.py` | Project Title Provider、模板身份、Handler 与 Queue Registry | 系统模板 Hash/Published Chunk 身份固定、完整候选门禁、无本地文件与 mock 回退、两阶段授权、候选 CAS/Audit、有界停机 |
 | `backend/services/server_article_generation.py` | Project Article Provider、Handler、Draft 变换与 Queue Registry | Prompt Version/目标字数/Published Chunk 身份固定、结构门禁、Raw/Initial Version、无本地文件与 mock 回退、两阶段授权、正文 CAS/Audit、有界停机 |
+| `backend/services/server_humanized_update.py` | 人工审阅 Humanized Markdown 的纯 Task 变换 | 结构/数字/FAQ/表格/列表/必须短语门禁、Version 与下游失效；不知道 HTTP/RBAC/PostgreSQL/本地 Prompt |
 | `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
@@ -1275,7 +1279,7 @@ URL、密钥或供应商错误正文。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、十六条 Task 写操作、`product_rediscovery/titles/outline/article` 的
+身份代码链、十七条 Task 写操作、`product_rediscovery/titles/outline/article` 的
 Enqueue/Runner 和窄范围
 Batch/Job Control 已接线；其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
 所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
@@ -1470,3 +1474,9 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      `initial_ai_checked`？
 105. Server Mode 是否不沿用 Local 低分自动跳过 Humanize/终检逻辑，初检 Report/Score
      值是否不进入 Audit？
+106. 人工 Humanized Article 是否只接受 Revision 与有界 Markdown，并要求
+     `article.edit` 与 `ACTION_UPDATE_HUMANIZED`？
+107. 标题层级、数字事实、FAQ、表格、列表或必须短语漂移时是否在 CAS 前失败且不追加
+     Version/Audit？
+108. 成功是否追加 `humanized/external_manual` Version、清空下游且不读取
+     `humanize_prompt_path`，自动 Humanize Job 是否仍保持 Local Only？

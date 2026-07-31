@@ -506,13 +506,14 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-十六条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+十七条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
+  `article.humanized.updated`、
   `article.outline_version.restored`、
   `article.products.confirmed`、
   `article.section.replaced`、`article.images.prepared`、
@@ -544,6 +545,9 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   Task/Prompt/Chunk Scope，只接受包含 H1/过渡段、H2/H3 和最终 FAQ 的完整 Markdown；
   失败不补 mock、不读写本地 Artifact。成功追加 Raw/Initial Version、进入
   `draft_ready` 并清空旧下游；Audit 只记录字数、Prompt 身份和 Chunk 数，不含正文；
+- 人工 Humanized Article 保存只提交 Revision 与有界 Markdown；服务端必须拒绝标题
+  层级、数字事实、FAQ、表格、列表或必须短语漂移，成功追加 `external_manual` Version、
+  进入 `humanized_ready` 并清空终检之后的旧产物。Audit 只记录字数，不含正文；
 - 人工注入 Audit Writer 失败时 Task Revision、正文和派生引用全部保持原值；旧 Revision
   或事务内撤权也不产生 Audit；
 - Audit Event 更新/删除仍被 Trigger 拒绝；图片/文章 DOCX/TDK DOCX/Review PNG/

@@ -327,6 +327,18 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "PUT",
+                "/api/projects/project-a/tasks/task-a/humanized-article",
+            )
+        )
+        self.assertFalse(
+            server_http_route_available(
+                "POST",
+                "/api/projects/project-a/tasks/task-a/humanized-article",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "GET",
                 "/api/projects/project-a/tasks/task-a/checks/"
                 "final-ai/screenshot/download",
