@@ -853,6 +853,41 @@ export type BatchCreateResponse = {
   rejected: Array<{ task_id: string; message: string }>;
 };
 
+export type ServerJobSummary = {
+  job_id: string;
+  batch_id: string;
+  task_id: string;
+  operation: string;
+  status: string;
+  source_revision: number;
+  result_revision: number | null;
+  attempts: number;
+  max_attempts: number;
+  cancel_requested: boolean;
+  has_error: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+};
+
+export type ServerBatchSummary = {
+  batch_id: string;
+  operation: string;
+  status: string;
+  total: number;
+  completed: number;
+  status_counts: Record<string, number>;
+  jobs: ServerJobSummary[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ServerBatchPage = {
+  items: ServerBatchSummary[];
+  next_after_batch_id: string | null;
+};
+
 export type ApiMessage = {
   message: string;
   data?: unknown;

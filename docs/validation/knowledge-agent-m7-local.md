@@ -1392,6 +1392,41 @@ node .\node_modules\next\dist\bin\next build
 - 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
 
+### M7 Server 操作员与 Job Control 面板
+
+实现边界：
+
+- Setup 阶段新增官网产品重新发现：只提交当前 Revision、官方 Category URL 与 1–50 的
+  `max_products`，复用 Task-scoped PostgreSQL Job 轮询；成功结果只进入 Knowledge
+  Inbox，不修改当前 Task Product 或文章；
+- 完全重写使用独立危险操作面板，必须显式勾选下游失效确认才启用；提交只含 Revision，
+  后端执行确定性状态重置。浏览器不删除 Knowledge、Audit、Version 或对象存储历史；
+- Batch 列表页和详情页新增 Auth Status 分流，Local 继续挂载原
+  `ProjectBatchCenter/Detail`，Server 只挂载 `ServerProjectBatchCenter/Detail`；
+- Server Header 新增 Project-scoped Job 抽屉；列表、详情、抽屉只消费
+  `ServerBatchPage/ServerBatchSummary/ServerJobSummary` 公共 DTO，不读取 Request、
+  Requester、Prompt、Chunk、URL 或原始错误；
+- Cancel/Retry 只向 `/api/projects/{project}/batches|jobs/...` 提交空 Body。前端 Effective
+  Role 仅控制按钮提示，后端仍在事务内重新锁定权限并按 Operation 检查；
+- Server Navigation 开放 Batch；Server 页面不请求旧 `/api/batches*` 或
+  `/api/batch-jobs*`，Local 页面不改为 PostgreSQL。
+
+验证结果：
+
+- 前端 TypeScript、全量 ESLint 与 Next.js production build 全部通过；
+- Mock Server 浏览器验证显示 Article/Batch/Delivery 三个 Server 导航项和 1 个 Active
+  Job；全局抽屉、Batch 列表和 Batch Detail 均正确显示 Running/Failed、Attempt 与脱敏
+  失败提示，浏览器日志无 Warning/Error；
+- 抽屉可见文本不含 `requested_by`、`category_url` 或 URL；失败 Job 只显示
+  `has_error` 对应的通用提示；
+- Rediscovery 在 Category URL 为空时禁用，填写官方 URL 后启用；完全重写在风险 Checkbox
+  未确认时禁用，确认后才启用。QA 未执行两个真实写命令；
+- 375×812 响应式覆盖下文档视口无水平溢出，Rediscovery 与完全重写面板均可达；
+- QA 使用临时 Mock API，不调用外部模型、对象存储或业务数据库；测试后恢复默认 API
+  构建并关闭临时服务；
+- 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell

@@ -37,7 +37,7 @@
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
-| Server Article Console | `/projects/{project}/articles*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
+| Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
 
 ## 3. Task 写操作矩阵
 
@@ -224,3 +224,6 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     Preview，Apply 只提交精确 Preview Hash？
 32. 大纲恢复和章节重写 UI 是否仍分别只提交 Version Index 与
     Heading Path/Replacement Body，不回传历史大纲或整篇文章？
+33. Server Batch 页面和全局 Job 抽屉是否仍只请求 Project-scoped 控制面，并保持公共
+    DTO 不含 Request、Requester、URL、Prompt、Chunk 或原始错误？
+34. Cancel/Retry 是否仍提交空 Body，且 UI Role 提示不会替代后端事务内授权？

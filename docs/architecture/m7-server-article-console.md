@@ -28,12 +28,23 @@ articles/[taskId]/page.tsx
        -> server -> ServerArticleWorkbench
 
 ProjectShell
-  -> server: Article + Delivery + authorized Settings
+  -> server: Article + Batch/Job Control + Delivery + authorized Settings
   -> local:  existing Article + Knowledge flag + Batch + Delivery + Settings
+
+batches/page.tsx
+  -> ProjectBatchDirectory
+       -> local  -> ProjectBatchCenter
+       -> server -> ServerProjectBatchCenter
+
+batches/[batchId]/page.tsx
+  -> ProjectBatchWorkspace
+       -> local  -> ProjectBatchDetail
+       -> server -> ServerProjectBatchDetail
 ```
 
 `ProjectArticleDirectory` 和 `ProjectArticleWorkspace` 是唯一模式分流点。Server 组件不接收
 Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败后回退 Local。
+批次页面使用同样的 `ProjectBatchDirectory/Workspace` 分流原则。
 
 ## 3. 主要代码职责
 
@@ -46,7 +57,12 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 | `server-seo-review-panel.tsx` | Review 设置、Run 选择、逐条裁决、预览与完成 | Apply 必须回传当前精确 Preview Hash；风险与 Pending 均显式确认 |
 | `server-outline-history.tsx` | 展示 Task 内 Outline Version 并恢复草稿 | 只提交服务端 `version_index`，不回传历史正文 |
 | `server-section-rewrite-panel.tsx` | 从 Initial Article 提取标题路径并提交局部替换 | 只提交 `heading_path` 与 `replacement_body`，后端仍是解析和校验准源 |
-| `project-shell.tsx` | Server 导航开放 Article/Delivery | 导航是可用性提示，不是授权准源 |
+| `server-product-rediscovery-panel.tsx` | 按官网分类页启动产品重新发现 | 只提交 Revision、官方 Category URL 与 1–50 上限；结果只入 Inbox |
+| `server-task-reset-panel.tsx` | 显式确认完全重写 | 只提交 Revision；不在浏览器删除历史对象或审计 |
+| `project-batch-directory.tsx` / `project-batch-workspace.tsx` | Batch 页面 Local/Server 组件树分流 | Auth 失败不猜测准源，Server 失败不回退 Local |
+| `server-project-batch-center.tsx` / `server-project-batch-detail.tsx` | Project-scoped Batch/Job 列表、取消和重试 | 公共 DTO 不读取 Request、Requester、URL、Prompt 或原始错误 |
+| `server-project-job-center.tsx` | 全局 Server Job 抽屉 | 只展示已迁移 Operation；Cancel/Retry 使用空 Body |
+| `project-shell.tsx` | Server 导航开放 Article/Batch/Delivery | 导航是可用性提示，不是授权准源 |
 | `server-project-selector.tsx` | SQL Project Directory 的默认入口 | 只跳转当前返回的 `project_id` |
 
 ## 4. Server 工作台数据流
@@ -70,8 +86,10 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 | UI 阶段 | 接口 | 客户端允许提交的内容 |
 |---|---|---|
 | 标题候选 | `POST .../titles` + `GET .../titles/jobs/{job}` | Revision |
+| 完全重写 | `POST .../rewrite-from-scratch` | Revision + 显式 UI 风险确认 |
 | 选择标题 | `PUT .../selected-title` | Revision、Candidate Index |
 | 选择产品 | `PUT .../products` | Revision、1–3 个 confirmed Product ID |
+| 产品重新发现 | `POST .../product-rediscovery` + Job GET | Revision、官方 Category URL、Max Products |
 | 大纲生成 | `POST .../outline` + Job GET | Revision |
 | 大纲保存/确认 | `PUT .../outline` | Revision、Markdown、Confirmed |
 | 大纲版本恢复 | `POST .../outline/restore-version` | Revision、服务器 Version Index |
@@ -89,6 +107,8 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 | 图片准备 | `POST .../prepare-images` | Revision、Hero Asset ID、Product ID 到 H2 的锚点 |
 | Word/TDK/ZIP | `POST .../export-docx`、`generate-tdk`、`package-delivery` | Revision |
 | 产物下载 | Task-scoped `.../download` | 无对象路径；响应为短期 URL |
+| Batch 列表/详情 | `GET /api/projects/{project}/batches*` | Limit、稳定 Cursor；无私有 Job Request |
+| Cancel/Retry | `POST /api/projects/{project}/batches|jobs/{id}/*` | 空 Body；服务端重放可信请求 |
 
 异步 Job 的浏览器等待不是 Worker 生命周期。页面只轮询公开状态
 `queued/retry_wait/running/succeeded/failed/cancelled/conflict`；等待超时只提示刷新，不发送
@@ -147,20 +167,46 @@ Hero 图同样只通过 Project 私有 `asset_id` 指定。浏览器不提交 Bu
 图片 URL、产品描述或产品图片事实。以后增加图片选择器时，它只能把现有 Asset ID 可视化，
 不能改变该命令契约。
 
-## 9. 当前明确未接入的控制
+产品重新发现和 Task 产品选择也保持两段式：
+
+1. Rediscovery 只允许当前 Project 官方域名的 Category URL 和有界数量，Worker 把证据写入
+   Inbox；
+2. 人工审核、发布并确认产品后，Task 选择区才按 Product ID 投影正式事实；
+3. Rediscovery Job 成功不修改 Task Revision、当前产品或文章，不把抓取结果直接当正式事实。
+
+## 9. Project-scoped Job Control
+
+Server Header、批次列表和详情共用同一公共 DTO：
+
+```text
+ServerBatchPage
+  -> ServerBatchSummary
+       -> ServerJobSummary
+            job_id / batch_id / task_id / operation / status
+            revision / attempts / timestamps / booleans
+            no request / requester / prompt / chunk / URL / raw error
+```
+
+列表使用稳定 `after_batch_id` Cursor；轮询只在存在 Active Job 时加速，使用串行
+`setTimeout` 避免请求重叠。Cancel/Retry Body 始终为空，前端 Role 只决定按钮提示，后端
+仍在事务内锁定可撤权事实并按 Operation 检查 `knowledge.edit/article.edit/article.review`。
+Retry 重放服务器私有请求，浏览器不能修改 Source Revision、Task、Requester 或参数。
+
+## 10. 当前明确未接入的控制
 
 本切片是现有 Task 的主链操作面，不是完整 Local UI 等价迁移。以下后端能力仍需专用面板：
 
-- Product Rediscovery 的 Category URL、进度与结果审阅；
-- Rewrite From Scratch；
-- Project-scoped Job Control 的全局抽屉；
+- Product Rediscovery 的 Inbox 结果审阅；
 - Hero/产品 Asset 的可视化选择器；
 - Server Task 导入/创建。
+
+Product Rediscovery 的创建与 Job 状态已接入；“结果审阅”仍依赖正式 Knowledge 页面，
+尚未在文章工作台复制一套 Inbox 审阅器。
 
 这些入口不能通过把 Local `ArticleWorkbench` 的 Handler 改个 URL 来补齐；每个面板都必须
 只提交 Server 契约允许的字段，并保留 Revision、权限和私有对象边界。
 
-## 10. 重构检查清单
+## 11. 重构检查清单
 
 1. Auth Status 失败时是否仍不会猜测 Local/Server？
 2. Server 列表和详情是否仍只使用显式 Project 路径？
@@ -177,3 +223,6 @@ Hero 图同样只通过 Project 私有 `asset_id` 指定。浏览器不提交 Bu
 13. SEO Apply 是否仍只能使用当前精确 Preview Hash，且 Pending/Risk 确认不会被默认勾选？
 14. Outline 恢复是否仍只提交服务器数组索引而不回传历史正文？
 15. Section Rewrite 是否仍只提交 Heading Path/Replacement Body，并由服务端重新解析全文？
+16. Rediscovery 是否仍只产生 Inbox Evidence，不自动替换 Task Product？
+17. 完全重写是否仍要求显式风险确认，且只提交 Revision？
+18. Server Batch/Job UI 是否仍使用 Project 路径、公共 DTO 与空 Cancel/Retry Body？

@@ -268,6 +268,12 @@
   裁决台：大纲恢复只发服务端 Version Index；章节重写只发 Heading Path 与 Replacement
   Body；Review 按单 Change 保存并在 Apply 前要求精确 Preview Hash、显式 Risk/Pending
   确认。三个 UI 都继续把权限、Markdown 解析、Revision CAS 和状态机留给后端准源；
+- Server Article Console 已接入产品重新发现与完全重写：Rediscovery 只提交官方
+  Category URL 和有界数量，结果只进入 Inbox；完全重写要求显式风险确认并只提交
+  Revision，不从浏览器删除历史对象；
+- Server Batch 页面和 Header 全局队列已按 Auth Status 与 Local 组件树分离，只消费
+  Project-scoped `batches/jobs` 公共 DTO；Cancel/Retry 使用空 Body，Retry 由后端重放
+  私有可信请求。Local Batch 页面与原 SQLite Queue 保持不变；
 - 已新增 PostgreSQL Project Prompt Snapshot 底座：Head、不可变 Version 与精确
   Default 指针分表；编辑只追加新 Version，默认不会自动漂移；读取与写入分别要求
   `project.view/article.edit`，写操作重新锁定可撤权事实并与安全 Audit 同事务；

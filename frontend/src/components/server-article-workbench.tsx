@@ -34,8 +34,10 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { ServerOutlineHistory } from "@/components/server-outline-history";
+import { ServerProductRediscoveryPanel } from "@/components/server-product-rediscovery-panel";
 import { ServerSectionRewritePanel } from "@/components/server-section-rewrite-panel";
 import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
+import { ServerTaskResetPanel } from "@/components/server-task-reset-panel";
 import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
@@ -257,7 +259,7 @@ export function ServerArticleWorkbench({
     label: string,
     action: () => Promise<unknown>,
     successMessage = `${label}完成。`,
-  ) {
+  ): Promise<boolean> {
     setPending(label);
     setError("");
     setMessage("");
@@ -265,20 +267,27 @@ export function ServerArticleWorkbench({
       await action();
       setMessage(successMessage);
       await load();
+      return true;
     } catch (reason) {
       setError(errorMessage(reason));
+      return false;
     } finally {
       setPending("");
     }
   }
 
-  async function runJob(label: string, endpoint: string) {
+  async function runJob(
+    label: string,
+    endpoint: string,
+    payload: Record<string, unknown> = {},
+  ) {
     if (!task) return;
     await runAction(
       label,
       async () => {
         const queued = await apiPost<ServerProjectJob>(`${taskApi}/${endpoint}`, {
           revision: task.revision ?? 0,
+          ...payload,
         });
         const statusPath = `${taskApi}/${endpoint}/jobs/${encodeURIComponent(queued.job_id)}`;
         for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -599,6 +608,23 @@ export function ServerArticleWorkbench({
                 </Button>
               </CardContent>
             </Card>
+
+            <ServerProductRediscoveryPanel
+              customer={customer}
+              pending={pending}
+              knowledgeEditAllowed={editAllowed}
+              runJob={runJob}
+            />
+
+            <ServerTaskResetPanel
+              task={task}
+              taskApi={taskApi}
+              pending={pending}
+              editAllowed={editAllowed}
+              resetAllowed={allowed.has("rewrite_from_scratch")}
+              runAction={runAction}
+              onCompleted={() => setStep("setup")}
+            />
           </div>
         )}
 

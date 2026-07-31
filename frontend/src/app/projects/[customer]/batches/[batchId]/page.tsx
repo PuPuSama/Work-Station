@@ -1,4 +1,4 @@
-import { ProjectBatchDetail } from "@/components/project-batch-detail";
+import { ProjectBatchWorkspace } from "@/components/project-batch-workspace";
 
 type ProjectBatchDetailPageProps = {
   params: Promise<{
@@ -10,7 +10,7 @@ type ProjectBatchDetailPageProps = {
 export default async function ProjectBatchDetailPage({ params }: ProjectBatchDetailPageProps) {
   const { customer, batchId } = await params;
   return (
-    <ProjectBatchDetail
+    <ProjectBatchWorkspace
       customer={decodeURIComponent(customer)}
       batchId={decodeURIComponent(batchId)}
     />

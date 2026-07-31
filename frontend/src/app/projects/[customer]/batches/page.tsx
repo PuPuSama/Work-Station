@@ -1,4 +1,4 @@
-import { ProjectBatchCenter } from "@/components/project-batch-center";
+import { ProjectBatchDirectory } from "@/components/project-batch-directory";
 
 type ProjectBatchPageProps = {
   params: Promise<{
@@ -8,5 +8,5 @@ type ProjectBatchPageProps = {
 
 export default async function ProjectBatchPage({ params }: ProjectBatchPageProps) {
   const { customer } = await params;
-  return <ProjectBatchCenter customer={decodeURIComponent(customer)} />;
+  return <ProjectBatchDirectory customer={decodeURIComponent(customer)} />;
 }

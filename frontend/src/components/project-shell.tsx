@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
 import { ProjectJobCenter } from "@/components/project-job-center";
+import { ServerProjectJobCenter } from "@/components/server-project-job-center";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -145,6 +146,7 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
       ? localItems.filter(
           (item) =>
             item.href.endsWith("/articles") ||
+            item.href.endsWith("/batches") ||
             item.href.endsWith("/deliveries"),
         )
       : serverMode === false
@@ -318,6 +320,9 @@ export function ProjectShell({ customer, children }: ProjectShellProps) {
             </BreadcrumbList>
           </Breadcrumb>
           {serverMode === false && <ProjectJobCenter customer={customer} />}
+          {serverMode === true && (
+            <ServerProjectJobCenter customer={customer} role={serverRole} />
+          )}
           <LogoutButton iconOnly />
         </header>
         <div className="min-w-0 flex-1">{children}</div>
