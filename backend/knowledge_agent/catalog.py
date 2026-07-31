@@ -239,6 +239,23 @@ class PostgresProductCatalogRepository:
         self._engine = engine
 
     def upsert_product(self, product: KnowledgeProduct) -> None:
+        try:
+            with self._engine.begin() as connection:
+                self.upsert_product_in_transaction(connection, product)
+        except IntegrityError as exc:
+            raise ProductCatalogConflictError(
+                "product conflicts with an existing project-scoped record"
+            ) from exc
+
+    def upsert_product_in_transaction(
+        self,
+        connection: Connection,
+        product: KnowledgeProduct,
+    ) -> bool:
+        """Upsert an unconfirmed product and report a real row change."""
+
+        if not connection.in_transaction():
+            raise ValueError("product writes require a business transaction")
         if product.status == "confirmed":
             raise ValueError("confirm_product must be used to confirm a product")
         statement = insert(knowledge_products).values(
@@ -250,38 +267,77 @@ class PostgresProductCatalogRepository:
             category_path=list(product.category_path),
             metadata=dict(product.metadata),
         )
+        keep_confirmed = sa.and_(
+            knowledge_products.c.status == "confirmed",
+            statement.excluded.status == "inbox",
+        )
+        effective_values = {
+            "name": sa.case(
+                (keep_confirmed, knowledge_products.c.name),
+                else_=statement.excluded.name,
+            ),
+            "status": sa.case(
+                (keep_confirmed, knowledge_products.c.status),
+                else_=statement.excluded.status,
+            ),
+            "canonical_url": sa.case(
+                (keep_confirmed, knowledge_products.c.canonical_url),
+                else_=statement.excluded.canonical_url,
+            ),
+            "category_path": sa.case(
+                (keep_confirmed, knowledge_products.c.category_path),
+                else_=statement.excluded.category_path,
+            ),
+            "metadata": sa.case(
+                (keep_confirmed, knowledge_products.c.metadata),
+                else_=statement.excluded.metadata,
+            ),
+        }
         statement = statement.on_conflict_do_update(
             index_elements=[
                 knowledge_products.c.project_id,
                 knowledge_products.c.product_id,
             ],
             set_={
-                "name": statement.excluded.name,
-                "status": sa.case(
-                    (
-                        sa.and_(
-                            knowledge_products.c.status == "confirmed",
-                            statement.excluded.status == "inbox",
-                        ),
-                        knowledge_products.c.status,
-                    ),
-                    else_=statement.excluded.status,
-                ),
-                "canonical_url": statement.excluded.canonical_url,
-                "category_path": statement.excluded.category_path,
-                "metadata": statement.excluded.metadata,
+                # New unreviewed evidence must not mutate the aggregate facts
+                # currently served for a confirmed product. Snapshot-scoped
+                # evidence remains available for the next review.
+                **effective_values,
                 "updated_at": sa.func.now(),
             },
-        )
-        try:
-            with self._engine.begin() as connection:
-                connection.execute(statement)
-        except IntegrityError as exc:
-            raise ProductCatalogConflictError(
-                "product conflicts with an existing project-scoped record"
-            ) from exc
+            where=sa.or_(
+                *(
+                    getattr(knowledge_products.c, field_name)
+                    .is_distinct_from(value)
+                    for field_name, value in effective_values.items()
+                )
+            ),
+        ).returning(knowledge_products.c.product_id)
+        return connection.execute(statement).scalar_one_or_none() is not None
 
     def store_source_evidence(self, evidence: ProductSourceEvidence) -> None:
+        try:
+            with self._engine.begin() as connection:
+                self.store_source_evidence_in_transaction(
+                    connection,
+                    evidence,
+                )
+        except IntegrityError as exc:
+            raise ProductCatalogNotFound(
+                "product or source snapshot was not found in the requested project"
+            ) from exc
+
+    def store_source_evidence_in_transaction(
+        self,
+        connection: Connection,
+        evidence: ProductSourceEvidence,
+    ) -> bool:
+        """Store immutable source evidence in a caller-owned transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "product source evidence requires a business transaction"
+            )
         statement = (
             insert(knowledge_product_source_evidence)
             .values(
@@ -295,34 +351,54 @@ class PostgresProductCatalogRepository:
                 metadata=dict(evidence.metadata),
             )
             .on_conflict_do_nothing()
+            .returning(knowledge_product_source_evidence.c.source_id)
         )
-        try:
-            with self._engine.begin() as connection:
-                result = connection.execute(statement)
-                if result.rowcount == 1:
-                    return
-                row = connection.execute(
-                    sa.select(knowledge_product_source_evidence).where(
-                        knowledge_product_source_evidence.c.project_id
-                        == evidence.project_id,
-                        knowledge_product_source_evidence.c.product_id
-                        == evidence.product_id,
-                        knowledge_product_source_evidence.c.source_id
-                        == evidence.source_id,
-                        knowledge_product_source_evidence.c.snapshot_id
-                        == evidence.snapshot_id,
-                    )
-                ).mappings().one_or_none()
-                if row is None or _source_evidence_from_row(row) != evidence:
-                    raise ProductCatalogConflictError(
-                        "product source evidence conflicts with an immutable record"
-                    )
-        except IntegrityError as exc:
-            raise ProductCatalogNotFound(
-                "product or source snapshot was not found in the requested project"
-            ) from exc
+        inserted_source_id = connection.execute(
+            statement
+        ).scalar_one_or_none()
+        if inserted_source_id is not None:
+            return True
+        row = connection.execute(
+            sa.select(knowledge_product_source_evidence).where(
+                knowledge_product_source_evidence.c.project_id
+                == evidence.project_id,
+                knowledge_product_source_evidence.c.product_id
+                == evidence.product_id,
+                knowledge_product_source_evidence.c.source_id
+                == evidence.source_id,
+                knowledge_product_source_evidence.c.snapshot_id
+                == evidence.snapshot_id,
+            )
+        ).mappings().one_or_none()
+        if row is None or _source_evidence_from_row(row) != evidence:
+            raise ProductCatalogConflictError(
+                "product source evidence conflicts with an immutable record"
+            )
+        return False
 
     def store_asset_evidence(self, evidence: ProductAssetEvidence) -> None:
+        try:
+            with self._engine.begin() as connection:
+                self.store_asset_evidence_in_transaction(
+                    connection,
+                    evidence,
+                )
+        except IntegrityError as exc:
+            raise ProductCatalogNotFound(
+                "product or snapshot asset was not found in the requested project"
+            ) from exc
+
+    def store_asset_evidence_in_transaction(
+        self,
+        connection: Connection,
+        evidence: ProductAssetEvidence,
+    ) -> bool:
+        """Store immutable asset evidence in a caller-owned transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "product asset evidence requires a business transaction"
+            )
         statement = (
             insert(knowledge_product_asset_evidence)
             .values(
@@ -337,34 +413,32 @@ class PostgresProductCatalogRepository:
                 metadata=dict(evidence.metadata),
             )
             .on_conflict_do_nothing()
+            .returning(knowledge_product_asset_evidence.c.asset_id)
         )
-        try:
-            with self._engine.begin() as connection:
-                result = connection.execute(statement)
-                if result.rowcount == 1:
-                    return
-                row = connection.execute(
-                    sa.select(knowledge_product_asset_evidence).where(
-                        knowledge_product_asset_evidence.c.project_id
-                        == evidence.project_id,
-                        knowledge_product_asset_evidence.c.product_id
-                        == evidence.product_id,
-                        knowledge_product_asset_evidence.c.source_id
-                        == evidence.source_id,
-                        knowledge_product_asset_evidence.c.snapshot_id
-                        == evidence.snapshot_id,
-                        knowledge_product_asset_evidence.c.asset_id
-                        == evidence.asset_id,
-                    )
-                ).mappings().one_or_none()
-                if row is None or _asset_evidence_from_row(row) != evidence:
-                    raise ProductCatalogConflictError(
-                        "product asset evidence conflicts with an immutable record"
-                    )
-        except IntegrityError as exc:
-            raise ProductCatalogNotFound(
-                "product or snapshot asset was not found in the requested project"
-            ) from exc
+        inserted_asset_id = connection.execute(
+            statement
+        ).scalar_one_or_none()
+        if inserted_asset_id is not None:
+            return True
+        row = connection.execute(
+            sa.select(knowledge_product_asset_evidence).where(
+                knowledge_product_asset_evidence.c.project_id
+                == evidence.project_id,
+                knowledge_product_asset_evidence.c.product_id
+                == evidence.product_id,
+                knowledge_product_asset_evidence.c.source_id
+                == evidence.source_id,
+                knowledge_product_asset_evidence.c.snapshot_id
+                == evidence.snapshot_id,
+                knowledge_product_asset_evidence.c.asset_id
+                == evidence.asset_id,
+            )
+        ).mappings().one_or_none()
+        if row is None or _asset_evidence_from_row(row) != evidence:
+            raise ProductCatalogConflictError(
+                "product asset evidence conflicts with an immutable record"
+            )
+        return False
 
     def confirm_product(self, project_id: str, product_id: str) -> None:
         with self._engine.begin() as connection:
@@ -444,6 +518,28 @@ class PostgresProductCatalogRepository:
                     knowledge_products.c.product_id == normalized_product_id,
                 )
             ).mappings().one_or_none()
+        return None if row is None else _product_from_row(row)
+
+    def get_product_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        product_id: str,
+    ) -> KnowledgeProduct | None:
+        """Read the stored aggregate product inside a caller transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "product reads require a business transaction"
+            )
+        row = connection.execute(
+            sa.select(knowledge_products).where(
+                knowledge_products.c.project_id
+                == _required_text(project_id, "project_id"),
+                knowledge_products.c.product_id
+                == _required_text(product_id, "product_id"),
+            )
+        ).mappings().one_or_none()
         return None if row is None else _product_from_row(row)
 
     def list_products(

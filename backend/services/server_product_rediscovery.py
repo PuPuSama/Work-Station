@@ -52,6 +52,11 @@ from services.job_queue import (
 from services.object_store import ObjectStore
 from services.postgres_job_queue import PostgresJobQueue
 from services.postgres_task_repository import PostgresTaskRepository
+from services.server_web_evidence_ingestion import (
+    CheckpointingOfficialSiteFetcher,
+    PostgresServerWebEvidenceIngestion,
+    ServerWebEvidenceContext,
+)
 
 
 PRODUCT_REDISCOVERY_OPERATION = "product_rediscovery"
@@ -111,7 +116,7 @@ class ProductRediscoveryStopReport:
 
 
 ProductSyncFactory = Callable[
-    [str, str],
+    [ActorIdentity, str, str, Callable[[], bool]],
     WordPressProductSyncService,
 ]
 ProductRediscoveryJobHandler = Callable[
@@ -145,10 +150,20 @@ class ServerProductRediscoveryHandler:
             job.get("organization_id") or ""
         ).strip()
         project_id = str(job.get("project_id") or "").strip()
+        job_id = str(job.get("id") or job.get("job_id") or "").strip()
+        requested_by_user_id = str(
+            job.get("requested_by_user_id") or ""
+        ).strip()
         task_id = str(job.get("task_id") or "").strip()
         source_revision = int(job.get("source_revision") or 0)
         command = ProductRediscoveryCommand.from_mapping(
             dict(job.get("request") or {})
+        )
+        if not job_id or not requested_by_user_id:
+            raise JobConflict("product rediscovery job identity is invalid")
+        actor = ActorIdentity(
+            organization_id=organization_id,
+            user_id=requested_by_user_id,
         )
         if cancelled():
             raise JobCancelled(
@@ -176,7 +191,7 @@ class ServerProductRediscoveryHandler:
             raise JobCancelled(
                 "Product rediscovery cancelled before official-site fetch."
             )
-        sync = self._sync_factory(organization_id, project_id)
+        sync = self._sync_factory(actor, project_id, job_id, cancelled)
         try:
             sync.sync_category(
                 project_id=project_id,
@@ -208,25 +223,57 @@ def create_product_sync_factory(
     """Build project-bound S3 ingestion without a local artifact fallback."""
 
     def create(
-        organization_id: str,
+        actor: ActorIdentity,
         project_id: str,
+        job_id: str,
+        cancelled: Callable[[], bool],
     ) -> WordPressProductSyncService:
+        access = ProjectAccessService(
+            PostgresProjectAccessRepository(engine)
+        )
+
+        def checkpoint() -> None:
+            if cancelled():
+                raise JobCancelled("Product rediscovery cancelled.")
+            access.require(actor, project_id, "knowledge.edit")
+
         repository = PostgresKnowledgeRepository(engine)
         asset_repository = PostgresKnowledgeAssetRepository(engine)
         catalog_repository = PostgresProductCatalogRepository(engine)
-        fetcher = SafeOfficialSiteFetcher()
-        ingestion = OfficialWebPageIngestionService(
+        fetcher = CheckpointingOfficialSiteFetcher(
+            SafeOfficialSiteFetcher(),
+            checkpoint=checkpoint,
+        )
+        preparer = OfficialWebPageIngestionService(
             repository=repository,
             asset_repository=asset_repository,
             catalog_repository=catalog_repository,
             artifact_store=ScopedS3ArtifactStore(
                 store=store,
                 bucket=bucket,
-                organization_id=organization_id,
+                organization_id=actor.organization_id,
                 project_id=project_id,
+                checkpoint=checkpoint,
             ),
             fetcher=fetcher,
             snapshot_lookup=PostgresKnowledgeLibrary(engine),
+        )
+        ingestion = PostgresServerWebEvidenceIngestion(
+            engine,
+            preparer=preparer,
+            context=ServerWebEvidenceContext(
+                actor=actor,
+                project_id=project_id,
+                operation=PRODUCT_REDISCOVERY_OPERATION,
+                target_type="background_job",
+                target_id=job_id,
+                permission="knowledge.edit",
+                cancelled=cancelled,
+            ),
+            bucket=bucket,
+            repository=repository,
+            assets=asset_repository,
+            catalog=catalog_repository,
         )
         return WordPressProductSyncService(
             fetcher=fetcher,

@@ -179,14 +179,16 @@ lock knowledge.publish facts
 ```text
 approved candidate ID
 -> private URL resolution
--> fresh authorization
+-> trusted Actor + cancellation checkpoint
 -> same-site URL normalization
--> SafeOfficialSiteFetcher
--> OfficialWebPageIngestionService
--> ScopedS3ArtifactStore(org/project prefix)
--> immutable Source/Snapshot/Chunk/Asset links
--> deterministic classification
--> audited Review
+-> CheckpointingOfficialSiteFetcher
+-> OfficialWebPageIngestionService.prepare_url
+-> ScopedS3ArtifactStore(org/project prefix + exact hashes)
+-> PostgresServerWebEvidenceIngestion
+-> one-page Source/Snapshot/Chunk/Product/Asset/Evidence + Audit transaction
+-> deterministic confidence gate
+-> cancellation check + audited Review
+-> cancellation check + Embedding Prepare
 -> audited Publish + current snapshot activation
 ```
 
@@ -196,6 +198,11 @@ Embedding、撤权或发布失败时旧 Current Snapshot 继续服务。
 网络取数和对象 Put 不能伪装成 PostgreSQL 单事务。当前实现允许晚期失败留下可对账的
 内容寻址对象，或已入 Inbox 但未发布的不可变证据；不会把它们当成 Published Current
 Evidence。
+
+受控取消从 Candidate Checkpoint 原样穿过 LangGraph Execution：Run 投影恢复到本次执行前
+的可重试状态并追加 `interrupted` Event，不会写成 terminal `failed`；随后 `JobCancelled`
+继续交给 Batch Runner 的 interrupted/requeue 机制。Provider 或业务异常仍转换为脱敏的
+`ResearchExecutionError`，不能借取消通道绕过失败记录。
 
 ## 9. HTTP 公共/私有字段
 
@@ -258,9 +265,11 @@ Run DTO；页面重载可由 Thread ID 恢复当前研究上下文。
    关系，进一步强化跨进程幂等、领域取消和可观测性。
 2. Start 实际只读已发布证据，未来可把权限拆为 `knowledge.research`；Resume 的抓取/
    发布继续要求 `knowledge.publish`。当前统一用保守的 `knowledge.publish`。
-3. 把 Web Ingestion 改为显式 Prepare/Commit：对象与解析先准备，最终 Inbox Link、
-   Review、Publish 各自有清晰 Receipt，便于 orphan 对账。
-4. 用显式 `ResearchExecutionContext(actor, scope)` 替换 `ContextVar`，让 Actor 生命周期
+3. Web Ingestion 已拆为显式 Prepare/Commit，当前结构与限制见
+   `docs/architecture/m7-server-web-evidence-ingestion.md`；下一步是 Snapshot-bound Review
+   Receipt，使新版本 Review/Embedding/Activate 绑定精确 Snapshot。
+4. 用显式 `ResearchExecutionContext(actor, scope, cancelled)` 替换当前承载 Actor 与取消
+   Callback 的 `_ACTIVE_RESEARCH_EXECUTION` ContextVar，让 Execution 生命周期
    可测试并适合跨进程 Worker。
 5. 抽取前端 `useResearchRunStream`，统一 SSE Cursor、重连退避和轮询恢复。
 6. Inbox 与 Research 共用 Project Role/Capability Query，避免重复读取但仍不缓存为
@@ -279,4 +288,5 @@ Run DTO；页面重载可由 Thread ID 恢复当前研究上下文。
 - Research Job 不走通用 Cancel/Retry 或自动基础设施重放；
 - 候选对象只写 Project-scoped S3，不写本地 Artifact；
 - Local UI/API/Queue 行为保持不变；
-- WordPress Sync 和 Raw Artifact 在 Server Mode 继续关闭。
+- 通用 WordPress Sync HTTP 与 Raw Artifact HTTP 在 Server Mode 继续关闭；受控 Product
+  Rediscovery/Research 只通过 Server Web Evidence Unit of Work 使用内部页面准备能力。

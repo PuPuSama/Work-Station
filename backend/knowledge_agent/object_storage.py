@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import unquote, urlsplit
@@ -76,9 +77,11 @@ class ScopedS3ArtifactStore:
         bucket: str,
         organization_id: str,
         project_id: str,
+        checkpoint: Callable[[], None] | None = None,
     ) -> None:
         self._organization_id = organization_id
         self._project_id = project_id
+        self._checkpoint = checkpoint
         self._uploader = ProjectObjectUploader(store, bucket=bucket)
 
     def put(
@@ -102,12 +105,20 @@ class ScopedS3ArtifactStore:
             mimetypes.guess_type(filename, strict=False)[0]
             or "application/octet-stream"
         )
-        return self._uploader.upload(
+        if self._checkpoint is not None:
+            self._checkpoint()
+        uploaded = self._uploader.upload(
             organization_id=self._organization_id,
             project_id=self._project_id,
             data=body,
             content_type=content_type,
-        ).object_uri
+        )
+        if self._checkpoint is not None:
+            # A failure here intentionally leaves a content-addressed orphan;
+            # no PostgreSQL evidence may be committed after cancellation or
+            # access revocation.
+            self._checkpoint()
+        return uploaded.object_uri
 
 
 def _s3_key(uri: str, expected_bucket: str) -> str:

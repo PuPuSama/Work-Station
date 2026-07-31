@@ -329,9 +329,12 @@ class PostgresKnowledgeAssetRepository:
                 metadata=dict(link.metadata),
             )
             .on_conflict_do_nothing()
+            .returning(snapshot_assets.c.asset_id)
         )
-        result = connection.execute(statement)
-        if result.rowcount == 1:
+        inserted_asset_id = connection.execute(
+            statement
+        ).scalar_one_or_none()
+        if inserted_asset_id is not None:
             return True
         stored = connection.execute(
             sa.select(snapshot_assets).where(

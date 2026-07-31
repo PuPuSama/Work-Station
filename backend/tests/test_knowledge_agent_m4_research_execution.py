@@ -4,6 +4,7 @@ import os
 import sys
 import unittest
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,6 +85,46 @@ class FakeDiscovery:
 class FakeIngestion:
     def ingest(self, **kwargs):
         return CandidateIngestionResult(published_source_ids=("source-1",))
+
+
+class ExpectedResearchInterruption(RuntimeError):
+    pass
+
+
+class InterruptingGraph:
+    def __init__(
+        self,
+        error: ExpectedResearchInterruption,
+        *,
+        checkpoint_state: dict[str, object] | None = None,
+    ) -> None:
+        self.error = error
+        self.checkpoint_state = dict(checkpoint_state or {})
+
+    def state(self, thread_id: str) -> dict[str, object]:
+        del thread_id
+        return dict(self.checkpoint_state)
+
+    def start(self, request):
+        del request
+        raise self.error
+
+    def continue_run(self, thread_id: str):
+        del thread_id
+        raise self.error
+
+    def resume(self, thread_id: str, *, approved_urls):
+        del thread_id, approved_urls
+        raise self.error
+
+
+class InterruptingSessions:
+    def __init__(self, graph: InterruptingGraph) -> None:
+        self.graph = graph
+
+    @contextmanager
+    def open(self):
+        yield self.graph
 
 
 def observation(pack_id: str, sufficiency: str) -> ScopeEvidenceObservation:
@@ -303,6 +344,91 @@ class KnowledgeAgentM4ResearchExecutionTests(unittest.TestCase):
         )
         self.assertTrue(
             all(event.details["error_code"] == "RuntimeError" for event in retry_events)
+        )
+
+    def test_start_passthrough_restores_queued_run_without_marking_failed(
+        self,
+    ) -> None:
+        request = self._request("cancel-start")
+        interruption = ExpectedResearchInterruption("controlled stop")
+        service = ResearchGraphExecutionService(
+            sessions=InterruptingSessions(  # type: ignore[arg-type]
+                InterruptingGraph(interruption)
+            ),
+            runs=self.runs,
+            passthrough_exceptions=(ExpectedResearchInterruption,),
+        )
+        service.enqueue(request)
+
+        with self.assertRaises(ExpectedResearchInterruption) as raised:
+            service.execute_start(request)
+
+        self.assertIs(raised.exception, interruption)
+        restored = self.runs.get_run(self.project_id, request.thread_id)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.status, "queued")  # type: ignore[union-attr]
+        self.assertEqual(restored.current_node, "queued")  # type: ignore[union-attr]
+        self.assertIsNone(restored.error_code)  # type: ignore[union-attr]
+        events = self.runs.list_events(self.project_id, request.thread_id)
+        self.assertNotIn("failed", [event.event_type for event in events])
+        self.assertEqual(events[-1].event_type, "interrupted")
+        self.assertEqual(events[-1].details, {"restored_status": "queued"})
+
+    def test_resume_passthrough_restores_waiting_run_without_marking_failed(
+        self,
+    ) -> None:
+        request = self._request("cancel-resume")
+        candidate = ResearchCandidate(
+            candidate_id="candidate-cancel-resume",
+            url=f"https://{self.prefix}.example.test/cancel-resume",
+            page_type="unknown",
+            needs_review=True,
+            evidence={"same_site": True},
+        )
+        normal = self._service(
+            evidence=SequencedEvidence((observation("before-cancel", "weak"),)),
+            discovery=FakeDiscovery((candidate,)),
+        )
+        normal.enqueue(request)
+        waiting = normal.execute_start(request)
+        checkpoint_state = normal.checkpoint_state(
+            project_id=self.project_id,
+            thread_id=request.thread_id,
+        )
+        interruption = ExpectedResearchInterruption("controlled stop")
+        interrupted = ResearchGraphExecutionService(
+            sessions=InterruptingSessions(  # type: ignore[arg-type]
+                InterruptingGraph(
+                    interruption,
+                    checkpoint_state=checkpoint_state,
+                )
+            ),
+            runs=self.runs,
+            passthrough_exceptions=(ExpectedResearchInterruption,),
+        )
+
+        with self.assertRaises(ExpectedResearchInterruption) as raised:
+            interrupted.execute_resume(
+                project_id=self.project_id,
+                thread_id=request.thread_id,
+                approved_urls=(candidate.url,),
+            )
+
+        self.assertIs(raised.exception, interruption)
+        restored = self.runs.get_run(self.project_id, request.thread_id)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.status, "waiting_for_review")  # type: ignore[union-attr]
+        self.assertEqual(  # type: ignore[union-attr]
+            restored.current_node,
+            waiting.current_node,
+        )
+        self.assertIsNone(restored.error_code)  # type: ignore[union-attr]
+        events = self.runs.list_events(self.project_id, request.thread_id)
+        self.assertNotIn("failed", [event.event_type for event in events])
+        self.assertEqual(events[-1].event_type, "interrupted")
+        self.assertEqual(
+            events[-1].details,
+            {"restored_status": "waiting_for_review"},
         )
 
 

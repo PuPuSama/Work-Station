@@ -168,6 +168,14 @@
   与轮询恢复，Local Research 保持原组件树。通用 Plan POST、Research Cancel/Retry、
   WordPress 和 Raw Artifact 继续关闭。结构记录见
   `docs/architecture/m7-server-knowledge-research.md`；
+- 已把 Product Rediscovery 与 Research Candidate 的官方网页入库统一收敛到
+  `WebPagePreparation` + `PostgresServerWebEvidenceIngestion`：网络、解析和内容寻址对象
+  Prepare 位于 SQL 外；每个页面的 Source/Snapshot/Chunk/Product/Asset/Evidence/Audit
+  在一次授权 PostgreSQL 事务提交。Fetcher、对象 Put、Commit 及 Research Review/Publish
+  贯穿可信取消/撤权 Checkpoint；精确重试不刷新聚合时间戳或重复 Audit，旧 Inbox 半图使用
+  独立 Reconcile Audit，Published 图禁止隐式修复。当前同 Source 新内容仍等待
+  Snapshot-bound Review Receipt。结构记录见
+  `docs/architecture/m7-server-web-evidence-ingestion.md`；
 - 已收紧 Server Knowledge 兼容写边界：Research Chat、通用 Evidence Pack Build、
   客户端 Evidence Link Write 与 Stale Review 因尚未绑定 PostgreSQL Task Revision、
   事务内撤权复核和 Audit，在 Server Mode 明确 503；Local Mode 保持不变。Server Plan

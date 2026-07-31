@@ -41,14 +41,16 @@
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
 | Server Knowledge Inbox | `/projects/{project}/knowledge` | Knowledge Library + 私有文档两阶段入库 + 原子 Review/Publish/Confirm；对象 Prepare、Embedding Prepare 与最终数据库切换分离 | `project.view` / `knowledge.edit` / `knowledge.publish`；上传前和写事务内重验权限并追加脱敏 Audit | Server Narrow |
-| Server Knowledge Research | `/api/knowledge/{project}/tasks/{task}/retrieval-plan`、`/api/knowledge/{project}/research-runs*` | 已确认 PostgreSQL Task + 不可变 Plan + PostgreSQL Run/Job/Checkpoint + Project-scoped S3 | Plan 为 `knowledge.edit`；Start/Resume、Claim、Handler、逐候选抓取与 Publish 为 `knowledge.publish` | Server Narrow |
+| Server Knowledge Research | `/api/knowledge/{project}/tasks/{task}/retrieval-plan`、`/api/knowledge/{project}/research-runs*` | 已确认 PostgreSQL Task + 不可变 Plan + PostgreSQL Run/Job/Checkpoint；网页对象 Prepare 后按页面原子提交 Source/Snapshot/Chunk/Product/Asset/Evidence/Audit | Plan 为 `knowledge.edit`；Start/Resume、Claim、Handler、逐 Fetch/Put/Commit/Review/Publish 均传递取消并复核 `knowledge.publish` | Server Narrow |
 
 私有文档上传 `POST /api/knowledge/{project}/sources/upload` 已迁移为 Server Narrow：
 原始/标准化/内嵌资产写入 Project-scoped ObjectStore，随后 Source/Snapshot/Chunk/Asset
 Link 与 Audit 在一个 PostgreSQL 事务提交。Research Plan/Start/Resume 已通过独立
-Server Registry、私有 Job 和安全 DTO 开放；通用 Plan POST、WordPress Sync 与 Raw
-Artifact 仍保持关闭，不能因同组窄路径已开放而整体放开 Knowledge 路由组。结构记录见
-`docs/architecture/m7-server-knowledge-research.md`。Research Chat、通用 Evidence Pack
+Server Registry、私有 Job 和安全 DTO 开放；受控 Research/Product Rediscovery 内部页面
+准备统一经过 Server Web Evidence Unit of Work，通用 Plan POST、WordPress Sync HTTP 与
+Raw Artifact HTTP 仍保持关闭，不能因同组窄路径已开放而整体放开 Knowledge 路由组。
+结构记录见 `docs/architecture/m7-server-knowledge-research.md` 和
+`docs/architecture/m7-server-web-evidence-ingestion.md`。Research Chat、通用 Evidence Pack
 Build、客户端 Evidence Link Write 与 Stale Review 也继续关闭；Server Plan 读取仅展示
 由已确认 Task 大纲生成的 Plan，结构记录见
 `docs/architecture/m7-server-knowledge-route-hardening.md`。

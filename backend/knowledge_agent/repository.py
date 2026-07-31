@@ -65,6 +65,56 @@ def _chunk_from_row(row: Mapping[str, object] | RowMapping) -> KnowledgeChunk:
     )
 
 
+def _source_from_row(
+    row: Mapping[str, object] | RowMapping,
+) -> KnowledgeSource:
+    return KnowledgeSource(
+        project_id=str(row["project_id"]),
+        source_id=str(row["source_id"]),
+        display_name=str(row["display_name"]),
+        source_kind=str(row["source_kind"]),  # type: ignore[arg-type]
+        trust_tier=str(row["trust_tier"]),  # type: ignore[arg-type]
+        status=str(row["status"]),  # type: ignore[arg-type]
+        public_source=bool(row["public_source"]),
+        canonical_url=(
+            None
+            if row["canonical_url"] is None
+            else str(row["canonical_url"])
+        ),
+        current_snapshot_id=(
+            None
+            if row["current_snapshot_id"] is None
+            else str(row["current_snapshot_id"])
+        ),
+        metadata=dict(row["metadata"] or {}),  # type: ignore[arg-type]
+    )
+
+
+def _snapshot_from_row(
+    row: Mapping[str, object] | RowMapping,
+) -> SourceSnapshot:
+    return SourceSnapshot(
+        project_id=str(row["project_id"]),
+        source_id=str(row["source_id"]),
+        snapshot_id=str(row["snapshot_id"]),
+        content_hash=str(row["content_hash"]),
+        fetched_at=row["fetched_at"],  # type: ignore[arg-type]
+        parser_name=str(row["parser_name"]),
+        parser_version=str(row["parser_version"]),
+        raw_artifact_uri=(
+            None
+            if row["raw_artifact_uri"] is None
+            else str(row["raw_artifact_uri"])
+        ),
+        normalized_artifact_uri=(
+            None
+            if row["normalized_artifact_uri"] is None
+            else str(row["normalized_artifact_uri"])
+        ),
+        metadata=dict(row["metadata"] or {}),  # type: ignore[arg-type]
+    )
+
+
 class PostgresKnowledgeRepository:
     """SQLAlchemy Core implementation of the project-scoped knowledge store."""
 
@@ -138,36 +188,79 @@ class PostgresKnowledgeRepository:
             canonical_url=source.canonical_url,
             metadata=dict(source.metadata),
         )
+        keep_published = sa.and_(
+            knowledge_sources.c.status == "published",
+            statement.excluded.status == "inbox",
+        )
         statement = statement.on_conflict_do_update(
             index_elements=[
                 knowledge_sources.c.project_id,
                 knowledge_sources.c.source_id,
             ],
             set_={
-                "display_name": statement.excluded.display_name,
-                "source_kind": statement.excluded.source_kind,
-                "trust_tier": statement.excluded.trust_tier,
+                # A new unreviewed snapshot must not mutate aggregate facts
+                # currently served for the published snapshot.
+                "display_name": sa.case(
+                    (keep_published, knowledge_sources.c.display_name),
+                    else_=statement.excluded.display_name,
+                ),
+                "source_kind": sa.case(
+                    (keep_published, knowledge_sources.c.source_kind),
+                    else_=statement.excluded.source_kind,
+                ),
+                "trust_tier": sa.case(
+                    (keep_published, knowledge_sources.c.trust_tier),
+                    else_=statement.excluded.trust_tier,
+                ),
                 # A refresh may upsert source metadata before its new snapshot
                 # has embeddings. Keep the active snapshot serving until
                 # activate_snapshot performs the atomic switch. Explicit
                 # moderation states still withdraw the source from retrieval.
                 "status": sa.case(
                     (
-                        sa.and_(
-                            knowledge_sources.c.status == "published",
-                            statement.excluded.status == "inbox",
-                        ),
+                        keep_published,
                         knowledge_sources.c.status,
                     ),
                     else_=statement.excluded.status,
                 ),
-                "public_source": statement.excluded.public_source,
-                "canonical_url": statement.excluded.canonical_url,
-                "metadata": statement.excluded.metadata,
+                "public_source": sa.case(
+                    (keep_published, knowledge_sources.c.public_source),
+                    else_=statement.excluded.public_source,
+                ),
+                "canonical_url": sa.case(
+                    (keep_published, knowledge_sources.c.canonical_url),
+                    else_=statement.excluded.canonical_url,
+                ),
+                "metadata": sa.case(
+                    (keep_published, knowledge_sources.c.metadata),
+                    else_=statement.excluded.metadata,
+                ),
                 "updated_at": sa.func.now(),
             },
         )
         connection.execute(statement)
+
+    def get_source_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        source_id: str,
+    ) -> KnowledgeSource | None:
+        """Read the stored aggregate source inside a caller transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "knowledge source reads require a business transaction"
+            )
+        row = connection.execute(
+            sa.select(knowledge_sources).where(
+                knowledge_sources.c.project_id
+                == _required_text(project_id, "project_id"),
+                knowledge_sources.c.source_id
+                == _required_text(source_id, "source_id"),
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _source_from_row(row)
 
     def store_snapshot(
         self,
@@ -187,6 +280,35 @@ class PostgresKnowledgeRepository:
             raise KnowledgeConflictError(
                 "snapshot conflicts with an existing project-scoped record"
             ) from exc
+
+    def find_snapshot_by_content_in_transaction(
+        self,
+        connection: Connection,
+        *,
+        project_id: str,
+        source_id: str,
+        content_hash: str,
+        parser_name: str,
+        parser_version: str,
+    ) -> SourceSnapshot | None:
+        """Read the canonical immutable snapshot inside a source lock."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "knowledge snapshot lookup requires a business transaction"
+            )
+        row = connection.execute(
+            sa.select(source_snapshots).where(
+                source_snapshots.c.project_id
+                == _required_text(project_id, "project_id"),
+                source_snapshots.c.source_id
+                == _required_text(source_id, "source_id"),
+                source_snapshots.c.content_hash == content_hash,
+                source_snapshots.c.parser_name == parser_name,
+                source_snapshots.c.parser_version == parser_version,
+            )
+        ).mappings().one_or_none()
+        return None if row is None else _snapshot_from_row(row)
 
     def store_snapshot_in_transaction(
         self,

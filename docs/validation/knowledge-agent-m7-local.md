@@ -1869,3 +1869,40 @@ Set-Location frontend
 - 通用写接口的专用 Server Command、来源级原子 Web Evidence Ingestion 与 Server Raw
   Artifact Download 仍是后续切片，不能因本次收口描述为已经迁移。结构与重构接缝见
   `docs/architecture/m7-server-knowledge-route-hardening.md`。
+
+### M7 Server Web Evidence 原子入库
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -p 'test_*.py'
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini upgrade head
+.\backend\.venv\Scripts\python.exe -m alembic -c backend\alembic.ini current
+
+Set-Location frontend
+& '<工作区 Node 绝对路径>' node_modules\eslint\bin\eslint.js .
+& '<工作区 Node 绝对路径>' node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- 完整后端回归 730 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 新增 Server Web Evidence 集成覆盖 Prepare 无数据库副作用、完整 Evidence Graph 原子提交、
+  Product/Asset 中间故障与 Audit 故障回滚、撤权/取消、双 Prepare Canonical Snapshot、
+  Exact Retry、Product 时间戳不漂移、真实 Published/Confirmed 返回、Reconcile Audit、
+  Asset ID 去重重映射、Raw/Normalized/Asset 精确对象 Scope 和 Snapshot Review Gate；
+- Research 取消测试覆盖 Fetch、页面 Commit、Review 和 Publish 边界；Product Rediscovery
+  将可信 Actor、Job ID 与取消 Callback 传入同一 Server Unit of Work；
+- Research Execution 将 `JobCancelled` 作为显式 passthrough：Run 恢复执行前可重试状态并
+  追加 `interrupted` Event，Handler 向 Batch Runner 原样传播取消，不落 terminal failed；
+- 首轮完整回归发现 psycopg `ON CONFLICT` 的 `rowcount` 不能可靠表达插入结果，已改用
+  `RETURNING` 作为 Source/Asset Evidence 和 Snapshot Asset Link 的真实变更 Receipt；同时
+  修正 append-only Audit 测试替身与取消错误文案断言，随后完整回归通过；
+- Alembic `upgrade head` 成功，Current/Head 均为 `20260731_0018`；本切片不修改 Schema；
+- 前端全量 ESLint 与 Next.js 16.2.10 production build 全部通过，Build 内 TypeScript
+  检查通过；本切片不修改前端接口或组件；
+- 没有调用真实网站、Tavily、Embedding、生产 S3 或客户资料；生产供应商往返与恢复演练
+  仍属于 M7 External Gate；
+- 组件职责、五阶段状态机、事务边界、Audit 白名单、Orphan、Exact Retry、当前刷新限制
+  和未来显式 Execution Context/Snapshot Review Receipt 接缝记录在
+  `docs/architecture/m7-server-web-evidence-ingestion.md`。

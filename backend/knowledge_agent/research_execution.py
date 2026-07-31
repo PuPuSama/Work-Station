@@ -69,9 +69,19 @@ class ResearchGraphExecutionService:
         *,
         sessions: ResearchGraphSessionFactory,
         runs: PostgresResearchRunRepository,
+        passthrough_exceptions: tuple[type[Exception], ...] = (),
     ) -> None:
         self._sessions = sessions
         self._runs = runs
+        if any(
+            not isinstance(error_type, type)
+            or not issubclass(error_type, Exception)
+            for error_type in passthrough_exceptions
+        ):
+            raise ValueError(
+                "passthrough_exceptions must contain Exception types"
+            )
+        self._passthrough_exceptions = passthrough_exceptions
 
     def enqueue(
         self,
@@ -101,6 +111,7 @@ class ResearchGraphExecutionService:
         if run.status == "waiting_for_review":
             return run
 
+        previous = run
         self._runs.mark_started(request.project_id, request.thread_id)
         try:
             with self._sessions.open() as graph:
@@ -112,6 +123,9 @@ class ResearchGraphExecutionService:
                 )
             return self._persist_state(request.project_id, request.thread_id, state)
         except Exception as exc:
+            if isinstance(exc, self._passthrough_exceptions):
+                self._runs.restore_after_interruption(previous)
+                raise
             self._persist_failure(request.project_id, request.thread_id, exc)
             raise ResearchExecutionError("Research execution failed.") from exc
 
@@ -127,6 +141,9 @@ class ResearchGraphExecutionService:
             thread_id=thread_id,
             approved_urls=approved_urls,
         )
+        previous = self._runs.get_run(project_id, thread_id)
+        if previous is None:
+            raise ResearchRunNotFound("research run was not found")
         self._runs.append_event(
             project_id=project_id,
             thread_id=thread_id,
@@ -144,6 +161,9 @@ class ResearchGraphExecutionService:
                 state = graph.resume(thread_id, approved_urls=approved_urls)
             return self._persist_state(project_id, thread_id, state)
         except Exception as exc:
+            if isinstance(exc, self._passthrough_exceptions):
+                self._runs.restore_after_interruption(previous)
+                raise
             self._persist_failure(project_id, thread_id, exc)
             raise ResearchExecutionError("Research execution failed.") from exc
 

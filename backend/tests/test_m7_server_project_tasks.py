@@ -6593,11 +6593,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
 
         handler = ServerProductRediscoveryHandler(
             self.engine,
-            sync_factory=lambda organization_id, project_id: (
+            sync_factory=lambda actor, project_id, job_id, cancelled: (
                 calls.append(
                     {
-                        "factory_organization_id": organization_id,
+                        "factory_organization_id": actor.organization_id,
+                        "factory_user_id": actor.user_id,
                         "factory_project_id": project_id,
+                        "factory_job_id": job_id,
+                        "factory_cancelled": cancelled(),
                     }
                 )
                 or FakeSync()
@@ -6607,6 +6610,8 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             "operation": "product_rediscovery",
             "organization_id": self.org_a,
             "project_id": self.project_a,
+            "id": "job-product-rediscovery",
+            "requested_by_user_id": self.user_a,
             "task_id": self.task_a,
             "source_revision": 0,
             "request": {
@@ -6625,7 +6630,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             [
                 {
                     "factory_organization_id": self.org_a,
+                    "factory_user_id": self.user_a,
                     "factory_project_id": self.project_a,
+                    "factory_job_id": "job-product-rediscovery",
+                    "factory_cancelled": False,
                 },
                 {
                     "project_id": self.project_a,

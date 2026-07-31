@@ -472,6 +472,66 @@ class PostgresResearchRunRepository:
             ).mappings().one()
             return _run_from_row(row)
 
+    def restore_after_interruption(
+        self,
+        previous: ResearchGraphRun,
+    ) -> ResearchGraphRun:
+        """Restore the resumable projection after controlled worker stop.
+
+        LangGraph owns its checkpoint transaction. The PostgreSQL business
+        projection must return to the state that was valid before this
+        execution attempt, rather than becoming terminal ``failed``.
+        """
+
+        if previous.status not in {
+            "queued",
+            "running",
+            "waiting_for_review",
+        }:
+            raise ResearchRunConflictError(
+                "interrupted research state is not resumable"
+            )
+        with self._engine.begin() as connection:
+            current = self._locked_run(
+                connection,
+                previous.project_id,
+                previous.thread_id,
+            )
+            if current.status in TERMINAL_RESEARCH_STATUSES:
+                raise ResearchRunConflictError(
+                    "terminal research run cannot be restored"
+                )
+            row = connection.execute(
+                research_graph_runs.update()
+                .where(
+                    research_graph_runs.c.project_id
+                    == previous.project_id,
+                    research_graph_runs.c.thread_id
+                    == previous.thread_id,
+                )
+                .values(
+                    status=previous.status,
+                    current_node=previous.current_node,
+                    current_scope_id=previous.current_scope_id,
+                    error_code=None,
+                    error_message=None,
+                    updated_at=sa.func.now(),
+                    finished_at=None,
+                )
+                .returning(research_graph_runs)
+            ).mappings().one()
+            restored = _run_from_row(row)
+            self.append_event_in_transaction(
+                connection,
+                project_id=previous.project_id,
+                thread_id=previous.thread_id,
+                event_type="interrupted",
+                node_name=previous.current_node,
+                scope_id=previous.current_scope_id,
+                details={"restored_status": previous.status},
+            )
+            return restored
+
     def append_event(
         self,
         *,

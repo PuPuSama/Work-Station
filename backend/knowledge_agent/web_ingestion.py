@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
@@ -66,6 +66,57 @@ class WebSnapshotLookup(Protocol):
     ) -> SourceSnapshot | None: ...
 
 
+class WebPageIngestion(Protocol):
+    """Shared Local/Server page-ingestion surface.
+
+    Local mode persists through the M2 repositories. Server mode supplies a
+    wrapper with the same methods but commits the prepared evidence in one
+    authorized PostgreSQL transaction.
+    """
+
+    def ingest_url(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        url: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> WebPageIngestionResult: ...
+
+    def ingest_resource(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        resource: FetchedResource,
+        classification: ClassifiedWebPage,
+        metadata: Mapping[str, object] | None = None,
+    ) -> WebPageIngestionResult: ...
+
+
+class WebPagePreparation(Protocol):
+    """Prepare immutable page evidence without relational database writes."""
+
+    def prepare_url(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        url: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> PreparedWebPageIngestion: ...
+
+    def prepare_resource(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        resource: FetchedResource,
+        classification: ClassifiedWebPage,
+        metadata: Mapping[str, object] | None = None,
+    ) -> PreparedWebPageIngestion: ...
+
+
 @dataclass(frozen=True, slots=True)
 class WebPageIngestionResult:
     """One reviewable webpage snapshot and any product evidence derived from it."""
@@ -77,6 +128,105 @@ class WebPageIngestionResult:
     product: KnowledgeProduct | None
     assets: tuple[KnowledgeAsset, ...]
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedWebPageIngestion:
+    """Frozen official-page evidence with no database side effects.
+
+    ArtifactStore writes are content addressed and may already have occurred.
+    Repository writes are deliberately deferred so a Server adapter can lock
+    access and commit every relational record with its Audit event.
+    """
+
+    source: KnowledgeSource
+    snapshot: SourceSnapshot
+    normalized_content_hash: str
+    chunks: tuple[KnowledgeChunk, ...]
+    classification: ClassifiedWebPage
+    product: KnowledgeProduct | None
+    source_evidence: ProductSourceEvidence | None
+    assets: tuple[KnowledgeAsset, ...]
+    snapshot_assets: tuple[SnapshotAsset, ...]
+    asset_evidence: tuple[ProductAssetEvidence, ...]
+    warnings: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        project_id = self.source.project_id
+        if not re.fullmatch(r"[0-9a-f]{64}", self.normalized_content_hash):
+            raise ValueError(
+                "normalized_content_hash must be a lowercase SHA-256 digest"
+            )
+        snapshot_identity = (
+            project_id,
+            self.source.source_id,
+            self.snapshot.snapshot_id,
+        )
+        if (
+            self.snapshot.project_id != project_id
+            or self.snapshot.source_id != self.source.source_id
+            or not self.chunks
+            or any(
+                (
+                    chunk.project_id,
+                    chunk.source_id,
+                    chunk.snapshot_id,
+                )
+                != snapshot_identity
+                for chunk in self.chunks
+            )
+        ):
+            raise ValueError(
+                "prepared chunks must belong to the supplied source snapshot"
+            )
+        if len({chunk.ordinal for chunk in self.chunks}) != len(self.chunks):
+            raise ValueError("prepared chunk ordinals must be unique")
+        if (self.product is None) != (self.source_evidence is None):
+            raise ValueError(
+                "prepared product and source evidence must be provided together"
+            )
+        if self.product is not None and (
+            self.product.project_id != project_id
+            or self.source_evidence is None
+            or self.source_evidence.project_id != project_id
+            or self.source_evidence.product_id != self.product.product_id
+            or self.source_evidence.source_id != self.source.source_id
+            or self.source_evidence.snapshot_id != self.snapshot.snapshot_id
+        ):
+            raise ValueError("prepared product evidence is out of scope")
+        asset_ids = {asset.asset_id for asset in self.assets}
+        if len(asset_ids) != len(self.assets):
+            raise ValueError("prepared asset ids must be unique")
+        if any(
+            link.project_id != project_id
+            or link.source_id != self.source.source_id
+            or link.snapshot_id != self.snapshot.snapshot_id
+            or link.asset_id not in asset_ids
+            for link in self.snapshot_assets
+        ):
+            raise ValueError("prepared snapshot assets are out of scope")
+        if len({link.ordinal for link in self.snapshot_assets}) != len(
+            self.snapshot_assets
+        ):
+            raise ValueError("prepared snapshot asset ordinals must be unique")
+        linked_asset_ids = {link.asset_id for link in self.snapshot_assets}
+        if (
+            len(linked_asset_ids) != len(self.snapshot_assets)
+            or linked_asset_ids != asset_ids
+        ):
+            raise ValueError(
+                "every prepared asset must have one snapshot link"
+            )
+        if any(
+            self.product is None
+            or evidence.project_id != project_id
+            or evidence.product_id != self.product.product_id
+            or evidence.source_id != self.source.source_id
+            or evidence.snapshot_id != self.snapshot.snapshot_id
+            or evidence.asset_id not in linked_asset_ids
+            for evidence in self.asset_evidence
+        ):
+            raise ValueError("prepared product asset evidence is out of scope")
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +469,25 @@ class OfficialWebPageIngestionService:
         url: str,
         metadata: Mapping[str, object] | None = None,
     ) -> WebPageIngestionResult:
+        return self._persist_prepared(
+            self.prepare_url(
+                project_id=project_id,
+                site_url=site_url,
+                url=url,
+                metadata=metadata,
+            )
+        )
+
+    def prepare_url(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        url: str,
+        metadata: Mapping[str, object] | None = None,
+    ) -> PreparedWebPageIngestion:
+        """Fetch, parse and store immutable objects without database writes."""
+
         site = normalize_site_url(site_url)
         target = normalize_official_url(site, url)
         resource = self._fetcher.fetch(site_url=site, url=target)
@@ -326,7 +495,7 @@ class OfficialWebPageIngestionService:
             requested_url=resource.final_url,
             html=resource.content,
         )
-        return self.ingest_resource(
+        return self.prepare_resource(
             project_id=project_id,
             site_url=site,
             resource=resource,
@@ -343,6 +512,27 @@ class OfficialWebPageIngestionService:
         classification: ClassifiedWebPage,
         metadata: Mapping[str, object] | None = None,
     ) -> WebPageIngestionResult:
+        return self._persist_prepared(
+            self.prepare_resource(
+                project_id=project_id,
+                site_url=site_url,
+                resource=resource,
+                classification=classification,
+                metadata=metadata,
+            )
+        )
+
+    def prepare_resource(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        resource: FetchedResource,
+        classification: ClassifiedWebPage,
+        metadata: Mapping[str, object] | None = None,
+    ) -> PreparedWebPageIngestion:
+        """Prepare one page and its product assets without relational writes."""
+
         normalize_official_url(site_url, classification.canonical_url)
         source_kind, trust_tier = _page_policy(classification.page_type)
         document = _document_for_page(resource, classification)
@@ -427,31 +617,94 @@ class OfficialWebPageIngestionService:
                 "block_count": len(document.blocks),
             },
         )
-        self._repository.upsert_source(source)
-        self._repository.store_snapshot(project_id, snapshot, chunks)
-
         product: KnowledgeProduct | None = None
+        source_evidence: ProductSourceEvidence | None = None
         assets: tuple[KnowledgeAsset, ...] = ()
+        snapshot_assets: tuple[SnapshotAsset, ...] = ()
+        asset_evidence: tuple[ProductAssetEvidence, ...] = ()
         warnings: tuple[str, ...] = ()
         if classification.page_type == "product_detail":
-            product, assets, warnings = self._store_product_evidence(
+            (
+                product,
+                source_evidence,
+                assets,
+                snapshot_assets,
+                asset_evidence,
+                warnings,
+            ) = self._prepare_product_evidence(
                 project_id=project_id,
                 site_url=site_url,
                 source=source,
                 snapshot=snapshot,
                 page=classification,
             )
-        return WebPageIngestionResult(
+        return PreparedWebPageIngestion(
             source=source,
             snapshot=snapshot,
+            normalized_content_hash=normalized_hash,
             chunks=chunks,
             classification=classification,
             product=product,
+            source_evidence=source_evidence,
             assets=assets,
+            snapshot_assets=snapshot_assets,
+            asset_evidence=asset_evidence,
             warnings=warnings,
         )
 
-    def _store_product_evidence(
+    def _persist_prepared(
+        self,
+        prepared: PreparedWebPageIngestion,
+    ) -> WebPageIngestionResult:
+        """Keep the M2 Local persistence behavior behind the new prepare seam."""
+
+        self._repository.upsert_source(prepared.source)
+        self._repository.store_snapshot(
+            prepared.source.project_id,
+            prepared.snapshot,
+            prepared.chunks,
+        )
+        if prepared.product is not None:
+            self._catalog_repository.upsert_product(prepared.product)
+        if prepared.source_evidence is not None:
+            self._catalog_repository.store_source_evidence(
+                prepared.source_evidence
+            )
+
+        stored_assets: list[KnowledgeAsset] = []
+        stored_ids: dict[str, str] = {}
+        for asset in prepared.assets:
+            stored = self._asset_repository.put_asset(asset)
+            stored_assets.append(stored)
+            stored_ids[asset.asset_id] = stored.asset_id
+        for link in prepared.snapshot_assets:
+            self._asset_repository.link_snapshot_asset(
+                replace(
+                    link,
+                    asset_id=stored_ids.get(link.asset_id, link.asset_id),
+                )
+            )
+        for evidence in prepared.asset_evidence:
+            self._catalog_repository.store_asset_evidence(
+                replace(
+                    evidence,
+                    asset_id=stored_ids.get(
+                        evidence.asset_id,
+                        evidence.asset_id,
+                    ),
+                )
+            )
+        return WebPageIngestionResult(
+            source=prepared.source,
+            snapshot=prepared.snapshot,
+            chunks=prepared.chunks,
+            classification=prepared.classification,
+            product=prepared.product,
+            assets=tuple(stored_assets),
+            warnings=prepared.warnings,
+        )
+
+    def _prepare_product_evidence(
         self,
         *,
         project_id: str,
@@ -459,7 +712,14 @@ class OfficialWebPageIngestionService:
         source: KnowledgeSource,
         snapshot: SourceSnapshot,
         page: ClassifiedWebPage,
-    ) -> tuple[KnowledgeProduct, tuple[KnowledgeAsset, ...], tuple[str, ...]]:
+    ) -> tuple[
+        KnowledgeProduct,
+        ProductSourceEvidence,
+        tuple[KnowledgeAsset, ...],
+        tuple[SnapshotAsset, ...],
+        tuple[ProductAssetEvidence, ...],
+        tuple[str, ...],
+    ]:
         parsed = page.product_page
         name = (
             parsed.h1
@@ -489,40 +749,40 @@ class OfficialWebPageIngestionService:
                 "faq": list(parsed.faq) if parsed is not None else [],
             },
         )
-        self._catalog_repository.upsert_product(product)
-        self._catalog_repository.store_source_evidence(
-            ProductSourceEvidence(
-                project_id=project_id,
-                product_id=product.product_id,
-                source_id=source.source_id,
-                snapshot_id=snapshot.snapshot_id,
-                relation="primary_detail",
-                confidence=page.confidence,
-                reason="deterministic classifier identified an official product detail page",
-                metadata={
-                    "classification_reasons": list(page.reasons),
-                    "selection_projection": {
-                        "schema_version": 1,
-                        "name": product.name,
-                        "canonical_url": product.canonical_url,
-                        "description": product.metadata.get(
-                            "description",
-                            "",
-                        ),
-                        "reference_facts": product.metadata.get(
-                            "main_content_facts",
-                            [],
-                        ),
-                        "specification_tables": product.metadata.get(
-                            "specification_tables",
-                            [],
-                        ),
-                    },
+        source_evidence = ProductSourceEvidence(
+            project_id=project_id,
+            product_id=product.product_id,
+            source_id=source.source_id,
+            snapshot_id=snapshot.snapshot_id,
+            relation="primary_detail",
+            confidence=page.confidence,
+            reason=(
+                "deterministic classifier identified an official product "
+                "detail page"
+            ),
+            metadata={
+                "classification_reasons": list(page.reasons),
+                "selection_projection": {
+                    "schema_version": 1,
+                    "name": product.name,
+                    "canonical_url": product.canonical_url,
+                    "description": product.metadata.get(
+                        "description",
+                        "",
+                    ),
+                    "reference_facts": product.metadata.get(
+                        "main_content_facts",
+                        [],
+                    ),
+                    "specification_tables": product.metadata.get(
+                        "specification_tables",
+                        [],
+                    ),
                 },
-            )
+            },
         )
         if parsed is None or self._max_product_images == 0:
-            return product, (), ()
+            return product, source_evidence, (), (), (), ()
 
         candidates = []
         seen_urls: set[str] = set()
@@ -543,6 +803,8 @@ class OfficialWebPageIngestionService:
                 break
 
         stored: list[KnowledgeAsset] = []
+        snapshot_assets: list[SnapshotAsset] = []
+        asset_evidence: list[ProductAssetEvidence] = []
         warnings: list[str] = []
         stored_hashes: set[str] = set()
         for evidence_kind, candidate in candidates:
@@ -574,18 +836,16 @@ class OfficialWebPageIngestionService:
                     ),
                     content=resource.content,
                 )
-                asset = self._asset_repository.put_asset(
-                    KnowledgeAsset(
-                        project_id=project_id,
-                        asset_id=f"asset_{content_hash[:32]}",
-                        content_hash=content_hash,
-                        artifact_uri=artifact_uri,
-                        content_type=content_type,
-                        byte_size=len(resource.content),
-                        width=width,
-                        height=height,
-                        metadata={"source_url": image_url},
-                    )
+                asset = KnowledgeAsset(
+                    project_id=project_id,
+                    asset_id=f"asset_{content_hash[:32]}",
+                    content_hash=content_hash,
+                    artifact_uri=artifact_uri,
+                    content_type=content_type,
+                    byte_size=len(resource.content),
+                    width=width,
+                    height=height,
+                    metadata={"source_url": image_url},
                 )
                 link = SnapshotAsset(
                     project_id=project_id,
@@ -601,7 +861,7 @@ class OfficialWebPageIngestionService:
                     locator=dict(candidate.dom_context),
                     metadata={"source_kinds": list(candidate.source_kinds)},
                 )
-                self._asset_repository.link_snapshot_asset(link)
+                snapshot_assets.append(link)
                 role = (
                     "primary"
                     if not stored and evidence_kind in {"gallery", "json_ld"}
@@ -609,7 +869,7 @@ class OfficialWebPageIngestionService:
                     if evidence_kind in {"gallery", "json_ld"}
                     else "detail"
                 )
-                self._catalog_repository.store_asset_evidence(
+                asset_evidence.append(
                     ProductAssetEvidence(
                         project_id=project_id,
                         product_id=product.product_id,
@@ -635,7 +895,14 @@ class OfficialWebPageIngestionService:
                 warnings.append(
                     f"image candidate skipped ({candidate.source_url}): {exc}"
                 )
-        return product, tuple(stored), tuple(warnings)
+        return (
+            product,
+            source_evidence,
+            tuple(stored),
+            tuple(snapshot_assets),
+            tuple(asset_evidence),
+            tuple(warnings),
+        )
 
 
 class WordPressProductSyncService:
@@ -645,7 +912,7 @@ class WordPressProductSyncService:
         self,
         *,
         fetcher: OfficialSiteFetcher,
-        page_ingestion: OfficialWebPageIngestionService,
+        page_ingestion: WebPageIngestion,
     ) -> None:
         self._fetcher = fetcher
         self._page_ingestion = page_ingestion
@@ -746,6 +1013,9 @@ __all__ = [
     "MAX_PRODUCT_IMAGES_PER_PAGE",
     "MAX_PRODUCT_IMAGE_BYTES",
     "OfficialWebPageIngestionService",
+    "PreparedWebPageIngestion",
+    "WebPageIngestion",
+    "WebPagePreparation",
     "WebPageIngestionResult",
     "WebSnapshotLookup",
     "WordPressCategorySyncResult",

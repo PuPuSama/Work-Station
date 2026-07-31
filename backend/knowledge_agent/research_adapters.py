@@ -25,7 +25,7 @@ from .research_runs import (
 )
 from .schema import projects
 from .scope_evidence import ScopeEvidenceService
-from .web_ingestion import OfficialWebPageIngestionService
+from .web_ingestion import WebPageIngestion
 from .wordpress import (
     UnsafeOfficialSiteUrl,
     WordPressIngestionError,
@@ -291,7 +291,7 @@ class OfficialCandidateIngestionAdapter:
         self,
         *,
         projects: PostgresProjectDirectory,
-        web_ingestion: OfficialWebPageIngestionService,
+        web_ingestion: WebPageIngestion,
         repository: KnowledgeRepository,
         library: PostgresKnowledgeLibrary,
         publication: KnowledgePublicationService,

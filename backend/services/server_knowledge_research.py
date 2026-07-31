@@ -81,13 +81,28 @@ from services.server_project_job_registry import (
     ServerProjectJobStopReport,
     public_job,
 )
+from services.server_web_evidence_ingestion import (
+    CheckpointingOfficialSiteFetcher,
+    PostgresServerWebEvidenceIngestion,
+    ServerWebEvidenceContext,
+)
 from services.tavily import TavilyClient
 
 
 KNOWLEDGE_RESEARCH_OPERATION = "knowledge_research"
 MAX_APPROVED_CANDIDATES = 20
-_ACTIVE_RESEARCH_ACTOR: ContextVar[ActorIdentity | None] = ContextVar(
-    "server_knowledge_research_actor",
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveResearchExecution:
+    actor: ActorIdentity
+    cancelled: Callable[[], bool]
+
+
+_ACTIVE_RESEARCH_EXECUTION: ContextVar[
+    _ActiveResearchExecution | None
+] = ContextVar(
+    "server_knowledge_research_execution",
     default=None,
 )
 
@@ -290,60 +305,99 @@ class ServerCandidateIngestionAdapter:
         approved_urls: Sequence[str],
         attempt_id: str,
     ) -> CandidateIngestionResult:
-        actor = _ACTIVE_RESEARCH_ACTOR.get()
-        if actor is None:
-            raise JobConflict("knowledge research actor context is unavailable")
-        self._access.require(actor, project_id, "knowledge.publish")
+        execution = _ACTIVE_RESEARCH_EXECUTION.get()
+        if execution is None:
+            raise JobConflict(
+                "knowledge research execution context is unavailable"
+            )
+        actor = execution.actor
+
+        def checkpoint() -> None:
+            if execution.cancelled():
+                raise JobCancelled("Knowledge research cancelled.")
+            self._access.require(
+                actor,
+                project_id,
+                "knowledge.publish",
+            )
+
+        checkpoint()
         repository = PostgresKnowledgeRepository(self._engine)
         assets = PostgresKnowledgeAssetRepository(self._engine)
         catalog = PostgresProductCatalogRepository(self._engine)
         library = PostgresKnowledgeLibrary(self._engine)
-        fetcher = SafeOfficialSiteFetcher()
+        fetcher = CheckpointingOfficialSiteFetcher(
+            SafeOfficialSiteFetcher(),
+            checkpoint=checkpoint,
+        )
         commands = PostgresServerKnowledgeCommands(
             self._engine,
             repository=repository,
             catalog=catalog,
             publication=self._publication,
         )
-        ingestion = OfficialCandidateIngestionAdapter(
-            projects=PostgresProjectDirectory(self._engine),
-            web_ingestion=OfficialWebPageIngestionService(
-                repository=repository,
-                asset_repository=assets,
-                catalog_repository=catalog,
-                artifact_store=ScopedS3ArtifactStore(
-                    store=self._store,
-                    bucket=self._bucket,
-                    organization_id=actor.organization_id,
-                    project_id=project_id,
-                ),
-                fetcher=fetcher,
-                snapshot_lookup=library,
-            ),
+        preparer = OfficialWebPageIngestionService(
             repository=repository,
-            library=library,
-            publication=self._publication,
-            attempts=self._attempts,
-            authorize_candidate=lambda: self._access.require(
-                actor,
-                project_id,
-                "knowledge.publish",
+            asset_repository=assets,
+            catalog_repository=catalog,
+            artifact_store=ScopedS3ArtifactStore(
+                store=self._store,
+                bucket=self._bucket,
+                organization_id=actor.organization_id,
+                project_id=project_id,
+                checkpoint=checkpoint,
             ),
-            review_source=lambda source, decision, reason: commands.review_source(
+            fetcher=fetcher,
+            snapshot_lookup=library,
+        )
+        web_ingestion = PostgresServerWebEvidenceIngestion(
+            self._engine,
+            preparer=preparer,
+            context=ServerWebEvidenceContext(
+                actor=actor,
+                project_id=project_id,
+                operation=KNOWLEDGE_RESEARCH_OPERATION,
+                target_type="research_thread",
+                target_id=thread_id,
+                permission="knowledge.publish",
+                cancelled=execution.cancelled,
+            ),
+            bucket=self._bucket,
+            repository=repository,
+            assets=assets,
+            catalog=catalog,
+        )
+        def review_source(source, decision, reason):
+            checkpoint()
+            return commands.review_source(
                 actor=actor,
                 project_id=project_id,
                 source_id=source.source_id,
                 source_kind=source.source_kind,
                 trust_tier=source.trust_tier,
-                decision=decision,  # type: ignore[arg-type]
+                decision=decision,
                 reason=reason,
-            ),
-            publish_source=lambda source, snapshot_id: commands.publish_source(
+            )
+
+        def publish_source(source, snapshot_id):
+            checkpoint()
+            return commands.publish_source(
                 actor=actor,
                 project_id=project_id,
                 source_id=source.source_id,
                 snapshot_id=snapshot_id,
-            ).source_id,
+            ).source_id
+
+        ingestion = OfficialCandidateIngestionAdapter(
+            projects=PostgresProjectDirectory(self._engine),
+            web_ingestion=web_ingestion,
+            repository=repository,
+            library=library,
+            publication=self._publication,
+            attempts=self._attempts,
+            authorize_candidate=checkpoint,
+            review_source=review_source,
+            publish_source=publish_source,
         )
         return ingestion.ingest(
             project_id=project_id,
@@ -416,6 +470,7 @@ def create_server_research_execution(
             telemetry=PostgresResearchTelemetry(runs),
         ),
         runs=runs,
+        passthrough_exceptions=(JobCancelled,),
     )
 
 
@@ -494,8 +549,11 @@ class ServerKnowledgeResearchHandler:
             or run.outline_version != command.outline_version
         ):
             raise JobConflict("research run identity is invalid")
-        actor_token = _ACTIVE_RESEARCH_ACTOR.set(
-            ActorIdentity(organization_id, requester)
+        execution_token = _ACTIVE_RESEARCH_EXECUTION.set(
+            _ActiveResearchExecution(
+                actor=ActorIdentity(organization_id, requester),
+                cancelled=cancelled,
+            )
         )
         try:
             if command.action == "start":
@@ -530,7 +588,7 @@ class ServerKnowledgeResearchHandler:
             # this Job terminal until a domain Resume command is created.
             raise JobConflict("knowledge research execution failed") from exc
         finally:
-            _ACTIVE_RESEARCH_ACTOR.reset(actor_token)
+            _ACTIVE_RESEARCH_EXECUTION.reset(execution_token)
         return source_revision
 
 
