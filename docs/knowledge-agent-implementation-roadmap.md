@@ -173,6 +173,11 @@
 - 已接通 Server 私有图片准备：Hero 由项目 Asset ID 指定，产品图只读取 Task 已确认的
   `selected_asset_id`；对象读取再次授权并复核哈希，在内存生成内容寻址 WebP，最多三张
   且视觉去重，Task 只保存 Asset 引用和文章锚点，不创建本地图片路径；
+- 已新增 Project-scoped Server Catalog：产品只列出由当前 Published Snapshot
+  Primary Evidence 支撑的 confirmed 身份；图片只列出当前 Published Snapshot 的安全
+  摘要。响应不含对象 URI/Key、Hash、Canonical/Source URL 或 Metadata；Hero 选择器按
+  Asset ID 单独取得 5 分钟短时预览，URL 只留在组件内存，产品图仍固定读取 Task
+  `selected_asset_id`；
 - 自动锚点失败时返回非 FAQ H2/H3 候选且不上传派生对象；人工锚点只能绑定当前 Task
   Product ID；
 - 已接通 Server 文章 DOCX：`article.deliver` 下重新读取并复核 Task 的私有 WebP，
@@ -199,11 +204,12 @@
   `D.docx`、Prepared WebP 和已确认终审截图，在内存生成确定性扁平 ZIP；Task 只保存
   私有 `delivery_zip` Asset 身份，通用 Viewer 下载隐藏，专用下载重新授权；
 - 已接通 Server 文章目录与单篇主链工作台：认证状态在列表/详情路由先分流组件树，
-  Server 只调用 Project-scoped Task、Knowledge Library、Job 和下载接口；标题、产品、
+  Server 只调用 Project-scoped Task、最小 Catalog、Job 和下载接口；标题、产品、
   大纲、初稿、初检、人化、终检、链接、图片、Word/TDK/ZIP 已有受限操作面，所有写入
   提交 Revision，产品只提交 confirmed Product ID，图片只提交私有 Asset ID 与锚点；
-  SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control、可视化
-  Asset Picker 和 Server Task 导入/创建仍待专用面板，Local UI 不变；组件与接口痕迹见
+  SEO Change 裁决、Product Rediscovery、版本恢复、章节重写、全局 Job Control 和
+  可视化 Hero Asset Picker 已接入；Rediscovery Inbox 审阅与 Server Task 导入/创建仍待
+  专用面板，Local UI 不变；组件与接口痕迹见
   `docs/architecture/m7-server-article-console.md`；
 - 已接通 Project Membership Console：仅 `org_admin/team_lead` 显示入口，Roster 与
   Candidate 稳定分页，可添加、改 `editor/reviewer/viewer` 与撤销显式成员；模式失败不

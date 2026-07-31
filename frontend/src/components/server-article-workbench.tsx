@@ -34,6 +34,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { ServerOutlineHistory } from "@/components/server-outline-history";
+import { ServerHeroAssetPicker } from "@/components/server-hero-asset-picker";
 import { ServerProductRediscoveryPanel } from "@/components/server-product-rediscovery-panel";
 import { ServerSectionRewritePanel } from "@/components/server-section-rewrite-panel";
 import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
@@ -42,8 +43,8 @@ import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
   AccessibleProject,
-  KnowledgeLibrary,
   ProjectAssetDownload,
+  ServerProjectCatalog,
   TaskRecord,
   WorkflowStatus,
 } from "@/types";
@@ -162,7 +163,7 @@ export function ServerArticleWorkbench({
   initialStep?: string;
 }) {
   const [task, setTask] = useState<TaskRecord | null>(null);
-  const [knowledge, setKnowledge] = useState<KnowledgeLibrary | null>(null);
+  const [catalog, setCatalog] = useState<ServerProjectCatalog | null>(null);
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(
     null,
   );
@@ -194,25 +195,21 @@ export function ServerArticleWorkbench({
     setLoading(true);
     setError("");
     try {
-      const [nextTask, projects, libraryResult] = await Promise.all([
+      const [nextTask, projects, nextCatalog] = await Promise.all([
         apiGet<TaskRecord>(`${taskApi}`),
         apiGet<AccessibleProject[]>("/api/projects"),
-        apiGet<KnowledgeLibrary>(
-          `/api/knowledge/${encodeURIComponent(customer)}`,
-        )
-          .then((value) => ({ value }))
-          .catch(() => ({ value: null })),
+        apiGet<ServerProjectCatalog>(`${projectApi}/catalog?image_limit=24`),
       ]);
       const project = projects.find((item) => item.project_id === customer);
       setTask(nextTask);
       setRole(project?.effective_role ?? null);
-      setKnowledge(libraryResult.value);
+      setCatalog(nextCatalog);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setLoading(false);
     }
-  }, [customer, taskApi]);
+  }, [customer, projectApi, taskApi]);
 
   useEffect(() => {
     void load();
@@ -249,6 +246,10 @@ export function ServerArticleWorkbench({
             : [],
         ),
       ),
+    );
+    setHeroAssetId(
+      task.images?.find((image) => image.role === "hero")?.source_asset_id ||
+        "",
     );
     if (!isWorkbenchStep(initialStep)) {
       setStep(recommendedStep(task.status));
@@ -328,10 +329,7 @@ export function ServerArticleWorkbench({
     });
   }
 
-  const confirmedProducts = useMemo(
-    () => (knowledge?.products || []).filter((product) => product.status === "confirmed"),
-    [knowledge],
-  );
+  const confirmedProducts = useMemo(() => catalog?.products || [], [catalog]);
   const allowed = new Set(task?.allowed_actions || []);
   const editAllowed = canEdit(role);
   const reviewAllowed = canReview(role);
@@ -1055,18 +1053,18 @@ export function ServerArticleWorkbench({
               </CardHeader>
               <CardContent className="grid gap-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="hero-asset-id">Hero Asset ID</Label>
-                  <Input
-                    id="hero-asset-id"
-                    value={heroAssetId}
+                  <Label>Hero 图片</Label>
+                  <ServerHeroAssetPicker
+                    assets={catalog?.image_assets || []}
+                    projectApi={projectApi}
+                    selectedAssetId={heroAssetId}
                     disabled={Boolean(pending) || !editAllowed}
-                    className="font-mono"
-                    placeholder="项目私有知识资产 ID"
-                    onChange={(event) => setHeroAssetId(event.target.value)}
+                    onSelect={setHeroAssetId}
                   />
                   <p className="text-xs leading-5 text-muted-foreground">
-                    浏览器不提交 Bucket、Object Key 或文件路径；服务端按 Asset ID
-                    重新授权、校验哈希并生成 WebP 派生图。
+                    浏览器只提交选中的 Asset ID。Bucket、Object Key、文件路径、内容哈希和
+                    来源 URL 均不进入 Catalog DTO；服务端会再次授权并生成 WebP
+                    派生图。
                   </p>
                 </div>
                 {task.products.map((product) =>

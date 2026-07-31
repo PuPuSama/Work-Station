@@ -372,6 +372,12 @@ OIDC 身份冒烟必须从登录页触发，并至少验证：
 - Preflight 的 `oidc_config` 与实时 `identity_provider` 探测通过，公开输出不含 Client
   Secret、Token、Provider 正文或 URL。
 
+Product/Image Catalog 冒烟必须先通过
+`GET /api/projects/{project}/catalog`。确认 Viewer 只能看到当前 Project 中由当前
+Published Snapshot 支撑的 confirmed Product 与图片摘要；Inbox/Rejected/旧 Snapshot、
+跨 Project 和无 Snapshot Evidence 的 Asset 均不得出现。响应字段不得包含 Canonical/
+Source URL、Artifact URI、Bucket、Object Key、Hash 或 Metadata。
+
 对象下载冒烟必须通过
 `GET /api/projects/{project}/assets/{asset_id}/download`，验证 URL 过期时间不超过
 3600 秒；同时使用另一 Project 的 Actor 和一条错误 Organization Key 前缀的测试资产，

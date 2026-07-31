@@ -214,6 +214,7 @@ from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_project_prompts import (
     ServerProjectPromptServiceFactory,
 )
+from services.server_project_catalog import PostgresServerProjectCatalog
 from services.server_product_selection import (
     PostgresConfirmedProductSelection,
 )
@@ -358,6 +359,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_object_service",
         None,
     )
+    previous_server_project_catalog = getattr(
+        application.state,
+        "server_project_catalog",
+        None,
+    )
     previous_server_confirmed_product_selection = getattr(
         application.state,
         "server_confirmed_product_selection",
@@ -449,6 +455,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_directory = None
     application.state.server_project_memberships = None
     application.state.server_project_object_service = None
+    application.state.server_project_catalog = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
     application.state.server_outline_generation = None
@@ -529,6 +536,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_confirmed_product_selection = (
             PostgresConfirmedProductSelection(server_engine)
+        )
+        application.state.server_project_catalog = (
+            PostgresServerProjectCatalog(server_engine)
         )
         application.state.server_job_control = (
             PostgresServerJobControlService(
@@ -787,6 +797,9 @@ async def app_lifespan(application: FastAPI):
             application.state.server_project_object_service = (
                 previous_server_project_object_service
             )
+            application.state.server_project_catalog = (
+                previous_server_project_catalog
+            )
             application.state.server_confirmed_product_selection = (
                 previous_server_confirmed_product_selection
             )
@@ -1033,6 +1046,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_object_service = (
             previous_server_project_object_service
+        )
+        application.state.server_project_catalog = (
+            previous_server_project_catalog
         )
         application.state.server_confirmed_product_selection = (
             previous_server_confirmed_product_selection

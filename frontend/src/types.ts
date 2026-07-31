@@ -492,6 +492,28 @@ export type ProjectAssetDownload = {
   expires_seconds: number;
 };
 
+export type ServerCatalogProduct = {
+  asset_count: number;
+  name: string;
+  product_id: string;
+  selected_asset_id: string;
+};
+
+export type ServerCatalogImageAsset = {
+  asset_id: string;
+  byte_size: number;
+  content_type: string;
+  evidence_kind: string;
+  height: number | null;
+  label: string;
+  width: number | null;
+};
+
+export type ServerProjectCatalog = {
+  image_assets: ServerCatalogImageAsset[];
+  products: ServerCatalogProduct[];
+};
+
 export type DashboardSummary = {
   week_folder: string;
   week_path: string;

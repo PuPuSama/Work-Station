@@ -114,6 +114,7 @@ from services.server_project_prompts import (
     ServerProjectPromptServiceFactory,
     ServerProjectPromptUnavailable,
 )
+from services.server_project_catalog import PostgresServerProjectCatalog
 from services.server_delivery_package import (
     ServerDeliveryPackage,
     ServerDeliveryPackageError,
@@ -177,6 +178,28 @@ class ProjectAssetDownload(BaseModel):
     asset_id: str
     url: str
     expires_seconds: int
+
+
+class ProjectCatalogProductResponse(BaseModel):
+    asset_count: int
+    name: str
+    product_id: str
+    selected_asset_id: str
+
+
+class ProjectCatalogImageAssetResponse(BaseModel):
+    asset_id: str
+    byte_size: int
+    content_type: str
+    evidence_kind: str
+    height: int | None
+    label: str
+    width: int | None
+
+
+class ProjectCatalogResponse(BaseModel):
+    image_assets: list[ProjectCatalogImageAssetResponse]
+    products: list[ProjectCatalogProductResponse]
 
 
 class ConfirmedProductsUpdateRequest(BaseModel):
@@ -671,6 +694,22 @@ def _knowledge_object_service(
     return service
 
 
+def _project_catalog(
+    request: Request,
+) -> PostgresServerProjectCatalog:
+    catalog = getattr(
+        request.app.state,
+        "server_project_catalog",
+        None,
+    )
+    if not isinstance(catalog, PostgresServerProjectCatalog):
+        raise HTTPException(
+            status_code=503,
+            detail="Server project catalog is not available.",
+        )
+    return catalog
+
+
 def _confirmed_product_selection(
     request: Request,
 ) -> PostgresConfirmedProductSelection:
@@ -1109,6 +1148,50 @@ def read_project_task(
             status_code=404,
             detail="Task was not found in the requested project.",
         ) from None
+
+
+@router.get(
+    "/{project}/catalog",
+    response_model=ProjectCatalogResponse,
+)
+def read_project_catalog(
+    project: str,
+    request: Request,
+    product_limit: int = Query(default=100, ge=1, le=200),
+    image_limit: int = Query(default=48, ge=1, le=100),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectCatalogResponse:
+    del project
+    catalog = _project_catalog(request).read(
+        authorized.project_id,
+        product_limit=product_limit,
+        image_limit=image_limit,
+    )
+    return ProjectCatalogResponse(
+        products=[
+            ProjectCatalogProductResponse(
+                product_id=item.product_id,
+                name=item.name,
+                asset_count=item.asset_count,
+                selected_asset_id=item.selected_asset_id,
+            )
+            for item in catalog.products
+        ],
+        image_assets=[
+            ProjectCatalogImageAssetResponse(
+                asset_id=item.asset_id,
+                content_type=item.content_type,
+                byte_size=item.byte_size,
+                width=item.width,
+                height=item.height,
+                label=item.label,
+                evidence_kind=item.evidence_kind,
+            )
+            for item in catalog.image_assets
+        ],
+    )
 
 
 @router.get(
@@ -3489,6 +3572,9 @@ __all__ = [
     "ProductRediscoveryJobResponse",
     "ProductRediscoveryRequest",
     "ProjectAssetDownload",
+    "ProjectCatalogImageAssetResponse",
+    "ProjectCatalogProductResponse",
+    "ProjectCatalogResponse",
     "ProjectSeoReviewApplyRequest",
     "ProjectSeoReviewChangeRequest",
     "ProjectSeoReviewCompleteRequest",

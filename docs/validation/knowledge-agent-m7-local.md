@@ -1427,6 +1427,41 @@ node .\node_modules\next\dist\bin\next build
 - 完整后端回归 671 tests 全部通过，2 tests 按显式外部环境门禁跳过；
 - Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
 
+### M7 Server Product/Image Catalog 与 Hero Picker
+
+实现边界：
+
+- 新增 `PostgresServerProjectCatalog` 与
+  `GET /api/projects/{project}/catalog`。Product 必须是 confirmed，并由当前 Published
+  Snapshot 的 Primary Detail Evidence 提供有效 Selection Projection；图片必须是当前
+  Published Snapshot 的 Image Asset；
+- Product DTO 只有 ID、正式名称、图片数量和服务端选出的 Asset ID；Image DTO 只有
+  Asset ID、媒体类型、字节数、尺寸、显示标签和 Evidence Kind。响应不含 Canonical/
+  Source URL、Artifact URI、Bucket、Object Key、Hash 或 Metadata；
+- `server-article-workbench.tsx` 不再为产品选择读取宽 `KnowledgeLibrary` DTO，只读取
+  Project Catalog；写入仍只提交 confirmed Product ID；
+- `server-hero-asset-picker.tsx` 按 Catalog Asset ID 调用现有授权下载路由，短时 URL
+  只保存在组件内存。Hero 选择仍只提交 Asset ID；产品图不能在该选择器覆盖，继续固定
+  读取 Task `Product.selected_asset_id`；
+- Catalog 是只读的 `project.view` 路由并加入 Server 精确白名单。图片准备仍要求
+  `article.edit`、最新 Revision、服务端对象复核和 CAS/Audit。
+
+验证结果：
+
+- 定向 HTTP/安全测试 9 项通过：Viewer 可读；跨项目返回 403；Inbox Product、非
+  Published Source、另一 Project Product、无 Current Snapshot Evidence 的 Asset 均不
+  返回；字段集合断言确认私有对象信息不进入响应；
+- 完整后端回归 672 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- TypeScript、全量 ESLint 与默认 API 的 Next.js production build 全部通过；
+- Mock Server 的 production QA build 显示 1 个 confirmed Product、2 张当前
+  Published 图片和 2 个实际短时预览；选择 Hero 后 `aria-pressed=true`，图片准备按钮
+  才启用，QA 未执行真实写命令；
+- 页面可见文本不含 Object Key、Artifact URI、Source URL 字段或签名 Host；短时 URL
+  只存在于两个 `<img src>`；浏览器无 Warning/Error；
+- 375×812 覆盖下实际文档 Client Width 为 360，Scroll Width 同为 360，无水平溢出；
+  QA 后恢复默认视口、关闭页面和临时服务，并重新生成默认 API production build；
+- Alembic Current/Head 均为 `20260731_0016`，连续两次 `upgrade head` 成功。
+
 ### M7 Task 历史大纲恢复
 
 ```powershell

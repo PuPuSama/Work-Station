@@ -33,6 +33,7 @@
 | Team/TeamMembership | `/api/organizations/{org}/teams/*` | PostgreSQL | Active Org Admin | Server Ready |
 | External Identity 管理 | `/api/organizations/{org}/external-identities/*` | PostgreSQL | Active Org Admin | Server Ready |
 | Project Directory/Membership | `/api/projects`、`/api/projects/{project}/members/*` | PostgreSQL | Project RBAC | Server Ready |
+| Project Product/Image Catalog | `/api/projects/{project}/catalog` | PostgreSQL Current Published Evidence | `project.view`；最小无 URL DTO | Server Ready |
 | Knowledge API | `/api/knowledge/projects/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |

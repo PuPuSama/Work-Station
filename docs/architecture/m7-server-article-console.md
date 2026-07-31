@@ -71,8 +71,10 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 
 1. `GET /api/projects/{project}/tasks/{task_id}`：Task 正文和当前 Revision；
 2. `GET /api/projects`：当前 Actor 的 Effective Role，仅用于按钮提示；
-3. `GET /api/knowledge/{project}`：confirmed 产品目录。该读失败不阻止查看 Task，但产品
-   选择区为空并解释需要先完成正式产品确认。
+3. `GET /api/projects/{project}/catalog`：只读 confirmed Product 摘要与当前 Published
+   Snapshot 图片摘要，不返回 Canonical/Source URL、对象 URI/Key、哈希或 Metadata；
+4. `GET /api/projects/{project}/assets/{asset_id}/download`：对 Catalog 中的图片逐个
+   重新授权并返回短时预览 URL；URL 只留在组件内存，不写回 Task 或 Catalog DTO。
 
 后端仍是权限准源。前端按钮隐藏或禁用不能替代以下事实：
 
@@ -89,6 +91,8 @@ Local Store、Dashboard 或 Config 作为 Props，也不在 Server 请求失败�
 | 完全重写 | `POST .../rewrite-from-scratch` | Revision + 显式 UI 风险确认 |
 | 选择标题 | `PUT .../selected-title` | Revision、Candidate Index |
 | 选择产品 | `PUT .../products` | Revision、1–3 个 confirmed Product ID |
+| 产品/图片目录 | `GET .../catalog` | Product/Image Limit；响应为无 URL 的最小摘要 |
+| 图片短时预览 | `GET .../assets/{asset_id}/download` | Asset ID、短期有效秒数 |
 | 产品重新发现 | `POST .../product-rediscovery` + Job GET | Revision、官方 Category URL、Max Products |
 | 大纲生成 | `POST .../outline` + Job GET | Revision |
 | 大纲保存/确认 | `PUT .../outline` | Revision、Markdown、Confirmed |
@@ -163,9 +167,15 @@ Knowledge Product (confirmed)
   -> Task ArticleImage 只保存 Asset 身份与正文锚点
 ```
 
-Hero 图同样只通过 Project 私有 `asset_id` 指定。浏览器不提交 Bucket、Object Key、本地路径、
-图片 URL、产品描述或产品图片事实。以后增加图片选择器时，它只能把现有 Asset ID 可视化，
-不能改变该命令契约。
+Hero 图同样只通过 Project 私有 `asset_id` 指定。`PostgresServerProjectCatalog` 只列出
+当前 Published Snapshot 中的图片，并把同一资产的多条 Snapshot Evidence 收敛成一个
+`asset_id/content_type/byte_size/dimensions/label/evidence_kind` 摘要。它不返回 Bucket、
+Object Key、Artifact URI、Hash、Source URL、Canonical URL 或 Metadata。
+
+`ServerHeroAssetPicker` 再按 Asset ID 调用授权下载路由取得 5 分钟短时预览；预览 URL
+只保存在组件内存，刷新即重新签名。选择结果仍只是 Asset ID，因此以后替换成缩略图服务、
+CDN 或虚拟列表时，不需要改变 `prepare-images` 命令契约。产品图不允许在该面板另选：
+它固定来自 Task 已确认产品的 `selected_asset_id`，避免浏览器把任意图片冒充产品证据。
 
 产品重新发现和 Task 产品选择也保持两段式：
 
@@ -197,7 +207,6 @@ Retry 重放服务器私有请求，浏览器不能修改 Source Revision、Task
 本切片是现有 Task 的主链操作面，不是完整 Local UI 等价迁移。以下后端能力仍需专用面板：
 
 - Product Rediscovery 的 Inbox 结果审阅；
-- Hero/产品 Asset 的可视化选择器；
 - Server Task 导入/创建。
 
 Product Rediscovery 的创建与 Job 状态已接入；“结果审阅”仍依赖正式 Knowledge 页面，
@@ -226,3 +235,5 @@ Product Rediscovery 的创建与 Job 状态已接入；“结果审阅”仍依�
 16. Rediscovery 是否仍只产生 Inbox Evidence，不自动替换 Task Product？
 17. 完全重写是否仍要求显式风险确认，且只提交 Revision？
 18. Server Batch/Job UI 是否仍使用 Project 路径、公共 DTO 与空 Cancel/Retry Body？
+19. Catalog 是否仍只列出当前 Published Snapshot，且不返回对象位置、哈希或来源 URL？
+20. 短时图片 URL 是否仍只存在于组件内存，产品图是否仍不能由 Hero 选择器覆盖？

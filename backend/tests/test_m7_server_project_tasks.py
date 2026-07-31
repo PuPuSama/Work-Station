@@ -2263,6 +2263,112 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertFalse(local_state.exists())
 
+    def test_server_catalog_is_minimal_current_and_project_scoped(
+        self,
+    ) -> None:
+        import app as app_module
+
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.product_a,
+            asset_id=self.asset_a,
+        )
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.inbox_product,
+            status="inbox",
+        )
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.unpublished_product,
+            source_status="needs_review",
+        )
+        self._store_selectable_product(
+            project_id=self.project_b,
+            product_id=self.product_b,
+        )
+        codec = ServerActorSessionCodec(b"g" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            isolated = replace(
+                base_config,
+                data_file=Path(directory) / "must-not-exist" / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "g" * 32,
+                        "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "",
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                response = client.get(
+                    f"/api/projects/{self.project_a}/catalog"
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(
+                    body["products"],
+                    [
+                        {
+                            "asset_count": 1,
+                            "name": f"Product {self.product_a}",
+                            "product_id": self.product_a,
+                            "selected_asset_id": self.asset_a,
+                        }
+                    ],
+                )
+                self.assertEqual(len(body["image_assets"]), 1)
+                image = body["image_assets"][0]
+                self.assertEqual(image["asset_id"], self.asset_a)
+                self.assertEqual(image["content_type"], "image/webp")
+                self.assertEqual(
+                    set(image),
+                    {
+                        "asset_id",
+                        "byte_size",
+                        "content_type",
+                        "evidence_kind",
+                        "height",
+                        "label",
+                        "width",
+                    },
+                )
+                serialized = response.text.casefold()
+                for private_field in (
+                    "artifact_uri",
+                    "object_key",
+                    "content_hash",
+                    "canonical_url",
+                    "source_url",
+                    "metadata",
+                    "private-bucket",
+                ):
+                    self.assertNotIn(private_field, serialized)
+                self.assertEqual(
+                    client.get(
+                        f"/api/projects/{self.project_b}/catalog"
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.get(
+                        f"/api/projects/{self.project_a}/catalog?image_limit=0"
+                    ).status_code,
+                    422,
+                )
+
     def test_server_prepares_private_asset_ids_without_local_paths(
         self,
     ) -> None:
