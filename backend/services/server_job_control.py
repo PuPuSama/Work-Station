@@ -32,6 +32,7 @@ SERVER_JOB_CONTROL_OPERATIONS = frozenset(
         "humanize",
         "knowledge_research",
         "outline",
+        "products",
         "product_rediscovery",
         "restore_links",
         "seo_review",

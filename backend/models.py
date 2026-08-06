@@ -373,6 +373,7 @@ class TaskRecord(WorkflowModel):
     final_article_word_count: int = 0
     final_article_hash: str = ""
 
+    product_candidate_ids: list[str] = Field(default_factory=list)
     products: list[Product] = Field(default_factory=list)
     hero_image: str = ""
     images: list[ArticleImage] = Field(default_factory=list)

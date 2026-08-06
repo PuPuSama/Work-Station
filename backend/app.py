@@ -234,6 +234,11 @@ from services.server_product_rediscovery import (
     ServerProductRediscoveryRegistry,
     create_product_sync_factory,
 )
+from services.server_product_generation import (
+    LlmServerProductProvider,
+    ServerProductGenerationHandler,
+    ServerProductGenerationRegistry,
+)
 from services.server_knowledge_research import (
     ServerKnowledgeResearchRegistry,
     ServerKnowledgeResearchUnavailable,
@@ -410,6 +415,11 @@ async def app_lifespan(application: FastAPI):
         "server_product_rediscovery",
         None,
     )
+    previous_server_product_generation = getattr(
+        application.state,
+        "server_product_generation",
+        None,
+    )
     previous_server_knowledge_research = getattr(
         application.state,
         "server_knowledge_research",
@@ -481,6 +491,7 @@ async def app_lifespan(application: FastAPI):
         None,
     )
     server_product_rediscovery = None
+    server_product_generation = None
     server_knowledge_research = None
     server_outline_generation = None
     server_title_generation = None
@@ -504,6 +515,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_catalog = None
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
+    application.state.server_product_generation = None
     application.state.server_knowledge_research = None
     application.state.server_outline_generation = None
     application.state.server_title_generation = None
@@ -650,6 +662,25 @@ async def app_lifespan(application: FastAPI):
         server_product_rediscovery.start_existing()
         application.state.server_product_rediscovery = (
             server_product_rediscovery
+        )
+        product_provider = LlmServerProductProvider(cfg)
+        product_handler = (
+            ServerProductGenerationHandler(
+                server_engine,
+                provider=product_provider,
+            )
+            if product_provider.ready
+            else None
+        )
+        server_product_generation = ServerProductGenerationRegistry(
+            server_engine,
+            access=server_access,
+            provider=product_provider,
+            handler=product_handler,
+        )
+        server_product_generation.start_existing()
+        application.state.server_product_generation = (
+            server_product_generation
         )
         outline_provider = LlmServerOutlineProvider(cfg)
         outline_handler = (
@@ -828,6 +859,12 @@ async def app_lifespan(application: FastAPI):
                     shutdown_error = RuntimeError(
                         "server product rediscovery did not drain"
                     )
+            if server_product_generation is not None:
+                stop_report = server_product_generation.stop()
+                if not stop_report.drained:
+                    shutdown_error = RuntimeError(
+                        "server product generation did not drain"
+                    )
             if server_knowledge_research is not None:
                 stop_report = server_knowledge_research.stop()
                 if not stop_report.drained:
@@ -917,6 +954,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_product_rediscovery = (
                 previous_server_product_rediscovery
+            )
+            application.state.server_product_generation = (
+                previous_server_product_generation
             )
             application.state.server_knowledge_research = (
                 previous_server_knowledge_research
@@ -1125,6 +1165,8 @@ async def app_lifespan(application: FastAPI):
         writing_runner.stop()
         if server_product_rediscovery is not None:
             server_product_rediscovery.stop()
+        if server_product_generation is not None:
+            server_product_generation.stop()
         if server_knowledge_research is not None:
             server_knowledge_research.stop()
         if server_outline_generation is not None:
@@ -1184,6 +1226,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_product_rediscovery = (
             previous_server_product_rediscovery
+        )
+        application.state.server_product_generation = (
+            previous_server_product_generation
         )
         application.state.server_knowledge_research = (
             previous_server_knowledge_research

@@ -370,6 +370,7 @@ export type TaskRecord = {
   final_ai_check?: AiCheckRecord;
   source_links?: ArticleLink[];
   link_validation?: LinkValidation;
+  product_candidate_ids?: string[];
   products: Product[];
   hero_image?: string;
   images?: ArticleImage[];

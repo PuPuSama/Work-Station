@@ -46,6 +46,7 @@ except ImportError:  # pragma: no cover - supports `import backend.workflow`
 
 ACTION_GENERATE_TITLES = "generate_titles"
 ACTION_SELECT_TITLE = "select_title"
+ACTION_GENERATE_PRODUCTS = "generate_products"
 ACTION_UPDATE_PRODUCTS = "update_products"
 ACTION_GENERATE_OUTLINE = "generate_outline"
 ACTION_UPDATE_OUTLINE = "update_outline"
@@ -89,18 +90,21 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
     STATUS_TITLES_READY: (ACTION_GENERATE_TITLES, ACTION_SELECT_TITLE),
     STATUS_TITLE_SELECTED: (
         ACTION_SELECT_TITLE,
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
         ACTION_UPDATE_ARTICLE,
     ),
     STATUS_OUTLINE_READY: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
         ACTION_UPDATE_ARTICLE,
     ),
     STATUS_OUTLINE_CONFIRMED: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -108,6 +112,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_UPDATE_ARTICLE,
     ),
     STATUS_DRAFT_READY: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -117,6 +122,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_UPDATE_HUMANIZED,
     ),
     STATUS_INITIAL_AI_CHECKED: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -126,6 +132,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_UPDATE_HUMANIZED,
     ),
     STATUS_HUMANIZED_READY: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -136,6 +143,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_CONFIRM_FINAL_AI,
     ),
     STATUS_FINAL_AI_CHECKED: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -147,6 +155,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_VERIFY_LINKS,
     ),
     STATUS_LINKS_VERIFIED: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -158,6 +167,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_PREPARE_IMAGES,
     ),
     STATUS_IMAGES_READY: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -169,6 +179,7 @@ _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
         ACTION_EXPORT_DOCX,
     ),
     STATUS_DOCX_EXPORTED: (
+        ACTION_GENERATE_PRODUCTS,
         ACTION_UPDATE_PRODUCTS,
         ACTION_GENERATE_OUTLINE,
         ACTION_UPDATE_OUTLINE,
@@ -355,6 +366,7 @@ def reset_for_full_rewrite(task: TaskRecord) -> TaskRecord:
 
     task.title_candidates = []
     task.selected_title = ""
+    task.product_candidate_ids = []
     task.products = []
     task.outline = ""
     task.outline_draft = ""
@@ -392,6 +404,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
 
     if stage in {"title_candidates", "titles"}:
         task.selected_title = ""
+        task.product_candidate_ids = []
         task.outline = ""
         task.outline_draft = ""
         _clear_raw_and_after(task)
@@ -399,6 +412,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
         _keep_versions(task, -1)
         task.status = STATUS_TITLES_READY
     elif stage in {"selected_title", "title"}:
+        task.product_candidate_ids = []
         task.outline = ""
         task.outline_draft = ""
         _clear_raw_and_after(task)
@@ -406,6 +420,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
         _keep_versions(task, -1)
         task.status = STATUS_TITLE_SELECTED
     elif stage in {"products", "product"}:
+        task.product_candidate_ids = []
         task.outline = ""
         task.outline_draft = ""
         _clear_raw_and_after(task)

@@ -43,9 +43,10 @@ Envelope 签名有效或恢复 Reviewer 给出通过结论，都不能代替代�
    Retry 和 drain 语义；`knowledge_research` 等特殊 Operation 必须保留专用语义；
 4. Manifest 生成稳定 `route_inventory_digest` 和 `operation_inventory_digest`。新增路由或
    Operation 会使旧 Digest 失效，必须重新审计；
-5. `products` 主生成链必须先进入 Inventory，并具备候选/提交分离、Current Published
-   Context、Provider 脱敏、Task CAS/Audit、两阶段授权和有界停机。完成这一项不自动证明
-   全部 Single Write/Worker Capability 已完成。
+5. `products` 主生成链已进入人工 Inventory，并具备候选/提交分离、Current
+   Published Context、Provider 脱敏、Task CAS/Audit、两阶段授权和有界停机；候选 Commit
+   冻结后仍须重新生成并签署 Route/Operation Digest。完成这一项不自动证明全部 Single
+   Write/Worker Capability 已完成。
 
 ## 4. RecoveryEvidenceEnvelope V1
 
@@ -182,7 +183,7 @@ ObjectStore、六项 Capability 和签名恢复 Evidence 全部通过时，报�
 ## 7. 后续顺序
 
 1. 先完成 Evidence Consumer 的严格 Schema、Ed25519、Commit/Head/Time 与安全输出验证；
-2. 再迁移 `products` 主生成链并补齐 Route/Operation Inventory；
+2. `products` 主生成链切片已迁移；冻结候选 Commit 后生成 Route/Operation Inventory Digest 与受控冒烟证据；
 3. 完成其余 API/Worker 覆盖、每项目冻结窗口 matched 报告和 PostgreSQL Task/Job 单写；
 4. 代码证据完整后才逐项修改 Capability 常量；
 5. 候选 Commit 冻结后，在真实环境执行 Capture、独立 Review、恢复演练和生产

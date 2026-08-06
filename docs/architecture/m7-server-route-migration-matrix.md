@@ -38,6 +38,7 @@
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Task Intake | `POST /api/projects/{project}/tasks`、`/task-imports` | PostgreSQL Task + Intake Receipt + Audit | `article.edit`；服务端 ID/序号 | Server Ready |
 | Task 写作要求与 Prompt Preview | `PUT /api/projects/{project}/tasks/{task}/writing-settings`、`POST .../writing-settings/preview` | PostgreSQL Task + Immutable Project Prompt + Current Published Knowledge | 写入 `article.edit` + CAS/Audit；预览 `project.view` + no-store | Server Ready |
+| 产品候选生成 | `POST /api/projects/{project}/tasks/{task}/products`、`GET .../products/jobs/{job_id}` | PostgreSQL Task + Current Published Product Evidence | `article.edit`；固定 Revision/Template/Model/Evidence Binding | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
@@ -58,6 +59,8 @@ Preview 和短时 Raw Attachment Download；Server Library 的 Source-level `raw
 Build、客户端 Evidence Link Write 与 Stale Review 也继续关闭；Server Plan 读取仅展示
 由已确认 Task 大纲生成的 Plan，结构记录见
 `docs/architecture/m7-server-knowledge-route-hardening.md`。
+产品候选生成的独立边界、固定身份、失败不变量和前端 Dirty/Conflict 契约见
+`docs/architecture/m7-server-product-generation.md`。
 
 ### 2.1 Snapshot Review/Publish 精确路由
 
@@ -122,6 +125,7 @@ Status、既有产物或最后一次实际生成的 Prompt Snapshot。Preview �
 | 选择当前标题候选 | `PUT .../selected-title` | `article.edit` | Server-owned Candidate + CAS + Audit | Server Ready |
 | 保存/确认已审阅大纲 | `PUT .../outline` | `article.edit` | PostgreSQL Version + CAS + Audit | Server Ready |
 | 恢复历史大纲为草稿 | `POST .../outline/restore-version` | `article.edit` | Server-owned Version + CAS + Audit | Server Ready |
+| 生成产品候选 | `POST .../products`、`GET .../products/jobs/{job_id}` | `article.edit` | PostgreSQL Job；成功只写 `product_candidate_ids`，不提交正式产品或失效下游 | Server Ready |
 | 选择已确认产品 | `PUT .../products` | `article.edit` | Published Evidence 投影 + CAS + Audit | Server Ready |
 | 产品重新发现 | `POST .../product-rediscovery` | `knowledge.edit` | PostgreSQL Job + S3 Inbox Evidence | Server Ready |
 | 替换指定章节 | `PUT .../article/sections` | `article.edit` | Heading Scope + Version + CAS + Audit | Server Ready |
@@ -152,7 +156,6 @@ Status、既有产物或最后一次实际生成的 Prompt Snapshot。Preview �
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | 旧路由不迁移；品牌/域名由 `GET/PUT /api/projects/{project}/metadata` 替代，自由 Context 拆入 Published Knowledge 与 Prompt Snapshot | 新 Metadata API 已 Server Ready；旧路由继续 503 |
 | 旧 Local Prompt HTTP | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review/Humanize 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
-| Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
 
@@ -167,7 +170,7 @@ Status、既有产物或最后一次实际生成的 Prompt Snapshot。Preview �
 | `humanize` | Project-scoped、固定 Task Revision/Project Humanize Prompt Version/Source Article Hash | 共享 Project Registry；Provider 产候选，提交前再次确定性校验并写 Humanized Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `restore_links` | Project-scoped、固定 Task Revision/Template Hash/Initial 与 Humanized Hash/链接数 | Project Registry；模型只产候选，确定性校验后写 Linked Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `seo_review` | Project-scoped、固定 Task Revision/Initial Article Hash/Prompt Version/System Template Hash/Published Chunk ID | 共享 Lifecycle + Operation-specific Enqueue/Handler；只追加 Open Review Run | `article.review` | `article.review` | Project-scoped 状态与 Batch/Job 控制已完成 |
-| `products` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `products` | Project-scoped、固定 Task Revision/Template Hash/Provider Model/完整 Current Published Product Evidence Binding | Project Registry，只写 `product_candidate_ids` | `article.edit` | `article.edit` | Project-scoped 状态、取消、重试与有界排空已完成；人工 `PUT .../products` 仍独立重验正式证据 |
 | `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
 | `knowledge_research` | 已确认 PostgreSQL Task、Plan/Run/Event/Batch/Job/Audit 同事务；Resume 只接受 Candidate ID | Server-only Handler + PostgreSQL Checkpointer + Project-scoped S3 | `knowledge.publish` | `knowledge.publish`；逐候选抓取与 Publish 再复核 | 列表已开放；通用 Cancel/Retry fail closed，只能创建领域 Resume Job |
 
@@ -245,9 +248,11 @@ Operation、Task 或 Source Revision；它重放服务器已保存的同一可�
 旧 `/api/batches*` 在控制面完成后仍保持 503，调用方必须使用 Project-scoped 路径，
 不能建立无 Project 的兼容别名。下一项 Operation 只有在可信 Enqueue、两阶段权限、
 Server-only Handler、私有存储和停机测试全部完成后，才能加入显式 Operation 集合。
-当前下一候选是 `products` 主生成链：必须先完成候选/提交分离、Current Published Context、
-Provider 错误脱敏、Task CAS/Audit 和两阶段授权；在这些证据齐全前，`products` 与
-`rewrite_article` 都继续保持 Local-only。
+`products` 主生成链现已完成候选/提交分离、Current Published Context、Provider
+错误脱敏、Task CAS/Audit、两阶段授权、Job Control 与有界停机，并进入显式 Operation
+集合。该切片只证明单个 Operation 的链路完整；`rewrite_article` 继续保持 Local-only，
+Route/Operation Inventory Digest、真实受控冒烟和其余 Capability 证据仍需在候选 Commit
+冻结后独立生成，不能据此把整体 M7 改为 `go`。
 
 ## 7. 重构检查点
 

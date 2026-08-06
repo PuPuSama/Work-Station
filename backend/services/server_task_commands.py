@@ -28,6 +28,7 @@ ServerTaskAuditAction = Literal[
     "article.task.rewritten",
     "article.titles.generated",
     "article.title.selected",
+    "article.products.generated",
     "article.outline.updated",
     "article.outline_version.restored",
     "article.writing_settings.updated",
@@ -59,6 +60,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.task.rewritten": "article.edit",
     "article.titles.generated": "article.edit",
     "article.title.selected": "article.edit",
+    "article.products.generated": "article.edit",
     "article.outline.updated": "article.edit",
     "article.outline_version.restored": "article.edit",
     "article.writing_settings.updated": "article.edit",
@@ -99,6 +101,9 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "candidate_count",
             "candidate_index",
         }
+    ),
+    "article.products.generated": frozenset(
+        {"candidate_count", "candidate_pool_count"}
     ),
     "article.outline.updated": frozenset(
         {

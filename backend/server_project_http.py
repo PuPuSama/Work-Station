@@ -135,6 +135,10 @@ from services.server_product_selection import (
     ConfirmedProductSelectionError,
     PostgresConfirmedProductSelection,
 )
+from services.server_product_generation import (
+    ProductGenerationUnavailable,
+    ServerProductGenerationRegistry,
+)
 from services.server_product_rediscovery import (
     ProductRediscoveryCommand,
     ProductRediscoveryUnavailable,
@@ -645,6 +649,10 @@ class TitleGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public title Job state; private Template and Chunk input stay hidden."""
 
 
+class ProductGenerationJobResponse(ProductRediscoveryJobResponse):
+    """Public product Job state; private catalog bindings stay hidden."""
+
+
 class ArticleGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public article Job state; private Prompt and Chunk input stay hidden."""
 
@@ -982,6 +990,24 @@ def _product_rediscovery(
             detail="Server product rediscovery is not available.",
         )
     return registry
+
+
+def _product_generation(
+    request: Request,
+) -> ServerProductGenerationRegistry:
+    registry = getattr(
+        request.app.state,
+        "server_product_generation",
+        None,
+    )
+    if not isinstance(registry, ServerProductGenerationRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Server product generation is not available.",
+        )
+    return registry
+
+
 
 
 def _outline_generation(
@@ -1827,6 +1853,91 @@ def preview_project_task_writing_settings(
             "enqueued."
         ],
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/products",
+    response_model=ProductGenerationJobResponse,
+)
+def enqueue_project_task_product_generation(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProductGenerationJobResponse:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _product_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProductGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server product generation is not available.",
+        ) from exc
+    return ProductGenerationJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/products/jobs/{job_id}",
+    response_model=ProductGenerationJobResponse,
+)
+def read_project_task_product_generation_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProductGenerationJobResponse:
+    del project
+    try:
+        job = _product_generation(request).get_job(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            job_id=job_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Product generation job was not found.",
+        ) from None
+    except ProductGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server product generation is not available.",
+        ) from exc
+    return ProductGenerationJobResponse.model_validate(job)
 
 
 @router.post(

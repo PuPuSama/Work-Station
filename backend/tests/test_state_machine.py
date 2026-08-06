@@ -37,6 +37,7 @@ from workflow.state_machine import (  # noqa: E402
     ACTION_EXPORT_DOCX,
     ACTION_GENERATE_ARTICLE,
     ACTION_GENERATE_OUTLINE,
+    ACTION_GENERATE_PRODUCTS,
     ACTION_GENERATE_TDK,
     ACTION_PACKAGE_DELIVERY,
     ACTION_HUMANIZE_ARTICLE,
@@ -204,6 +205,10 @@ class AllowedActionsTests(unittest.TestCase):
         ):
             with self.subTest(status=status):
                 self.assertIn(ACTION_UPDATE_PRODUCTS, allowed_actions(task_at(status)))
+                self.assertIn(
+                    ACTION_GENERATE_PRODUCTS,
+                    allowed_actions(task_at(status)),
+                )
 
     def test_manual_first_version_can_recover_a_failed_generation(self) -> None:
         task = task_at(STATUS_OUTLINE_READY)
@@ -331,6 +336,18 @@ class InvalidationTests(unittest.TestCase):
             ArticleVersion(kind="final", content="final"),
         ]
         return task
+
+    def test_title_and_product_changes_clear_advisory_candidates(
+        self,
+    ) -> None:
+        for stage in ("titles", "selected_title", "products"):
+            with self.subTest(stage=stage):
+                task = self.populated_task()
+                task.title_candidates = ["Candidate title"]
+                task.selected_title = "Selected title"
+                task.product_candidate_ids = ["product-a", "product-b"]
+                invalidate_downstream(task, stage)
+                self.assertEqual(task.product_candidate_ids, [])
 
     def test_initial_article_edit_invalidates_every_dependent_result(self) -> None:
         task = self.populated_task()
@@ -461,6 +478,7 @@ class InvalidationTests(unittest.TestCase):
         task = self.populated_task()
         task.title_candidates = ["Old title"]
         task.selected_title = "Old title"
+        task.product_candidate_ids = ["product-a"]
         task.products = [Product(name="Old product", url="https://example.com/old")]
         task.outline = "Old outline"
         task.article = "Old compatibility article"
@@ -476,6 +494,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.task_dir, "D:/article/example/topic_001")
         self.assertEqual(task.title_candidates, [])
         self.assertEqual(task.selected_title, "")
+        self.assertEqual(task.product_candidate_ids, [])
         self.assertEqual(task.products, [])
         self.assertEqual(task.outline, "")
         self.assertEqual(task.article, "")

@@ -713,10 +713,10 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 
 当前已迁移 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、保存写作要求、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、自动生成 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、保存写作要求、生成标题候选、选择标题候选、生成产品候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、自动生成 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
   `article.task.rewritten`、`article.writing_settings.updated`、
-  `article.titles.generated`、`article.title.selected`、
+  `article.titles.generated`、`article.title.selected`、`article.products.generated`、
   `article.outline.updated`、`article.outline_version.restored`、
   `article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
@@ -745,6 +745,10 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
   发布态知识，不读取本地 Customer Context；Provider 返回不足、重复、空白或超长候选时
   Job 失败且不补 mock。成功只写 `title_candidates`、清空旧选择和下游，并以
   `article.titles.generated` 与 Task CAS 同事务提交，Audit 只含候选数和 Context Chunk 数；
+- 产品候选生成只提交当前 Revision；入队时固定 checked-in `products` Template Hash、
+  Provider Model 和完整 Current Published Primary Detail Evidence Binding。Worker 执行前
+  复核 Task/模板/模型/证据并再次授权；成功只写 `product_candidate_ids`，不修改正式
+  `task.products`、Workflow Status 或下游产物，人工 `PUT .../products` 仍独立重验当前证据；
 - 大纲保存只提交有界 Markdown 与 Confirmed 标志；草稿保留当前确认大纲和下游，确认
   才使下游失效；Audit 只记录 Confirmed 与字符数，不记录 Markdown；
 - 大纲恢复只提交 Version Index，只允许当前 Task 的 Outline Version 恢复成草稿；

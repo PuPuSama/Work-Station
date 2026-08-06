@@ -154,6 +154,16 @@ function articleFor(task: TaskRecord) {
   );
 }
 
+function taskProductIds(task: TaskRecord) {
+  return task.products.flatMap((product) =>
+    product.product_id ? [product.product_id] : [],
+  );
+}
+
+function productSelectionKey(productIds: string[]) {
+  return JSON.stringify([...productIds].sort());
+}
+
 export function ServerArticleWorkbench({
   customer,
   taskId,
@@ -176,6 +186,8 @@ export function ServerArticleWorkbench({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [productSelectionConflict, setProductSelectionConflict] =
+    useState(false);
   const [outlineDraft, setOutlineDraft] = useState("");
   const [humanizedDraft, setHumanizedDraft] = useState("");
   const [initialScore, setInitialScore] = useState("");
@@ -194,6 +206,8 @@ export function ServerArticleWorkbench({
   const preserveDraftsForRevisionRef = useRef<number | null>(null);
   const recommendedTaskIdRef = useRef("");
   const loadRequestRef = useRef(0);
+  const productBaselineRef = useRef<string | null>(null);
+  const productDraftIdsRef = useRef<string[]>([]);
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
   const taskApi = `${projectApi}/tasks/${encodeURIComponent(taskId)}`;
@@ -252,6 +266,10 @@ export function ServerArticleWorkbench({
 
   useEffect(() => {
     setTask(null);
+    setSelectedProductIds([]);
+    productDraftIdsRef.current = [];
+    productBaselineRef.current = null;
+    setProductSelectionConflict(false);
     setPending("");
     setMessage("");
     setWritingSettingsDirty(false);
@@ -267,12 +285,26 @@ export function ServerArticleWorkbench({
     const preserveDrafts =
       preserveDraftsForRevisionRef.current === (task.revision ?? 0);
     preserveDraftsForRevisionRef.current = null;
+    const officialProductIds = taskProductIds(task);
+    const nextProductBaseline = productSelectionKey(officialProductIds);
+    const previousProductBaseline = productBaselineRef.current;
+    const currentProductDraft = productDraftIdsRef.current;
+    const currentProductDraftKey = productSelectionKey(currentProductDraft);
+    const productDraftWasDirty =
+      previousProductBaseline !== null &&
+      currentProductDraftKey !== previousProductBaseline;
+    if (
+      !productDraftWasDirty ||
+      currentProductDraftKey === nextProductBaseline
+    ) {
+      productDraftIdsRef.current = officialProductIds;
+      setSelectedProductIds(officialProductIds);
+      setProductSelectionConflict(false);
+    } else if (previousProductBaseline !== nextProductBaseline) {
+      setProductSelectionConflict(true);
+    }
+    productBaselineRef.current = nextProductBaseline;
     if (!preserveDrafts) {
-      setSelectedProductIds(
-        task.products.flatMap((product) =>
-          product.product_id ? [product.product_id] : [],
-        ),
-      );
       setOutlineDraft(task.outline_draft || task.outline || "");
       setHumanizedDraft(task.humanized_article || task.initial_article || "");
       setInitialScore(
@@ -409,6 +441,47 @@ export function ServerArticleWorkbench({
   }
 
   const confirmedProducts = useMemo(() => catalog?.products || [], [catalog]);
+  const recommendedProductIds = useMemo(() => {
+    const available = new Set(
+      confirmedProducts.map((product) => product.product_id),
+    );
+    return new Set(
+      (task?.product_candidate_ids || []).filter((productId) =>
+        available.has(productId),
+      ),
+    );
+  }, [confirmedProducts, task?.product_candidate_ids]);
+  const productSelectionDirty =
+    task !== null &&
+    productSelectionKey(selectedProductIds) !==
+    productSelectionKey(taskProductIds(task));
+
+  function resetProductDraftToServer() {
+    if (!task) return;
+    const officialProductIds = taskProductIds(task);
+    productDraftIdsRef.current = officialProductIds;
+    productBaselineRef.current = productSelectionKey(officialProductIds);
+    setSelectedProductIds(officialProductIds);
+    setProductSelectionConflict(false);
+  }
+
+  async function saveProductSelection(payload: {
+    revision: number;
+    product_ids: string[];
+  }) {
+    const updated = await apiPut<TaskRecord>(
+      `${taskApi}/products`,
+      payload,
+    );
+    const officialProductIds = taskProductIds(updated);
+    productDraftIdsRef.current = officialProductIds;
+    productBaselineRef.current = productSelectionKey(officialProductIds);
+    setSelectedProductIds(officialProductIds);
+    setProductSelectionConflict(false);
+    setTask(updated);
+    return updated;
+  }
+
   const allowed = new Set(task?.allowed_actions || []);
   const editAllowed = canEdit(role);
   const reviewAllowed = canReview(role);
@@ -621,9 +694,73 @@ export function ServerArticleWorkbench({
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="min-h-11"
+                  disabled={
+                    Boolean(pending) ||
+                    !editAllowed ||
+                    !allowed.has("generate_products") ||
+                    !confirmedProducts.length ||
+                    productSelectionDirty ||
+                    productSelectionConflict
+                  }
+                  onClick={() => void runJob("生成产品候选", "products")}
+                >
+                  {pending === "生成产品候选" ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Sparkles />
+                  )}
+                  {recommendedProductIds.size
+                    ? "重新生成产品候选"
+                    : "生成产品候选"}
+                </Button>
+                {recommendedProductIds.size > 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    已生成 {recommendedProductIds.size}
+                    个当前目录内的推荐；点击勾选只修改本地草稿，仍需显式保存。
+                  </p>
+                )}
+                {productSelectionConflict && (
+                  <Alert variant="destructive">
+                    <AlertCircle />
+                    <AlertTitle>服务器产品选择已变化</AlertTitle>
+                    <AlertDescription className="grid gap-3">
+                      <span>
+                        本地未保存选择未被覆盖。请先载入最新服务器选择，再重新勾选并保存。
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="w-fit"
+                        disabled={Boolean(pending)}
+                        onClick={resetProductDraftToServer}
+                      >
+                        载入服务器选择
+                      </Button>
+                    </AlertDescription>
+                  </Alert>
+                )}
+                {!productSelectionConflict && productSelectionDirty && (
+                  <Alert>
+                    <AlertCircle />
+                    <AlertTitle>产品选择尚未保存</AlertTitle>
+                    <AlertDescription>
+                      生成新候选已暂停；保存或还原当前选择后可继续。
+                    </AlertDescription>
+                  </Alert>
+                )}
                 {confirmedProducts.length ? (
                   confirmedProducts.map((product) => {
-                    const checked = selectedProductIds.includes(product.product_id);
+                    const checked = selectedProductIds.includes(
+                      product.product_id,
+                    );
+                    const recommended = recommendedProductIds.has(
+                      product.product_id,
+                    );
                     return (
                       <label
                         key={product.product_id}
@@ -636,20 +773,28 @@ export function ServerArticleWorkbench({
                           disabled={
                             Boolean(pending) ||
                             !editAllowed ||
+                            productSelectionConflict ||
                             (!checked && selectedProductIds.length >= 3)
                           }
                           onChange={() =>
-                            setSelectedProductIds((current) =>
-                              checked
+                            setSelectedProductIds((current) => {
+                              const next = checked
                                 ? current.filter(
                                     (value) => value !== product.product_id,
                                   )
-                                : [...current, product.product_id],
-                            )
+                                : [...current, product.product_id];
+                              productDraftIdsRef.current = next;
+                              return next;
+                            })
                           }
                         />
                         <span className="min-w-0">
-                          <span className="block font-medium">{product.name}</span>
+                          <span className="flex flex-wrap items-center gap-2 font-medium">
+                            {product.name}
+                            {recommended && (
+                              <Badge variant="secondary">AI 推荐</Badge>
+                            )}
+                          </span>
                           <span className="mt-1 block break-all font-mono text-xs text-muted-foreground">
                             {product.product_id}
                           </span>
@@ -669,11 +814,12 @@ export function ServerArticleWorkbench({
                     Boolean(pending) ||
                     !editAllowed ||
                     !allowed.has("update_products") ||
+                    productSelectionConflict ||
                     selectedProductIds.length < 1
                   }
                   onClick={() =>
                     void runAction("保存产品选择", () =>
-                      apiPut<TaskRecord>(`${taskApi}/products`, {
+                      saveProductSelection({
                         revision: task.revision ?? 0,
                         product_ids: selectedProductIds,
                       }),
@@ -687,6 +833,7 @@ export function ServerArticleWorkbench({
             </Card>
 
             <ServerProductRediscoveryPanel
+              key={`${customer}:${taskId}:product-rediscovery`}
               customer={customer}
               pending={pending}
               knowledgeEditAllowed={editAllowed}
