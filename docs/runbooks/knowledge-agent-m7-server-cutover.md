@@ -18,20 +18,31 @@
 
 ## 2. Preflight 接口和安全输出
 
-位置：服务器发布候选目录的 `backend`。
+以下是 Windows 本地候选验收命令，位置为正式 worktree 的 `backend`。生产发布时必须在
+冻结的候选环境执行同一 Python 模块与参数；解释器路径和 Evidence 只读挂载由部署包确定，
+不得因为生产环境使用容器而跳过该门禁。
 
 ```powershell
 $env:ARTICLE_AGENT_CONFIG = `
   'D:\Project\article\article-agent-formal\config.ci.yaml'
-.\.venv\Scripts\python.exe -m knowledge_agent.m7_deployment_preflight
-```
-
-只有在本次数据库和对象恢复演练证据已经人工复核后，才允许增加：
-
-```powershell
+$env:ARTICLE_AGENT_RECOVERY_EVIDENCE_PUBLIC_KEY = `
+  '<由受控 Secret 注入的 Base64 32-byte Ed25519 raw public key>'
 .\.venv\Scripts\python.exe -m knowledge_agent.m7_deployment_preflight `
-  --backup-restore-drill-passed
+  --recovery-evidence 'D:\controlled-evidence\recovery-envelope-v1.json' `
+  --release-commit '<完整 40-hex 候选 Commit>'
 ```
+
+不接受任何人工布尔恢复声明。Evidence 必须是严格
+`article-agent.recovery-evidence.v1` Envelope：由独立 verifier 使用 Ed25519 签名，绑定上述
+Commit、代码预期 Alembic Head、演练时间、独立 Operator/Reviewer、数据库恢复 Manifest/
+固定检查结果、四类对象 Hash 抽样以及 RPO/RTO。唯一信任根是独立公钥环境变量；公钥缺失、
+签名/指纹不符、Commit/Head 漂移、过期或任一恢复不变量失败都必须 fail closed。
+完整字段契约见 `docs/architecture/m7-deployment-capability-evidence.md`。
+
+当前仓库只消费和验证 Envelope，不提供 Capture/签发工具，也没有执行真实恢复演练。
+Envelope、Dump、Inventory、抽样明细、检查输出和 Reviewer 记录必须保存在外部受控不可变
+证据系统；仓库、聊天、普通日志和公开 Preflight 只能保存非敏感 Artifact ID/Digest 与
+固定状态。
 
 退出码：
 
@@ -434,7 +445,8 @@ Source-scoped Server Writer。应用回滚时应关闭 Server Knowledge 写流�
 
 发布顺序：
 
-1. 备份与恢复演练；
+1. 备份与恢复演练；由独立 Reviewer 复核外部不可变证据包并签发绑定候选 Commit 的
+   Recovery Evidence Envelope；
 2. 关闭外部流量，暂停 Server Knowledge Review/Publish 和 Worker Claim；
 3. `alembic upgrade head`，确认 Head 为 `20260806_0019` 并完成上述 Backfill 验证；
 4. 停止 SQLite 写入口和旧 Worker，完成其余一次性迁移；
@@ -936,6 +948,7 @@ Project-scoped Job Control 冒烟必须另外验证：
 ```text
 commit:
 operator:
+reviewer:
 utc_started:
 utc_completed:
 database_backup_sha256:
@@ -944,6 +957,19 @@ database_restore_checks:
 object_inventory_or_version_watermark:
 object_restore_sample_count:
 object_restore_hash_matches:
+recovery_evidence_artifact:
+recovery_evidence_bundle_sha256:
+recovery_evidence_signing_key_id:
+capability_manifest_artifact:
+route_inventory_digest:
+operation_inventory_digest:
+cutover_report_artifacts:
+cutover_reports_all_projects_matched:
+worker_drain_report_artifact:
+worker_drained:
+idp_conformance_smoke:
+object_store_policy_evidence:
+products_smoke:
 preflight_report_artifact:
 writing_settings_smoke:
 backend_regression:
@@ -955,3 +981,7 @@ decision: go | no-go
 ```
 
 模板中的空值代表门禁未完成，不能写“默认通过”。
+模板只记录受控系统中的 Artifact ID、Digest、数量和判断，不复制 Evidence Envelope、数据库
+内容、对象 Key/URI、OIDC Token、Bucket Policy 正文、签名、公钥或 Secret。当前尚未进行
+真实恢复演练，不能预填 `go`、`worker_drained=true` 或
+`cutover_reports_all_projects_matched=true`。

@@ -61,7 +61,9 @@ class FakeFailedStore:
 
 
 class DeploymentReadinessTests(unittest.TestCase):
-    def test_all_explicit_gates_can_pass_without_exposing_secrets(self) -> None:
+    def test_missing_recovery_evidence_fails_without_exposing_secrets(
+        self,
+    ) -> None:
         report = run_deployment_preflight(
             environment=COMPLETE_ENVIRONMENT,
             database_probe=lambda: DatabaseReadiness(
@@ -78,10 +80,9 @@ class DeploymentReadinessTests(unittest.TestCase):
                 worker_reauthorizes=True,
                 object_download_reauthorizes=True,
             ),
-            backup_restore_drill_passed=True,
         )
 
-        self.assertTrue(report.ready)
+        self.assertFalse(report.ready)
         public = str(report.public_values())
         for secret in (
             "private-db-password",
@@ -118,7 +119,13 @@ class DeploymentReadinessTests(unittest.TestCase):
             "trusted_identity_source",
             by_id["server_cutover"].detail,
         )
-        self.assertFalse(by_id["backup_restore_drill"].passed)
+        for check_id in (
+            "recovery_evidence_identity",
+            "database_restore",
+            "object_restore",
+            "recovery_objectives",
+        ):
+            self.assertFalse(by_id[check_id].passed)
 
     def test_probe_failures_and_configuration_errors_are_generic(self) -> None:
         environment = {
@@ -168,7 +175,6 @@ class DeploymentReadinessTests(unittest.TestCase):
                 True,
                 True,
             ),
-            backup_restore_drill_passed=True,
         )
         self.assertFalse(report.ready)
         database = next(
@@ -198,7 +204,6 @@ class DeploymentReadinessTests(unittest.TestCase):
                 True,
                 True,
             ),
-            backup_restore_drill_passed=True,
         )
         transport = next(
             check

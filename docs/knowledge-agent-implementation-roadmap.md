@@ -17,7 +17,7 @@
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
 | M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
-| M7 | 进行中：多人 Server 主闭环、Snapshot Receipt、精确 Evidence Preview 与 Task 写作要求操作面完成；生产部署门禁仍 no-go | `docs/architecture/knowledge-agent-m7.md`、`docs/architecture/m7-server-route-migration-matrix.md`、`docs/architecture/m7-snapshot-review-receipts.md`、`docs/architecture/m7-server-snapshot-evidence-preview.md`、`docs/architecture/m7-server-task-writing-settings.md` |
+| M7 | 进行中：多人 Server 主闭环、Snapshot Receipt、精确 Evidence Preview、Task 写作要求与签名 Recovery Evidence 消费底座完成；生产部署门禁仍 no-go | `docs/architecture/knowledge-agent-m7.md`、`docs/architecture/m7-server-route-migration-matrix.md`、`docs/architecture/m7-snapshot-review-receipts.md`、`docs/architecture/m7-server-snapshot-evidence-preview.md`、`docs/architecture/m7-server-task-writing-settings.md`、`docs/architecture/m7-deployment-capability-evidence.md` |
 
 ## M0：基线与接口边界
 
@@ -144,8 +144,12 @@
   Alembic 往返升级；
 - 已实现私有 S3 兼容 ObjectStore、内容寻址 Key、M2 ArtifactStore 适配、
   产品/知识资产授权上传和短期签名下载，并通过本地真实 S3 往返测试；
-- 已实现安全输出的部署 Preflight 和备份/恢复/轮换/回滚 Runbook；当前代码能力
-  门禁明确 no-go，真实恢复演练与生产供应商仍待确定；
+- 已实现安全输出的部署 Preflight 和备份/恢复/轮换/回滚 Runbook，并新增严格
+  `RecoveryEvidenceEnvelope V1` 消费边界：只验证独立 Ed25519 信任根签发且绑定完整
+  Release Commit、Alembic Head、演练时间、独立 Reviewer、数据库/对象恢复摘要与
+  RPO/RTO 的证据；不提供 Capture/签发或真实恢复执行。当前代码 Capability 仍有缺项，
+  真实恢复演练与生产供应商仍未完成，整体明确 no-go；结构记录见
+  `docs/architecture/m7-deployment-capability-evidence.md`；
 - 已接入 Server Mode 请求安全底座：Knowledge Router 全路由重新读取数据库权限，
   未迁移的旧 API、SQLite Research Queue 和本地对象入口明确返回 503；
 - 已加固 Server Knowledge Inbox 三个写命令：Source Review 以 `knowledge.edit`、
@@ -366,10 +370,12 @@
 - 当前单密码 Cookie 不具备 User Identity；OIDC 只把已验证 Issuer/Subject 映射为本地
   Actor，不信任外部 Email/Group/Role；`trusted_identity_source` 代码门禁已完成，
   具体生产 IdP 注册与 Conformance 冒烟仍待部署环境；
-- 下一未迁移业务 Operation 候选为 `products` 主生成链；只有候选/提交分离、Published
+- Deployment Capability Evidence Consumer 的实现、自动化验证和整体回归已完成，现有
+  Capability true/false 保持不变；下一业务 Operation 为 `products` 主生成链。只有
+  候选/提交分离、Published
   Context、Provider 脱敏、CAS/Audit、两阶段授权和停机语义全部成立后才可进入 Server
-  Operation 白名单，`rewrite_article` 继续 Local-only。与此同时按“生产 IdP Conformance 与
+  Operation 白名单，`rewrite_article` 继续 Local-only。随后按“生产 IdP Conformance 与
   逐 Operation API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据 -> 服务器 PostgreSQL
-  单写切换 -> 备份恢复与部署门禁”
+  单写切换 -> 真实备份恢复 Capture/独立 Review -> 签名 Evidence Preflight 与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。

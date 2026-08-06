@@ -23,6 +23,7 @@ from services.oidc_identity import (
     OidcProviderSettings,
     OidcProviderUnavailable,
 )
+from services.recovery_evidence import VerifiedRecoveryEvidence
 from services.server_auth import (
     ServerActorSessionError,
     load_server_actor_session_codec,
@@ -251,9 +252,15 @@ def run_deployment_preflight(
         Callable[[OidcProviderSettings], None] | None
     ) = None,
     capabilities: ServerCutoverCapabilities = CURRENT_SERVER_CUTOVER_CAPABILITIES,
-    backup_restore_drill_passed: bool = False,
+    recovery_evidence: VerifiedRecoveryEvidence | None = None,
 ) -> DeploymentPreflightReport:
     """Run fail-closed checks without returning sensitive configuration."""
+
+    verified_recovery_evidence = (
+        recovery_evidence
+        if isinstance(recovery_evidence, VerifiedRecoveryEvidence)
+        else None
+    )
 
     (
         checks,
@@ -340,12 +347,37 @@ def run_deployment_preflight(
             else "missing: " + ", ".join(missing_capabilities),
         )
     )
-    checks.append(
+    recovery_checks = (
+        (
+            "recovery_evidence_identity",
+            verified_recovery_evidence is not None,
+        ),
+        (
+            "database_restore",
+            verified_recovery_evidence.database_restore_passed
+            if verified_recovery_evidence is not None
+            else False,
+        ),
+        (
+            "object_restore",
+            verified_recovery_evidence.object_restore_passed
+            if verified_recovery_evidence is not None
+            else False,
+        ),
+        (
+            "recovery_objectives",
+            verified_recovery_evidence.recovery_objectives_passed
+            if verified_recovery_evidence is not None
+            else False,
+        ),
+    )
+    checks.extend(
         PreflightCheck(
-            "backup_restore_drill",
-            backup_restore_drill_passed,
-            "verified" if backup_restore_drill_passed else "not attested",
+            check_id,
+            passed,
+            "verified" if passed else "not verified",
         )
+        for check_id, passed in recovery_checks
     )
     return DeploymentPreflightReport(tuple(checks))
 

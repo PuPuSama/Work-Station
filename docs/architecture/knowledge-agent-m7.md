@@ -574,8 +574,11 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/delivery_package.py` | Local/Server 共用的 Delivery ZIP 组装核心 | 安全文件名、固定顺序/时间戳/权限、扁平确定性 ZIP；Local 另保留目录写入入口 |
 | `backend/services/server_delivery_package.py` | Server 私有交付资产到 Delivery ZIP Asset | `article.deliver`、终审正文哈希绑定、逐对象身份复核、纯内存组装、Task 不保存路径 |
 | `backend/services/deployment_readiness.py` | 服务器发布前只读门禁与安全报告 | 代码能力显式列举、默认 no-go、输出不带 Secret/URL |
-| `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 非零即停止发布、备份恢复只能显式证明 |
+| `backend/services/recovery_evidence.py` | 签名恢复证据的严格解析与验证 | V1 字段白名单、Ed25519 独立信任根、Commit/Head/时间/Reviewer/恢复摘要门禁，只返回安全布尔结果 |
+| `backend/knowledge_agent/m7_deployment_preflight.py` | Preflight CLI | 显式 Recovery Evidence + Release Commit、非零即停止发布，不接受人工布尔声明 |
 | `docs/runbooks/knowledge-agent-m7-server-cutover.md` | 备份、恢复、轮换、发布和回滚操作准源 | 新实例恢复、跨系统恢复点、禁止默认 Actor/Project |
+| `docs/architecture/m7-deployment-capability-evidence.md` | 六项 Capability 与 RecoveryEvidenceEnvelope V1 准则 | 代码能力不由 Evidence 翻转、签名 Consumer 与 Capture 分权、真实演练仍需外部受控证据 |
+| `docs/validation/knowledge-agent-m7-deployment-capability-evidence.md` | Evidence Consumer 验证计划与证据记录 | 未执行结果保持空白、测试 Fixture 不冒充真实恢复、当前发布判断 no-go |
 | `docs/architecture/m7-server-route-migration-matrix.md` | Local 到 Server 的路由/Worker 迁移索引 | 每条能力的准源、权限、存储、Operation 状态和下一闭环门禁 |
 | `backend/tests/test_m7_access_control.py` | 权限矩阵单元测试 | 自助交付与管理操作边界 |
 | `backend/tests/test_m7_access_control_postgres.py` | 真实数据库隔离测试 | 跨组织攻击、禁用身份、复合 FK、append-only |
@@ -588,6 +591,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_workspace_invitations.py` | Invitation Schema、管理 HTTP 与兑换事务测试 | Token 一次返回、过期/重放/租户隔离、Mapping/状态/Audit 原子性、错误脱敏 |
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_server_job_control.py` | Project Job Control 真实 PostgreSQL/HTTP 集成测试 | 跨项目、Operation 隔离、撤权、取消/重试、私有字段、Audit 回滚、精确路由 |
+| `backend/tests/test_recovery_evidence.py` | RecoveryEvidenceEnvelope V1 与 Preflight 定向测试 | 严格 Schema、Ed25519/指纹、Commit/Head/时间/Reviewer、数据库/对象/RPO-RTO、不泄露私有证据 |
+| `backend/tests/test_m7_deployment_readiness.py` | Deployment Preflight 组合门禁测试 | 缺失 Evidence 与未完成 Capability 保持 no-go、固定安全 Check 输出、真实 PostgreSQL Probe |
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
 | `backend/tests/test_m7_server_task_writing_settings.py` | 写作设置服务与纯内存 Preview 定向测试 | 十字段规范化、同事务 Prompt 锁/CAS/Audit、无下游失效、Preview 无写入/LLM |
 | `backend/tests/test_m7_server_project_tasks.py` 的 Writing Settings 场景 | 真实 PostgreSQL/HTTP 集成验证 | strict Body、权限/精确 Project Scope、Local/Server 路由隔离、no-store、安全 Prompt Identity、CAS/Audit 与 Audit 故障回滚 |
@@ -1492,12 +1497,21 @@ S3 契约验证，不是生产供应商选择。
 #### D2 已实现底座、待真实演练：运维与部署门禁
 
 `DeploymentPreflightReport` 已把 Server Mode、Actor Session、Knowledge 配置、
-Alembic/pgvector、S3 Bucket、代码切换能力和备份恢复证明拆成稳定 Check ID。报告不返回
-URL、密钥或供应商错误正文。
+Alembic/pgvector、S3 Bucket、代码切换能力和恢复证明拆成稳定 Check ID。报告不返回 URL、
+密钥、Evidence 内容或供应商错误正文。
+
+当前切片把原来的人工 `backup_restore_drill_passed` 声明替换为签名
+`RecoveryEvidenceEnvelope V1` 消费：Preflight 必须显式接收 Evidence 文件与完整
+40-hex Release Commit，只从 `ARTICLE_AGENT_RECOVERY_EVIDENCE_PUBLIC_KEY` 读取 Base64
+32-byte Ed25519 raw public key。Envelope 的签名、公钥指纹、Commit、Alembic Head、
+24 小时演练窗口、七天有效期、独立 Operator/Reviewer、数据库 Manifest/固定检查结果、四类
+对象恢复样本和 RPO/RTO 必须全部成立，否则 fail closed。Consumer 只验证受信 Reviewer
+签发的摘要，不捕获证据、不连接恢复目标，也不表示本仓库已经完成真实恢复演练。完整
+契约见 `docs/architecture/m7-deployment-capability-evidence.md`。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
 HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、二十四条 Task 写操作、
+身份代码链、已迁移 Task 写操作、
 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`
 的 Enqueue/Runner 和窄范围 Batch/Job Control 已接线；Research 仍禁用通用 Cancel/Retry。
 其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
@@ -1749,3 +1763,19 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      Local fail closed，且错误不泄露 Prompt、备注、URL、Provider/数据库或 Secret？
 133. 前端 Dirty、Prompt Invalid 与 Revision Conflict 是否仍阻止 Outline/Article 生成，
      同时保留其他草稿、当前步骤和动态 Project/Task 请求隔离？
+134. Recovery Evidence 是否只接受严格 V1 Envelope，并拒绝未知/缺失字段、重复 JSON Key、
+     非有限数字、超限文件和非法 Base64URL？
+135. Evidence 签名是否固定使用独立环境注入的 Base64 raw Ed25519 公钥，并验证
+     `signing_key_id` 指纹，而不接受 Envelope 自带信任根或回退其他 Secret？
+136. `release_commit` 是否只接受完整 40-hex 并与显式 CLI 参数精确相同，Alembic Head 漂移
+     是否使旧 Evidence 失效？
+137. 演练开始/完成/过期时间、24 小时演练上限、七天 Evidence 有效期和 Operator/Reviewer
+     职责分离是否全部 fail closed？
+138. 数据库 Source/Restored Manifest、九项布尔检查、对象四类样本总计与逐类匹配、RPO/RTO
+     是否全部通过后才产生安全 Verified 结果？
+139. Preflight 是否只公开固定 Check ID/布尔状态/安全说明，不输出 Evidence 路径、身份、
+     时间、Hash、签名、公钥或底层异常？
+140. 有效 Recovery Evidence 是否只满足恢复相关门禁，而不翻转六项代码 Capability、不覆盖
+     实时 IdP/ObjectStore/数据库检查，也不被描述为本仓库已执行真实恢复？
+141. Route/Operation Inventory 是否仍需绑定完整 Commit 与稳定 Digest，新增路由或 Operation
+     后是否强制重新审计而不复用旧 Capability 结论？
