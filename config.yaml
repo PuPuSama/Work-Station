@@ -11,7 +11,7 @@ article:
   ai_pass_threshold: 30
 
 prompts:
-  humanize: "D:\\article\\降ai提示词-未测试效果版.txt"
+  humanize: "backend/prompts/humanize_ci.txt"
 
 docx_format:
   font: "Times New Roman"

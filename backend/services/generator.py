@@ -30,7 +30,7 @@ from services.llm import LLMClient
 
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
-DEFAULT_HUMANIZE_PROMPT_PATH = Path(r"D:\article\降ai提示词-未测试效果版.txt")
+DEFAULT_HUMANIZE_PROMPT_PATH = PROMPT_DIR / "humanize_ci.txt"
 PROMPT_TOKEN_PATTERN = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 
 ARTICLE_TARGET_MIN = 1000

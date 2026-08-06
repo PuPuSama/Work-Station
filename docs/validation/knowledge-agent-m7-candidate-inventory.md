@@ -46,6 +46,10 @@
 `backend.tests.test_m7_candidate_inventory` 并确认 `11/11` 通过。上述 Humanize 环境问题不转换为
 Candidate Inventory 通过证据，也不在本切片混入无关配置修复。
 
+后续独立修复已把 Local Humanize 配置与默认值统一到仓库内
+`backend/prompts/humanize_ci.txt`，并只补跑最初失败的两个 Humanize 用例，结果 `2/2` 通过。
+完整 `787` 项套件未重复执行，因此本记录仍保留原始整体退出结果，不把定向补跑改写成完整回归退出码 0。
+
 ## 3. Artifact 验证
 
 候选提交完成后，在隔离 Checkout 运行 CLI 两次：第一次写本地 staging artifact；第二次写
