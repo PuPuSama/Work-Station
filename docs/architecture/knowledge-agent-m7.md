@@ -136,6 +136,11 @@ M7 不一次性切换整个应用。采用 expand/contract：
   入队固定 checked-in Template Hash、Initial/Humanized Article Hash 和来源链接数；
   Worker 在两阶段重授权后复核 Final AI Check 身份，模型只产生候选，只有链接集合完全
   复现且非链接可见正文不变时才追加 `linked` Version 并进入 `links_verified`；
+- 新增 Server Task 写作要求与 Effective Prompt Preview：`PUT .../writing-settings`
+  保存十个有界字段，当前 Outline/Article Prompt 选择必须可解析，并以 Revision CAS 和
+  不含备注/提示词正文的 Audit 原子提交；`POST .../writing-settings/preview` 可使用未保存
+  草稿，复用正式 Prompt Builder 与当前 Published Context，但不调用 LLM、不写业务状态且
+  返回 `no-store`。设置保存选择意图，真正生成仍在入队时固定精确 Prompt/Chunk 身份；
 - 新增 SEO Review 设置前置命令：`PUT .../seo-review-settings` 只接受 Revision、
   关键词和 Prompt Selection；服务端解析当前 Project 的 `review` Prompt Snapshot，
   规范化/去重关键词，并以不含关键词正文的 CAS/Audit 保存；它不调用 Review Provider；
@@ -152,7 +157,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 新增窄范围 Server 前端入口：认证状态先决定 Local/Server 组件树；Server 首页只读取
   SQL Project Directory，并直达已迁移的 Delivery Console；未迁移的文章、批量任务和
   设置导航不挂载；交付下载先取 Task-scoped 短期 URL，不暴露对象 URI；
-- 二十四条 PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
+- PostgreSQL Task 写操作统一通过 `PostgresAuditedTaskWriter`：事务内锁定可撤权
   事实、按 Action 固定最小权限、执行 Revision CAS，并追加不含正文的稳定 Audit Event；
   任一授权、CAS 或 Audit 失败都会回滚 Task；
 - 新增 `GET /api/projects/{project}/assets/{asset_id}/download`：路由授权后，
@@ -208,7 +213,8 @@ M7 不一次性切换整个应用。采用 expand/contract：
   Audit 原子提交；Audit 失败回滚全部业务写入。
 - 新增 Project-scoped Prompt HTTP：目录、创建、追加版本、归档/恢复与精确 Default
   切换全部走 PostgreSQL Snapshot Service；Body 字段严格白名单，旧无 Server Scope 的
-  `/api/projects/{customer}/prompts` Handler 不复用，Local Mode 不挂载新接口。
+  `/api/projects/{customer}/prompts` Handler 不复用。Router 始终注册，但 Local 请求由
+  Server 依赖返回 `404`，Server Mode 则由精确路由白名单控制；两种模式不回退。
 - 新增显式 `migrate_project_prompts()`：把指定 SQLite Customer 的当前 Prompt Library
   导入指定 Organization/Project，保留 Prompt ID、当前 Version、Active/Archived 和
   Default 的精确版本；旧库没有不可变历史行，因此只迁移可证明存在的当前 Snapshot，
@@ -491,8 +497,8 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/migrations/versions/20260731_0018_project_metadata_revision.py` | Project Metadata 乐观并发 Schema | `projects.revision` 非空、非负、默认 0，可升降级 |
 | `backend/services/server_task_intake.py` | Task 单条创建与规范化行导入事务服务 | 不读 Local 文件；服务端身份/序号；幂等 Receipt、Task、Audit 原子提交 |
 | `backend/services/server_project_metadata.py` | Project 共享显示名/官方域名读写服务 | Project ID 不变、`project.members.manage`、撤权事实锁、Revision CAS、脱敏 Audit 同事务 |
-| `backend/server_project_http.py` | Project Task Intake HTTP 与其余 Server Task 命令 | 字段白名单、Project Scope、统一 403/409/422/503、最小 Intake 响应 |
-| `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
+| `backend/services/server_task_writing_settings.py` | Task 写作要求更新与 Effective Prompt Preview | 十字段规范化、Revision、设置不失效既有产物、正式 Builder、无 LLM/Local 回退、Preview 二次授权 |
+| `backend/services/server_project_prompts.py` | Project-scoped Prompt Snapshot 服务 | 精确版本解析、默认版本不漂移、稳定 Project Prompt advisory lock 覆盖“无 Default 行”并发、读写权限分离、撤权锁、业务写入与安全 Audit 同事务 |
 | `backend/services/server_project_prompt_migration.py` | SQLite Prompt 当前 Snapshot 一次性导入 | 显式 Customer 到 Project 映射、版本/状态/Default 保留、摘要复核、差异目标不覆盖、导入与安全 Audit 同事务 |
 | `backend/server_prompt_http.py` | Project Prompt 目录、创建、版本、Active 与 Default HTTP | Project Scope、严格 Body、统一 403/404/409/422/503、公开响应不含内部 Actor/Hash |
 | `backend/services/workspace_invitations.py` | 邀请目录、签发、撤销与 Verified Identity 兑换事务 | Active Org Admin、一次返回 Token、过期/重放拒绝、Identity/Invitation/Audit 同事务 |
@@ -512,6 +518,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `frontend/src/app/accept-invite/page.tsx` | 邀请领取入口 | Token 优先从 URL Fragment 读取并在网络请求前清除；仅 POST 到准备端点，不进入查询参数或 IdP URL |
 | `frontend/src/components/project-delivery-records.tsx` | Local/Server 双模式交付控制台 | Path/Asset 身份分别判定、Revision 打包、角色禁用、专用短期 URL 下载、异步反馈 |
 | `frontend/src/components/server-task-intake-panel.tsx` | Server Task 单条创建与 Tab 行导入 | 失败重试保留 Intake ID；输入变化换新身份；不提交 Task/Project/Workflow 字段或本地路径 |
+| `frontend/src/components/server-writing-requirements-panel.tsx` | Server Task 十字段写作要求和折叠 Prompt Preview | 显式保存、Dirty 生成门禁、409 保留草稿、Server Prompt DTO、Viewer 只读预览、无 Local API |
 | `backend/services/server_request_security.py` | 请求 Actor、Knowledge 权限映射和服务器路由可用性 | 先验签并校验数据库 Session Version，再查 Role；项目规范化、未迁移路由 fail closed |
 | `backend/services/server_knowledge_commands.py` | Server Knowledge Review/Publish/Confirm 事务命令 | Router 授权只作早拒绝；事务内重锁权限；Review/Activate/Confirm 与脱敏 Audit 原子提交；重复激活/确认不重复审计 |
 | `backend/knowledge_agent/publication.py` | Knowledge Snapshot Embedding 与发布编排 | `prepare` 只写未激活向量；Local `publish` 保持兼容；Server 最终激活交给事务命令，失败时旧 Snapshot 继续服务 |
@@ -521,7 +528,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/server_team_http.py` | Organization-scoped Team/TeamMembership HTTP | 字段/角色白名单、精确路径、Manager 可空语义、归档冲突与安全错误 |
 | `backend/services/team_administration.py` | Team 目录、生命周期和显式成员事务服务 | Active Org Admin、稳定游标、Manager 不授权、Active User 才能新授权、归档停止继承但保留清理路径、Audit 原子性 |
 | `backend/knowledge_agent/security.py` | Knowledge Router 的 FastAPI 授权适配器 | 全路由依赖、统一 401/403、授权结果只放 Request State |
-| `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
+| `backend/app.py` Server Mode Lifespan | 服务器请求安全装配与本地运行时隔离 | 初始化 WritingSettings Factory；Local 明确为 `None`、teardown 恢复 previous；不启动 SQLite Worker、不允许全局 TaskStore/JobQueue、兼容 Knowledge 路由不得绕过依赖 |
 | `backend/services/project_memberships.py` | 受授权的显式成员/可授权候选分页读模型，以及带审计的 ProjectMembership 变更 | SQL 内 Project Scope、候选不复制继承访问、稳定游标、授权/写入/审计同事务、跨组织目标不泄露 |
 | `backend/services/postgres_task_repository.py` | 项目级 Task JSONB 持久化 | Scope 注入、顺序、扩展字段、Revision CAS |
 | `backend/services/server_project_tasks.py` | 已授权请求到 PostgreSQL TaskStore 的兼容适配器 | 固定 Organization/Project、禁用 Legacy Import、不创建本地存储 |
@@ -537,7 +544,7 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/services/server_project_job_registry.py` | 单 Operation 的共享 Project Runner 生命周期与公开 Job 投影 | 只抽取 Runner/Queue/Stop/Get 样板；业务 Enqueue、权限、私有 Request 与 Handler 仍由各 Operation 定义 |
 | `backend/services/server_seo_review_generation.py` | Project SEO Review Provider、Handler、Review Run 变换与 Queue Registry | Prompt/Template/Initial Article/Published Chunk 身份固定、只用注入 Context、两阶段授权、只追加 Open Run、CAS/Audit、有界停机 |
 | `backend/services/server_seo_review_commands.py` | SEO Review Change/Preview/Apply/Complete 的纯 Task 变换 | 精确 Review/Change 身份、Open/Article Hash 门禁、风险确认、Preview Hash、生成与提交分离；不知道 HTTP/RBAC/PostgreSQL |
-| `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/标题选择/大纲保存/确定性重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、写入用事务或 Revision CAS、跨项目只返回 403/404、URL 短期有效 |
+| `backend/server_project_http.py` | Server Mode Project Directory、ProjectMembership、Task 读取/写作设置/Prompt Preview、标题/大纲/重写与私有资产下载 API | 路径必须含 Project、命令 Body 白名单、每次请求查数据库权限、Task CAS/Audit、Preview no-store、跨项目只返回 403/404、URL 短期有效 |
 | `backend/services/project_directory.py` | Actor 可见 Project 的 SQL Directory | 先验证 Active Actor/Organization、SQL 内过滤 Scope、不读取全量后再过滤 |
 | `backend/services/task_store_migration.py` | SQLite Task 一次性导入与摘要比对 | 非空差异目标绝不覆盖、导入后再校验 |
 | `backend/services/postgres_job_queue.py` | PostgreSQL Batch/Job Queue | 活跃任务唯一、SKIP LOCKED、Worker Lease、调用方事务内创建/取消/重试、终态与安全 Audit 同事务 |
@@ -582,6 +589,9 @@ DOCX/截图若在 CAS 前完成写入、随后授权或 Audit 失败，仍按内
 | `backend/tests/test_m7_postgres_tasks.py` | Task/Job PostgreSQL 集成测试 | Scope、迁移、CAS、并发 Claim、Lease、Retry |
 | `backend/tests/test_m7_server_job_control.py` | Project Job Control 真实 PostgreSQL/HTTP 集成测试 | 跨项目、Operation 隔离、撤权、取消/重试、私有字段、Audit 回滚、精确路由 |
 | `backend/tests/test_m7_server_task_commands.py` | Task CAS 与 Audit 原子性测试 | 审计失败回滚、撤权/旧 Revision 无审计、安全 Details |
+| `backend/tests/test_m7_server_task_writing_settings.py` | 写作设置服务与纯内存 Preview 定向测试 | 十字段规范化、同事务 Prompt 锁/CAS/Audit、无下游失效、Preview 无写入/LLM |
+| `backend/tests/test_m7_server_project_tasks.py` 的 Writing Settings 场景 | 真实 PostgreSQL/HTTP 集成验证 | strict Body、权限/精确 Project Scope、Local/Server 路由隔离、no-store、安全 Prompt Identity、CAS/Audit 与 Audit 故障回滚 |
+| `docs/architecture/m7-server-task-writing-settings.md` | 写作要求与 Effective Prompt Preview 结构准则 | 接口、事务、Prompt 固定时点、前端 Dirty/409 语义及后续重构接缝 |
 | `backend/tests/test_m7_server_tdk_export.py` | Server TDK 纯内存导出测试 | 私有 Asset 身份、无本地路径、Provider 错误脱敏 |
 | `backend/tests/test_m7_server_ai_screenshots.py` | Server AI-rate 截图规范化测试 | PNG/尺寸/大小门禁、私有 Asset 类型、无本地路径 |
 | `backend/tests/test_m7_server_link_restoration.py` | Server Link Restore Provider 与确定性提交测试 | Template 漂移、Gateway 错误脱敏、无缺失链接不调用模型、精确链接/正文门禁 |
@@ -1728,3 +1738,14 @@ RPO/RTO、供应商选择和证据仍未完成。正式身份和 API 全覆盖�
      更新后的 Project Metadata？
 127. 自由文本事实和写作规则是否仍分别进入 Published Knowledge 与不可变 Prompt
      Snapshot，而不重新塞回 Project Settings？
+128. 写作要求接口是否仍只接受 Revision 与完整十字段，路径是否是 Project/Task 身份唯一
+     准源，未知/缺失字段与客户端 Prompt/Actor/Context 身份是否拒绝？
+129. 保存是否在同一事务持有稳定 Project Prompt 锁、验证精确 Prompt、重新授权
+     `article.edit`、执行 Task CAS 与脱敏 Audit，且不失效既有下游产物？
+130. Project Default 尚不存在时的并发插入/切换是否仍不能穿过写作设置验证窗口？
+131. Preview 是否在返回前再次要求 `project.view`，只在 Task 深拷贝上使用正式 Builder 与
+     Current Published Context，并保持无 LLM、无 Task/Job/Audit 写入及 `no-store`？
+132. 旧 Local 写作设置/Prompt Preview 是否在 Server fail closed，新 Project 路径是否在
+     Local fail closed，且错误不泄露 Prompt、备注、URL、Provider/数据库或 Secret？
+133. 前端 Dirty、Prompt Invalid 与 Revision Conflict 是否仍阻止 Outline/Article 生成，
+     同时保留其他草稿、当前步骤和动态 Project/Task 请求隔离？

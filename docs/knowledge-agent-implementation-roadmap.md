@@ -17,7 +17,7 @@
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
 | M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
-| M7 | 进行中：多人 Server 主闭环、Snapshot Receipt 与精确 Evidence Preview 完成；生产部署门禁仍 no-go | `docs/architecture/knowledge-agent-m7.md`、`docs/architecture/m7-snapshot-review-receipts.md`、`docs/architecture/m7-server-snapshot-evidence-preview.md` |
+| M7 | 进行中：多人 Server 主闭环、Snapshot Receipt、精确 Evidence Preview 与 Task 写作要求操作面完成；生产部署门禁仍 no-go | `docs/architecture/knowledge-agent-m7.md`、`docs/architecture/m7-server-route-migration-matrix.md`、`docs/architecture/m7-snapshot-review-receipts.md`、`docs/architecture/m7-server-snapshot-evidence-preview.md`、`docs/architecture/m7-server-task-writing-settings.md` |
 
 ## M0：基线与接口边界
 
@@ -279,7 +279,7 @@
   Accepted 与 Audit 同事务，过期/撤销/重放/跨组织冲突 fail closed；邮件投递未接入；
 - 派生对象 orphan 对账与延迟清理安全门已完成；真实生产身份、对象供应商与恢复演练
   仍未验收，因此不能把当前可操作的 Server 交付界面描述成生产上线；
-- 已让二十四条迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
+- 已让当前迁移完成的 Server Task 写操作统一走 `PostgresAuditedTaskWriter`：锁定
   可撤权事实，按 Audit Action 固定最小权限，Task Revision CAS 与 append-only Audit
   同事务；审计失败、撤权或 CAS 冲突不留下 Task 写入，Details 不含正文或 URL；
 - 已新增 PostgreSQL Task 标题候选选择命令：客户端只提交 Revision 与候选索引，
@@ -343,6 +343,12 @@
 - 已接通 Project-scoped Server Prompt HTTP：Viewer 可读目录，Editor 可创建、追加版本、
   归档/恢复和切换精确 Default；严格 Body 与路由白名单不允许客户端提交 Actor、Role、
   Status 或内容 Hash；旧 SQLite Prompt API 仍不在 Server Mode 开放；
+- 已接通 Server Task 写作要求与 Effective Prompt Preview：完整十字段设置以
+  `article.edit`、Revision CAS、稳定 Project Prompt 事务锁和脱敏 Audit 原子保存，但只保留
+  Prompt 选择意图；Preview 允许 Viewer 使用未保存草稿，复用正式 Builder 和 Current
+  Published Context，不调用模型、不写 Task/Job/Audit，并返回 `no-store`。前端显式保存、
+  Dirty/Prompt 可用性门禁和 `409` 草稿保护均留在独立组件，Local 路径与存储保持不变；
+  结构记录见 `docs/architecture/m7-server-task-writing-settings.md`；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界
@@ -360,8 +366,10 @@
 - 当前单密码 Cookie 不具备 User Identity；OIDC 只把已验证 Issuer/Subject 映射为本地
   Actor，不信任外部 Email/Group/Role；`trusted_identity_source` 代码门禁已完成，
   具体生产 IdP 注册与 Conformance 冒烟仍待部署环境；
-- 后续按“生产 IdP Conformance 与逐 Operation API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据
-  -> 服务器 PostgreSQL 单写切换
-  -> 备份恢复与部署门禁”
+- 下一未迁移业务 Operation 候选为 `products` 主生成链；只有候选/提交分离、Published
+  Context、Provider 脱敏、CAS/Audit、两阶段授权和停机语义全部成立后才可进入 Server
+  Operation 白名单，`rewrite_article` 继续 Local-only。与此同时按“生产 IdP Conformance 与
+  逐 Operation API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据 -> 服务器 PostgreSQL
+  单写切换 -> 备份恢复与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。

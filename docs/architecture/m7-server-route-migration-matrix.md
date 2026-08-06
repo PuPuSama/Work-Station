@@ -37,6 +37,7 @@
 | Knowledge API | `/api/knowledge/{project}/*` | PostgreSQL/pgvector/ObjectStore | Knowledge 权限矩阵 | Server Narrow |
 | Project Task 读取 | `/api/projects/{project}/tasks/*` | PostgreSQL JSONB | `project.view` | Server Ready |
 | Project Task Intake | `POST /api/projects/{project}/tasks`、`/task-imports` | PostgreSQL Task + Intake Receipt + Audit | `article.edit`；服务端 ID/序号 | Server Ready |
+| Task 写作要求与 Prompt Preview | `PUT /api/projects/{project}/tasks/{task}/writing-settings`、`POST .../writing-settings/preview` | PostgreSQL Task + Immutable Project Prompt + Current Published Knowledge | 写入 `article.edit` + CAS/Audit；预览 `project.view` + no-store | Server Ready |
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
@@ -92,6 +93,23 @@ Object Key、Hash 或 Provider Body。旧 `.../raw` 在 Server 继续 503，Loca
 内容策略和重构接缝见
 `docs/architecture/m7-server-snapshot-evidence-preview.md`。
 
+### 2.3 Task 写作要求与 Effective Prompt Preview
+
+Server 只开放：
+
+```text
+PUT  /api/projects/{project}/tasks/{task}/writing-settings
+POST /api/projects/{project}/tasks/{task}/writing-settings/preview
+```
+
+写入保存 Task 的十个写作字段，以 Revision CAS 与脱敏 Audit 原子提交，不改变 Workflow
+Status、既有产物或最后一次实际生成的 Prompt Snapshot。Preview 可使用未保存草稿，读取
+当前 Project Prompt 与 Published Knowledge，并复用正式 Outline/Article Prompt Builder；
+它不调用 LLM、不写 Task/Job/Audit，响应使用 `no-store`。Task 保存的是 Prompt 选择意图，
+真正生成仍在入队时固定精确 Prompt Version 与 Chunk ID。旧 Local `writing-settings` 和
+`prompt-preview` 路径在 Server 继续关闭。结构与后续重构不变量见
+`docs/architecture/m7-server-task-writing-settings.md`。
+
 ## 3. Task 写操作矩阵
 
 | 业务操作 | Project-scoped Server 路径 | 权限 | 存储边界 | 状态 |
@@ -99,6 +117,8 @@ Object Key、Hash 或 Provider Body。旧 `.../raw` 在 Server 继续 503，Loca
 | 单条创建 Task | `POST /api/projects/{project}/tasks` | `article.edit` | 服务端身份/序号 + 幂等 Receipt + Audit | Server Ready |
 | 规范化行导入 Task | `POST /api/projects/{project}/task-imports` | `article.edit` | 1–200 行 + Source Digest + 幂等 Receipt + Audit | Server Ready |
 | 完全重写 | `POST .../rewrite-from-scratch` | `article.edit` | PostgreSQL CAS + Audit | Server Ready |
+| 保存 Task 写作要求 | `PUT .../writing-settings` | `article.edit` | 十字段白名单 + Prompt 当前可用性验证 + CAS/Audit；不失效既有产物 | Server Ready |
+| 预览 Effective Prompt | `POST .../writing-settings/preview` | `project.view` | 未保存草稿 + 正式 Prompt Builder + Current Published Context；无写入/no-store | Server Ready |
 | 选择当前标题候选 | `PUT .../selected-title` | `article.edit` | Server-owned Candidate + CAS + Audit | Server Ready |
 | 保存/确认已审阅大纲 | `PUT .../outline` | `article.edit` | PostgreSQL Version + CAS + Audit | Server Ready |
 | 恢复历史大纲为草稿 | `POST .../outline/restore-version` | `article.edit` | Server-owned Version + CAS + Audit | Server Ready |
@@ -131,7 +151,7 @@ Object Key、Hash 或 Provider Body。旧 `.../raw` 在 Server 继续 503，Loca
 | `/api/dashboard`、`/api/sync-tasks`、`/api/init-week` | JSON/Excel/本地目录 | 不复用；Server 已用 Project Task 目录与 Intake API | 旧路径继续 503，不读本地 Topic Library |
 | `/api/topic-files/upload` | 本地上传路径 | 私有 Topic Asset | ObjectStore、内容哈希、Project 权限 |
 | `/api/projects/{customer}/brand|context|domain` | Local TaskStore/Project 文件 | 旧路由不迁移；品牌/域名由 `GET/PUT /api/projects/{project}/metadata` 替代，自由 Context 拆入 Published Knowledge 与 Prompt Snapshot | 新 Metadata API 已 Server Ready；旧路由继续 503 |
-| Project Prompt Library | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
+| 旧 Local Prompt HTTP | Project-scoped PostgreSQL HTTP、显式当前 Snapshot 导入和 Outline/Article/SEO Review/Humanize 消费已完成；旧 Local HTTP 仍属 SQLite | Project Prompt Snapshot | 旧路由继续关闭；后续消费者必须固定精确 Version |
 | Product 主生成链 | Local TaskStore + LLM | Project Task Command/Job | 候选与提交分离、Published Context、Provider 错误脱敏、CAS/Audit |
 | 本地图片上传/预览 | 本地文件路径 | 私有 Asset | 类型/像素/哈希门禁、短期下载 |
 | `/api/batches*`、`/api/batch-jobs*` | SQLite Queue | 不迁移该无 Project 兼容路径 | 继续 503；调用方改用 Project-scoped Control |
@@ -225,6 +245,9 @@ Operation、Task 或 Source Revision；它重放服务器已保存的同一可�
 旧 `/api/batches*` 在控制面完成后仍保持 503，调用方必须使用 Project-scoped 路径，
 不能建立无 Project 的兼容别名。下一项 Operation 只有在可信 Enqueue、两阶段权限、
 Server-only Handler、私有存储和停机测试全部完成后，才能加入显式 Operation 集合。
+当前下一候选是 `products` 主生成链：必须先完成候选/提交分离、Current Published Context、
+Provider 错误脱敏、Task CAS/Audit 和两阶段授权；在这些证据齐全前，`products` 与
+`rewrite_article` 都继续保持 Local-only。
 
 ## 7. 重构检查点
 
@@ -298,3 +321,13 @@ Server-only Handler、私有存储和停机测试全部完成后，才能加入�
     进入 Retriever/Catalog？
 42. Server `raw_evidence_url` 是否仍为 `null`，在独立授权预览能力完成前没有回退 Local
     Raw 路由或泄露对象 URI？
+43. 写作要求 PUT 是否仍只接受 Revision + 完整十字段，并在同一事务持有稳定 Project
+    Prompt 锁、复核 `article.edit`、执行 Task CAS 与脱敏 Audit？
+44. `project_default` 行不存在时，并发插入/切换是否仍与写作设置保存竞争同一个稳定锁；
+    显式 Prompt 归档/换版是否仍被 Head 锁阻止穿过验证窗口？
+45. Effective Prompt Preview 是否只接受未保存十字段 + `outline|article`，复用正式 Builder
+    与 Current Published Context，并保持无 LLM、无 Task/Job/Audit 写入及 `no-store`？
+46. 旧 Local writing-settings/prompt-preview 是否在 Server 继续 503，新 Project 路径是否在
+    Local 继续 404，且两种模式不共享 Task/Prompt Store？
+47. 前端是否仍在 Dirty、Prompt 不可用或 Revision 冲突时阻止 Outline/Article 生成，同时
+    保留其他未保存草稿、当前步骤和动态 Task 请求隔离？

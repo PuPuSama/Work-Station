@@ -695,6 +695,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/prompt-defaults/humanize",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "POST",
                 "/api/projects/example.com/tasks/task-a/"
                 "outline/restore-version",
@@ -778,6 +784,20 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "PUT",
+                "/api/projects/example.com/tasks/task-a/"
+                "writing-settings",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/projects/example.com/tasks/task-a/"
+                "writing-settings/preview",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "GET",
                 "/api/projects/example.com/tasks/task-a/"
                 "restore-links/jobs/job-a",
@@ -815,6 +835,29 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "seo-review-settings",
             )
         )
+        for method, path in (
+            (
+                "POST",
+                "/api/projects/example.com/tasks/task-a/"
+                "writing-settings",
+            ),
+            (
+                "PUT",
+                "/api/projects/example.com/tasks/task-a/"
+                "writing-settings/preview",
+            ),
+            (
+                "POST",
+                "/api/projects/example.com/tasks/task-a/"
+                "writing-settings/preview/extra",
+            ),
+            ("PUT", "/api/tasks/task-a/writing-settings"),
+            ("POST", "/api/tasks/task-a/prompt-preview"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertFalse(
+                    server_http_route_available(method, path)
+                )
         self.assertFalse(
             server_http_route_available(
                 "DELETE",

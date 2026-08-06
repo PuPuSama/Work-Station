@@ -241,8 +241,27 @@ GET  /api/projects/{project}/prompt-snapshots
 POST /api/projects/{project}/prompt-snapshots
 PUT  /api/projects/{project}/prompt-snapshots/{prompt_id}
 PUT  /api/projects/{project}/prompt-snapshots/{prompt_id}/active
-PUT  /api/projects/{project}/prompt-defaults/{outline|article|review}
+PUT  /api/projects/{project}/prompt-defaults/{outline|article|review|humanize}
 ```
+
+### Server Task 写作要求与 Effective Prompt Preview
+
+候选发布必须对同一 Project/Task 验证：
+
+- Editor 使用 `PUT /api/projects/{project}/tasks/{task}/writing-settings` 提交 Revision 与
+  完整十字段；Viewer 返回 403，未知/缺失字段返回 422；
+- 保存事务持有稳定 Project Prompt advisory lock，当前无 Default 行时的并发插入/切换也
+  不能穿过验证窗口；Task CAS 与 `article.writing_settings.updated` Audit 原子提交；
+- Audit 仅含字段变更布尔值、Use/Include 状态和 Prompt Source/Version，不含备注、自定义/
+  Effective Prompt、Prompt ID/Hash、URL、Chunk、Provider/数据库错误或 Secret；
+- Viewer 可使用 `POST .../writing-settings/preview` 预览未保存十字段；响应含安全 Prompt
+  Identity、完整 Effective Prompt、Context 数量、目标词数和固定 Warning，Header 必须为
+  `Cache-Control: no-store`；Preview 不写 Task/Job/Audit，也不调用模型；
+- 旧 `/api/tasks/{task}/writing-settings` 与 `/api/tasks/{task}/prompt-preview` 在 Server 返回
+  503；两条新 Project 路径在 Local 返回 404；
+- 前端 Dirty、Prompt 不可用或 Revision Conflict 时必须阻止 Outline/Article 生成；409
+  保留草稿并要求手动重载，保存不得覆盖正文/大纲/Review 等其他未保存草稿或跳转步骤；
+- 动态切换 Project/Task 后，旧 Directory/Task/Save/Preview 响应不得写入新 Scope。
 
 Prompt 数据切换顺序：
 
@@ -422,7 +441,8 @@ Source-scoped Server Writer。应用回滚时应关闭 Server Knowledge 写流�
 5. 对每个项目运行 `m7_cutover_report` 并保存 matched JSON；
 6. 只读 Preflight；
 7. API/Worker 部署但保持流量关闭；
-8. 身份、项目 Scope、对象下载、Retriever、Task/Job 与 Snapshot Review/Publish 冒烟；
+8. 身份、项目 Scope、对象下载、Retriever、Task/Job、写作要求/Prompt Preview 与 Snapshot
+   Review/Publish 冒烟；
 9. 小流量开放；
 10. 观察期结束后才关闭旧服务器写路径。
 
@@ -560,6 +580,7 @@ Server Knowledge Research 冒烟还必须覆盖：
   重新要求 `article.deliver` 并签发不超过一小时的 URL；
 - 并发 CAS 后的未引用 DOCX 进入内容寻址 orphan 对账，不在失败请求中立即删除；
 - Server Article Console 已接通现有 Task 的标题到交付主链，Delivery ZIP 与下载也已接线；
+  “内容准备”包含十字段写作要求、显式保存和折叠 Effective Prompt Preview；
   SEO Change 裁决/Preview/Apply/Complete、历史大纲恢复和章节重写已有专用 Server
   面板；Product Rediscovery 创建/状态、Rewrite From Scratch、Project Batch/Job
   列表/详情/全局抽屉、Rediscovery Inbox 审阅、可视化 Hero Asset Picker，以及
@@ -678,11 +699,12 @@ Server Delivery Console 冒烟必须从 `/` 开始，至少验证：
 - Local 模式仍挂载原 ProjectSelector、完整导航与 Path 下载，不因 Server UI 改动而
   改写现有行为。
 
-二十四条 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
+当前已迁移 Server Task 写操作的事务内 Audit 冒烟必须同时验证：
 
-- “完全重写、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、自动生成 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
+- “完全重写、保存写作要求、生成标题候选、选择标题候选、保存/确认大纲、恢复历史大纲草稿、生成正文初稿、上传初检截图、确认初检、保存人工 Humanized Article、自动生成 Humanized Article、恢复链接、保存 SEO Review 设置、生成 SEO Review Run、裁决 Review Change、应用 Review、完成 Review、确认产品、替换章节、准备图片、导出 DOCX、生成 TDK、上传最终截图、
   确认最终检查、打包交付 ZIP”分别产生
-  `article.task.rewritten`、`article.titles.generated`、`article.title.selected`、
+  `article.task.rewritten`、`article.writing_settings.updated`、
+  `article.titles.generated`、`article.title.selected`、
   `article.outline.updated`、`article.outline_version.restored`、
   `article.draft.generated`、
   `article.initial_ai_screenshot.uploaded`、`article.initial_ai_check.updated`、
@@ -923,6 +945,9 @@ object_inventory_or_version_watermark:
 object_restore_sample_count:
 object_restore_hash_matches:
 preflight_report_artifact:
+writing_settings_smoke:
+backend_regression:
+frontend_build:
 rpo:
 rto:
 rollback_owner:

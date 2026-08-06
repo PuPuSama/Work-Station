@@ -17,7 +17,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +39,7 @@ import { ServerProductRediscoveryPanel } from "@/components/server-product-redis
 import { ServerSectionRewritePanel } from "@/components/server-section-rewrite-panel";
 import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
 import { ServerTaskResetPanel } from "@/components/server-task-reset-panel";
+import { ServerWritingRequirementsPanel } from "@/components/server-writing-requirements-panel";
 import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
@@ -65,7 +66,7 @@ const STEPS: Array<{
   label: string;
   description: string;
 }> = [
-  { id: "setup", label: "1. 标题与产品", description: "候选、标题、正式产品身份" },
+  { id: "setup", label: "1. 内容准备", description: "标题、产品与本篇写作要求" },
   { id: "outline", label: "2. 大纲", description: "生成草稿并人工确认" },
   { id: "draft", label: "3. 初稿", description: "正文生成与 AI-rate 初检" },
   { id: "review", label: "4. 审阅", description: "人化、终检和链接恢复" },
@@ -187,11 +188,32 @@ export function ServerArticleWorkbench({
   const [productAnchors, setProductAnchors] = useState<Record<string, string>>(
     {},
   );
+  const [writingSettingsDirty, setWritingSettingsDirty] = useState(false);
+  const [writingSettingsPromptBlocked, setWritingSettingsPromptBlocked] =
+    useState(true);
+  const preserveDraftsForRevisionRef = useRef<number | null>(null);
+  const recommendedTaskIdRef = useRef("");
+  const loadRequestRef = useRef(0);
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
   const taskApi = `${projectApi}/tasks/${encodeURIComponent(taskId)}`;
+  const workbenchScope = `${customer}\n${taskId}`;
+  const activeWorkbenchScopeRef = useRef("");
+
+  useEffect(() => {
+    activeWorkbenchScopeRef.current = workbenchScope;
+    return () => {
+      if (activeWorkbenchScopeRef.current === workbenchScope) {
+        activeWorkbenchScopeRef.current = "";
+      }
+    };
+  }, [workbenchScope]);
 
   const load = useCallback(async () => {
+    const requestScope = workbenchScope;
+    if (activeWorkbenchScopeRef.current !== requestScope) return;
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
     setLoading(true);
     setError("");
     try {
@@ -200,80 +222,122 @@ export function ServerArticleWorkbench({
         apiGet<AccessibleProject[]>("/api/projects"),
         apiGet<ServerProjectCatalog>(`${projectApi}/catalog?image_limit=24`),
       ]);
+      if (
+        activeWorkbenchScopeRef.current !== requestScope ||
+        loadRequestRef.current !== requestId
+      ) {
+        return;
+      }
       const project = projects.find((item) => item.project_id === customer);
       setTask(nextTask);
       setRole(project?.effective_role ?? null);
       setCatalog(nextCatalog);
     } catch (reason) {
+      if (
+        activeWorkbenchScopeRef.current !== requestScope ||
+        loadRequestRef.current !== requestId
+      ) {
+        return;
+      }
       setError(errorMessage(reason));
     } finally {
-      setLoading(false);
+      if (
+        activeWorkbenchScopeRef.current === requestScope &&
+        loadRequestRef.current === requestId
+      ) {
+        setLoading(false);
+      }
     }
-  }, [customer, projectApi, taskApi]);
+  }, [customer, projectApi, taskApi, workbenchScope]);
 
   useEffect(() => {
+    setTask(null);
+    setPending("");
+    setMessage("");
+    setWritingSettingsDirty(false);
+    setWritingSettingsPromptBlocked(true);
     void load();
+    return () => {
+      loadRequestRef.current += 1;
+    };
   }, [load]);
 
   useEffect(() => {
     if (!task) return;
-    setSelectedProductIds(
-      task.products.flatMap((product) =>
-        product.product_id ? [product.product_id] : [],
-      ),
-    );
-    setOutlineDraft(task.outline_draft || task.outline || "");
-    setHumanizedDraft(task.humanized_article || task.initial_article || "");
-    setInitialScore(
-      task.initial_ai_check?.score === null ||
-        task.initial_ai_check?.score === undefined
-        ? ""
-        : String(task.initial_ai_check.score),
-    );
-    setInitialReport(task.initial_ai_check?.report || "");
-    setFinalScore(
-      task.final_ai_check?.score === null ||
-        task.final_ai_check?.score === undefined
-        ? ""
-        : String(task.final_ai_check.score),
-    );
-    setFinalReport(task.final_ai_check?.report || "");
-    setProductAnchors(
-      Object.fromEntries(
+    const preserveDrafts =
+      preserveDraftsForRevisionRef.current === (task.revision ?? 0);
+    preserveDraftsForRevisionRef.current = null;
+    if (!preserveDrafts) {
+      setSelectedProductIds(
         task.products.flatMap((product) =>
-          product.product_id
-            ? [[product.product_id, product.name] as const]
-            : [],
+          product.product_id ? [product.product_id] : [],
         ),
-      ),
-    );
-    setHeroAssetId(
-      task.images?.find((image) => image.role === "hero")?.source_asset_id ||
-        "",
-    );
-    if (!isWorkbenchStep(initialStep)) {
-      setStep(recommendedStep(task.status));
+      );
+      setOutlineDraft(task.outline_draft || task.outline || "");
+      setHumanizedDraft(task.humanized_article || task.initial_article || "");
+      setInitialScore(
+        task.initial_ai_check?.score === null ||
+          task.initial_ai_check?.score === undefined
+          ? ""
+          : String(task.initial_ai_check.score),
+      );
+      setInitialReport(task.initial_ai_check?.report || "");
+      setFinalScore(
+        task.final_ai_check?.score === null ||
+          task.final_ai_check?.score === undefined
+          ? ""
+          : String(task.final_ai_check.score),
+      );
+      setFinalReport(task.final_ai_check?.report || "");
+      setProductAnchors(
+        Object.fromEntries(
+          task.products.flatMap((product) =>
+            product.product_id
+              ? [[product.product_id, product.name] as const]
+              : [],
+          ),
+        ),
+      );
+      setHeroAssetId(
+        task.images?.find((image) => image.role === "hero")
+          ?.source_asset_id || "",
+      );
+    }
+    if (recommendedTaskIdRef.current !== task.id) {
+      recommendedTaskIdRef.current = task.id;
+      if (!isWorkbenchStep(initialStep)) {
+        setStep(recommendedStep(task.status));
+      }
     }
   }, [initialStep, task]);
+
+  function acceptWritingSettingsTask(updated: TaskRecord) {
+    preserveDraftsForRevisionRef.current = updated.revision ?? 0;
+    setTask(updated);
+  }
 
   async function runAction(
     label: string,
     action: () => Promise<unknown>,
     successMessage = `${label}完成。`,
   ): Promise<boolean> {
+    const actionScope = workbenchScope;
+    if (activeWorkbenchScopeRef.current !== actionScope) return false;
     setPending(label);
     setError("");
     setMessage("");
     try {
       await action();
+      if (activeWorkbenchScopeRef.current !== actionScope) return false;
       setMessage(successMessage);
       await load();
       return true;
     } catch (reason) {
+      if (activeWorkbenchScopeRef.current !== actionScope) return false;
       setError(errorMessage(reason));
       return false;
     } finally {
-      setPending("");
+      if (activeWorkbenchScopeRef.current === actionScope) setPending("");
     }
   }
 
@@ -283,6 +347,19 @@ export function ServerArticleWorkbench({
     payload: Record<string, unknown> = {},
   ) {
     if (!task) return;
+    const jobScope = workbenchScope;
+    if (
+      (writingSettingsDirty || writingSettingsPromptBlocked) &&
+      (endpoint === "outline" || endpoint === "article")
+    ) {
+      setMessage("");
+      setError(
+        writingSettingsDirty
+          ? "写作要求有未保存修改，请先在“内容准备”中保存，再开始生成。"
+          : "写作要求中的 Prompt 尚未通过可用性检查，请先返回“内容准备”处理。",
+      );
+      return;
+    }
     await runAction(
       label,
       async () => {
@@ -290,8 +367,10 @@ export function ServerArticleWorkbench({
           revision: task.revision ?? 0,
           ...payload,
         });
+        if (activeWorkbenchScopeRef.current !== jobScope) return;
         const statusPath = `${taskApi}/${endpoint}/jobs/${encodeURIComponent(queued.job_id)}`;
         for (let attempt = 0; attempt < 180; attempt += 1) {
+          if (activeWorkbenchScopeRef.current !== jobScope) return;
           const current = await apiGet<ServerProjectJob>(statusPath);
           if (TERMINAL_JOB_STATUSES.has(current.status)) {
             if (current.status !== "succeeded") {
@@ -626,6 +705,19 @@ export function ServerArticleWorkbench({
           </div>
         )}
 
+        <div hidden={step !== "setup"}>
+          <ServerWritingRequirementsPanel
+            key={`${customer}:${taskId}`}
+            task={task}
+            projectApi={projectApi}
+            taskApi={taskApi}
+            canEdit={editAllowed}
+            onTaskUpdated={acceptWritingSettingsTask}
+            onDirtyChange={setWritingSettingsDirty}
+            onGenerationBlockedChange={setWritingSettingsPromptBlocked}
+          />
+        </div>
+
         {step === "outline" && (
           <Card>
             <CardHeader className="border-b">
@@ -635,6 +727,17 @@ export function ServerArticleWorkbench({
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
+              {writingSettingsDirty || writingSettingsPromptBlocked ? (
+                <Alert>
+                  <AlertCircle />
+                  <AlertTitle>写作要求尚未保存</AlertTitle>
+                  <AlertDescription>
+                    {writingSettingsDirty
+                      ? "返回“内容准备”保存后才能生成大纲；当前草稿仍保留在页面中。"
+                      : "返回“内容准备”确认 Prompt Directory 与当前选择可用后再生成大纲。"}
+                  </AlertDescription>
+                </Alert>
+              ) : null}
               <div className="grid gap-2">
                 <Label htmlFor="server-outline">Markdown 大纲</Label>
                 <Textarea
@@ -653,6 +756,8 @@ export function ServerArticleWorkbench({
                   className="min-h-11"
                   disabled={
                     Boolean(pending) ||
+                    writingSettingsDirty ||
+                    writingSettingsPromptBlocked ||
                     !editAllowed ||
                     !allowed.has("generate_outline")
                   }
@@ -732,6 +837,17 @@ export function ServerArticleWorkbench({
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
+                {writingSettingsDirty || writingSettingsPromptBlocked ? (
+                  <Alert>
+                    <AlertCircle />
+                    <AlertTitle>写作要求尚未保存</AlertTitle>
+                    <AlertDescription>
+                      {writingSettingsDirty
+                        ? "返回“内容准备”保存后才能生成文章；当前草稿仍保留在页面中。"
+                        : "返回“内容准备”确认 Prompt Directory 与当前选择可用后再生成文章。"}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
                 <div className="max-h-[64dvh] overflow-auto rounded-lg border bg-muted/20 p-4">
                   <pre className="whitespace-pre-wrap font-sans text-sm leading-7">
                     {task.initial_article || task.article || "尚未生成初稿。"}
@@ -742,6 +858,8 @@ export function ServerArticleWorkbench({
                   className="min-h-11"
                   disabled={
                     Boolean(pending) ||
+                    writingSettingsDirty ||
+                    writingSettingsPromptBlocked ||
                     !editAllowed ||
                     !allowed.has("generate_article")
                   }

@@ -41,6 +41,7 @@ from services.server_project_prompts import (  # noqa: E402
     ServerProjectPromptError,
     ServerProjectPromptUnavailable,
     ServerProjectPromptServiceFactory,
+    _prompt_scope_lock_identity,
 )
 from services.project_prompts import ProjectPromptRepository  # noqa: E402
 from services.postgres_task_repository import (  # noqa: E402
@@ -467,6 +468,41 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertEqual(resolved.prompt_id, created.prompt_id)
         self.assertEqual(resolved.kind, "humanize")
         self.assertEqual(resolved.content.count("{{ARTICLE}}"), 1)
+
+    def test_writing_settings_resolution_holds_stable_prompt_scope_lock(
+        self,
+    ) -> None:
+        lock_identity = _prompt_scope_lock_identity(
+            self.organization_id,
+            self.project_id,
+        )
+        with self.engine.begin() as connection:
+            resolved = self.service.resolve_for_update_in_transaction(
+                connection,
+                self.editor,
+                kind="outline",
+                selection="project_default",
+            )
+            self.assertEqual(resolved.source, "system")
+            with self.engine.begin() as competing_connection:
+                competing_lock = competing_connection.execute(
+                    sa.select(
+                        sa.func.pg_try_advisory_xact_lock(
+                            sa.func.hashtextextended(lock_identity, 0)
+                        )
+                    )
+                ).scalar_one()
+                self.assertFalse(competing_lock)
+
+        with self.engine.begin() as connection:
+            released_lock = connection.execute(
+                sa.select(
+                    sa.func.pg_try_advisory_xact_lock(
+                        sa.func.hashtextextended(lock_identity, 0)
+                    )
+                )
+            ).scalar_one()
+            self.assertTrue(released_lock)
 
     def test_archive_clears_default_without_deleting_versions(self) -> None:
         created = self.service.create(
@@ -958,6 +994,34 @@ class ServerProjectPromptTests(unittest.TestCase):
                 )
                 self.assertEqual(default.status_code, 200, default.text)
                 self.assertEqual(default.json()["version"], 2)
+                humanizer = client.post(
+                    base_path,
+                    json={
+                        "name": "HTTP humanizer",
+                        "kind": "humanize",
+                        "content": "Rewrite {{ARTICLE}} naturally.",
+                    },
+                )
+                self.assertEqual(
+                    humanizer.status_code,
+                    201,
+                    humanizer.text,
+                )
+                humanizer_id = humanizer.json()["prompt_id"]
+                humanize_default = client.put(
+                    f"/api/projects/{self.project_id}/"
+                    "prompt-defaults/humanize",
+                    json={"prompt_id": humanizer_id},
+                )
+                self.assertEqual(
+                    humanize_default.status_code,
+                    200,
+                    humanize_default.text,
+                )
+                self.assertEqual(
+                    humanize_default.json()["kind"],
+                    "humanize",
+                )
                 self.assertEqual(
                     client.put(
                         f"{base_path}/{prompt_id}/active",
@@ -986,13 +1050,25 @@ class ServerProjectPromptTests(unittest.TestCase):
                 )
                 listing = client.get(base_path)
                 self.assertEqual(listing.status_code, 200)
+                listed_prompts = {
+                    item["prompt_id"]: item
+                    for item in listing.json()["prompts"]
+                }
                 self.assertEqual(
-                    listing.json()["prompts"][0]["status"],
+                    listed_prompts[prompt_id]["status"],
                     "archived",
+                )
+                self.assertEqual(
+                    listed_prompts[humanizer_id]["kind"],
+                    "humanize",
                 )
                 self.assertNotIn(
                     "outline",
                     listing.json()["defaults"],
+                )
+                self.assertEqual(
+                    listing.json()["defaults"]["humanize"]["prompt_id"],
+                    humanizer_id,
                 )
                 self.assertEqual(
                     client.post(
@@ -1011,6 +1087,8 @@ class ServerProjectPromptTests(unittest.TestCase):
                     [
                         "project_prompt.created",
                         "project_prompt.version.created",
+                        "project_prompt.default.updated",
+                        "project_prompt.created",
                         "project_prompt.default.updated",
                         "project_prompt.status.updated",
                     ],

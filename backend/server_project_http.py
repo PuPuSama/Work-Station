@@ -11,6 +11,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -158,6 +159,13 @@ from services.server_task_intake import (
     ServerTaskIntakeResult,
     ServerTaskIntakeRow,
     ServerTaskIntakeUnavailable,
+)
+from services.server_task_writing_settings import (
+    ServerTaskWritingSettings,
+    ServerTaskWritingSettingsConflict,
+    ServerTaskWritingSettingsError,
+    ServerTaskWritingSettingsServiceFactory,
+    ServerTaskWritingSettingsUnavailable,
 )
 from services.server_tdk_export import (
     ServerTdkDocxExport,
@@ -403,6 +411,63 @@ class ProjectOutlineUpdateRequest(BaseModel):
     revision: int = Field(ge=0)
     outline: str = Field(min_length=1, max_length=40000)
     confirmed: bool = True
+
+
+class ProjectTaskWritingSettingsRequest(BaseModel):
+    """Replace the complete Server writing-settings projection under CAS."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    revision: int = Field(ge=0)
+    topic_notes: str = Field(max_length=30000)
+    outline_custom_prompt: str = Field(max_length=40000)
+    article_custom_prompt: str = Field(max_length=40000)
+    use_outline_custom_prompt: bool
+    use_article_custom_prompt: bool
+    outline_prompt_selection: str = Field(max_length=255)
+    article_prompt_selection: str = Field(max_length=255)
+    include_project_introduction: bool
+    include_project_notes: bool
+    include_topic_notes: bool
+
+    def to_settings(self) -> ServerTaskWritingSettings:
+        values = self.model_dump(exclude={"revision", "kind"})
+        return ServerTaskWritingSettings(**values)
+
+
+class ProjectTaskWritingSettingsPreviewRequest(
+    ProjectTaskWritingSettingsRequest
+):
+    """Preview one Server prompt without accepting a caller-owned snapshot."""
+
+    kind: Literal["outline", "article"]
+
+
+class ProjectTaskPromptSnapshotResponse(BaseModel):
+    """Safe Prompt identity without separately returning content or hashes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_id: str
+    name: str
+    kind: Literal["outline", "article"]
+    version: int
+    source: Literal["system", "project_default", "library"]
+    captured_at: str
+
+
+class ProjectTaskWritingSettingsPreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    task_id: str
+    task_revision: int
+    kind: Literal["outline", "article"]
+    prompt_snapshot: ProjectTaskPromptSnapshotResponse
+    effective_prompt: str
+    context_chunk_count: int
+    target_words: int
+    warnings: list[str]
 
 
 class ProjectOutlineVersionRestoreRequest(BaseModel):
@@ -1032,6 +1097,23 @@ def _project_prompt_service(
     return factory.create(authorized)
 
 
+def _task_writing_settings_service(
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+):
+    factory = getattr(
+        request.app.state,
+        "server_task_writing_settings_service_factory",
+        None,
+    )
+    if not isinstance(factory, ServerTaskWritingSettingsServiceFactory):
+        raise HTTPException(
+            status_code=503,
+            detail="Server writing settings are not available.",
+        )
+    return factory.create(authorized)
+
+
 def _require_project_permission(
     request: Request,
     authorized: AuthorizedProjectRequest,
@@ -1604,6 +1686,146 @@ def rewrite_project_task_from_scratch(
         task,
         expected_revision=payload.revision,
         action="article.task.rewritten",
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/writing-settings",
+    response_model=TaskRecord,
+)
+def update_project_task_writing_settings(
+    project: str,
+    task_id: str,
+    payload: ProjectTaskWritingSettingsRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        return _task_writing_settings_service(
+            request,
+            authorized,
+        ).update(
+            actor=authorized.actor,
+            task_id=task_id,
+            expected_revision=payload.revision,
+            settings=payload.to_settings(),
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (RevisionConflictError, ServerTaskWritingSettingsConflict) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Task writing settings conflict.",
+        ) from exc
+    except (ServerProjectPromptError, ServerTaskWritingSettingsError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Writing settings are invalid.",
+        ) from exc
+    except (
+        ServerProjectPromptUnavailable,
+        ServerTaskWritingSettingsUnavailable,
+    ) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server writing settings are temporarily unavailable.",
+        ) from exc
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/writing-settings/preview",
+    response_model=ProjectTaskWritingSettingsPreviewResponse,
+)
+def preview_project_task_writing_settings(
+    project: str,
+    task_id: str,
+    payload: ProjectTaskWritingSettingsPreviewRequest,
+    request: Request,
+    response: Response,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectTaskWritingSettingsPreviewResponse:
+    del project
+    try:
+        preview = _task_writing_settings_service(
+            request,
+            authorized,
+        ).preview(
+            actor=authorized.actor,
+            task_id=task_id,
+            expected_revision=payload.revision,
+            kind=payload.kind,
+            settings=payload.to_settings(),
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (RevisionConflictError, ServerTaskWritingSettingsConflict) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Task writing settings conflict.",
+        ) from exc
+    except (ServerProjectPromptError, ServerTaskWritingSettingsError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Writing settings are invalid.",
+        ) from exc
+    except (
+        ServerProjectPromptUnavailable,
+        ServerTaskWritingSettingsUnavailable,
+    ) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server writing settings are temporarily unavailable.",
+        ) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    snapshot = preview.snapshot
+    return ProjectTaskWritingSettingsPreviewResponse(
+        project_id=authorized.project_id,
+        task_id=task_id,
+        task_revision=payload.revision,
+        kind=payload.kind,
+        prompt_snapshot=ProjectTaskPromptSnapshotResponse(
+            prompt_id=snapshot.prompt_id,
+            name=snapshot.name,
+            kind=payload.kind,
+            version=snapshot.version,
+            source=snapshot.source,
+            captured_at=snapshot.captured_at,
+        ),
+        effective_prompt=preview.effective_prompt,
+        context_chunk_count=preview.context_chunk_count,
+        target_words=preview.target_words,
+        warnings=[
+            "Preview resolves the current Project Prompt and Published "
+            "Knowledge; generation pins exact inputs when the Job is "
+            "enqueued."
+        ],
     )
 
 

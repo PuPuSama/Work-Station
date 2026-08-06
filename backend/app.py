@@ -222,6 +222,9 @@ from services.server_project_tasks import ServerProjectTaskStoreFactory
 from services.server_project_prompts import (
     ServerProjectPromptServiceFactory,
 )
+from services.server_task_writing_settings import (
+    ServerTaskWritingSettingsServiceFactory,
+)
 from services.server_project_catalog import PostgresServerProjectCatalog
 from services.server_product_selection import (
     PostgresConfirmedProductSelection,
@@ -357,6 +360,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_prompt_service_factory",
         None,
     )
+    previous_server_task_writing_settings_service_factory = getattr(
+        application.state,
+        "server_task_writing_settings_service_factory",
+        None,
+    )
     previous_server_project_directory = getattr(
         application.state,
         "server_project_directory",
@@ -486,6 +494,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_prompt_service_factory = None
+    application.state.server_task_writing_settings_service_factory = None
     application.state.server_project_directory = None
     application.state.server_project_metadata = None
     application.state.server_project_memberships = None
@@ -565,6 +574,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_prompt_service_factory = (
             ServerProjectPromptServiceFactory(server_engine)
+        )
+        application.state.server_task_writing_settings_service_factory = (
+            ServerTaskWritingSettingsServiceFactory(server_engine, cfg)
         )
         application.state.server_project_directory = (
             PostgresProjectDirectory(server_engine)
@@ -876,6 +888,9 @@ async def app_lifespan(application: FastAPI):
             application.state.server_project_prompt_service_factory = (
                 previous_server_project_prompt_service_factory
             )
+            application.state.server_task_writing_settings_service_factory = (
+                previous_server_task_writing_settings_service_factory
+            )
             application.state.server_project_directory = (
                 previous_server_project_directory
             )
@@ -1139,6 +1154,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_prompt_service_factory = (
             previous_server_project_prompt_service_factory
+        )
+        application.state.server_task_writing_settings_service_factory = (
+            previous_server_task_writing_settings_service_factory
         )
         application.state.server_project_directory = (
             previous_server_project_directory

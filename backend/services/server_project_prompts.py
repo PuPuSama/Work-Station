@@ -37,6 +37,15 @@ PromptStatus = Literal["active", "archived"]
 PromptSource = Literal["system", "project_default", "library"]
 
 
+def _prompt_scope_lock_identity(
+    organization_id: str,
+    project_id: str,
+) -> str:
+    """Stable namespace for serializing one Project's Prompt pointer graph."""
+
+    return "\n".join(("server_project_prompts_v1", organization_id, project_id))
+
+
 @dataclass(frozen=True, slots=True)
 class ServerProjectPromptItem:
     snapshot: PromptSnapshot
@@ -149,6 +158,22 @@ class PostgresProjectPromptService:
             "article.edit",
         ).allowed:
             raise ProjectAccessDenied("project access denied")
+        # The Default row may not exist yet, so a row lock cannot protect the
+        # absence case. Every Prompt mutation and writing-settings validation
+        # takes this transaction-scoped lock before reading a Default pointer.
+        connection.execute(
+            sa.select(
+                sa.func.pg_advisory_xact_lock(
+                    sa.func.hashtextextended(
+                        _prompt_scope_lock_identity(
+                            self.organization_id,
+                            self.project_id,
+                        ),
+                        0,
+                    )
+                )
+            )
+        ).scalar_one()
 
     def _append_audit(
         self,
@@ -235,6 +260,103 @@ class PostgresProjectPromptService:
         if lock:
             query = query.with_for_update(of=project_prompt_heads)
         return connection.execute(query).mappings().one_or_none()
+
+    def _resolve_in_connection(
+        self,
+        connection: Connection,
+        *,
+        kind: PromptKind,
+        selection: str,
+        lock: bool,
+    ) -> PromptSnapshot:
+        normalized = selection.strip()
+        if normalized == "system":
+            return _system_snapshot(kind)
+        if not normalized or normalized == "project_default":
+            query = (
+                sa.select(
+                    project_prompt_defaults.c.prompt_id,
+                    project_prompt_defaults.c.version,
+                    project_prompt_heads.c.kind,
+                    project_prompt_heads.c.status,
+                    project_prompt_versions.c.name,
+                    project_prompt_versions.c.content,
+                    project_prompt_versions.c.created_at,
+                )
+                .select_from(
+                    project_prompt_defaults.join(
+                        project_prompt_heads,
+                        sa.and_(
+                            project_prompt_heads.c.organization_id
+                            == project_prompt_defaults.c.organization_id,
+                            project_prompt_heads.c.project_id
+                            == project_prompt_defaults.c.project_id,
+                            project_prompt_heads.c.prompt_id
+                            == project_prompt_defaults.c.prompt_id,
+                        ),
+                    ).join(
+                        project_prompt_versions,
+                        sa.and_(
+                            project_prompt_versions.c.organization_id
+                            == project_prompt_defaults.c.organization_id,
+                            project_prompt_versions.c.project_id
+                            == project_prompt_defaults.c.project_id,
+                            project_prompt_versions.c.prompt_id
+                            == project_prompt_defaults.c.prompt_id,
+                            project_prompt_versions.c.kind
+                            == project_prompt_defaults.c.kind,
+                            project_prompt_versions.c.version
+                            == project_prompt_defaults.c.version,
+                        ),
+                    )
+                )
+                .where(
+                    project_prompt_defaults.c.organization_id
+                    == self.organization_id,
+                    project_prompt_defaults.c.project_id == self.project_id,
+                    project_prompt_defaults.c.kind == kind,
+                    project_prompt_heads.c.status == "active",
+                )
+            )
+            if lock:
+                query = query.with_for_update(of=project_prompt_heads)
+            row = connection.execute(query).mappings().one_or_none()
+            if row is None:
+                return _system_snapshot(kind)
+            return self._snapshot(row, source="project_default")
+        row = self._current_row(connection, normalized, lock=lock)
+        if (
+            row is None
+            or row["status"] != "active"
+            or row["kind"] != kind
+        ):
+            raise ServerProjectPromptError(
+                "selected prompt is unavailable"
+            )
+        return self._snapshot(row, source="library")
+
+    def resolve_for_update_in_transaction(
+        self,
+        connection: Connection,
+        actor: ActorIdentity,
+        *,
+        kind: PromptKind,
+        selection: str,
+    ) -> PromptSnapshot:
+        """Resolve and lock one selection in the caller's write transaction."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "project prompt resolution requires a business transaction"
+            )
+        validated_kind = _validate_kind(kind)
+        self._lock_write_access(connection, actor)
+        return self._resolve_in_connection(
+            connection,
+            kind=validated_kind,
+            selection=selection,
+            lock=True,
+        )
 
     def create(
         self,
@@ -621,73 +743,13 @@ class PostgresProjectPromptService:
     ) -> PromptSnapshot:
         kind = _validate_kind(kind)
         self._require_read(actor)
-        normalized = selection.strip()
-        if normalized == "system":
-            return _system_snapshot(kind)
         with self._engine.connect() as connection:
-            if not normalized or normalized == "project_default":
-                row = connection.execute(
-                    sa.select(
-                        project_prompt_defaults.c.prompt_id,
-                        project_prompt_defaults.c.version,
-                        project_prompt_heads.c.kind,
-                        project_prompt_heads.c.status,
-                        project_prompt_versions.c.name,
-                        project_prompt_versions.c.content,
-                        project_prompt_versions.c.created_at,
-                    )
-                    .select_from(
-                        project_prompt_defaults.join(
-                            project_prompt_heads,
-                            sa.and_(
-                                project_prompt_heads.c.organization_id
-                                == project_prompt_defaults.c.organization_id,
-                                project_prompt_heads.c.project_id
-                                == project_prompt_defaults.c.project_id,
-                                project_prompt_heads.c.prompt_id
-                                == project_prompt_defaults.c.prompt_id,
-                            ),
-                        ).join(
-                            project_prompt_versions,
-                            sa.and_(
-                                project_prompt_versions.c.organization_id
-                                == project_prompt_defaults.c.organization_id,
-                                project_prompt_versions.c.project_id
-                                == project_prompt_defaults.c.project_id,
-                                project_prompt_versions.c.prompt_id
-                                == project_prompt_defaults.c.prompt_id,
-                                project_prompt_versions.c.kind
-                                == project_prompt_defaults.c.kind,
-                                project_prompt_versions.c.version
-                                == project_prompt_defaults.c.version,
-                            ),
-                        )
-                    )
-                    .where(
-                        project_prompt_defaults.c.organization_id
-                        == self.organization_id,
-                        project_prompt_defaults.c.project_id
-                        == self.project_id,
-                        project_prompt_defaults.c.kind == kind,
-                        project_prompt_heads.c.status == "active",
-                    )
-                ).mappings().one_or_none()
-                if row is None:
-                    return _system_snapshot(kind)
-                return self._snapshot(
-                    row,
-                    source="project_default",
-                )
-            row = self._current_row(connection, normalized)
-            if (
-                row is None
-                or row["status"] != "active"
-                or row["kind"] != kind
-            ):
-                raise ServerProjectPromptError(
-                    "selected prompt is unavailable"
-                )
-            return self._snapshot(row, source="library")
+            return self._resolve_in_connection(
+                connection,
+                kind=kind,
+                selection=selection,
+                lock=False,
+            )
 
     def list(
         self,

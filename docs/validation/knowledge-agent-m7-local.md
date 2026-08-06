@@ -1,9 +1,13 @@
 # Knowledge Agent M7 持续实施本地验证记录
 
-- 日期：2026-07-31
+- 首次记录：2026-07-31
+- 最后更新：2026-08-06
 - 分支：`feature/knowledge-agent-m7`
 - 基线：`cc4bbf2 feat: add M6 retrieval evaluation framework`
-- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL、私有对象存储、Project Prompt 与 append-only 审计底座
+- 范围：多租户 Schema、项目 RBAC、Actor Session、成员管理、Task/Job PostgreSQL、私有对象存储、Project Prompt、Task 写作要求与 append-only 审计底座
+
+本文按切片追加验证快照；早期小节保留当时的能力边界和测试数量，不代表当前最新状态。
+当前结论以文末最后一个切片及“当前未验证或未接入”为准。
 
 ## 环境
 
@@ -1976,3 +1980,38 @@ Set-Location ..\frontend
   External Gate；
 - 组件职责、接口作用、对象边界、内容策略、失败语义和后续重构接缝记录在
   `docs/architecture/m7-server-snapshot-evidence-preview.md`。
+
+### M7 Server Task 写作要求与 Effective Prompt Preview
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+Set-Location <仓库根目录>
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -q
+
+Set-Location frontend
+& '<工作区 Node 绝对路径>' .\node_modules\typescript\bin\tsc --noEmit
+& '<工作区 Node 绝对路径>' .\node_modules\eslint\bin\eslint.js .
+& '<工作区 Node 绝对路径>' .\node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- 完整后端回归 771 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 写作设置服务覆盖完整十字段规范化、既有下游产物保留、Preview 纯内存构建和 Article
+  前置状态；真实 PostgreSQL/HTTP 覆盖 Viewer/Editor、strict Body、精确 Project/Task Scope、
+  Revision、Audit 脱敏与故障回滚、Preview `no-store`、旧 Local 路由在 Server 503 和新路由
+  在 Local 404；
+- Project Prompt 真实 PostgreSQL 测试证明 writing-settings 解析持有稳定 Project advisory
+  lock：竞争连接不能取得同一锁，事务结束后锁会释放，覆盖“当前无 Default 行”的并发插入
+  窗口；显式 Prompt Head 仍在同一业务事务锁定；
+- 前端 TypeScript、全量 ESLint 与 Next.js 16.2.10 production build 串行通过；Build 完成
+  TypeScript、Page Data 和 7 个 Static Page；
+- 前端验证边界包括显式保存、Dirty/Prompt Invalid/Revision Conflict 生成门禁、409 草稿
+  保留、其他 Workbench 草稿保护、动态 Project/Task 旧响应隔离及 Viewer 可聚焦只读状态；
+- 本切片不修改 Schema 或 Alembic Migration，因此没有重复运行 Alembic；当前文档 Head
+  `20260806_0019` 来自前一迁移切片的既有验证，不把它冒充为本次新验证结果；
+- 测试使用确定性本地 Provider/对象替身和开发 PostgreSQL，没有调用真实 LLM、Embedding、
+  Tavily、客户网站、生产 IdP 或生产 S3；
+- 接口、事务、Prompt 固定时点、组件职责、失败语义和后续重构接缝记录在
+  `docs/architecture/m7-server-task-writing-settings.md`。

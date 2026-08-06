@@ -17,7 +17,7 @@ from services.server_project_prompts import (
 from services.server_request_security import AuthorizedProjectRequest
 
 
-PromptKind = Literal["outline", "article", "review"]
+PromptKind = Literal["outline", "article", "review", "humanize"]
 
 
 class ServerPromptItemResponse(BaseModel):

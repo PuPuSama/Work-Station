@@ -136,6 +136,7 @@ export type TdkMetadata = {
 };
 
 export type PromptKind = "outline" | "article" | "review";
+export type ServerPromptKind = PromptKind | "humanize";
 
 export type PromptLibraryItem = {
   id: string;
@@ -175,6 +176,59 @@ export type PromptSnapshot = {
 export type PromptPreview = {
   snapshot: PromptSnapshot;
   effective_prompt: string;
+};
+
+export type ServerPromptItem = {
+  prompt_id: string;
+  name: string;
+  kind: ServerPromptKind;
+  content: string;
+  version: number;
+  status: "active" | "archived";
+  captured_at: string;
+};
+
+export type ServerPromptSnapshot = Omit<PromptSnapshot, "kind"> & {
+  kind: ServerPromptKind;
+};
+
+export type ServerPromptDirectory = {
+  prompts: ServerPromptItem[];
+  defaults: Partial<Record<ServerPromptKind, ServerPromptSnapshot>>;
+};
+
+export type PromptIdentity = {
+  prompt_id: string;
+  name: string;
+  kind: "outline" | "article";
+  version: number;
+  source: "system" | "project_default" | "library";
+  captured_at: string;
+};
+
+export type EffectivePromptPreview = {
+  project_id: string;
+  task_id: string;
+  task_revision: number;
+  kind: "outline" | "article";
+  prompt_snapshot: PromptIdentity;
+  effective_prompt: string;
+  context_chunk_count: number;
+  target_words: number;
+  warnings: string[];
+};
+
+export type ServerTaskWritingSettings = {
+  topic_notes: string;
+  outline_custom_prompt: string;
+  article_custom_prompt: string;
+  use_outline_custom_prompt: boolean;
+  use_article_custom_prompt: boolean;
+  outline_prompt_selection: string;
+  article_prompt_selection: string;
+  include_project_introduction: boolean;
+  include_project_notes: boolean;
+  include_topic_notes: boolean;
 };
 
 export type SeoReviewDimension = {

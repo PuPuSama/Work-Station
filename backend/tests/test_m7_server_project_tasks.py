@@ -131,6 +131,9 @@ from services.server_task_intake import (  # noqa: E402
     ServerTaskIntakeResult,
     ServerTaskIntakeRow,
 )
+from services.server_task_writing_settings import (  # noqa: E402
+    ServerTaskWritingSettingsServiceFactory,
+)
 from storage import content_hash  # noqa: E402
 from services.seo_review import (  # noqa: E402
     effective_review_prompt_snapshot,
@@ -725,6 +728,29 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             created_at="2026-07-30T00:00:00+00:00",
             updated_at="2026-07-30T00:00:00+00:00",
         ).model_dump(mode="json")
+
+    @staticmethod
+    def _writing_settings_payload(
+        *,
+        revision: int = 0,
+        kind: str | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "revision": revision,
+            "topic_notes": "Private topic notes",
+            "outline_custom_prompt": "Private outline instructions",
+            "article_custom_prompt": "Private article instructions",
+            "use_outline_custom_prompt": True,
+            "use_article_custom_prompt": False,
+            "outline_prompt_selection": "project_default",
+            "article_prompt_selection": "project_default",
+            "include_project_introduction": True,
+            "include_project_notes": False,
+            "include_topic_notes": True,
+        }
+        if kind is not None:
+            payload["kind"] = kind
+        return payload
 
     @staticmethod
     def _image_bytes(color: str) -> bytes:
@@ -2213,6 +2239,22 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/rewrite-from-scratch",
                     json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).put(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/writing-settings",
+                    json=self._writing_settings_payload(),
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/writing-settings/preview",
+                    json=self._writing_settings_payload(kind="outline"),
                 ).status_code,
                 404,
             )
@@ -4021,6 +4063,288 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(
                     client.get(download_path).status_code,
                     403,
+                )
+                self.assertFalse(local_state.exists())
+
+    def test_server_writing_settings_http_is_scoped_strict_and_safe(
+        self,
+    ) -> None:
+        import app as app_module
+
+        codec = ServerActorSessionCodec(b"w" * 32)
+        actor = ActorIdentity(self.org_a, self.user_a)
+        base_config = app_module.config()
+        with tempfile.TemporaryDirectory() as directory:
+            local_state = Path(directory) / "must-not-exist"
+            isolated = replace(
+                base_config,
+                data_file=local_state / "tasks.json",
+                knowledge_agent_enabled=False,
+            )
+            audit = RecordingAuditWriter()
+            with (
+                patch.object(app_module, "config", return_value=isolated),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ARTICLE_AGENT_SERVER_MODE": "true",
+                        "ARTICLE_AGENT_SERVER_SESSION_SECRET": "w" * 32,
+                    },
+                    clear=False,
+                ),
+                TestClient(app_module.app) as client,
+            ):
+                client.app.state.server_task_writing_settings_service_factory = (
+                    ServerTaskWritingSettingsServiceFactory(
+                        self.engine,
+                        isolated,
+                        audit=audit,
+                    )
+                )
+                client.cookies.set(
+                    SERVER_AUTH_COOKIE_NAME,
+                    codec.create(actor),
+                )
+                base_path = (
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/writing-settings"
+                )
+                preview_payload = self._writing_settings_payload(
+                    kind="outline"
+                )
+
+                self.assertEqual(
+                    client.put(
+                        f"/api/tasks/{self.task_a}/writing-settings",
+                        json=self._writing_settings_payload(),
+                    ).status_code,
+                    503,
+                )
+                self.assertEqual(
+                    client.post(
+                        f"/api/tasks/{self.task_a}/prompt-preview",
+                        json={
+                            "kind": "outline",
+                            "selection": "system",
+                        },
+                    ).status_code,
+                    503,
+                )
+
+                unknown = dict(preview_payload)
+                unknown["prompt_content"] = "must not be accepted"
+                self.assertEqual(
+                    client.post(
+                        f"{base_path}/preview",
+                        json=unknown,
+                    ).status_code,
+                    422,
+                )
+                preview = client.post(
+                    f"{base_path}/preview",
+                    json=preview_payload,
+                )
+                self.assertEqual(preview.status_code, 200, preview.text)
+                self.assertEqual(
+                    preview.headers.get("cache-control"),
+                    "no-store",
+                )
+                body = preview.json()
+                self.assertEqual(body["project_id"], self.project_a)
+                self.assertEqual(body["task_id"], self.task_a)
+                self.assertEqual(body["task_revision"], 0)
+                self.assertEqual(body["kind"], "outline")
+                self.assertEqual(
+                    set(body["prompt_snapshot"]),
+                    {
+                        "prompt_id",
+                        "name",
+                        "kind",
+                        "version",
+                        "source",
+                        "captured_at",
+                    },
+                )
+                self.assertNotIn("content", body["prompt_snapshot"])
+                self.assertNotIn("hash", str(body["prompt_snapshot"]))
+                self.assertIsInstance(body["effective_prompt"], str)
+                self.assertEqual(
+                    body["warnings"],
+                    [
+                        "Preview resolves the current Project Prompt and "
+                        "Published Knowledge; generation pins exact inputs "
+                        "when the Job is enqueued."
+                    ],
+                )
+                self.assertEqual(audit.events, [])
+
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/writing-settings/preview"
+                        ),
+                        json=preview_payload,
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.put(
+                        base_path,
+                        json=self._writing_settings_payload(),
+                    ).status_code,
+                    403,
+                )
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        project_memberships.update()
+                        .where(
+                            project_memberships.c.organization_id
+                            == self.org_a,
+                            project_memberships.c.project_id
+                            == self.project_a,
+                            project_memberships.c.user_id == self.user_a,
+                        )
+                        .values(role="editor")
+                    )
+
+                unknown_update = self._writing_settings_payload()
+                unknown_update["prompt_content"] = "must not be accepted"
+                self.assertEqual(
+                    client.put(base_path, json=unknown_update).status_code,
+                    422,
+                )
+                missing_update = self._writing_settings_payload()
+                del missing_update["include_topic_notes"]
+                self.assertEqual(
+                    client.put(base_path, json=missing_update).status_code,
+                    422,
+                )
+                non_boolean_update = self._writing_settings_payload()
+                non_boolean_update["include_topic_notes"] = 1
+                self.assertEqual(
+                    client.put(base_path, json=non_boolean_update).status_code,
+                    422,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_b}/tasks/"
+                            f"{self.task_b}/writing-settings"
+                        ),
+                        json=self._writing_settings_payload(),
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.put(
+                        (
+                            f"/api/projects/{self.project_a}/tasks/"
+                            f"{self.task_b}/writing-settings"
+                        ),
+                        json=self._writing_settings_payload(),
+                    ).status_code,
+                    404,
+                )
+
+                invalid_selection = self._writing_settings_payload()
+                invalid_selection["outline_prompt_selection"] = (
+                    "private-secret-selection"
+                )
+                invalid = client.put(
+                    base_path,
+                    json=invalid_selection,
+                )
+                self.assertEqual(invalid.status_code, 422)
+                self.assertNotIn("private-secret-selection", invalid.text)
+
+                updated = client.put(
+                    base_path,
+                    json=self._writing_settings_payload(),
+                )
+                self.assertEqual(updated.status_code, 200, updated.text)
+                self.assertEqual(updated.json()["revision"], 1)
+                self.assertEqual(len(audit.events), 1)
+                event = audit.events[0]
+                self.assertEqual(
+                    event.action,
+                    "article.writing_settings.updated",
+                )
+                self.assertNotIn("Private topic notes", str(event.details))
+                self.assertNotIn(
+                    "Private outline instructions",
+                    str(event.details),
+                )
+                self.assertNotIn(
+                    "Private article instructions",
+                    str(event.details),
+                )
+                self.assertEqual(
+                    set(event.details),
+                    {
+                        "from_revision",
+                        "to_revision",
+                        "status",
+                        "topic_notes_changed",
+                        "outline_custom_prompt_changed",
+                        "article_custom_prompt_changed",
+                        "outline_prompt_selection_changed",
+                        "article_prompt_selection_changed",
+                        "use_outline_custom_prompt",
+                        "use_article_custom_prompt",
+                        "include_project_introduction",
+                        "include_project_notes",
+                        "include_topic_notes",
+                        "outline_prompt_source",
+                        "outline_prompt_version",
+                        "article_prompt_source",
+                        "article_prompt_version",
+                    },
+                )
+                self.assertEqual(
+                    client.put(
+                        base_path,
+                        json=self._writing_settings_payload(),
+                    ).status_code,
+                    409,
+                )
+                self.assertEqual(
+                    client.post(
+                        (
+                            f"/api/projects/{self.project_a}/tasks/"
+                            "missing/writing-settings/preview"
+                        ),
+                        json=preview_payload,
+                    ).status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.post(
+                        f"{base_path}/preview",
+                        json=preview_payload,
+                    ).status_code,
+                    409,
+                )
+                failed_payload = self._writing_settings_payload(revision=1)
+                failed_payload["topic_notes"] = "Must roll back"
+                client.app.state.server_task_writing_settings_service_factory = (
+                    ServerTaskWritingSettingsServiceFactory(
+                        self.engine,
+                        isolated,
+                        audit=FailingAuditWriter(),
+                    )
+                )
+                failed = client.put(base_path, json=failed_payload)
+                self.assertEqual(failed.status_code, 503, failed.text)
+                self.assertNotIn("private audit failure", failed.text)
+                stored = client.get(
+                    f"/api/projects/{self.project_a}/tasks/{self.task_a}"
+                )
+                self.assertEqual(stored.status_code, 200, stored.text)
+                self.assertEqual(stored.json()["revision"], 1)
+                self.assertEqual(
+                    stored.json()["topic_notes"],
+                    "Private topic notes",
                 )
                 self.assertFalse(local_state.exists())
 

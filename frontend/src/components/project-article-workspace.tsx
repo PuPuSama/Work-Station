@@ -52,6 +52,7 @@ export function ProjectArticleWorkspace({
   if (mode === "server") {
     return (
       <ServerArticleWorkbench
+        key={`${customer}:${taskId}`}
         customer={customer}
         taskId={taskId}
         initialStep={initialStep}
