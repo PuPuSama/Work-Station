@@ -7,9 +7,11 @@ Source Snapshot。数据库 Schema、Server Review/Publish 命令、Research 回
 Library 读模型和 Server Inbox UI 已按 Snapshot 身份接线；当前 Alembic Head 为
 `20260806_0019`。
 
-本切片没有交付 Server Raw Evidence Preview。Server Library DTO 当前把
-`raw_evidence_url` 固定为 `null`；对象存储中的 Raw/Normalized Artifact 仍是私有证据，不能
-因为 Inbox 已展示 Current/Pending 身份就描述成可预览。
+Receipt 切片本身没有交付 Server Raw Evidence Preview；后续
+`M7 Server Snapshot Evidence Preview v1` 已用 Current/Pending 精确 Snapshot 路径补齐有界
+Normalized Text Preview 和短时 Raw Attachment Download。Server Library DTO 仍把 Source-level
+`raw_evidence_url` 固定为 `null`，不能按 Latest 猜测对象地址。详细边界见
+`docs/architecture/m7-server-snapshot-evidence-preview.md`。
 
 ## 2. Current/Pending 双指针
 
@@ -182,7 +184,8 @@ Knowledge Library 返回 Current/Pending 双身份，以及 Pending 的 fetched 
 - Pending Snapshot：待审版本及其 Receipt 投影；
 - 只有 Pending 才显示 Snapshot Review/Publish 操作；
 - 发布操作始终携带 Pending Snapshot ID；
-- Server `raw_evidence_url` 仍为 `null`，Raw Preview 是后续能力。
+- Server `raw_evidence_url` 仍为 `null`；Evidence 操作使用精确
+  `/snapshots/{snapshot}/evidence*` 路径。
 
 旧 `metadata.review` 只在 Local 或没有 Pending 的历史展示路径中保留兼容读取；Server 的
 Review/Publish 授权只读取 Receipt。
@@ -238,7 +241,8 @@ Local façade 继续使用既有 Source-scoped `metadata.review` 和 Source-only
 
 以下均未因本切片自动完成：
 
-1. Server Raw/Normalized Evidence 的授权预览、Range/Content-Type/下载策略；
+1. Raw/Normalized Evidence 的 v1 授权预览已由后续切片完成；PDF/Image Range Inline、历史
+   Snapshot、访问日志与即时撤权仍未完成；
 2. 将 Research `_ACTIVE_RESEARCH_EXECUTION` ContextVar 替换为显式执行上下文；
 3. 把 Product Rediscovery 与 Research 的 Web Evidence 装配收敛为共享工厂；
 4. 是否支持多个并存 Pending Snapshot；当前仍只允许一个；

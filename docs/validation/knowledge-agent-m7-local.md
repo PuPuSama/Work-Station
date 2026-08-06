@@ -1942,3 +1942,37 @@ Set-Location ..\frontend
 - Current/Pending 数据模型、Receipt/version/idempotency 语义、Review -> Embedding ->
   Activate 事务顺序、Server HTTP/UI 契约、Local 兼容边界与后续重构接缝记录在
   `docs/architecture/m7-snapshot-review-receipts.md`。
+
+### M7 Server Snapshot Evidence Preview v1
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+Set-Location backend
+.\.venv\Scripts\python.exe -m unittest discover -s tests -q
+
+Set-Location ..\frontend
+& '<工作区 Node 绝对路径>' .\node_modules\eslint\bin\eslint.js .
+& '<工作区 Node 绝对路径>' .\node_modules\next\dist\bin\next build
+```
+
+结果：
+
+- 完整后端回归 765 tests 全部通过，2 tests 按显式外部环境门禁跳过；
+- 新增真实 PostgreSQL Snapshot Evidence 集成覆盖 Published Current、Pending、历史/Rejected
+  拒绝、跨 Project/Source、撤权、指针变化、错误 S3 Scope、对象错误脱敏、Normalized
+  Byte/JSON/SHA-256/文本截断门禁和 Raw Attachment 签名；
+- 新增 ObjectStore HEAD 与安全 Response Header Override；S3 Provider Body、Bucket、Key、URI、
+  Hash、ETag 和 Secret 均不进入公共 Manifest/Preview/HTTP Error；
+- Server HTTP 精确路由、`project.view` 权限、服务内二次授权和 `Cache-Control: no-store`
+  通过；旧 Server `.../raw` 继续 fail closed，Local Source-level `raw_evidence_url` 行为保持；
+- Server Inbox 的 Current/Pending 卡片分别使用自己的 Snapshot ID；Viewer 可以查看证据但
+  不能 Review/Publish，签名 URL 只在函数局部变量中使用；
+- 前端全量 ESLint 通过；Next.js 16.2.10 production build 完整通过，包括 TypeScript、
+  Page Data 和 7 个 Static Page；随后把公开 `slot` 类型收紧为 `current | pending`，单独
+  `tsc --noEmit` 再次通过；
+- 本切片不修改 Schema，Alembic Head 仍为 `20260806_0019`；没有调用真实客户资料、外部
+  LLM、Tavily 或生产 S3，真实 S3 Content-Disposition/Range/Proxy Cache 冒烟仍属于
+  External Gate；
+- 组件职责、接口作用、对象边界、内容策略、失败语义和后续重构接缝记录在
+  `docs/architecture/m7-server-snapshot-evidence-preview.md`。

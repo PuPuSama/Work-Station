@@ -1423,6 +1423,25 @@ S3 Put 与 PostgreSQL Insert 无法组成一个 ACID 事务。当前顺序是“
 数据库引用集合对账的 orphan 扫描和延迟清理；请求失败时仍不立即删除对象，因为并发请求
 可能已经复用同一个 Key。
 
+#### D1.9 已实现：Snapshot 精确 Evidence Preview
+
+Snapshot Review/Publish 已从可变 Source Metadata 迁移到 Current/Pending 双指针和
+append-only Snapshot Review Receipt。为避免操作者只看 ID 和计数就审批，Server Inbox
+现在分别为 Current/Pending 调用精确 Snapshot Evidence 路径。
+
+`PostgresServerSnapshotEvidenceService` 每次重新要求 `project.view`，精确验证
+Project/Source/Snapshot 仍是 Published Current 或 Pending，再检查 S3 Bucket 与完整
+Organization/Project Prefix。Normalized Artifact 只在 512 KiB 内读取、校验上传 SHA-256，
+并投影有界纯文本；Raw Artifact 只签发固定 60 秒、`application/octet-stream`、Attachment
+下载。公共 DTO 不返回 URI、Key、Hash 或 Provider Body，旧 Server `.../raw` 继续关闭，
+Local FileResponse 不变。
+
+对象 Adapter 只提供 provider-neutral HEAD 与安全签名 Header；它不知道 Source/Snapshot。
+Evidence Service 只负责权限、数据库身份、Scope 和内容策略；HTTP 只映射安全响应；Inbox
+只保存 Manifest/Preview 状态，不持久化签名 URL。这样后续替换 S3、增加 Range Streaming
+或拆出访问日志时，不需要改写 Snapshot Receipt/Publish 事务。完整结构和重构接缝见
+`docs/architecture/m7-server-snapshot-evidence-preview.md`。
+
 #### D2 已实现：Orphan 连续观察与显式清理
 
 对账只扫描

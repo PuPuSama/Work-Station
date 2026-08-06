@@ -139,6 +139,32 @@ class ObjectMetadata:
         object.__setattr__(self, "last_modified", modified.astimezone(timezone.utc))
 
 
+@dataclass(frozen=True)
+class ObjectStat:
+    """Provider-neutral immutable object metadata returned by ``head``."""
+
+    key: str
+    byte_size: int
+    content_type: str
+    sha256: str
+    etag: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "key", _object_key(self.key))
+        if self.byte_size < 0:
+            raise ValueError("byte_size must be non-negative")
+        object.__setattr__(
+            self,
+            "content_type",
+            _response_header(
+                self.content_type,
+                "content_type",
+                max_length=255,
+            ),
+        )
+        object.__setattr__(self, "sha256", _sha256(self.sha256))
+
+
 class ObjectStore(Protocol):
     def check_ready(self) -> None: ...
 
@@ -153,11 +179,15 @@ class ObjectStore(Protocol):
 
     def get(self, key: str, *, max_bytes: int) -> bytes: ...
 
+    def head(self, key: str) -> ObjectStat: ...
+
     def create_download_url(
         self,
         key: str,
         *,
         expires_seconds: int,
+        response_content_type: str | None = None,
+        response_content_disposition: str | None = None,
     ) -> str: ...
 
     def list(self, *, prefix: str) -> tuple[ObjectMetadata, ...]: ...
@@ -275,6 +305,30 @@ def _metadata(
     return result
 
 
+def _response_header(
+    value: str,
+    field_name: str,
+    *,
+    max_length: int,
+) -> str:
+    """Validate a provider response-header override without logging it."""
+
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} must not be empty")
+    if len(normalized) > max_length:
+        raise ValueError(f"{field_name} is too long")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError(f"{field_name} must be a safe single-line header")
+    try:
+        normalized.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must contain ASCII characters only") from exc
+    return normalized
+
+
 class S3ObjectStore:
     """Small S3-compatible adapter with no public ACL behavior."""
 
@@ -379,23 +433,58 @@ class S3ObjectStore:
             raise ObjectTooLarge("object exceeds the requested size limit")
         return body
 
+    def head(self, key: str) -> ObjectStat:
+        normalized_key = _object_key(key)
+        try:
+            response = self._client.head_object(
+                Bucket=self.settings.bucket,
+                Key=normalized_key,
+            )
+            metadata = response.get("Metadata") or {}
+            if not isinstance(metadata, Mapping):
+                raise ValueError("object metadata is invalid")
+            return ObjectStat(
+                key=normalized_key,
+                byte_size=int(response["ContentLength"]),
+                content_type=str(response["ContentType"]),
+                sha256=str(metadata.get("sha256") or ""),
+                etag=str(response.get("ETag") or "").strip('"'),
+            )
+        except (BotoCoreError, ClientError, KeyError, TypeError, ValueError) as exc:
+            raise ObjectStoreError("object store head failed") from exc
+
     def create_download_url(
         self,
         key: str,
         *,
         expires_seconds: int,
+        response_content_type: str | None = None,
+        response_content_disposition: str | None = None,
     ) -> str:
         normalized_key = _object_key(key)
         if expires_seconds <= 0 or expires_seconds > 3600:
             raise ValueError("expires_seconds must be between 1 and 3600")
+        params = {
+            "Bucket": self.settings.bucket,
+            "Key": normalized_key,
+        }
+        if response_content_type is not None:
+            params["ResponseContentType"] = _response_header(
+                response_content_type,
+                "response_content_type",
+                max_length=255,
+            )
+        if response_content_disposition is not None:
+            params["ResponseContentDisposition"] = _response_header(
+                response_content_disposition,
+                "response_content_disposition",
+                max_length=512,
+            )
         try:
             return str(
                 self._client.generate_presigned_url(
                     "get_object",
-                    Params={
-                        "Bucket": self.settings.bucket,
-                        "Key": normalized_key,
-                    },
+                    Params=params,
                     ExpiresIn=int(expires_seconds),
                 )
             )
@@ -501,6 +590,7 @@ class ProjectObjectUploader:
 
 __all__ = [
     "ObjectMetadata",
+    "ObjectStat",
     "ObjectStore",
     "ObjectStoreError",
     "ObjectTooLarge",

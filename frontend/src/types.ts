@@ -616,6 +616,39 @@ export type KnowledgeSourceSummary = {
   raw_evidence_url: string | null;
 };
 
+export type KnowledgeSnapshotEvidenceManifest = {
+  project_id: string;
+  source_id: string;
+  snapshot_id: string;
+  slot: "current" | "pending";
+  raw_available: boolean;
+  normalized_available: boolean;
+  raw_content_type: string | null;
+  raw_byte_size: number | null;
+  normalized_content_type: string | null;
+  normalized_byte_size: number | null;
+  preview_supported: boolean;
+};
+
+export type KnowledgeSnapshotEvidencePreview = {
+  project_id: string;
+  source_id: string;
+  snapshot_id: string;
+  slot: "current" | "pending";
+  text: string;
+  truncated: boolean;
+  block_count: number;
+};
+
+export type KnowledgeSnapshotRawDownload = {
+  project_id: string;
+  source_id: string;
+  snapshot_id: string;
+  slot: "current" | "pending";
+  download_url: string;
+  expires_seconds: number;
+};
+
 export type KnowledgeProductSummary = {
   project_id: string;
   product_id: string;

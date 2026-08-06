@@ -40,17 +40,18 @@
 | Project Job Control | `/api/projects/{project}/batches*`、`/jobs*` | PostgreSQL Queue | `project.view` / Operation Worker 权限 | Server Narrow |
 | Project Prompt Library | `/api/projects/{project}/prompt-snapshots*`、`/prompt-defaults/*` | PostgreSQL Immutable Snapshot | `project.view` / `article.edit` | Server Ready |
 | Server Article/Batch Console | `/projects/{project}/articles*`、`/batches*` | Project-scoped Task/Knowledge/Job API | 前端提示 + 后端实时 RBAC | Server Narrow |
-| Server Knowledge Inbox | `/projects/{project}/knowledge`、`/api/knowledge/{project}/sources/{source}/snapshots/{snapshot}/{review|publish}` | Knowledge Library + Current/Pending 双指针 + Snapshot Review Receipt；对象 Prepare、Embedding Prepare 与最终 Activate 分离 | `project.view` / `knowledge.edit` / `knowledge.publish`；精确 Snapshot 身份、Receipt Version、写事务内重验权限和脱敏 Audit | Server Narrow |
+| Server Knowledge Inbox | `/projects/{project}/knowledge`、`/api/knowledge/{project}/sources/{source}/snapshots/{snapshot}/{evidence|review|publish}` | Knowledge Library + Current/Pending 双指针 + Snapshot Review Receipt；对象 Prepare、Evidence Preview、Embedding Prepare 与最终 Activate 分离 | Evidence 为 `project.view` 且对象访问前二次授权；Review/Publish 为 `knowledge.edit` / `knowledge.publish`；精确 Snapshot 身份、Receipt Version、写事务内重验权限和脱敏 Audit | Server Narrow |
 | Server Knowledge Research | `/api/knowledge/{project}/tasks/{task}/retrieval-plan`、`/api/knowledge/{project}/research-runs*` | 已确认 PostgreSQL Task + 不可变 Plan + PostgreSQL Run/Job/Checkpoint；网页对象 Prepare 后按页面原子提交 Source/Snapshot/Chunk/Product/Asset/Evidence/Audit | Plan 为 `knowledge.edit`；Start/Resume、Claim、Handler、逐 Fetch/Put/Commit/Review/Publish 均传递取消并复核 `knowledge.publish` | Server Narrow |
 
 私有文档上传 `POST /api/knowledge/{project}/sources/upload` 已迁移为 Server Narrow：
 原始/标准化/内嵌资产写入 Project-scoped ObjectStore，随后 Source/Snapshot/Chunk/Asset
 Link 与 Audit 在一个 PostgreSQL 事务提交。Research Plan/Start/Resume 已通过独立
 Server Registry、私有 Job 和安全 DTO 开放；受控 Research/Product Rediscovery 内部页面
-准备统一经过 Server Web Evidence Unit of Work，通用 Plan POST、WordPress Sync HTTP 与
-Raw Artifact HTTP 与 Server Raw Preview 仍保持关闭，不能因 Inbox 已显示 Pending 身份或同组
-窄路径已开放而整体放开 Knowledge 路由组。Server Library 的 `raw_evidence_url` 当前为
-`null`，不是暂时可猜测的对象地址。
+准备统一经过 Server Web Evidence Unit of Work，通用 Plan POST、WordPress Sync HTTP 与旧
+Source-level Raw Artifact HTTP 仍保持关闭，不能因同组窄路径已开放而整体放开 Knowledge
+路由组。Server 已新增 Current/Pending 精确 Snapshot Evidence Manifest、文本化 Normalized
+Preview 和短时 Raw Attachment Download；Server Library 的 Source-level `raw_evidence_url`
+继续为 `null`，不能按 Latest 猜测对象地址。
 结构记录见 `docs/architecture/m7-server-knowledge-research.md` 和
 `docs/architecture/m7-server-web-evidence-ingestion.md`。Research Chat、通用 Evidence Pack
 Build、客户端 Evidence Link Write 与 Stale Review 也继续关闭；Server Plan 读取仅展示
@@ -74,6 +75,22 @@ Knowledge Library DTO 已返回 `current_snapshot_id`、`pending_snapshot_id`、
 Chunk/Asset 数量与最新 Receipt 投影。只有 Current Published Snapshot 进入 Retriever 和
 Product/Image Catalog；Pending、Rejected 与旧 Snapshot 只保留为不可变证据。详细边界见
 `docs/architecture/m7-snapshot-review-receipts.md`。
+
+### 2.2 Snapshot Evidence 精确路由
+
+Server 只开放：
+
+```text
+GET  .../sources/{source}/snapshots/{snapshot}/evidence
+GET  .../sources/{source}/snapshots/{snapshot}/evidence/preview
+POST .../sources/{source}/snapshots/{snapshot}/evidence/raw-download
+```
+
+每次请求重新要求 `project.view` 并确认 Snapshot 仍是 Published Current 或 Pending。Preview
+只返回有界规范化文本；Raw 使用固定 60 秒 Attachment 签名。响应不返回 S3 URI、Bucket、
+Object Key、Hash 或 Provider Body。旧 `.../raw` 在 Server 继续 503，Local 行为不变。结构、
+内容策略和重构接缝见
+`docs/architecture/m7-server-snapshot-evidence-preview.md`。
 
 ## 3. Task 写操作矩阵
 

@@ -6,6 +6,8 @@ import {
   AlertCircle,
   BookOpenText,
   CheckCircle2,
+  Download,
+  Eye,
   FileStack,
   ImageIcon,
   Inbox,
@@ -35,6 +37,9 @@ import type {
   AccessibleProject,
   KnowledgeLibrary,
   KnowledgeProductSummary,
+  KnowledgeSnapshotEvidenceManifest,
+  KnowledgeSnapshotEvidencePreview,
+  KnowledgeSnapshotRawDownload,
   KnowledgeSourceSummary,
   KnowledgeUploadResult,
 } from "@/types";
@@ -83,6 +88,235 @@ function formatDate(value: string | null) {
         dateStyle: "medium",
         timeStyle: "short",
       }).format(date);
+}
+
+function formatByteSize(value: number | null) {
+  if (value === null) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function hasExactSnapshotIdentity(
+  value: { project_id: string; source_id: string; snapshot_id: string },
+  projectId: string,
+  sourceId: string,
+  snapshotId: string,
+) {
+  return (
+    value.project_id === projectId &&
+    value.source_id === sourceId &&
+    value.snapshot_id === snapshotId
+  );
+}
+
+function SnapshotEvidencePanel({
+  projectId,
+  snapshotId,
+  sourceId,
+  sourcePath,
+}: {
+  projectId: string;
+  snapshotId: string;
+  sourceId: string;
+  sourcePath: string;
+}) {
+  const [manifest, setManifest] =
+    useState<KnowledgeSnapshotEvidenceManifest | null>(null);
+  const [manifestLoading, setManifestLoading] = useState(true);
+  const [manifestError, setManifestError] = useState("");
+  const [preview, setPreview] =
+    useState<KnowledgeSnapshotEvidencePreview | null>(null);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
+  const manifestRequestId = useRef(0);
+  const evidencePath = `${sourcePath}/snapshots/${encodeURIComponent(snapshotId)}/evidence`;
+
+  const loadManifest = useCallback(async () => {
+    const requestId = manifestRequestId.current + 1;
+    manifestRequestId.current = requestId;
+    setManifestLoading(true);
+    setManifestError("");
+    try {
+      const result = await apiGet<KnowledgeSnapshotEvidenceManifest>(
+        evidencePath,
+      );
+      if (
+        !hasExactSnapshotIdentity(result, projectId, sourceId, snapshotId)
+      ) {
+        throw new Error("证据清单与当前 Snapshot 不匹配。");
+      }
+      if (manifestRequestId.current === requestId) {
+        setManifest(result);
+      }
+    } catch (error) {
+      if (manifestRequestId.current === requestId) {
+        setManifest(null);
+        setManifestError(errorMessage(error));
+      }
+    } finally {
+      if (manifestRequestId.current === requestId) {
+        setManifestLoading(false);
+      }
+    }
+  }, [evidencePath, projectId, snapshotId, sourceId]);
+
+  useEffect(() => {
+    void loadManifest();
+    return () => {
+      manifestRequestId.current += 1;
+    };
+  }, [loadManifest]);
+
+  async function togglePreview() {
+    if (preview) {
+      setPreviewVisible((visible) => !visible);
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewError("");
+    try {
+      const result = await apiGet<KnowledgeSnapshotEvidencePreview>(
+        `${evidencePath}/preview`,
+      );
+      if (
+        !hasExactSnapshotIdentity(result, projectId, sourceId, snapshotId) ||
+        result.slot !== manifest?.slot
+      ) {
+        throw new Error("规范化预览与当前 Snapshot 不匹配。");
+      }
+      setPreview(result);
+      setPreviewVisible(true);
+    } catch (error) {
+      setPreviewError(errorMessage(error));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function downloadRawEvidence() {
+    setDownloadLoading(true);
+    setDownloadError("");
+    try {
+      const result = await apiPost<KnowledgeSnapshotRawDownload>(
+        `${evidencePath}/raw-download`,
+      );
+      if (
+        !hasExactSnapshotIdentity(result, projectId, sourceId, snapshotId) ||
+        result.slot !== manifest?.slot
+      ) {
+        throw new Error("原始证据下载与当前 Snapshot 不匹配。");
+      }
+      window.open(result.download_url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setDownloadError(errorMessage(error));
+    } finally {
+      setDownloadLoading(false);
+    }
+  }
+
+  if (manifestLoading) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" />
+        正在读取此 Snapshot 的证据清单…
+      </div>
+    );
+  }
+
+  if (!manifest) {
+    return (
+      <Alert variant="destructive" className="py-3">
+        <AlertCircle className="size-4" />
+        <AlertTitle>证据清单读取失败</AlertTitle>
+        <AlertDescription className="grid gap-2">
+          <span>{manifestError || "请重试。"}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="w-fit"
+            onClick={() => void loadManifest()}
+          >
+            重试
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <div className="grid gap-3 border-t pt-3">
+      <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <div>
+          <span className="block text-foreground">规范化证据</span>
+          {manifest.normalized_available
+            ? `${manifest.normalized_content_type || "未知类型"} · ${formatByteSize(manifest.normalized_byte_size)}`
+            : "不可用"}
+        </div>
+        <div>
+          <span className="block text-foreground">原始证据</span>
+          {manifest.raw_available
+            ? `${manifest.raw_content_type || "未知类型"} · ${formatByteSize(manifest.raw_byte_size)}`
+            : "不可用"}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={
+            previewLoading ||
+            !manifest.normalized_available ||
+            !manifest.preview_supported
+          }
+          onClick={() => void togglePreview()}
+        >
+          {previewLoading ? (
+            <Loader2 className="animate-spin" />
+          ) : (
+            <Eye />
+          )}
+          {previewVisible ? "收起规范化文本" : "查看规范化文本"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={downloadLoading || !manifest.raw_available}
+          onClick={() => void downloadRawEvidence()}
+        >
+          {downloadLoading ? (
+            <Loader2 className="animate-spin" />
+          ) : (
+            <Download />
+          )}
+          下载原始证据
+        </Button>
+      </div>
+      {previewError ? (
+        <p className="text-xs text-destructive">{previewError}</p>
+      ) : null}
+      {downloadError ? (
+        <p className="text-xs text-destructive">{downloadError}</p>
+      ) : null}
+      {preview && previewVisible ? (
+        <div className="grid gap-2 rounded-lg border bg-background p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+            <span>{preview.block_count} 个文本块</span>
+            {preview.truncated ? <Badge variant="outline">已截断</Badge> : null}
+          </div>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-sans text-xs leading-5">
+            {preview.text}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function SourceReviewCard({
@@ -191,6 +425,15 @@ function SourceReviewCard({
                 ? "当前写作检索继续使用此不可变 Snapshot。"
                 : "当前没有已发布 Snapshot；待审证据不会参与检索。"}
             </p>
+            {source.current_snapshot_id ? (
+              <SnapshotEvidencePanel
+                key={source.current_snapshot_id}
+                projectId={source.project_id}
+                sourceId={source.source_id}
+                sourcePath={sourcePath}
+                snapshotId={source.current_snapshot_id}
+              />
+            ) : null}
           </div>
 
           <div className="grid gap-2 rounded-xl border bg-muted/10 p-4">
@@ -237,6 +480,13 @@ function SourceReviewCard({
                     ? ` · ${formatDate(source.pending_reviewed_at)}`
                     : ""}
                 </p>
+                <SnapshotEvidencePanel
+                  key={pendingSnapshotId}
+                  projectId={source.project_id}
+                  sourceId={source.source_id}
+                  sourcePath={sourcePath}
+                  snapshotId={pendingSnapshotId}
+                />
               </>
             ) : (
               <p className="text-xs leading-5 text-muted-foreground">

@@ -404,7 +404,8 @@ cd backend
   `needs_review`；
 - Receipt UPDATE/DELETE Trigger 生效；
 - Server Source-only Review/Publish 路由 fail closed，精确 Snapshot 路由可用；
-- Server Library 的 `raw_evidence_url` 仍为 `null`。Raw Preview 不属于本次 Cutover。
+- Server Library 的 Source-level `raw_evidence_url` 仍为 `null`；后续 Evidence Preview
+  切片只通过 Current/Pending 精确 Snapshot 路径访问对象，不能按 Latest 猜测。
 
 一旦新 Receipt 或 Pending 产生业务数据，不得把数据库降级到 0018，也不得重新开放旧
 Source-scoped Server Writer。应用回滚时应关闭 Server Knowledge 写流量，保留 0019 Schema
@@ -490,8 +491,14 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
 - Server DOM 与网络只允许已迁移的 Project-scoped Upload、Task Plan 和 Research
   Run/Resume；不得出现通用 Plan POST、WordPress Sync、Raw Artifact 或 Local
   `/api/config` 请求；
-- Server Inbox 可以展示 Current/Pending ID、Pending 计数和 Receipt 投影，但
-  `raw_evidence_url` 必须为 `null`；不要把尚未实现的 Server Raw Preview 写成验收通过；
+- Server Inbox 可以展示 Current/Pending ID、Pending 计数和 Receipt 投影；Source-level
+  `raw_evidence_url` 必须为 `null`，Evidence 操作必须携带卡片对应的精确 Snapshot ID；
+- Viewer 可以读取 Current/Pending Evidence Manifest 和有界 Normalized Text Preview，
+  但不能 Review/Publish；撤权后 Preview/Download 必须拒绝；
+- Raw Download 只能返回 60 秒 Attachment 签名，公共响应和日志不得包含 Bucket、Object
+  Key、Artifact URI、Hash、Provider Body 或 Secret；
+- Historical/Rejected Snapshot、错误 Source/Project、错误 Bucket/Prefix 和旧 Server
+  `.../raw` 路径必须 fail closed；HTML/SVG 也不得以内联 Content-Type 执行；
 - Product Confirm 不代表文章可选择；必须再验证 Project Catalog 只投影当前 Published
   Snapshot Evidence。
 

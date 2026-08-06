@@ -6,7 +6,7 @@
 
 学习实验、正式模块的合入门槛和五周建议节奏见 `docs/agent-learning-and-delivery-plan.md`。第一条真实案例固定为 `www.qewitfastener.com / topic_006`，不能只用模拟数据证明流程可运行。
 
-## 实施状态（2026-07-30）
+## 实施状态（2026-08-06）
 
 | 里程碑 | 状态 | 结构记录 |
 |---|---|---|
@@ -17,7 +17,7 @@
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |
 | M5 | 完成 | `docs/architecture/knowledge-agent-m5.md` |
 | M6 | 完成评测框架；真实对照实验待外部条件 | `docs/architecture/knowledge-agent-m6.md` |
-| M7 | 进行中：A/B/C1-C2、D1 与 D2 no-go 门禁底座完成 | `docs/architecture/knowledge-agent-m7.md` |
+| M7 | 进行中：多人 Server 主闭环、Snapshot Receipt 与精确 Evidence Preview 完成；生产部署门禁仍 no-go | `docs/architecture/knowledge-agent-m7.md`、`docs/architecture/m7-snapshot-review-receipts.md`、`docs/architecture/m7-server-snapshot-evidence-preview.md` |
 
 ## M0：基线与接口边界
 
@@ -173,9 +173,17 @@
   Prepare 位于 SQL 外；每个页面的 Source/Snapshot/Chunk/Product/Asset/Evidence/Audit
   在一次授权 PostgreSQL 事务提交。Fetcher、对象 Put、Commit 及 Research Review/Publish
   贯穿可信取消/撤权 Checkpoint；精确重试不刷新聚合时间戳或重复 Audit，旧 Inbox 半图使用
-  独立 Reconcile Audit，Published 图禁止隐式修复。当前同 Source 新内容仍等待
-  Snapshot-bound Review Receipt。结构记录见
+  独立 Reconcile Audit，Published 图禁止隐式修复。结构记录见
   `docs/architecture/m7-server-web-evidence-ingestion.md`；
+- 已新增 Current/Pending 双指针与 append-only Snapshot Review Receipt：同 Source 新内容先成为
+  Pending，旧 Published Current 在审核、Embedding 或 Audit 失败时继续服务；Review/Publish
+  必须携带精确 Snapshot，Receipt Version、Expected Current 和 Pending 在 Activate 事务重新
+  验证。结构记录见 `docs/architecture/m7-snapshot-review-receipts.md`；
+- 已新增 Snapshot 精确 Evidence Preview v1：Current/Pending 卡片分别读取自己的安全 Manifest，
+  Normalized 只投影有界纯文本，Raw 只签发 60 秒 Attachment URL；每次对象访问重新要求
+  `project.view` 并验证 Bucket 与 Organization/Project Prefix。Source-level `raw_evidence_url`
+  在 Server 继续为 `null`，历史/Rejected/Latest 猜测均拒绝。结构记录见
+  `docs/architecture/m7-server-snapshot-evidence-preview.md`；
 - 已收紧 Server Knowledge 兼容写边界：Research Chat、通用 Evidence Pack Build、
   客户端 Evidence Link Write 与 Stale Review 因尚未绑定 PostgreSQL Task Revision、
   事务内撤权复核和 Audit，在 Server Mode 明确 503；Local Mode 保持不变。Server Plan

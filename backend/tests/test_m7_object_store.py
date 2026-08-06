@@ -15,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.object_store import (  # noqa: E402
+    ObjectStat,
     ObjectStoreError,
     ObjectTooLarge,
     ProjectObjectUploader,
@@ -31,10 +32,20 @@ class FakeS3Client:
             "ContentLength": 4,
             "Body": io.BytesIO(b"data"),
         }
+        self.head_calls: list[dict[str, str]] = []
+        self.head_response: dict[str, object] = {
+            "ContentLength": 4,
+            "ContentType": "application/json",
+            "Metadata": {"sha256": "a" * 64},
+            "ETag": '"etag-head"',
+        }
+        self.presign_calls: list[dict[str, object]] = []
         self.deleted: list[dict[str, str]] = []
         self.list_responses: list[dict[str, object]] = []
         self.fail_put = False
         self.fail_ready = False
+        self.fail_head = False
+        self.fail_presign = False
 
     def head_bucket(self, **kwargs):
         if self.fail_ready:
@@ -56,7 +67,28 @@ class FakeS3Client:
     def get_object(self, **kwargs):
         return self.get_response
 
+    def head_object(self, **kwargs):
+        self.head_calls.append(kwargs)
+        if self.fail_head:
+            raise ClientError(
+                {"Error": {"Code": "500", "Message": "secret head body"}},
+                "HeadObject",
+            )
+        return self.head_response
+
     def generate_presigned_url(self, operation, *, Params, ExpiresIn):
+        self.presign_calls.append(
+            {
+                "operation": operation,
+                "Params": Params,
+                "ExpiresIn": ExpiresIn,
+            }
+        )
+        if self.fail_presign:
+            raise ClientError(
+                {"Error": {"Code": "500", "Message": "secret sign body"}},
+                "GetObject",
+            )
         return f"https://signed.example.test/{Params['Key']}?ttl={ExpiresIn}"
 
     def delete_object(self, **kwargs):
@@ -143,6 +175,68 @@ class ObjectStoreTests(unittest.TestCase):
         with self.assertRaises(ObjectTooLarge):
             self.store.get("object-key", max_bytes=4)
 
+    def test_head_returns_provider_neutral_verified_metadata(self) -> None:
+        digest = hashlib.sha256(b"data").hexdigest()
+        self.client.head_response = {
+            "ContentLength": 4,
+            "ContentType": "application/json",
+            "Metadata": {"sha256": digest, "private-provider-field": "ignored"},
+            "ETag": '"etag-head"',
+        }
+
+        metadata = self.store.head("scope/private-object")
+
+        self.assertIsInstance(metadata, ObjectStat)
+        self.assertEqual(metadata.key, "scope/private-object")
+        self.assertEqual(metadata.byte_size, 4)
+        self.assertEqual(metadata.content_type, "application/json")
+        self.assertEqual(metadata.sha256, digest)
+        self.assertEqual(metadata.etag, "etag-head")
+        self.assertEqual(
+            self.client.head_calls,
+            [
+                {
+                    "Bucket": self.settings.bucket,
+                    "Key": "scope/private-object",
+                }
+            ],
+        )
+
+    def test_head_rejects_invalid_provider_metadata_and_hides_errors(self) -> None:
+        invalid_responses = (
+            {
+                "ContentLength": 4,
+                "ContentType": "application/json",
+                "Metadata": {},
+            },
+            {
+                "ContentLength": 4,
+                "ContentType": "application/json\r\nX-Unsafe: yes",
+                "Metadata": {"sha256": "a" * 64},
+            },
+            {
+                "ContentLength": -1,
+                "ContentType": "application/json",
+                "Metadata": {"sha256": "a" * 64},
+            },
+        )
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                self.client.head_response = response
+                with self.assertRaisesRegex(
+                    ObjectStoreError,
+                    "^object store head failed$",
+                ):
+                    self.store.head("scope/private-object")
+
+        self.client.fail_head = True
+        with self.assertRaisesRegex(
+            ObjectStoreError,
+            "^object store head failed$",
+        ) as caught:
+            self.store.head("scope/private-object")
+        self.assertNotIn("secret head body", str(caught.exception))
+
     def test_download_expiry_delete_and_configuration_gate(self) -> None:
         url = self.store.create_download_url(
             "private-key",
@@ -167,6 +261,62 @@ class ObjectStoreTests(unittest.TestCase):
                 bucket="bucket",
                 access_key_id="only-access-key",
             )
+
+    def test_download_url_supports_safe_response_header_overrides(self) -> None:
+        url = self.store.create_download_url(
+            "private-key",
+            expires_seconds=60,
+            response_content_type="text/plain; charset=utf-8",
+            response_content_disposition='attachment; filename="evidence.txt"',
+        )
+
+        self.assertEqual(
+            url,
+            "https://signed.example.test/private-key?ttl=60",
+        )
+        self.assertEqual(
+            self.client.presign_calls[-1],
+            {
+                "operation": "get_object",
+                "Params": {
+                    "Bucket": self.settings.bucket,
+                    "Key": "private-key",
+                    "ResponseContentType": "text/plain; charset=utf-8",
+                    "ResponseContentDisposition": (
+                        'attachment; filename="evidence.txt"'
+                    ),
+                },
+                "ExpiresIn": 60,
+            },
+        )
+
+        unsafe_values = (
+            {"response_content_type": "text/plain\r\nX-Unsafe: yes"},
+            {"response_content_disposition": "attachment\x00unsafe"},
+            {"response_content_type": "text/plain;" + "x" * 255},
+            {"response_content_disposition": "attachment;" + "x" * 512},
+            {"response_content_type": "text/浜у搧"},
+        )
+        for kwargs in unsafe_values:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    self.store.create_download_url(
+                        "private-key",
+                        expires_seconds=60,
+                        **kwargs,
+                    )
+
+        self.client.fail_presign = True
+        with self.assertRaisesRegex(
+            ObjectStoreError,
+            "^object store download signing failed$",
+        ) as caught:
+            self.store.create_download_url(
+                "private-key",
+                expires_seconds=60,
+                response_content_type="text/plain",
+            )
+        self.assertNotIn("secret sign body", str(caught.exception))
 
     def test_list_is_paginated_sorted_and_provider_errors_are_stable(self) -> None:
         modified = datetime(2026, 7, 31, tzinfo=timezone.utc)

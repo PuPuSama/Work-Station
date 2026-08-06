@@ -15,6 +15,7 @@ from fastapi import (
     Form,
     HTTPException,
     Request,
+    Response,
     UploadFile,
 )
 from fastapi.responses import FileResponse, StreamingResponse
@@ -36,6 +37,11 @@ from services.server_private_document_ingestion import (
     ServerPrivateDocumentUploadConflict,
     ServerPrivateDocumentUploadUnavailable,
     default_private_source_id,
+)
+from services.server_snapshot_evidence import (
+    PostgresServerSnapshotEvidenceService,
+    SnapshotEvidenceNotFound,
+    SnapshotEvidenceUnavailable,
 )
 
 from .artifact_store import ArtifactStoreError
@@ -212,6 +218,39 @@ class KnowledgePublicationResponse(KnowledgeApiModel):
     status: str
     embedding_model: str
     chunk_count: int
+
+
+class SnapshotEvidenceManifestResponse(KnowledgeApiModel):
+    project_id: str
+    source_id: str
+    snapshot_id: str
+    slot: Literal["current", "pending"]
+    raw_available: bool
+    normalized_available: bool
+    raw_content_type: str | None
+    raw_byte_size: int | None
+    normalized_content_type: str | None
+    normalized_byte_size: int | None
+    preview_supported: bool
+
+
+class SnapshotEvidencePreviewResponse(KnowledgeApiModel):
+    project_id: str
+    source_id: str
+    snapshot_id: str
+    slot: Literal["current", "pending"]
+    text: str
+    truncated: bool
+    block_count: int
+
+
+class SnapshotEvidenceDownloadResponse(KnowledgeApiModel):
+    project_id: str
+    source_id: str
+    snapshot_id: str
+    slot: Literal["current", "pending"]
+    download_url: str
+    expires_seconds: int
 
 
 class WordPressProbeRequest(KnowledgeApiModel):
@@ -588,6 +627,25 @@ def _server_private_document_ingestion(
         raise HTTPException(
             status_code=503,
             detail="Server private document ingestion is not available.",
+        )
+    return configured
+
+
+def _server_snapshot_evidence(
+    request: Request,
+) -> PostgresServerSnapshotEvidenceService:
+    configured = getattr(
+        request.app.state,
+        "server_snapshot_evidence",
+        None,
+    )
+    if not isinstance(
+        configured,
+        PostgresServerSnapshotEvidenceService,
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Server Snapshot evidence is not available.",
         )
     return configured
 
@@ -2056,6 +2114,165 @@ def review_knowledge_source(
         source_id=source_id,
         status=reviewed.status,
         decision=payload.decision,
+    )
+
+
+@router.get(
+    "/{project}/sources/{source_id}/snapshots/{snapshot_id}/evidence",
+    response_model=SnapshotEvidenceManifestResponse,
+)
+def get_snapshot_evidence_manifest(
+    project: str,
+    source_id: str,
+    snapshot_id: str,
+    request: Request,
+    response: Response,
+) -> SnapshotEvidenceManifestResponse:
+    _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Snapshot evidence manifest is available only in Server mode."
+            ),
+        )
+    actor, project_id = server_context
+    try:
+        manifest = _server_snapshot_evidence(request).get_manifest(
+            actor=actor,
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except SnapshotEvidenceNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Snapshot evidence was not found.",
+        ) from exc
+    except SnapshotEvidenceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return SnapshotEvidenceManifestResponse(
+        project_id=manifest.project_id,
+        source_id=manifest.source_id,
+        snapshot_id=manifest.snapshot_id,
+        slot=manifest.slot,
+        raw_available=manifest.raw_available,
+        normalized_available=manifest.normalized_available,
+        raw_content_type=manifest.raw_content_type,
+        raw_byte_size=manifest.raw_byte_size,
+        normalized_content_type=manifest.normalized_content_type,
+        normalized_byte_size=manifest.normalized_byte_size,
+        preview_supported=manifest.preview_supported,
+    )
+
+
+@router.get(
+    "/{project}/sources/{source_id}/snapshots/{snapshot_id}/evidence/preview",
+    response_model=SnapshotEvidencePreviewResponse,
+)
+def preview_snapshot_evidence(
+    project: str,
+    source_id: str,
+    snapshot_id: str,
+    request: Request,
+    response: Response,
+) -> SnapshotEvidencePreviewResponse:
+    _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Snapshot evidence preview is available only in Server mode."
+            ),
+        )
+    actor, project_id = server_context
+    try:
+        preview = _server_snapshot_evidence(request).get_preview(
+            actor=actor,
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except SnapshotEvidenceNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Snapshot evidence was not found.",
+        ) from exc
+    except SnapshotEvidenceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return SnapshotEvidencePreviewResponse(
+        project_id=preview.project_id,
+        source_id=preview.source_id,
+        snapshot_id=preview.snapshot_id,
+        slot=preview.slot,
+        text=preview.text,
+        truncated=preview.truncated,
+        block_count=preview.block_count,
+    )
+
+
+@router.post(
+    "/{project}/sources/{source_id}/snapshots/{snapshot_id}/evidence/raw-download",
+    response_model=SnapshotEvidenceDownloadResponse,
+)
+def create_snapshot_raw_download(
+    project: str,
+    source_id: str,
+    snapshot_id: str,
+    request: Request,
+    response: Response,
+) -> SnapshotEvidenceDownloadResponse:
+    _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Snapshot evidence download is available only in Server mode."
+            ),
+        )
+    actor, project_id = server_context
+    try:
+        download = _server_snapshot_evidence(request).create_raw_download(
+            actor=actor,
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except SnapshotEvidenceNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Snapshot evidence was not found.",
+        ) from exc
+    except SnapshotEvidenceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return SnapshotEvidenceDownloadResponse(
+        project_id=download.project_id,
+        source_id=download.source_id,
+        snapshot_id=download.snapshot_id,
+        slot=download.slot,
+        download_url=download.download_url,
+        expires_seconds=download.expires_seconds,
     )
 
 

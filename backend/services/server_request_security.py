@@ -38,6 +38,7 @@ def knowledge_permission_for(
         normalized_path.endswith("/research-assistant/messages")
         or normalized_path.endswith("/evidence-packs")
         or normalized_path.endswith("/knowledge-coverage")
+        or normalized_path.endswith("/evidence/raw-download")
     ):
         return "project.view"
     if (

@@ -188,6 +188,11 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/knowledge/{project}/sources/upload",
             ): "knowledge.edit",
             (
+                "POST",
+                "/api/knowledge/{project}/sources/x/snapshots/y/"
+                "evidence/raw-download",
+            ): "project.view",
+            (
                 "DELETE",
                 "/api/knowledge/{project}/sources/x",
             ): "knowledge.delete",
@@ -254,6 +259,26 @@ class ServerRequestSecurityTests(unittest.TestCase):
         ):
             self.assertTrue(
                 server_knowledge_route_ready("POST", migrated)
+            )
+        for method, migrated in (
+            (
+                "GET",
+                "/api/knowledge/{project}/sources/{source_id}/snapshots/"
+                "{snapshot_id}/evidence",
+            ),
+            (
+                "GET",
+                "/api/knowledge/{project}/sources/{source_id}/snapshots/"
+                "{snapshot_id}/evidence/preview",
+            ),
+            (
+                "POST",
+                "/api/knowledge/{project}/sources/{source_id}/snapshots/"
+                "{snapshot_id}/evidence/raw-download",
+            ),
+        ):
+            self.assertTrue(
+                server_knowledge_route_ready(method, migrated)
             )
         self.assertTrue(
             server_http_route_available(
