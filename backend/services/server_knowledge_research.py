@@ -367,12 +367,27 @@ class ServerCandidateIngestionAdapter:
             assets=assets,
             catalog=catalog,
         )
-        def review_source(source, decision, reason):
+        def review_source(source, snapshot_id, decision, reason):
             checkpoint()
-            return commands.review_source(
+            receipt_id = "research-review-" + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "\x1f".join(
+                    (
+                        actor.organization_id,
+                        project_id,
+                        thread_id,
+                        attempt_id,
+                        snapshot_id,
+                        decision,
+                    )
+                ),
+            ).hex
+            return commands.review_snapshot(
                 actor=actor,
                 project_id=project_id,
                 source_id=source.source_id,
+                snapshot_id=snapshot_id,
+                receipt_id=receipt_id,
                 source_kind=source.source_kind,
                 trust_tier=source.trust_tier,
                 decision=decision,

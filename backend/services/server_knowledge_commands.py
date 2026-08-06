@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import Literal, Mapping
+from typing import Mapping
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Connection, Engine
@@ -10,10 +9,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from knowledge_agent.catalog import (
     PostgresProductCatalogRepository,
+    ProductConfirmationError,
     ProductCatalogRepositoryError,
 )
 from knowledge_agent.contracts import (
-    KnowledgeSource,
     SourceKind,
     TrustTier,
 )
@@ -27,12 +26,23 @@ from knowledge_agent.repository import (
     KnowledgeRepositoryError,
     PostgresKnowledgeRepository,
 )
-from knowledge_agent.schema import knowledge_sources, source_snapshots
+from knowledge_agent.schema import (
+    knowledge_chunks,
+    knowledge_product_source_evidence,
+    knowledge_sources,
+    source_snapshots,
+)
+from knowledge_agent.snapshot_reviews import (
+    PostgresSnapshotReviewRepository,
+    ReviewDecision,
+    SnapshotReviewConflict,
+    SnapshotReviewReceipt,
+    SnapshotReviewRepositoryError,
+)
 from services.access_control import (
     ActorIdentity,
     PostgresProjectAccessRepository,
     ProjectAccessDenied,
-    ProjectAccessService,
     ProjectPermission,
     decide_project_permission,
 )
@@ -41,9 +51,6 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
-
-
-ReviewDecision = Literal["approve", "needs_review", "reject"]
 
 
 class ServerKnowledgeCommandUnavailable(RuntimeError):
@@ -64,6 +71,38 @@ def _required_text(
     return normalized
 
 
+def _snapshot_source_projection(
+    metadata: Mapping[str, object],
+) -> dict[str, object]:
+    projection = metadata.get("source_projection")
+    if not isinstance(projection, Mapping):
+        return {}
+    if projection.get("schema_version") != 1:
+        return {}
+    display_name = projection.get("display_name")
+    public_source = projection.get("public_source")
+    canonical_url = projection.get("canonical_url")
+    source_metadata = projection.get("metadata")
+    if not isinstance(display_name, str) or not display_name.strip():
+        return {}
+    if not isinstance(public_source, bool):
+        return {}
+    if canonical_url is not None and (
+        not isinstance(canonical_url, str) or not canonical_url.strip()
+    ):
+        return {}
+    if public_source and canonical_url is None:
+        return {}
+    if not isinstance(source_metadata, Mapping):
+        return {}
+    return {
+        "display_name": display_name.strip(),
+        "public_source": public_source,
+        "canonical_url": canonical_url,
+        "metadata": dict(source_metadata),
+    }
+
+
 class PostgresServerKnowledgeCommands:
     """Atomic Server commands for Knowledge review, publish, and confirm.
 
@@ -80,22 +119,15 @@ class PostgresServerKnowledgeCommands:
         catalog: PostgresProductCatalogRepository,
         publication: KnowledgePublicationService | None,
         audit: AuditEventWriter | None = None,
+        reviews: PostgresSnapshotReviewRepository | None = None,
     ) -> None:
         self._engine = engine
         self._repository = repository
         self._catalog = catalog
         self._publication = publication
+        self._reviews = reviews or PostgresSnapshotReviewRepository(engine)
         self._access_repository = PostgresProjectAccessRepository(engine)
-        self._access = ProjectAccessService(self._access_repository)
         self._audit = audit or PostgresAuditEventWriter()
-
-    def _require_initial_access(
-        self,
-        actor: ActorIdentity,
-        project_id: str,
-        permission: ProjectPermission,
-    ) -> None:
-        self._access.require(actor, project_id, permission)
 
     def _lock_access(
         self,
@@ -137,19 +169,23 @@ class PostgresServerKnowledgeCommands:
             ),
         )
 
-    def review_source(
+    def review_snapshot(
         self,
         *,
         actor: ActorIdentity,
         project_id: str,
         source_id: str,
+        snapshot_id: str,
+        receipt_id: str,
         source_kind: SourceKind,
         trust_tier: TrustTier,
         decision: ReviewDecision,
         reason: str,
-    ) -> KnowledgeSource:
+    ) -> SnapshotReviewReceipt:
         normalized_project_id = _required_text(project_id, "project_id")
         normalized_source_id = _required_text(source_id, "source_id")
+        normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
+        normalized_receipt_id = _required_text(receipt_id, "receipt_id")
         normalized_reason = _required_text(
             reason,
             "reason",
@@ -185,60 +221,76 @@ class PostgresServerKnowledgeCommands:
                     raise KnowledgeRecordNotFound(
                         "knowledge source was not found in the requested project"
                     )
-                if row["status"] == "published":
-                    raise KnowledgePublicationError(
-                        "published source review requires a new snapshot"
-                    )
-                metadata = dict(row["metadata"] or {})
-                metadata["review"] = {
-                    "decision": decision,
-                    "reason": normalized_reason,
-                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
-                }
-                reviewed = KnowledgeSource(
+                appended = self._reviews.append_review_in_transaction(
+                    connection,
                     project_id=normalized_project_id,
                     source_id=normalized_source_id,
-                    display_name=str(row["display_name"]),
+                    snapshot_id=normalized_snapshot_id,
+                    receipt_id=normalized_receipt_id,
+                    decision=decision,
                     source_kind=source_kind,
                     trust_tier=trust_tier,
-                    status=status_by_decision[decision],  # type: ignore[arg-type]
-                    canonical_url=(
-                        None
-                        if row["canonical_url"] is None
-                        else str(row["canonical_url"])
-                    ),
-                    public_source=bool(row["public_source"]),
-                    metadata=metadata,
+                    reason=normalized_reason,
+                    reviewer_kind="user",
+                    reviewer_id=actor.user_id,
                 )
-                self._repository.upsert_source_in_transaction(
-                    connection,
-                    reviewed,
-                )
+                if not appended.created:
+                    return appended.receipt
+                if row["pending_snapshot_id"] != normalized_snapshot_id:
+                    raise KnowledgePublicationError(
+                        "only the pending snapshot can be reviewed"
+                    )
+                values: dict[str, object] = {}
+                if row["current_snapshot_id"] is None:
+                    values.update(
+                        source_kind=source_kind,
+                        trust_tier=trust_tier,
+                        status=status_by_decision[decision],
+                    )
+                if decision == "reject":
+                    values["pending_snapshot_id"] = None
+                if values:
+                    values["updated_at"] = sa.func.now()
+                    connection.execute(
+                        knowledge_sources.update()
+                        .where(
+                            knowledge_sources.c.project_id
+                            == normalized_project_id,
+                            knowledge_sources.c.source_id
+                            == normalized_source_id,
+                        )
+                        .values(**values)
+                    )
                 self._append_audit(
                     connection,
                     actor=actor,
                     project_id=normalized_project_id,
-                    action="knowledge.source.reviewed",
-                    target_type="knowledge_source",
-                    target_id=normalized_source_id,
+                    action="knowledge.snapshot.reviewed",
+                    target_type="source_snapshot",
+                    target_id=normalized_snapshot_id,
                     details={
+                        "source_id": normalized_source_id,
                         "decision": decision,
                         "source_kind": source_kind,
                         "trust_tier": trust_tier,
+                        "review_version": appended.receipt.review_version,
+                        "receipt_id": appended.receipt.receipt_id,
                     },
                 )
-                return reviewed
+                return appended.receipt
         except (
             KnowledgePublicationError,
             KnowledgeRecordNotFound,
             KnowledgeRepositoryError,
             ProjectAccessDenied,
+            SnapshotReviewConflict,
+            SnapshotReviewRepositoryError,
             ValueError,
         ):
             raise
         except (RuntimeError, SQLAlchemyError) as exc:
             raise ServerKnowledgeCommandUnavailable(
-                "knowledge source review could not be committed"
+                "knowledge snapshot review could not be committed"
             ) from exc
 
     def publish_source(
@@ -247,33 +299,130 @@ class PostgresServerKnowledgeCommands:
         actor: ActorIdentity,
         project_id: str,
         source_id: str,
-        snapshot_id: str | None = None,
+        snapshot_id: str,
     ) -> PublicationResult:
         normalized_project_id = _required_text(project_id, "project_id")
         normalized_source_id = _required_text(source_id, "source_id")
+        normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
         if self._publication is None:
             raise ServerKnowledgeCommandUnavailable(
                 "embedding provider is not configured"
             )
 
-        # Do not spend provider capacity for an actor who is already denied.
-        # The authoritative recheck still happens in the commit transaction.
         try:
-            self._require_initial_access(
-                actor,
-                normalized_project_id,
-                "knowledge.publish",
-            )
-        except ProjectAccessDenied:
+            with self._engine.begin() as connection:
+                self._lock_access(
+                    connection,
+                    actor,
+                    normalized_project_id,
+                    "knowledge.publish",
+                )
+                source = connection.execute(
+                    sa.select(
+                        knowledge_sources.c.status,
+                        knowledge_sources.c.current_snapshot_id,
+                        knowledge_sources.c.pending_snapshot_id,
+                    )
+                    .where(
+                        knowledge_sources.c.project_id
+                        == normalized_project_id,
+                        knowledge_sources.c.source_id
+                        == normalized_source_id,
+                    )
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if source is None:
+                    raise KnowledgePublicationError(
+                        "knowledge source was not found in the requested project"
+                    )
+                already_active = (
+                    source["status"] == "published"
+                    and source["current_snapshot_id"]
+                    == normalized_snapshot_id
+                    and source["pending_snapshot_id"] is None
+                )
+                if (
+                    not already_active
+                    and source["pending_snapshot_id"]
+                    != normalized_snapshot_id
+                ):
+                    raise KnowledgePublicationError(
+                        "only the pending snapshot can be published"
+                    )
+                approved_receipt = (
+                    self._reviews.get_latest_review_in_transaction(
+                        connection,
+                        normalized_project_id,
+                        normalized_source_id,
+                        normalized_snapshot_id,
+                    )
+                )
+                if (
+                    approved_receipt is None
+                    or approved_receipt.decision != "approve"
+                ):
+                    raise KnowledgePublicationError(
+                        "snapshot classification must be approved before publication"
+                    )
+                if already_active:
+                    total_chunks = connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(knowledge_chunks)
+                        .where(
+                            knowledge_chunks.c.project_id
+                            == normalized_project_id,
+                            knowledge_chunks.c.source_id
+                            == normalized_source_id,
+                            knowledge_chunks.c.snapshot_id
+                            == normalized_snapshot_id,
+                        )
+                    ).scalar_one()
+                    incomplete_chunks = connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(knowledge_chunks)
+                        .where(
+                            knowledge_chunks.c.project_id
+                            == normalized_project_id,
+                            knowledge_chunks.c.source_id
+                            == normalized_source_id,
+                            knowledge_chunks.c.snapshot_id
+                            == normalized_snapshot_id,
+                            sa.or_(
+                                knowledge_chunks.c.embedding.is_(None),
+                                knowledge_chunks.c.embedding_model
+                                != self._publication.embedding_model,
+                            ),
+                        )
+                    ).scalar_one()
+                    if total_chunks and not incomplete_chunks:
+                        return PublicationResult(
+                            project_id=normalized_project_id,
+                            source_id=normalized_source_id,
+                            snapshot_id=normalized_snapshot_id,
+                            embedding_model=(
+                                self._publication.embedding_model
+                            ),
+                            chunk_count=int(total_chunks),
+                        )
+                expected_current_snapshot_id = source[
+                    "current_snapshot_id"
+                ]
+        except (
+            KnowledgePublicationError,
+            ProjectAccessDenied,
+            SnapshotReviewRepositoryError,
+            ValueError,
+        ):
             raise
         except (RuntimeError, SQLAlchemyError) as exc:
             raise ServerKnowledgeCommandUnavailable(
-                "knowledge source publication is unavailable"
+                "knowledge snapshot publication is unavailable"
             ) from exc
-        candidate = self._publication.prepare(
+
+        candidate = self._publication.prepare_snapshot(
             project_id=normalized_project_id,
             source_id=normalized_source_id,
-            snapshot_id=snapshot_id,
+            snapshot_id=normalized_snapshot_id,
         )
 
         try:
@@ -288,7 +437,7 @@ class PostgresServerKnowledgeCommands:
                     sa.select(
                         knowledge_sources.c.status,
                         knowledge_sources.c.current_snapshot_id,
-                        knowledge_sources.c.metadata,
+                        knowledge_sources.c.pending_snapshot_id,
                     )
                     .where(
                         knowledge_sources.c.project_id
@@ -302,38 +451,46 @@ class PostgresServerKnowledgeCommands:
                     raise KnowledgePublicationError(
                         "knowledge source was not found in the requested project"
                     )
-                review = dict(source["metadata"] or {}).get("review")
+                latest_receipt = (
+                    self._reviews.get_latest_review_in_transaction(
+                        connection,
+                        normalized_project_id,
+                        normalized_source_id,
+                        normalized_snapshot_id,
+                        for_update=True,
+                    )
+                )
                 if (
-                    not isinstance(review, Mapping)
-                    or review.get("decision") != "approve"
+                    latest_receipt is None
+                    or latest_receipt.decision != "approve"
+                    or latest_receipt.receipt_id
+                    != approved_receipt.receipt_id
+                    or latest_receipt.review_version
+                    != approved_receipt.review_version
                 ):
                     raise KnowledgePublicationError(
-                        "source classification must be approved before publication"
+                        "snapshot review changed during publication"
                     )
-                if snapshot_id is None:
-                    latest_snapshot_id = connection.execute(
-                        sa.select(source_snapshots.c.snapshot_id)
-                        .where(
-                            source_snapshots.c.project_id
-                            == normalized_project_id,
-                            source_snapshots.c.source_id
-                            == normalized_source_id,
-                        )
-                        .order_by(
-                            source_snapshots.c.fetched_at.desc(),
-                            source_snapshots.c.snapshot_id.desc(),
-                        )
-                        .limit(1)
-                    ).scalar_one_or_none()
-                    if latest_snapshot_id != candidate.snapshot_id:
-                        raise KnowledgePublicationError(
-                            "source snapshot changed during publication"
-                        )
                 already_active = (
                     source["status"] == "published"
                     and source["current_snapshot_id"] == candidate.snapshot_id
+                    and source["pending_snapshot_id"] is None
                 )
                 if not already_active:
+                    if (
+                        source["pending_snapshot_id"]
+                        != candidate.snapshot_id
+                    ):
+                        raise KnowledgePublicationError(
+                            "pending snapshot changed during publication"
+                        )
+                    if (
+                        source["current_snapshot_id"]
+                        != expected_current_snapshot_id
+                    ):
+                        raise KnowledgePublicationError(
+                            "current snapshot changed during publication"
+                        )
                     self._repository.activate_snapshot_in_transaction(
                         connection,
                         candidate.project_id,
@@ -341,15 +498,51 @@ class PostgresServerKnowledgeCommands:
                         candidate.snapshot_id,
                         candidate.embedding_model,
                     )
+                    snapshot_metadata = connection.execute(
+                        sa.select(source_snapshots.c.metadata).where(
+                            source_snapshots.c.project_id
+                            == normalized_project_id,
+                            source_snapshots.c.source_id
+                            == normalized_source_id,
+                            source_snapshots.c.snapshot_id
+                            == candidate.snapshot_id,
+                        )
+                    ).scalar_one()
+                    aggregate_values = _snapshot_source_projection(
+                        dict(snapshot_metadata or {})
+                    )
+                    aggregate_values.update(
+                        source_kind=latest_receipt.source_kind,
+                        trust_tier=latest_receipt.trust_tier,
+                        updated_at=sa.func.now(),
+                    )
+                    connection.execute(
+                        knowledge_sources.update()
+                        .where(
+                            knowledge_sources.c.project_id
+                            == normalized_project_id,
+                            knowledge_sources.c.source_id
+                            == normalized_source_id,
+                        )
+                        .values(**aggregate_values)
+                    )
                     self._append_audit(
                         connection,
                         actor=actor,
                         project_id=normalized_project_id,
-                        action="knowledge.source.published",
-                        target_type="knowledge_source",
-                        target_id=normalized_source_id,
+                        action="knowledge.snapshot.published",
+                        target_type="source_snapshot",
+                        target_id=candidate.snapshot_id,
                         details={
+                            "source_id": normalized_source_id,
                             "snapshot_id": candidate.snapshot_id,
+                            "previous_snapshot_id": (
+                                expected_current_snapshot_id
+                            ),
+                            "review_version": (
+                                latest_receipt.review_version
+                            ),
+                            "receipt_id": latest_receipt.receipt_id,
                             "chunk_count": candidate.chunk_count,
                             "embedding_model": candidate.embedding_model,
                         },
@@ -358,12 +551,13 @@ class PostgresServerKnowledgeCommands:
             KnowledgePublicationError,
             KnowledgeRepositoryError,
             ProjectAccessDenied,
+            SnapshotReviewRepositoryError,
             ValueError,
         ):
             raise
         except (RuntimeError, SQLAlchemyError) as exc:
             raise ServerKnowledgeCommandUnavailable(
-                "knowledge source publication could not be committed"
+                "knowledge snapshot publication could not be committed"
             ) from exc
 
         return PublicationResult(
@@ -391,6 +585,37 @@ class PostgresServerKnowledgeCommands:
                     normalized_project_id,
                     "knowledge.publish",
                 )
+                current_primary_detail = connection.execute(
+                    sa.select(
+                        knowledge_product_source_evidence.c.product_id
+                    )
+                    .join(
+                        knowledge_sources,
+                        sa.and_(
+                            knowledge_sources.c.project_id
+                            == knowledge_product_source_evidence.c.project_id,
+                            knowledge_sources.c.source_id
+                            == knowledge_product_source_evidence.c.source_id,
+                            knowledge_sources.c.current_snapshot_id
+                            == knowledge_product_source_evidence.c.snapshot_id,
+                            knowledge_sources.c.status == "published",
+                        ),
+                    )
+                    .where(
+                        knowledge_product_source_evidence.c.project_id
+                        == normalized_project_id,
+                        knowledge_product_source_evidence.c.product_id
+                        == normalized_product_id,
+                        knowledge_product_source_evidence.c.relation
+                        == "primary_detail",
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                if current_primary_detail is None:
+                    raise ProductConfirmationError(
+                        "product requires current published primary detail "
+                        "evidence before confirmation"
+                    )
                 changed = self._catalog.confirm_product_in_transaction(
                     connection,
                     normalized_project_id,

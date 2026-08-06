@@ -56,6 +56,13 @@ from .repository import (
     PostgresKnowledgeRepository,
     SnapshotActivationError,
 )
+from .snapshot_reviews import (
+    PostgresSnapshotReviewRepository,
+    SnapshotReviewAppendResult,
+    SnapshotReviewConflict,
+    SnapshotReviewReceipt,
+    SnapshotReviewRepositoryError,
+)
 from .retriever import PgVectorKnowledgeRetriever
 from .hybrid_retriever import (
     BasicHybridRetriever,
@@ -342,6 +349,7 @@ __all__ = [
     "PdfDocumentParser",
     "PgVectorKnowledgeRetriever",
     "PostgresKnowledgeRepository",
+    "PostgresSnapshotReviewRepository",
     "PostgresEvidenceLinkRepository",
     "PostgresEvidencePackRepository",
     "PostgresRetrievalPlanRepository",
@@ -412,6 +420,10 @@ __all__ = [
     "ParagraphEvidenceTarget",
     "SourceDiscovery",
     "SnapshotActivationError",
+    "SnapshotReviewAppendResult",
+    "SnapshotReviewConflict",
+    "SnapshotReviewReceipt",
+    "SnapshotReviewRepositoryError",
     "ScopeEvidenceObservation",
     "ScopeEvidenceNotFound",
     "ScopeEvidencePort",

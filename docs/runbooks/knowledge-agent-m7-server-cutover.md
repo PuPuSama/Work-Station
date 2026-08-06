@@ -75,13 +75,20 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260731_0018`；
+- `alembic_version = 20260806_0019`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
 - `workspace_users.session_version` 非空且大于 0；
 - 复合租户外键仍存在；
 - Audit Event 更新和删除仍被 Trigger 拒绝；
+- `knowledge_sources.current_snapshot_id` 与 `pending_snapshot_id` 都由精确
+  Project/Source/Snapshot 复合外键约束，且两个非空指针不能相同；
+- `source_snapshot_review_receipts` 的复合主键、Project-scoped Receipt 唯一约束、枚举/
+  Reviewer/Reason CHECK 和 Latest B-tree 索引存在；
+- Snapshot Review Receipt 更新和删除被 `trg_snapshot_review_receipts_append_only` 拒绝；
+- 旧 Published Source 的 Legacy Approval 只绑定其 Current Snapshot；无 Current 的多
+  Snapshot Source 没有被迁移脚本猜测批准；
 - Task/Job 迁移工具的数量、状态分布和内容 SHA-256 摘要一致；
 - 抽样知识资产 URI 能在恢复用对象存储中读取，下载字节 SHA-256 与数据库一致。
 
@@ -381,19 +388,42 @@ cd backend
 重复执行必须安全。Schema 未准备时 Research Job 应失败并输出脱敏终态，不能临时回退
 内存 Checkpointer 或 SQLite Queue。
 
+### Snapshot Review Receipt Cutover
+
+`20260806_0019` 会新增 Current/Pending 双指针约束、不可变 Receipt 表并执行保守 Backfill。
+正式升级前必须暂停 Server Knowledge Review/Publish 写入口和相关 Worker Claim，避免旧进程
+在 Backfill 后继续只写 `knowledge_sources.metadata.review`。
+
+升级后、开放流量前验证：
+
+- 已 Published Source 保持原 `current_snapshot_id`，`pending_snapshot_id` 不被臆造；
+- 每个 Legacy Published Receipt 只批准该 Source 的精确 Current Snapshot；
+- 无 Current 且恰好一个 Snapshot 的 Source 被设置为 Pending；只有合法旧 Review 才有
+  对应 Receipt；
+- 无 Current 且多个 Snapshot 的 Source 不产生推断 Receipt，旧 Inbox Approval 投影成为
+  `needs_review`；
+- Receipt UPDATE/DELETE Trigger 生效；
+- Server Source-only Review/Publish 路由 fail closed，精确 Snapshot 路由可用；
+- Server Library 的 `raw_evidence_url` 仍为 `null`。Raw Preview 不属于本次 Cutover。
+
+一旦新 Receipt 或 Pending 产生业务数据，不得把数据库降级到 0018，也不得重新开放旧
+Source-scoped Server Writer。应用回滚时应关闭 Server Knowledge 写流量，保留 0019 Schema
+与数据，直到 Receipt-aware 版本恢复。
+
 ## 6. 发布和回滚顺序
 
 发布顺序：
 
 1. 备份与恢复演练；
-2. `alembic upgrade head`；
-3. 停止 SQLite 写入口和 Worker，完成一次性迁移；
-4. 对每个项目运行 `m7_cutover_report` 并保存 matched JSON；
-5. 只读 Preflight；
-6. API/Worker 部署但保持流量关闭；
-7. 身份、项目 Scope、对象下载、Retriever、Task/Job 冒烟；
-8. 小流量开放；
-9. 观察期结束后才关闭旧服务器写路径。
+2. 关闭外部流量，暂停 Server Knowledge Review/Publish 和 Worker Claim；
+3. `alembic upgrade head`，确认 Head 为 `20260806_0019` 并完成上述 Backfill 验证；
+4. 停止 SQLite 写入口和旧 Worker，完成其余一次性迁移；
+5. 对每个项目运行 `m7_cutover_report` 并保存 matched JSON；
+6. 只读 Preflight；
+7. API/Worker 部署但保持流量关闭；
+8. 身份、项目 Scope、对象下载、Retriever、Task/Job 与 Snapshot Review/Publish 冒烟；
+9. 小流量开放；
+10. 观察期结束后才关闭旧服务器写路径。
 
 OIDC 身份冒烟必须从登录页触发，并至少验证：
 
@@ -425,11 +455,11 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
 - Viewer/Reviewer 只能读取；Editor 可保存 Source Kind、Trust Tier、Decision 和
   Reason，发布与产品确认仍由后端要求 `knowledge.publish`；
 - Editor 上传一份不含真实客户正文的 DOCX/PDF/XLSX 测试资料，确认只进入 Inbox，
-  `created=true` 且 `current_snapshot_id` 仍为空；相同文件重试必须返回
+  `created=true`、`current_snapshot_id` 仍为空且 `pending_snapshot_id` 指向新 Snapshot；
+  相同文件重试必须返回
   `created=false`，Source/Snapshot/Audit 数量不增加；
-- 显式复用已有 Published Source ID 上传新内容必须返回 409，原显示名、Trust Tier、
-  Metadata 和 Current Snapshot 不变；在引入 Snapshot 级 Review 前不得产生无法审阅的
-  Pending Snapshot；
+- 已 Published Source 抓取新内容时必须创建唯一 Pending Snapshot，原 Current、Published
+  状态、Retriever 与 Catalog 不变；已有另一 Pending 时第二份不同新字节返回 409；
 - 预置同 Hash 的 `file://`、错误 Bucket、错误 Organization/Project S3 Asset 后上传
   必须返回 409，Snapshot Link 不得复用 Server 无法授权读取的历史位置；
 - Viewer 上传必须在任何 ObjectStore Put 前返回 403；在第一个对象写入后撤销 Editor
@@ -438,23 +468,30 @@ Server Knowledge Inbox 冒烟必须通过 `/projects/{project}/knowledge`：
   orphan 候选由延迟对账处理，不在请求失败路径立即删除；
 - Upload Audit 只含 Snapshot ID、Parser 和 Chunk/Asset 数量；公开响应与 Audit 不得
   出现文件名、正文、Hash、Bucket、Object Key、Artifact URI 或 Provider Secret；
-- Review 与 Publish 是两个请求；Embedding 失败后来源不得显示为 Published，旧
-  Published Snapshot 继续服务；
+- Review 与 Publish 是两个精确 Snapshot 请求：
+  `PUT .../snapshots/{snapshot}/review` 与 `POST .../snapshots/{snapshot}/publish`；Server
+  Source-only 路由必须返回 Conflict；Embedding 失败时未发布 Source 不得显示为 Published，
+  已有旧 Published Snapshot 时继续服务；
+- 同 Receipt ID、同业务 Payload 的 Review 重试返回同一 Version 且不重复 Audit；同 ID
+  不同 Payload 返回 Conflict；新 ID 追加 Version；Receipt UPDATE/DELETE 被 Trigger 拒绝；
 - 在 Review/Publish/Confirm 的 Router 授权后撤销 Actor Membership，命令事务必须再次
   返回 403；Publish 在 Embedding 期间撤权时可以保留 Candidate Vector，但不得切换
   Current Snapshot 或追加成功 Audit；
-- 在 Embedding 期间写入更新的 Latest Snapshot，未指定 Snapshot 的发布必须返回 409，
-  不得把已经落后的 Candidate 激活为 Current；
+- 在 Embedding 期间追加新 Review、替换 Pending 或切换 Current 时，Activate 必须因 Receipt
+  Version/Pending/Expected Current 漂移返回 409，不得把落后的 Candidate 激活为 Current；
 - 注入 Audit Writer 故障后，Review 分类、Current Snapshot 激活和 Product Confirm
   必须分别回滚；公开 503 不得包含底层错误、Reason、Canonical URL 或对象信息；
 - 重试已经激活的同一 Snapshot 或已经确认的 Product 时保持成功读模型，但不得重复追加
-  `knowledge.source.published` / `knowledge.product.confirmed`；
-- 检查三类 Audit：Review 只含 Decision/Source Kind/Trust Tier，Publish 只含不可变
-  Snapshot ID/Chunk Count/Embedding Model，Confirm 只含确认状态；正文、Reason、URL、
+  `knowledge.snapshot.published` / `knowledge.product.confirmed`；
+- 检查三类 Audit：Review 只含 Source ID、Decision、Source Kind、Trust Tier、Review
+  Version 和 Receipt ID；Publish 只含不可变 Snapshot ID、Receipt Version/ID、Chunk Count、
+  Embedding Model，Confirm 只含确认状态；正文、Reason、URL、
   原始 Content Hash、Artifact URI 和 Secret 均不得出现；
 - Server DOM 与网络只允许已迁移的 Project-scoped Upload、Task Plan 和 Research
   Run/Resume；不得出现通用 Plan POST、WordPress Sync、Raw Artifact 或 Local
   `/api/config` 请求；
+- Server Inbox 可以展示 Current/Pending ID、Pending 计数和 Receipt 投影，但
+  `raw_evidence_url` 必须为 `null`；不要把尚未实现的 Server Raw Preview 写成验收通过；
 - Product Confirm 不代表文章可选择；必须再验证 Project Catalog 只投影当前 Published
   Snapshot Evidence。
 

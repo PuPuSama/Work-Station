@@ -374,12 +374,13 @@ class PostgresServerWebEvidenceIngestion:
                         )
                     ).scalar_one()
                 )
-                if canonical_snapshot is None and existing_snapshot_count:
-                    # Review metadata is currently Source-scoped. Until a
-                    # snapshot review receipt exists, accepting a new version
-                    # would let an old approval authorize new bytes.
+                if (
+                    canonical_snapshot is None
+                    and source_row is not None
+                    and source_row["pending_snapshot_id"] is not None
+                ):
                     raise ServerWebEvidenceConflict(
-                        "web source refresh requires snapshot-bound review"
+                        "web source already has a pending snapshot"
                     )
                 committed = (
                     prepared
@@ -405,7 +406,17 @@ class PostgresServerWebEvidenceIngestion:
                         committed.chunks,
                     )
                 )
-                changed = new_source or created_snapshot
+                pending_changed = False
+                if created_snapshot:
+                    pending_changed = (
+                        self._repository.set_pending_snapshot_in_transaction(
+                            connection,
+                            context.project_id,
+                            committed.source.source_id,
+                            committed.snapshot.snapshot_id,
+                        )
+                    )
+                changed = new_source or created_snapshot or pending_changed
 
                 if committed.product is not None:
                     changed = (

@@ -62,6 +62,10 @@ from .embedding import EmbeddingProviderError
 from .library import KnowledgeSourceSummary
 from .repository import KnowledgeRecordNotFound, KnowledgeRepositoryError
 from .publication import KnowledgePublicationError
+from .snapshot_reviews import (
+    SnapshotReviewConflict,
+    SnapshotReviewRepositoryError,
+)
 from .runtime import KnowledgeAgentRuntime
 from .research_graph import ResearchGraphRequest, new_research_thread_id
 from .research_runs import (
@@ -113,6 +117,14 @@ class KnowledgeSourceResponse(KnowledgeApiModel):
     status: str
     canonical_url: str | None
     current_snapshot_id: str | None
+    latest_snapshot_id: str | None
+    pending_snapshot_id: str | None
+    pending_fetched_at: str | None
+    pending_chunk_count: int
+    pending_asset_count: int
+    pending_review_decision: str | None
+    pending_review_version: int | None
+    pending_reviewed_at: str | None
     snapshot_count: int
     chunk_count: int
     asset_count: int
@@ -135,6 +147,7 @@ class KnowledgeLibraryResponse(KnowledgeApiModel):
     project_id: str
     source_count: int
     inbox_count: int
+    pending_count: int
     published_count: int
     product_count: int
     confirmed_product_count: int
@@ -180,6 +193,16 @@ class KnowledgeSourceReviewResponse(KnowledgeApiModel):
     source_id: str
     status: str
     decision: str
+
+
+class KnowledgeSnapshotReviewRequest(KnowledgeSourceReviewRequest):
+    receipt_id: str = Field(min_length=1, max_length=200)
+
+
+class KnowledgeSnapshotReviewResponse(KnowledgeSourceReviewResponse):
+    snapshot_id: str
+    receipt_id: str
+    review_version: int
 
 
 class KnowledgePublicationResponse(KnowledgeApiModel):
@@ -626,6 +649,22 @@ def _source_response(
         status=item.status,
         canonical_url=item.canonical_url,
         current_snapshot_id=item.current_snapshot_id,
+        latest_snapshot_id=item.latest_snapshot_id,
+        pending_snapshot_id=item.pending_snapshot_id,
+        pending_fetched_at=(
+            None
+            if item.pending_fetched_at is None
+            else item.pending_fetched_at.isoformat()
+        ),
+        pending_chunk_count=item.pending_chunk_count,
+        pending_asset_count=item.pending_asset_count,
+        pending_review_decision=item.pending_review_decision,
+        pending_review_version=item.pending_review_version,
+        pending_reviewed_at=(
+            None
+            if item.pending_reviewed_at is None
+            else item.pending_reviewed_at.isoformat()
+        ),
         snapshot_count=item.snapshot_count,
         chunk_count=item.chunk_count,
         asset_count=item.asset_count,
@@ -1058,6 +1097,7 @@ def read_knowledge_library(project: str, request: Request) -> KnowledgeLibraryRe
         project_id=summary.project_id,
         source_count=summary.source_count,
         inbox_count=summary.inbox_count,
+        pending_count=summary.pending_count,
         published_count=summary.published_count,
         product_count=summary.product_count,
         confirmed_product_count=summary.confirmed_product_count,
@@ -1970,43 +2010,11 @@ def review_knowledge_source(
         else server_context[1]
     )
     if server_context is not None:
-        actor, _ = server_context
-        try:
-            reviewed = _server_knowledge_commands(
-                request,
-                runtime,
-            ).review_source(
-                actor=actor,
-                project_id=project_id,
-                source_id=source_id,
-                source_kind=payload.source_kind,
-                trust_tier=payload.trust_tier,
-                decision=payload.decision,
-                reason=payload.reason,
-            )
-        except ProjectAccessDenied as exc:
-            raise HTTPException(
-                status_code=403,
-                detail="project access denied",
-            ) from exc
-        except KnowledgeRecordNotFound as exc:
-            raise HTTPException(
-                status_code=404,
-                detail="Knowledge source was not found.",
-            ) from exc
-        except (
-            KnowledgePublicationError,
-            KnowledgeRepositoryError,
-            ValueError,
-        ) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ServerKnowledgeCommandUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return KnowledgeSourceReviewResponse(
-            project_id=project_id,
-            source_id=source_id,
-            status=reviewed.status,
-            decision=payload.decision,
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Server review requires an exact Snapshot review route."
+            ),
         )
 
     source = runtime.library.get_source(project_id, source_id)
@@ -2051,6 +2059,76 @@ def review_knowledge_source(
     )
 
 
+@router.put(
+    "/{project}/sources/{source_id}/snapshots/{snapshot_id}/review",
+    response_model=KnowledgeSnapshotReviewResponse,
+)
+def review_knowledge_snapshot(
+    project: str,
+    source_id: str,
+    snapshot_id: str,
+    payload: KnowledgeSnapshotReviewRequest,
+    request: Request,
+) -> KnowledgeSnapshotReviewResponse:
+    runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Snapshot review is available only in Server mode.",
+        )
+    actor, project_id = server_context
+    try:
+        receipt = _server_knowledge_commands(
+            request,
+            runtime,
+        ).review_snapshot(
+            actor=actor,
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+            receipt_id=payload.receipt_id,
+            source_kind=payload.source_kind,
+            trust_tier=payload.trust_tier,
+            decision=payload.decision,
+            reason=payload.reason,
+        )
+        source = runtime.library.get_source(project_id, source_id)
+        if source is None:
+            raise KnowledgeRecordNotFound(
+                "knowledge source was not found in the requested project"
+            )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KnowledgeRecordNotFound as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Knowledge source or Snapshot was not found.",
+        ) from exc
+    except (
+        KnowledgePublicationError,
+        KnowledgeRepositoryError,
+        SnapshotReviewConflict,
+        SnapshotReviewRepositoryError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeCommandUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return KnowledgeSnapshotReviewResponse(
+        project_id=project_id,
+        source_id=source_id,
+        snapshot_id=snapshot_id,
+        status=source.status,
+        decision=receipt.decision,
+        receipt_id=receipt.receipt_id,
+        review_version=receipt.review_version,
+    )
+
+
 @router.post(
     "/{project}/sources/{source_id}/publish",
     response_model=KnowledgePublicationResponse,
@@ -2072,21 +2150,17 @@ def publish_knowledge_source(
         if server_context is None
         else server_context[1]
     )
+    if server_context is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Server publication requires an exact Snapshot publish route."
+            ),
+        )
     try:
-        result = (
-            runtime.publication.publish(
-                project_id=project_id,
-                source_id=source_id,
-            )
-            if server_context is None
-            else _server_knowledge_commands(
-                request,
-                runtime,
-            ).publish_source(
-                actor=server_context[0],
-                project_id=project_id,
-                source_id=source_id,
-            )
+        result = runtime.publication.publish(
+            project_id=project_id,
+            source_id=source_id,
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -2096,6 +2170,64 @@ def publish_knowledge_source(
     except EmbeddingProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (KnowledgePublicationError, KnowledgeRepositoryError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeCommandUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return KnowledgePublicationResponse(
+        project_id=result.project_id,
+        source_id=result.source_id,
+        snapshot_id=result.snapshot_id,
+        status="published",
+        embedding_model=result.embedding_model,
+        chunk_count=result.chunk_count,
+    )
+
+
+@router.post(
+    "/{project}/sources/{source_id}/snapshots/{snapshot_id}/publish",
+    response_model=KnowledgePublicationResponse,
+)
+def publish_knowledge_snapshot(
+    project: str,
+    source_id: str,
+    snapshot_id: str,
+    request: Request,
+) -> KnowledgePublicationResponse:
+    runtime = _runtime(request)
+    if runtime.publication is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding Provider is not configured.",
+        )
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Snapshot publication is available only in Server mode.",
+        )
+    actor, project_id = server_context
+    try:
+        result = _server_knowledge_commands(
+            request,
+            runtime,
+        ).publish_source(
+            actor=actor,
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except EmbeddingProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except (
+        KnowledgePublicationError,
+        KnowledgeRepositoryError,
+        SnapshotReviewRepositoryError,
+    ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ServerKnowledgeCommandUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

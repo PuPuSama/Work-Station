@@ -454,6 +454,21 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
                 )
             ).scalar_one()
 
+    def _mark_published(self, source_id: str, snapshot_id: str) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.update()
+                .where(
+                    knowledge_sources.c.project_id == self.project_id,
+                    knowledge_sources.c.source_id == source_id,
+                )
+                .values(
+                    status="published",
+                    current_snapshot_id=snapshot_id,
+                    pending_snapshot_id=None,
+                )
+            )
+
     def test_prepare_writes_objects_but_no_database_rows(self) -> None:
         prepared = self._prepare()
 
@@ -483,6 +498,11 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
         self.assertEqual(counts["asset_evidence"], 1)
         self.assertIsNotNone(result.product)
         self.assertEqual(len(result.assets), 1)
+        self.assertIsNone(result.source.current_snapshot_id)
+        self.assertEqual(
+            result.source.pending_snapshot_id,
+            result.snapshot.snapshot_id,
+        )
 
         self.assertEqual(len(self.audit.events), 1)
         event = self.audit.events[0]
@@ -511,6 +531,20 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
         self.assertNotIn("content_hash", serialized_audit)
 
     def test_audit_failure_rolls_back_complete_database_graph(self) -> None:
+        first = self._ingest()
+        self._mark_published(
+            first.source.source_id,
+            first.snapshot.snapshot_id,
+        )
+        baseline = self._row_counts()
+        self.fetcher.responses[self.page_url] = (
+            product_html(
+                canonical_url=self.page_url,
+                image_url=self.image_url,
+                description="Pending evidence whose Audit must fail.",
+            ),
+            "text/html; charset=utf-8",
+        )
         service = self._service(audit=FailingAuditWriter())
 
         with self.assertRaisesRegex(
@@ -525,9 +559,34 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
 
         self.assertNotIn("private-audit", str(captured.exception))
         self.assertTrue(self.store.put_calls)
-        self.assertEqual(self._row_counts(), self._empty_counts())
+        self.assertEqual(self._row_counts(), baseline)
+        source = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            first.source.source_id,
+        )
+        self.assertEqual(source.status, "published")
+        self.assertEqual(
+            source.current_snapshot_id,
+            first.snapshot.snapshot_id,
+        )
+        self.assertIsNone(source.pending_snapshot_id)
+        self.assertEqual(len(self.audit.events), 1)
 
     def test_permission_revocation_after_prepare_rejects_commit(self) -> None:
+        first = self._ingest()
+        self._mark_published(
+            first.source.source_id,
+            first.snapshot.snapshot_id,
+        )
+        baseline = self._row_counts()
+        self.fetcher.responses[self.page_url] = (
+            product_html(
+                canonical_url=self.page_url,
+                image_url=self.image_url,
+                description="Pending evidence after permission revocation.",
+            ),
+            "text/html; charset=utf-8",
+        )
         prepared = self._prepare()
         with self.engine.begin() as connection:
             connection.execute(
@@ -546,8 +605,18 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
             self.service.commit(prepared)
 
         self.assertTrue(self.store.put_calls)
-        self.assertEqual(self._row_counts(), self._empty_counts())
-        self.assertEqual(self.audit.events, [])
+        self.assertEqual(self._row_counts(), baseline)
+        source = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            first.source.source_id,
+        )
+        self.assertEqual(source.status, "published")
+        self.assertEqual(
+            source.current_snapshot_id,
+            first.snapshot.snapshot_id,
+        )
+        self.assertIsNone(source.pending_snapshot_id)
+        self.assertEqual(len(self.audit.events), 1)
 
     def test_cancellation_after_prepare_rejects_commit(self) -> None:
         cancellation = {"requested": False}
@@ -643,6 +712,10 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
 
         self.assertEqual(
             second.snapshot.snapshot_id,
+            first.snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            second.source.pending_snapshot_id,
             first.snapshot.snapshot_id,
         )
         self.assertEqual(self._row_counts(), first_counts)
@@ -796,18 +869,10 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
         product = first.product
         self.assertIsNotNone(product)
         assert product is not None
-        with self.engine.begin() as connection:
-            connection.execute(
-                knowledge_sources.update()
-                .where(
-                    knowledge_sources.c.project_id == self.project_id,
-                    knowledge_sources.c.source_id == first.source.source_id,
-                )
-                .values(
-                    status="published",
-                    current_snapshot_id=first.snapshot.snapshot_id,
-                )
-            )
+        self._mark_published(
+            first.source.source_id,
+            first.snapshot.snapshot_id,
+        )
         PostgresProductCatalogRepository(self.engine).confirm_product(
             self.project_id,
             product.product_id,
@@ -820,6 +885,7 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
             retried.source.current_snapshot_id,
             first.snapshot.snapshot_id,
         )
+        self.assertIsNone(retried.source.pending_snapshot_id)
         self.assertIsNotNone(retried.product)
         assert retried.product is not None
         self.assertEqual(retried.product.status, "confirmed")
@@ -939,8 +1005,14 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
         self.assertEqual(self._row_counts(), self._empty_counts())
         self.assertEqual(self.audit.events, [])
 
-    def test_changed_content_for_same_source_requires_snapshot_review(self) -> None:
+    def test_published_source_accepts_one_pending_snapshot_and_retry(
+        self,
+    ) -> None:
         first = self._ingest()
+        self._mark_published(
+            first.source.source_id,
+            first.snapshot.snapshot_id,
+        )
         first_counts = self._row_counts()
         self.fetcher.responses[self.page_url] = (
             product_html(
@@ -958,14 +1030,70 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
             first.snapshot.content_hash,
         )
 
+        pending = self.service.commit(changed)
+        pending_counts = self._row_counts()
+        source = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            first.source.source_id,
+        )
+        self.assertEqual(source.status, "published")
+        self.assertEqual(
+            source.current_snapshot_id,
+            first.snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            source.pending_snapshot_id,
+            pending.snapshot.snapshot_id,
+        )
+        self.assertEqual(pending_counts["snapshots"], 2)
+        self.assertGreater(pending_counts["chunks"], first_counts["chunks"])
+        self.assertEqual(len(self.audit.events), 2)
+
+        retry = self._ingest()
+        self.assertEqual(
+            retry.snapshot.snapshot_id,
+            pending.snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            retry.source.pending_snapshot_id,
+            pending.snapshot.snapshot_id,
+        )
+        self.assertEqual(self._row_counts(), pending_counts)
+        self.assertEqual(len(self.audit.events), 2)
+
+        self.fetcher.responses[self.page_url] = (
+            product_html(
+                canonical_url=self.page_url,
+                image_url=self.image_url,
+                description="A second distinct candidate must fail closed.",
+            ),
+            "text/html; charset=utf-8",
+        )
+        second_pending = self._prepare()
+        self.assertNotEqual(
+            second_pending.snapshot.content_hash,
+            pending.snapshot.content_hash,
+        )
         with self.assertRaisesRegex(
             ServerWebEvidenceConflict,
-            "^web source refresh requires snapshot-bound review$",
+            "^web source already has a pending snapshot$",
         ):
-            self.service.commit(changed)
+            self.service.commit(second_pending)
 
-        self.assertEqual(self._row_counts(), first_counts)
-        self.assertEqual(len(self.audit.events), 1)
+        unchanged = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            first.source.source_id,
+        )
+        self.assertEqual(
+            unchanged.current_snapshot_id,
+            first.snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            unchanged.pending_snapshot_id,
+            pending.snapshot.snapshot_id,
+        )
+        self.assertEqual(self._row_counts(), pending_counts)
+        self.assertEqual(len(self.audit.events), 2)
 
 
 if __name__ == "__main__":

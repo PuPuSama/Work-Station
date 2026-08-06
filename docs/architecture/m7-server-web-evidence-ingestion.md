@@ -9,6 +9,10 @@ Local/Server 分流和后续重构接缝。它用于后期重构导航，不替�
 本切片的目标是把原来由多个 Repository 各自提交的网页关系记录收敛成一个
 Project-scoped PostgreSQL Unit of Work，同时保持 M2 Local 行为和调用接口兼容。
 
+Snapshot Review、Current/Pending 指针和发布事务的准确定义见
+`docs/architecture/m7-snapshot-review-receipts.md`。本文继续聚焦网页 Prepare/Commit 与
+Evidence Graph 接缝。
+
 这里的“原子入库”只指：**一个已分类网页的关系图和对应 Audit 在一个 PostgreSQL
 事务中提交**。它不表示整个分类页抓取、整个 Research Attempt、S3 与 PostgreSQL，或
 Embedding Provider 与 PostgreSQL 可以组成一个原子事务。
@@ -21,7 +25,7 @@ Embedding Provider 与 PostgreSQL 可以组成一个原子事务。
 |---|---|---|---|
 | Prepare | 下载同站页面、确定性分类、解析、分块、提取产品与图片证据，把 Raw/Normalized/Image 写入内容寻址对象存储 | `PreparedWebPageIngestion`（含独立 `normalized_content_hash`）和可能已经存在的 S3 对象 | 不写 PostgreSQL 关系记录，不改变发布状态 |
 | Commit | 重新授权并锁定 Project/Source，把 Source、Snapshot、Chunk、Product、Asset 和 Evidence Link 一次提交 | 一张完整、可审阅的 Inbox Evidence Graph 和脱敏 Audit | 不批准来源，不生成向量，不切换 Current Snapshot |
-| Review | 人工或受控自动门根据来源类型、信任层级和分类置信度作出 `approve / needs_review / reject` | 当前实现为 Source-scoped Review 状态和 Audit | 不调用 Embedding，不激活 Snapshot |
+| Review | 人工或受控自动门对精确 Pending Snapshot 作出 `approve / needs_review / reject` | append-only Snapshot Review Receipt、Version 和脱敏 Audit | 不调用 Embedding，不激活 Snapshot |
 | Embedding | 对明确候选 Snapshot 的全部 Chunk 调用独立 Embedding Provider，校验模型、数量、维度、NaN 与零向量后写 Candidate Vector | 尚未服务的 Chunk Embedding | 不把外部调用伪装成数据库事务，不改变 Current Snapshot |
 | Activate | 在事务中重新授权、锁定 Source、确认 Review、Snapshot、模型和全部向量匹配，再切换 Current Snapshot | `knowledge_sources.status=published`、精确 `current_snapshot_id` 和发布 Audit | 不重新抓取页面，不重新解释 Review |
 
@@ -82,6 +86,8 @@ erDiagram
     PROJECTS ||--o{ KNOWLEDGE_SOURCES : owns
     KNOWLEDGE_SOURCES ||--o{ SOURCE_SNAPSHOTS : versions
     KNOWLEDGE_SOURCES o|--o| SOURCE_SNAPSHOTS : current_snapshot
+    KNOWLEDGE_SOURCES o|--o| SOURCE_SNAPSHOTS : pending_snapshot
+    SOURCE_SNAPSHOTS ||--o{ SNAPSHOT_REVIEW_RECEIPTS : reviewed_by
     SOURCE_SNAPSHOTS ||--|{ KNOWLEDGE_CHUNKS : contains
 
     PROJECTS ||--o{ KNOWLEDGE_ASSETS : owns
@@ -99,8 +105,9 @@ erDiagram
 
 | 表 | 证据职责 |
 |---|---|
-| `knowledge_sources` | 稳定来源身份、Canonical URL、来源类型、信任层级、Review/发布状态和 Current Snapshot 指针 |
+| `knowledge_sources` | 稳定来源身份、Canonical URL、服务投影，以及互不相同的 Current/Pending Snapshot 指针 |
 | `source_snapshots` | 按 Content Hash + Parser 身份保存不可变版本和 Raw/Normalized Artifact URI |
+| `source_snapshot_review_receipts` | 精确 Snapshot 的不可变裁决；Version 递增，Receipt ID 在 Project 内幂等 |
 | `knowledge_chunks` | Snapshot 内的可检索正文单元；Embedding 在后续阶段补齐 |
 | `knowledge_assets` | Project 内按 Content Hash 去重的私有对象身份 |
 | `snapshot_assets` | 图片/附件在精确 Source Snapshot 中的位置、顺序与证据类型 |
@@ -227,7 +234,7 @@ Audit 不得包含 Canonical/Source/Image URL、页面正文、Content Hash、Bu
 Artifact URI、分类 Reason、Provider Error、Requester 私有 Job Request 或 Secret。Audit 写入
 失败时整个 PostgreSQL Evidence Graph 回滚。
 
-## 8. Exact Retry 与当前 Source 刷新限制
+## 8. Exact Retry 与单 Pending Source 刷新
 
 ### 8.1 Exact Retry
 
@@ -260,21 +267,20 @@ Evidence 的 Snapshot ID。随后每一条不可变记录都必须与已存记�
 `published web evidence requires explicit reconciliation`，避免未绑定图片字节或旧 Source
 Approval 在发布后获得新事实。
 
-### 8.2 当前限制：同一 Source 不接受新字节版本
+### 8.2 当前实现：同一 Source 允许一个 Pending Snapshot
 
-当前 Review 记录保存在 `knowledge_sources.metadata`，是 Source-scoped，不是
-Snapshot-scoped。为了防止旧 Snapshot 的 Approval 自动授权新网页字节，Server Commit
-当前只允许：
+Alembic `20260806_0019` 已增加 `pending_snapshot_id` 和不可变 Snapshot Review Receipt。
+Server Commit 现在允许已有 Source 写入一份新字节版本，但必须满足：
 
-1. 新建一个从未有 Snapshot 的 Source；或
-2. 对已有 Source 提交完全相同 Content Hash + Parser 身份的精确重试。
+1. 新 Snapshot 的 Project/Source 身份与 Canonical URL 完全一致；
+2. Source 当前没有另一份 Pending；
+3. 新 Snapshot、Chunk、Product、Asset 与 Evidence 仍在同一页面事务提交；
+4. 新 Snapshot 只设置 Pending，不继承 Current 或旧 `metadata.review` 的 Approval；
+5. 已 Published Source 的 `status` 与 Current 不变，Retriever/Catalog 继续服务旧 Current。
 
-只要同一 Source 已存在 Snapshot，而本次没有匹配到完全相同的 Canonical Snapshot，提交
-就返回 `web source refresh requires snapshot-bound review` Conflict。即使 Source 尚未发布，
-也不在当前模型中静默追加第二个待审 Snapshot。
-
-这项限制比底层 M1 多 Snapshot 能力更严格，是当前 Review 数据模型的安全门，不应通过
-放宽 Upsert 或沿用旧 Source Metadata 绕过。
+Source 已有另一份 Pending 时，新字节返回 `web source already has a pending snapshot`。相同
+Current、Pending 或历史 Snapshot 仍先按 Content Hash + Parser 身份走精确重试。当前只支持
+一个 Pending；多 Pending、Published Snapshot 的受控关系补全仍属于后续重构。
 
 ## 9. 对象 Orphan
 
@@ -345,21 +351,14 @@ Research Execution 把 `JobCancelled` 配置为显式 passthrough exception：�
 同一事务追加 `interrupted` Event，再让 Batch Runner 执行其受控 interrupted/requeue 语义。
 普通 Provider/Graph 异常仍走脱敏 `failed` 路径，二者不能合并。
 
-## 11. 未来 Snapshot-bound Review Receipt
+## 11. 已实现的 Snapshot-bound Review Receipt
 
-解除“一个 Source 只能新建或精确重试”限制前，必须先增加不可变 Snapshot Review Receipt。
-推荐语义：
+Server Review/Publish 已切换到精确 Snapshot 路由和 append-only Receipt。Receipt 主键包含
+Project、Source、Snapshot 与 Review Version；`receipt_id` 在 Project 内唯一并承担命令幂等。
+修改裁决追加 Version，不覆盖历史；Publish 在 Embedding 前固定 Approval，并在 Activate
+事务内重验最新 Receipt、Pending、Expected Current、向量模型和全部 Chunk。
 
-- Receipt 身份至少包含 `project_id + source_id + snapshot_id`；
-- 保存 Decision、Source Kind、Trust Tier、Reviewer、时间和安全 Reason 摘要；
-- Receipt append-only，修改裁决产生新 Version/Event，不覆盖历史；
-- Publish 必须读取目标 Snapshot 的有效 `approve` Receipt，不能读取 Source 的旧 Approval；
-- 新 Snapshot 可以作为 Pending/Needs Review 与旧 Published Current Snapshot 并存；
-- Embedding 只针对目标 Snapshot；Activate 再次确认 Receipt、向量模型和目标 Snapshot；
-- Rejected/Needs Review 新 Snapshot 不影响旧 Current Snapshot 服务；
-- Source 级展示状态可以是 Receipt 的投影，但不能继续作为授权准源。
-
-完成该模型后，刷新流程才可以变为：
+当前刷新流程为：
 
 ```text
 existing Source
@@ -369,6 +368,10 @@ existing Source
   -> embed exact Snapshot
   -> atomically activate exact Snapshot
 ```
+
+Reject/Needs Review 不影响旧 Current 服务；Source Status 只是读模型投影，不再是 Server
+发布授权准源。字段、Backfill、路由和失败恢复细节见
+`docs/architecture/m7-snapshot-review-receipts.md`。
 
 ## 12. Research ContextVar 后续重构方向
 
@@ -409,7 +412,7 @@ Review/Publish 的分层授权，不能因为上下文变显式而减少授权�
 8. Source Advisory Lock 是否仍包含 Organization、Project 与 Source Identity？
 9. 去重对象是否仍复核 Bucket、Organization、Project 和 Content Hash？
 10. Exact Retry 是否仍验证完整不可变记录且不重复 Audit？
-11. Snapshot-bound Review 上线前，新的同 Source 字节是否仍 fail closed？
+11. 同 Source 是否仍只允许一个 Pending，且旧 Receipt/Metadata 不授权新字节？
 12. Review、Embedding、Activate 是否仍是三个独立阶段？
 13. Embedding 或 Activate 失败时，旧 Current Snapshot 是否仍继续服务？
 14. Audit 是否仍只包含白名单计数和稳定 ID，不包含 URL、Hash、URI、正文或 Secret？

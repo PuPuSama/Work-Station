@@ -615,6 +615,13 @@ class OfficialWebPageIngestionService:
                 "classification_confidence": classification.confidence,
                 "classification_reasons": list(classification.reasons),
                 "block_count": len(document.blocks),
+                "source_projection": {
+                    "schema_version": 1,
+                    "display_name": source.display_name,
+                    "public_source": source.public_source,
+                    "canonical_url": source.canonical_url,
+                    "metadata": dict(source.metadata),
+                },
             },
         )
         product: KnowledgeProduct | None = None

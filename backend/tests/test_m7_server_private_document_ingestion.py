@@ -86,11 +86,13 @@ def embedded_png_bytes() -> bytes:
     return output.getvalue()
 
 
-def docx_bytes() -> bytes:
+def docx_bytes(
+    fact: str = "Material: carbon steel. Finish: zinc plated.",
+) -> bytes:
     document = Document()
     document.core_properties.title = "Private Fastener Specification"
     document.add_heading("Wood Screw", level=1)
-    document.add_paragraph("Material: carbon steel. Finish: zinc plated.")
+    document.add_paragraph(fact)
     document.add_picture(BytesIO(embedded_png_bytes()))
     output = BytesIO()
     document.save(output)
@@ -395,6 +397,7 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
         actor: ActorIdentity | None = None,
         source_id: str = "private-spec",
         display_name: str = "Private specification",
+        content: bytes | None = None,
     ):
         return (service or self.service).upload(
             actor=actor or self.editor,
@@ -403,7 +406,9 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             display_name=display_name,
             document_input=DocumentInput(
                 filename="private-spec.docx",
-                content=self.document_content,
+                content=(
+                    self.document_content if content is None else content
+                ),
                 content_type=(
                     "application/vnd.openxmlformats-officedocument."
                     "wordprocessingml.document"
@@ -411,6 +416,59 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             ),
             trust_tier="hard_fact",
         )
+
+    def _seed_published_source(self, source_id: str) -> SourceSnapshot:
+        self.repository.upsert_source(
+            KnowledgeSource(
+                project_id=self.project_id,
+                source_id=source_id,
+                display_name="Published private specification",
+                source_kind="private_file",
+                trust_tier="hard_fact",
+                status="inbox",
+            )
+        )
+        snapshot = SourceSnapshot(
+            project_id=self.project_id,
+            source_id=source_id,
+            snapshot_id=f"{source_id}-current",
+            content_hash="a" * 64,
+            fetched_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+            parser_name="test",
+            parser_version="1",
+        )
+        chunk = KnowledgeChunk(
+            project_id=self.project_id,
+            source_id=source_id,
+            snapshot_id=snapshot.snapshot_id,
+            chunk_id=f"{snapshot.snapshot_id}:000000",
+            text="Old published private evidence.",
+        )
+        self.repository.store_snapshot(
+            self.project_id,
+            snapshot,
+            (chunk,),
+        )
+        self.repository.store_embeddings(
+            self.project_id,
+            (
+                ChunkEmbedding(
+                    project_id=self.project_id,
+                    chunk_id=chunk.chunk_id,
+                    snapshot_id=snapshot.snapshot_id,
+                    vector=(1.0,)
+                    + (0.0,) * (EMBEDDING_DIMENSIONS - 1),
+                    embedding_model="published-test-model",
+                ),
+            ),
+        )
+        self.repository.activate_snapshot(
+            self.project_id,
+            source_id,
+            snapshot.snapshot_id,
+            "published-test-model",
+        )
+        return snapshot
 
     def _row_counts(self) -> dict[str, int]:
         with self.engine.connect() as connection:
@@ -448,6 +506,14 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             first.result.snapshot.snapshot_id,
             second.result.snapshot.snapshot_id,
         )
+        self.assertEqual(
+            first.result.source.pending_snapshot_id,
+            first.result.snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            second.result.source.pending_snapshot_id,
+            first.result.snapshot.snapshot_id,
+        )
         counts = self._row_counts()
         self.assertEqual(counts["sources"], 1)
         self.assertEqual(counts["snapshots"], 1)
@@ -459,6 +525,11 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
         self.assertEqual(
             stored_source.display_name,
             "Private specification",
+        )
+        self.assertIsNone(stored_source.current_snapshot_id)
+        self.assertEqual(
+            stored_source.pending_snapshot_id,
+            first.result.snapshot.snapshot_id,
         )
         self.assertEqual(
             [event.action for event in self.audit.events],
@@ -580,69 +651,33 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             ).scalar_one()
         self.assertEqual(linked_id, "legacy-product-image")
 
-    def test_published_source_requires_a_new_identity_for_new_content(
+    def test_published_source_accepts_one_pending_snapshot_and_retry(
         self,
     ) -> None:
         source_id = "published-private-spec"
-        self.repository.upsert_source(
-            KnowledgeSource(
-                project_id=self.project_id,
-                source_id=source_id,
-                display_name="Published private specification",
-                source_kind="private_file",
-                trust_tier="hard_fact",
-                status="inbox",
-            )
-        )
-        old_snapshot = SourceSnapshot(
-            project_id=self.project_id,
+        old_snapshot = self._seed_published_source(source_id)
+
+        first = self._upload(
             source_id=source_id,
-            snapshot_id="published-private-old",
-            content_hash="a" * 64,
-            fetched_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
-            parser_name="test",
-            parser_version="1",
+            display_name="New private specification",
         )
-        old_chunk = KnowledgeChunk(
-            project_id=self.project_id,
+        first_counts = self._row_counts()
+        retry = self._upload(
             source_id=source_id,
-            snapshot_id=old_snapshot.snapshot_id,
-            chunk_id=f"{old_snapshot.snapshot_id}:000000",
-            text="Old published private evidence.",
-        )
-        self.repository.store_snapshot(
-            self.project_id,
-            old_snapshot,
-            (old_chunk,),
-        )
-        self.repository.store_embeddings(
-            self.project_id,
-            (
-                ChunkEmbedding(
-                    project_id=self.project_id,
-                    chunk_id=old_chunk.chunk_id,
-                    snapshot_id=old_snapshot.snapshot_id,
-                    vector=(1.0,) + (0.0,) * (EMBEDDING_DIMENSIONS - 1),
-                    embedding_model="published-test-model",
-                ),
-            ),
-        )
-        self.repository.activate_snapshot(
-            self.project_id,
-            source_id,
-            old_snapshot.snapshot_id,
-            "published-test-model",
+            display_name="Ignored retry title",
         )
 
-        with self.assertRaisesRegex(
-            ServerPrivateDocumentUploadConflict,
-            "^published source requires a new upload identity$",
-        ):
-            self._upload(
-                source_id=source_id,
-                display_name="New private specification",
-            )
-
+        self.assertTrue(first.created)
+        self.assertFalse(retry.created)
+        self.assertEqual(
+            retry.result.snapshot.snapshot_id,
+            first.result.snapshot.snapshot_id,
+        )
+        self.assertEqual(self._row_counts(), first_counts)
+        self.assertEqual(
+            [event.action for event in self.audit.events],
+            ["knowledge.source.uploaded"],
+        )
         source = PostgresKnowledgeLibrary(self.engine).get_source(
             self.project_id,
             source_id,
@@ -653,20 +688,43 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             old_snapshot.snapshot_id,
         )
         self.assertEqual(
+            source.pending_snapshot_id,
+            first.result.snapshot.snapshot_id,
+        )
+        self.assertEqual(
             source.display_name,
             "Published private specification",
         )
-        with self.engine.connect() as connection:
-            snapshot_count = connection.execute(
-                sa.select(sa.func.count())
-                .select_from(source_snapshots)
-                .where(
-                    source_snapshots.c.project_id == self.project_id,
-                    source_snapshots.c.source_id == source_id,
-                )
-            ).scalar_one()
-        self.assertEqual(snapshot_count, 1)
-        self.assertEqual(self.audit.events, [])
+        self.assertEqual(first_counts["snapshots"], 2)
+
+        different_content = docx_bytes(
+            "Material: stainless steel. Finish: black oxide."
+        )
+        with self.assertRaisesRegex(
+            ServerPrivateDocumentUploadConflict,
+            "^knowledge source already has a pending snapshot$",
+        ):
+            self._upload(
+                source_id=source_id,
+                display_name="Second pending specification",
+                content=different_content,
+            )
+
+        unchanged = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            source_id,
+        )
+        self.assertEqual(unchanged.status, "published")
+        self.assertEqual(
+            unchanged.current_snapshot_id,
+            old_snapshot.snapshot_id,
+        )
+        self.assertEqual(
+            unchanged.pending_snapshot_id,
+            first.result.snapshot.snapshot_id,
+        )
+        self.assertEqual(self._row_counts(), first_counts)
+        self.assertEqual(len(self.audit.events), 1)
 
     def test_deduplication_rejects_assets_outside_server_scope(
         self,
@@ -733,6 +791,9 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
     def test_permission_revocation_after_object_write_rolls_back_database(
         self,
     ) -> None:
+        source_id = "revoked-pending-private-spec"
+        current = self._seed_published_source(source_id)
+        baseline = self._row_counts()
         store = RevokingStore(
             self.engine,
             organization_id=self.organization_id,
@@ -745,16 +806,23 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             ProjectAccessDenied,
             "^project access denied$",
         ):
-            self._upload(service)
+            self._upload(service, source_id=source_id)
 
         self.assertTrue(store.put_calls)
-        self.assertEqual(
-            self._row_counts(),
-            {"sources": 0, "snapshots": 0, "chunks": 0},
+        self.assertEqual(self._row_counts(), baseline)
+        source = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            source_id,
         )
+        self.assertEqual(source.status, "published")
+        self.assertEqual(source.current_snapshot_id, current.snapshot_id)
+        self.assertIsNone(source.pending_snapshot_id)
         self.assertEqual(self.audit.events, [])
 
     def test_audit_failure_rolls_back_all_database_rows(self) -> None:
+        source_id = "audit-failed-pending-private-spec"
+        current = self._seed_published_source(source_id)
+        baseline = self._row_counts()
         service = self._service(
             store=self.store,
             audit=FailingAuditWriter(),
@@ -764,14 +832,18 @@ class ServerPrivateDocumentIngestionTests(unittest.TestCase):
             ServerPrivateDocumentUploadUnavailable,
             "^private document could not be committed$",
         ) as captured:
-            self._upload(service)
+            self._upload(service, source_id=source_id)
 
         self.assertNotIn("private-audit", str(captured.exception))
         self.assertTrue(self.store.put_calls)
-        self.assertEqual(
-            self._row_counts(),
-            {"sources": 0, "snapshots": 0, "chunks": 0},
+        self.assertEqual(self._row_counts(), baseline)
+        source = PostgresKnowledgeLibrary(self.engine).get_source(
+            self.project_id,
+            source_id,
         )
+        self.assertEqual(source.status, "published")
+        self.assertEqual(source.current_snapshot_id, current.snapshot_id)
+        self.assertIsNone(source.pending_snapshot_id)
 
     def _http_client(
         self,

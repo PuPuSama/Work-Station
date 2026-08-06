@@ -74,6 +74,12 @@ class KnowledgePublicationService:
             chunk_count=candidate.chunk_count,
         )
 
+    @property
+    def embedding_model(self) -> str:
+        """Model identity used to validate an already-active retry."""
+
+        return self._embedding_provider.model_id
+
     def prepare(
         self,
         *,
@@ -105,6 +111,40 @@ class KnowledgePublicationService:
             raise KnowledgePublicationError(
                 "source snapshot was not found in the requested project"
             )
+        return self.prepare_snapshot(
+            project_id=project_id,
+            source_id=source_id,
+            snapshot_id=selected_snapshot.snapshot_id,
+        )
+
+    def prepare_snapshot(
+        self,
+        *,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+    ) -> PublicationCandidate:
+        """Embed one explicit Snapshot after an external authorization gate.
+
+        Server commands use an immutable Snapshot Review Receipt as their
+        authorization source. The Local façade continues to call ``prepare``
+        and therefore retains its legacy Source metadata review gate.
+        """
+
+        source = self._library.get_source(project_id, source_id)
+        if source is None:
+            raise KnowledgePublicationError(
+                "knowledge source was not found in the requested project"
+            )
+        selected_snapshot = self._library.get_snapshot(
+            project_id,
+            source_id,
+            snapshot_id,
+        )
+        if selected_snapshot is None:
+            raise KnowledgePublicationError(
+                "source snapshot was not found in the requested project"
+            )
         chunks = self._library.get_snapshot_chunks(
             project_id,
             source_id,
@@ -115,8 +155,15 @@ class KnowledgePublicationService:
                 "source snapshot has no text chunks to publish"
             )
 
-        for offset in range(0, len(chunks), self._batch_size):
-            group = chunks[offset : offset + self._batch_size]
+        pending_chunks = self._library.get_snapshot_chunks_requiring_embedding(
+            project_id,
+            source_id,
+            selected_snapshot.snapshot_id,
+            self._embedding_provider.model_id,
+        )
+
+        for offset in range(0, len(pending_chunks), self._batch_size):
+            group = pending_chunks[offset : offset + self._batch_size]
             batch = self._embedding_provider.embed(
                 tuple(chunk.text for chunk in group)
             )

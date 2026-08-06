@@ -16,6 +16,7 @@ from .schema import (
     knowledge_products,
     knowledge_sources,
     snapshot_assets,
+    source_snapshot_review_receipts,
     source_snapshots,
 )
 
@@ -37,6 +38,13 @@ class KnowledgeSourceSummary:
     latest_fetched_at: datetime | None
     latest_snapshot_id: str | None
     metadata: Mapping[str, object]
+    pending_snapshot_id: str | None = None
+    pending_fetched_at: datetime | None = None
+    pending_chunk_count: int = 0
+    pending_asset_count: int = 0
+    pending_review_decision: str | None = None
+    pending_review_version: int | None = None
+    pending_reviewed_at: datetime | None = None
 
     @property
     def classification_reason(self) -> str:
@@ -59,6 +67,8 @@ class KnowledgeSourceSummary:
 
     @property
     def review_decision(self) -> str | None:
+        if self.pending_snapshot_id is not None:
+            return self.pending_review_decision
         review = self.metadata.get("review")
         if not isinstance(review, Mapping):
             return None
@@ -71,6 +81,7 @@ class KnowledgeLibrarySummary:
     project_id: str
     source_count: int
     inbox_count: int
+    pending_count: int
     published_count: int
     product_count: int
     confirmed_product_count: int
@@ -95,6 +106,11 @@ class PostgresKnowledgeLibrary:
                     sa.func.count()
                     .filter(knowledge_sources.c.status == "published")
                     .label("published"),
+                    sa.func.count()
+                    .filter(
+                        knowledge_sources.c.pending_snapshot_id.is_not(None)
+                    )
+                    .label("pending"),
                 ).where(knowledge_sources.c.project_id == normalized_project_id)
             ).mappings().one()
             product_counts = connection.execute(
@@ -114,6 +130,7 @@ class PostgresKnowledgeLibrary:
             project_id=normalized_project_id,
             source_count=int(source_counts["total"]),
             inbox_count=int(source_counts["inbox"]),
+            pending_count=int(source_counts["pending"]),
             published_count=int(source_counts["published"]),
             product_count=int(product_counts["total"]),
             confirmed_product_count=int(product_counts["confirmed"]),
@@ -174,6 +191,92 @@ class PostgresKnowledgeLibrary:
             .limit(1)
             .scalar_subquery()
         )
+        pending_fetched_at = (
+            sa.select(source_snapshots.c.fetched_at)
+            .where(
+                source_snapshots.c.project_id
+                == knowledge_sources.c.project_id,
+                source_snapshots.c.source_id
+                == knowledge_sources.c.source_id,
+                source_snapshots.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .scalar_subquery()
+        )
+        pending_chunk_count = (
+            sa.select(sa.func.count())
+            .select_from(knowledge_chunks)
+            .where(
+                knowledge_chunks.c.project_id
+                == knowledge_sources.c.project_id,
+                knowledge_chunks.c.source_id
+                == knowledge_sources.c.source_id,
+                knowledge_chunks.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .scalar_subquery()
+        )
+        pending_asset_count = (
+            sa.select(sa.func.count(sa.distinct(snapshot_assets.c.asset_id)))
+            .select_from(snapshot_assets)
+            .where(
+                snapshot_assets.c.project_id
+                == knowledge_sources.c.project_id,
+                snapshot_assets.c.source_id
+                == knowledge_sources.c.source_id,
+                snapshot_assets.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .scalar_subquery()
+        )
+        latest_review_decision = (
+            sa.select(source_snapshot_review_receipts.c.decision)
+            .where(
+                source_snapshot_review_receipts.c.project_id
+                == knowledge_sources.c.project_id,
+                source_snapshot_review_receipts.c.source_id
+                == knowledge_sources.c.source_id,
+                source_snapshot_review_receipts.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .order_by(
+                source_snapshot_review_receipts.c.review_version.desc()
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
+        latest_review_version = (
+            sa.select(source_snapshot_review_receipts.c.review_version)
+            .where(
+                source_snapshot_review_receipts.c.project_id
+                == knowledge_sources.c.project_id,
+                source_snapshot_review_receipts.c.source_id
+                == knowledge_sources.c.source_id,
+                source_snapshot_review_receipts.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .order_by(
+                source_snapshot_review_receipts.c.review_version.desc()
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
+        latest_reviewed_at = (
+            sa.select(source_snapshot_review_receipts.c.reviewed_at)
+            .where(
+                source_snapshot_review_receipts.c.project_id
+                == knowledge_sources.c.project_id,
+                source_snapshot_review_receipts.c.source_id
+                == knowledge_sources.c.source_id,
+                source_snapshot_review_receipts.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .order_by(
+                source_snapshot_review_receipts.c.review_version.desc()
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
         statement = (
             sa.select(
                 knowledge_sources,
@@ -188,6 +291,12 @@ class PostgresKnowledgeLibrary:
                 ),
                 snapshot_counts.c.latest_fetched_at,
                 latest_snapshot_id.label("latest_snapshot_id"),
+                pending_fetched_at.label("pending_fetched_at"),
+                pending_chunk_count.label("pending_chunk_count"),
+                pending_asset_count.label("pending_asset_count"),
+                latest_review_decision.label("pending_review_decision"),
+                latest_review_version.label("pending_review_version"),
+                latest_reviewed_at.label("pending_reviewed_at"),
             )
             .outerjoin(
                 snapshot_counts,
@@ -290,6 +399,11 @@ class PostgresKnowledgeLibrary:
                 if row["current_snapshot_id"] is None
                 else str(row["current_snapshot_id"])
             ),
+            pending_snapshot_id=(
+                None
+                if row["pending_snapshot_id"] is None
+                else str(row["pending_snapshot_id"])
+            ),
             metadata=dict(row["metadata"]),  # type: ignore[arg-type]
         )
 
@@ -335,6 +449,36 @@ class PostgresKnowledgeLibrary:
                     knowledge_chunks.c.project_id == normalized_project_id,
                     knowledge_chunks.c.source_id == normalized_source_id,
                     knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
+                )
+                .order_by(knowledge_chunks.c.ordinal.asc())
+            ).mappings().all()
+        return tuple(_chunk_from_row(row) for row in rows)
+
+    def get_snapshot_chunks_requiring_embedding(
+        self,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+        embedding_model: str,
+    ) -> tuple[KnowledgeChunk, ...]:
+        """Return only chunks not yet prepared for one exact model."""
+
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_source_id = _required_text(source_id, "source_id")
+        normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
+        normalized_model = _required_text(embedding_model, "embedding_model")
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(knowledge_chunks)
+                .where(
+                    knowledge_chunks.c.project_id == normalized_project_id,
+                    knowledge_chunks.c.source_id == normalized_source_id,
+                    knowledge_chunks.c.snapshot_id == normalized_snapshot_id,
+                    sa.or_(
+                        knowledge_chunks.c.embedding.is_(None),
+                        knowledge_chunks.c.embedding_model
+                        != normalized_model,
+                    ),
                 )
                 .order_by(knowledge_chunks.c.ordinal.asc())
             ).mappings().all()
@@ -406,4 +550,23 @@ def _source_summary_from_row(row: Mapping[str, object]) -> KnowledgeSourceSummar
             else str(row["latest_snapshot_id"])
         ),
         metadata=dict(row["metadata"]),  # type: ignore[arg-type]
+        pending_snapshot_id=(
+            None
+            if row["pending_snapshot_id"] is None
+            else str(row["pending_snapshot_id"])
+        ),
+        pending_fetched_at=row["pending_fetched_at"],  # type: ignore[arg-type]
+        pending_chunk_count=int(row["pending_chunk_count"] or 0),
+        pending_asset_count=int(row["pending_asset_count"] or 0),
+        pending_review_decision=(
+            None
+            if row["pending_review_decision"] is None
+            else str(row["pending_review_decision"])
+        ),
+        pending_review_version=(
+            None
+            if row["pending_review_version"] is None
+            else int(row["pending_review_version"])
+        ),
+        pending_reviewed_at=row["pending_reviewed_at"],  # type: ignore[arg-type]
     )

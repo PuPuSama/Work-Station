@@ -599,6 +599,14 @@ export type KnowledgeSourceSummary = {
   status: string;
   canonical_url: string | null;
   current_snapshot_id: string | null;
+  latest_snapshot_id: string | null;
+  pending_snapshot_id: string | null;
+  pending_fetched_at: string | null;
+  pending_chunk_count: number;
+  pending_asset_count: number;
+  pending_review_decision: "approve" | "needs_review" | "reject" | null;
+  pending_review_version: number | null;
+  pending_reviewed_at: string | null;
   snapshot_count: number;
   chunk_count: number;
   asset_count: number;
@@ -621,6 +629,7 @@ export type KnowledgeLibrary = {
   project_id: string;
   source_count: number;
   inbox_count: number;
+  pending_count: number;
   published_count: number;
   product_count: number;
   confirmed_product_count: number;

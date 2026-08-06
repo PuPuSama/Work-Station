@@ -86,6 +86,11 @@ def _source_from_row(
             if row["current_snapshot_id"] is None
             else str(row["current_snapshot_id"])
         ),
+        pending_snapshot_id=(
+            None
+            if row["pending_snapshot_id"] is None
+            else str(row["pending_snapshot_id"])
+        ),
         metadata=dict(row["metadata"] or {}),  # type: ignore[arg-type]
     )
 
@@ -186,6 +191,7 @@ class PostgresKnowledgeRepository:
             status=source.status,
             public_source=source.public_source,
             canonical_url=source.canonical_url,
+            pending_snapshot_id=source.pending_snapshot_id,
             metadata=dict(source.metadata),
         )
         keep_published = sa.and_(
@@ -231,6 +237,13 @@ class PostgresKnowledgeRepository:
                     (keep_published, knowledge_sources.c.canonical_url),
                     else_=statement.excluded.canonical_url,
                 ),
+                "pending_snapshot_id": sa.case(
+                    (
+                        knowledge_sources.c.pending_snapshot_id.is_(None),
+                        statement.excluded.pending_snapshot_id,
+                    ),
+                    else_=knowledge_sources.c.pending_snapshot_id,
+                ),
                 "metadata": sa.case(
                     (keep_published, knowledge_sources.c.metadata),
                     else_=statement.excluded.metadata,
@@ -261,6 +274,105 @@ class PostgresKnowledgeRepository:
             )
         ).mappings().one_or_none()
         return None if row is None else _source_from_row(row)
+
+    def set_pending_snapshot_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+    ) -> bool:
+        """Point one Source at its only review candidate.
+
+        The caller must already serialize the Source. Reusing the same pending
+        identity is an idempotent no-op; a second candidate fails closed until
+        the first one is published or rejected.
+        """
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "pending snapshot writes require a business transaction"
+            )
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_source_id = _required_text(source_id, "source_id")
+        normalized_snapshot_id = _required_text(snapshot_id, "snapshot_id")
+        row = connection.execute(
+            sa.select(
+                knowledge_sources.c.current_snapshot_id,
+                knowledge_sources.c.pending_snapshot_id,
+            )
+            .where(
+                knowledge_sources.c.project_id == normalized_project_id,
+                knowledge_sources.c.source_id == normalized_source_id,
+            )
+            .with_for_update()
+        ).mappings().one_or_none()
+        if row is None:
+            raise KnowledgeRecordNotFound(
+                "knowledge source was not found in the requested project"
+            )
+        if row["current_snapshot_id"] == normalized_snapshot_id:
+            return False
+        pending_snapshot_id = row["pending_snapshot_id"]
+        if pending_snapshot_id == normalized_snapshot_id:
+            return False
+        if pending_snapshot_id is not None:
+            raise KnowledgeConflictError(
+                "knowledge source already has a pending snapshot"
+            )
+        snapshot_exists = connection.execute(
+            sa.select(source_snapshots.c.snapshot_id).where(
+                source_snapshots.c.project_id == normalized_project_id,
+                source_snapshots.c.source_id == normalized_source_id,
+                source_snapshots.c.snapshot_id == normalized_snapshot_id,
+            )
+        ).scalar_one_or_none()
+        if snapshot_exists is None:
+            raise KnowledgeRecordNotFound(
+                "source snapshot was not found in the requested project"
+            )
+        connection.execute(
+            knowledge_sources.update()
+            .where(
+                knowledge_sources.c.project_id == normalized_project_id,
+                knowledge_sources.c.source_id == normalized_source_id,
+            )
+            .values(
+                pending_snapshot_id=normalized_snapshot_id,
+                updated_at=sa.func.now(),
+            )
+        )
+        return True
+
+    def clear_pending_snapshot_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+    ) -> bool:
+        """Clear only the expected candidate pointer after rejection."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "pending snapshot writes require a business transaction"
+            )
+        result = connection.execute(
+            knowledge_sources.update()
+            .where(
+                knowledge_sources.c.project_id
+                == _required_text(project_id, "project_id"),
+                knowledge_sources.c.source_id
+                == _required_text(source_id, "source_id"),
+                knowledge_sources.c.pending_snapshot_id
+                == _required_text(snapshot_id, "snapshot_id"),
+            )
+            .values(
+                pending_snapshot_id=None,
+                updated_at=sa.func.now(),
+            )
+        )
+        return result.rowcount == 1
 
     def store_snapshot(
         self,
@@ -686,6 +798,14 @@ class PostgresKnowledgeRepository:
             .values(
                 status="published",
                 current_snapshot_id=normalized_snapshot_id,
+                pending_snapshot_id=sa.case(
+                    (
+                        knowledge_sources.c.pending_snapshot_id
+                        == normalized_snapshot_id,
+                        None,
+                    ),
+                    else_=knowledge_sources.c.pending_snapshot_id,
+                ),
                 updated_at=sa.func.now(),
             )
         )

@@ -228,6 +228,7 @@ class KnowledgeSource:
     canonical_url: str | None = None
     public_source: bool = False
     current_snapshot_id: str | None = None
+    pending_snapshot_id: str | None = None
     metadata: Metadata = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -250,11 +251,22 @@ class KnowledgeSource:
         current_snapshot_id = _optional_text(
             self.current_snapshot_id, "current_snapshot_id"
         )
+        pending_snapshot_id = _optional_text(
+            self.pending_snapshot_id, "pending_snapshot_id"
+        )
         if self.status == "published" and current_snapshot_id is None:
             raise ValueError("published source requires current_snapshot_id")
+        if (
+            current_snapshot_id is not None
+            and pending_snapshot_id == current_snapshot_id
+        ):
+            raise ValueError(
+                "pending_snapshot_id must differ from current_snapshot_id"
+            )
 
         object.__setattr__(self, "canonical_url", canonical_url)
         object.__setattr__(self, "current_snapshot_id", current_snapshot_id)
+        object.__setattr__(self, "pending_snapshot_id", pending_snapshot_id)
         object.__setattr__(self, "metadata", _metadata(self.metadata, "metadata"))
 
 

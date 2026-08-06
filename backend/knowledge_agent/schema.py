@@ -70,6 +70,7 @@ knowledge_sources = sa.Table(
     ),
     sa.Column("canonical_url", sa.Text(), nullable=True),
     sa.Column("current_snapshot_id", sa.Text(), nullable=True),
+    sa.Column("pending_snapshot_id", sa.Text(), nullable=True),
     sa.Column(
         "metadata",
         postgresql.JSONB(astext_type=sa.Text()),
@@ -116,6 +117,12 @@ knowledge_sources = sa.Table(
         name="ck_knowledge_sources_published_snapshot",
     ),
     sa.CheckConstraint(
+        "pending_snapshot_id IS NULL "
+        "OR current_snapshot_id IS NULL "
+        "OR pending_snapshot_id <> current_snapshot_id",
+        name="ck_knowledge_sources_distinct_snapshot_pointers",
+    ),
+    sa.CheckConstraint(
         "NOT public_source OR "
         "(canonical_url IS NOT NULL AND btrim(canonical_url) <> '')",
         name="ck_knowledge_sources_public_canonical_url",
@@ -149,6 +156,12 @@ sa.Index(
     knowledge_sources.c.project_id,
     knowledge_sources.c.status,
     knowledge_sources.c.current_snapshot_id,
+)
+sa.Index(
+    "ix_knowledge_sources_pending_snapshot",
+    knowledge_sources.c.project_id,
+    knowledge_sources.c.pending_snapshot_id,
+    postgresql_where=knowledge_sources.c.pending_snapshot_id.is_not(None),
 )
 
 
@@ -244,6 +257,115 @@ knowledge_sources.append_constraint(
         deferrable=True,
         initially="DEFERRED",
     )
+)
+
+knowledge_sources.append_constraint(
+    sa.ForeignKeyConstraint(
+        [
+            knowledge_sources.c.project_id,
+            knowledge_sources.c.source_id,
+            knowledge_sources.c.pending_snapshot_id,
+        ],
+        [
+            source_snapshots.c.project_id,
+            source_snapshots.c.source_id,
+            source_snapshots.c.snapshot_id,
+        ],
+        name="fk_knowledge_sources_pending_snapshot",
+        deferrable=True,
+        initially="DEFERRED",
+    )
+)
+
+
+source_snapshot_review_receipts = sa.Table(
+    "source_snapshot_review_receipts",
+    metadata,
+    sa.Column("project_id", sa.Text(), nullable=False),
+    sa.Column("source_id", sa.Text(), nullable=False),
+    sa.Column("snapshot_id", sa.Text(), nullable=False),
+    sa.Column("review_version", sa.Integer(), nullable=False),
+    sa.Column("receipt_id", sa.Text(), nullable=False),
+    sa.Column("decision", sa.Text(), nullable=False),
+    sa.Column("source_kind", sa.Text(), nullable=False),
+    sa.Column("trust_tier", sa.Text(), nullable=False),
+    sa.Column("reason", sa.Text(), nullable=False),
+    sa.Column("reviewer_kind", sa.Text(), nullable=False),
+    sa.Column("reviewer_id", sa.Text(), nullable=True),
+    sa.Column("reviewed_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "review_version > 0",
+        name="ck_snapshot_review_receipts_version_positive",
+    ),
+    sa.CheckConstraint(
+        "btrim(receipt_id) <> ''",
+        name="ck_snapshot_review_receipts_receipt_id_nonempty",
+    ),
+    sa.CheckConstraint(
+        "decision IN ('approve', 'needs_review', 'reject')",
+        name="ck_snapshot_review_receipts_decision",
+    ),
+    sa.CheckConstraint(
+        "source_kind IN "
+        "('private_file', 'product_detail', 'product_category', "
+        "'official_blog', 'knowledge_page')",
+        name="ck_snapshot_review_receipts_source_kind",
+    ),
+    sa.CheckConstraint(
+        "trust_tier IN "
+        "('hard_fact', 'reference_material', 'writing_instruction')",
+        name="ck_snapshot_review_receipts_trust_tier",
+    ),
+    sa.CheckConstraint(
+        "char_length(btrim(reason)) BETWEEN 1 AND 500",
+        name="ck_snapshot_review_receipts_reason_length",
+    ),
+    sa.CheckConstraint(
+        "reviewer_kind IN ('user', 'automation', 'legacy_migration')",
+        name="ck_snapshot_review_receipts_reviewer_kind",
+    ),
+    sa.CheckConstraint(
+        "(reviewer_kind = 'legacy_migration' AND reviewer_id IS NULL) "
+        "OR (reviewer_kind IN ('user', 'automation') "
+        "AND reviewer_id IS NOT NULL AND btrim(reviewer_id) <> '')",
+        name="ck_snapshot_review_receipts_reviewer_identity",
+    ),
+    sa.ForeignKeyConstraint(
+        ["project_id", "source_id", "snapshot_id"],
+        [
+            "source_snapshots.project_id",
+            "source_snapshots.source_id",
+            "source_snapshots.snapshot_id",
+        ],
+        name="fk_snapshot_review_receipts_snapshot",
+        ondelete="RESTRICT",
+    ),
+    sa.PrimaryKeyConstraint(
+        "project_id",
+        "source_id",
+        "snapshot_id",
+        "review_version",
+        name="pk_source_snapshot_review_receipts",
+    ),
+    sa.UniqueConstraint(
+        "project_id",
+        "receipt_id",
+        name="uq_snapshot_review_receipts_project_receipt",
+    ),
+)
+
+sa.Index(
+    "ix_snapshot_review_receipts_latest",
+    source_snapshot_review_receipts.c.project_id,
+    source_snapshot_review_receipts.c.source_id,
+    source_snapshot_review_receipts.c.snapshot_id,
+    source_snapshot_review_receipts.c.review_version.desc(),
 )
 
 

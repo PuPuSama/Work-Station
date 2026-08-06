@@ -297,7 +297,9 @@ class OfficialCandidateIngestionAdapter:
         publication: KnowledgePublicationService,
         attempts: PostgresResearchRunRepository,
         minimum_auto_publish_confidence: float = 0.75,
-        review_source: Callable[[KnowledgeSource, str, str], None] | None = None,
+        review_source: (
+            Callable[[KnowledgeSource, str, str, str], None] | None
+        ) = None,
         publish_source: Callable[[KnowledgeSource, str], str] | None = None,
         authorize_candidate: Callable[[], None] | None = None,
     ) -> None:
@@ -400,6 +402,7 @@ class OfficialCandidateIngestionAdapter:
             if result.classification.confidence < self._minimum_confidence:
                 self._review_source(
                     result.source,
+                    result.snapshot.snapshot_id,
                     "needs_review",
                     "deterministic classification confidence is below the gate",
                 )
@@ -412,6 +415,7 @@ class OfficialCandidateIngestionAdapter:
 
             self._review_source(
                 result.source,
+                result.snapshot.snapshot_id,
                 "approve",
                 (
                     "same-site URL was human-approved and deterministic "
@@ -457,6 +461,7 @@ class OfficialCandidateIngestionAdapter:
     def _default_review_source(
         self,
         source: KnowledgeSource,
+        snapshot_id: str,
         decision: str,
         reason: str,
     ) -> None:
@@ -466,6 +471,7 @@ class OfficialCandidateIngestionAdapter:
             "reason": reason,
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
             "actor": "research_graph_publication_gate",
+            "snapshot_id": snapshot_id,
         }
         reviewed = KnowledgeSource(
             project_id=source.project_id,

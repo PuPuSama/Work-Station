@@ -31,9 +31,11 @@ from knowledge_agent import (  # noqa: E402
     SourceSnapshot,
     create_knowledge_engine,
 )
+from knowledge_agent.catalog import ProductConfirmationError  # noqa: E402
 from knowledge_agent.http import router  # noqa: E402
 from knowledge_agent.library import PostgresKnowledgeLibrary  # noqa: E402
 from knowledge_agent.publication import (  # noqa: E402
+    KnowledgePublicationError,
     KnowledgePublicationService,
 )
 from knowledge_agent.schema import (  # noqa: E402
@@ -42,7 +44,12 @@ from knowledge_agent.schema import (  # noqa: E402
     knowledge_products,
     knowledge_sources,
     projects,
+    source_snapshot_review_receipts,
     source_snapshots,
+)
+from knowledge_agent.snapshot_reviews import (  # noqa: E402
+    PostgresSnapshotReviewRepository,
+    SnapshotReviewConflict,
 )
 from server_schema import (  # noqa: E402
     organizations,
@@ -124,49 +131,38 @@ class RevokingEmbeddingProvider(DeterministicEmbeddingProvider):
         return batch
 
 
-class DriftingSnapshotEmbeddingProvider(DeterministicEmbeddingProvider):
+class DriftingReceiptEmbeddingProvider(DeterministicEmbeddingProvider):
     def __init__(
         self,
-        repository: PostgresKnowledgeRepository,
         *,
+        commands: PostgresServerKnowledgeCommands,
+        actor: ActorIdentity,
         project_id: str,
         source_id: str,
+        snapshot_id: str,
     ) -> None:
         super().__init__()
-        self._repository = repository
+        self._commands = commands
+        self._actor = actor
         self._project_id = project_id
         self._source_id = source_id
+        self._snapshot_id = snapshot_id
         self._drifted = False
 
     def embed(self, texts: Sequence[str]) -> EmbeddingBatch:
         batch = super().embed(texts)
         if not self._drifted:
             self._drifted = True
-            self._repository.store_snapshot(
-                self._project_id,
-                SourceSnapshot(
-                    project_id=self._project_id,
-                    source_id=self._source_id,
-                    snapshot_id="publish-drifted",
-                    content_hash="d" * 64,
-                    fetched_at=datetime(
-                        2026,
-                        8,
-                        1,
-                        tzinfo=timezone.utc,
-                    ),
-                    parser_name="test",
-                    parser_version="1",
-                ),
-                (
-                    KnowledgeChunk(
-                        project_id=self._project_id,
-                        chunk_id="publish-drifted:0000",
-                        source_id=self._source_id,
-                        snapshot_id="publish-drifted",
-                        text="Newer private snapshot.",
-                    ),
-                ),
+            self._commands.review_snapshot(
+                actor=self._actor,
+                project_id=self._project_id,
+                source_id=self._source_id,
+                snapshot_id=self._snapshot_id,
+                receipt_id="publish-review-drift",
+                source_kind="official_blog",
+                trust_tier="reference_material",
+                decision="needs_review",
+                reason="Classification changed while embeddings were prepared.",
             )
         return batch
 
@@ -220,6 +216,7 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
         self.repository = PostgresKnowledgeRepository(self.engine)
         self.catalog = PostgresProductCatalogRepository(self.engine)
         self.library = PostgresKnowledgeLibrary(self.engine)
+        self.reviews = PostgresSnapshotReviewRepository(self.engine)
         self.provider = DeterministicEmbeddingProvider()
         self.publication = KnowledgePublicationService(
             repository=self.repository,
@@ -291,10 +288,6 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
                 ),
             )
 
-        self._store_source(self.project_id, "review-source")
-        self._store_source(self.other_project_id, "other-source")
-        self._store_publication_source()
-        self._store_product()
         self.editor = ActorIdentity(
             self.organization_id,
             self.editor_id,
@@ -304,6 +297,10 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
             self.viewer_id,
         )
         self.service = self._service(audit=self.audit)
+        self._store_source(self.project_id, "review-source")
+        self._store_source(self.other_project_id, "other-source")
+        self._store_publication_source()
+        self._store_products()
 
     def tearDown(self) -> None:
         project_ids = (self.project_id, self.other_project_id)
@@ -325,6 +322,32 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
                     knowledge_chunks.c.project_id.in_(project_ids)
                 )
             )
+            try:
+                connection.execute(
+                    sa.text(
+                        "ALTER TABLE source_snapshot_review_receipts "
+                        "DISABLE TRIGGER "
+                        "trg_snapshot_review_receipts_append_only"
+                    )
+                )
+                connection.execute(
+                    source_snapshot_review_receipts.delete().where(
+                        source_snapshot_review_receipts.c.project_id.in_(
+                            project_ids
+                        )
+                    )
+                )
+            finally:
+                # PostgreSQL DDL is transactional. If deletion fails and the
+                # transaction becomes aborted, the rollback restores the
+                # trigger even when this ENABLE statement cannot execute.
+                connection.execute(
+                    sa.text(
+                        "ALTER TABLE source_snapshot_review_receipts "
+                        "ENABLE TRIGGER "
+                        "trg_snapshot_review_receipts_append_only"
+                    )
+                )
             connection.execute(
                 source_snapshots.delete().where(
                     source_snapshots.c.project_id.in_(project_ids)
@@ -412,6 +435,13 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
                 ),
             ),
         )
+        with self.engine.begin() as connection:
+            self.repository.set_pending_snapshot_in_transaction(
+                connection,
+                project_id,
+                source_id,
+                f"{source_id}-snapshot",
+            )
 
     def _store_publication_source(self) -> None:
         source_id = "publish-source"
@@ -450,6 +480,23 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
                     ),
                     parser_name="test",
                     parser_version="1",
+                    metadata=(
+                        {
+                            "source_projection": {
+                                "schema_version": 1,
+                                "display_name": "Projected publish source",
+                                "public_source": True,
+                                "canonical_url": (
+                                    f"https://{self.project_id}/projected"
+                                ),
+                                "metadata": {
+                                    "projection_marker": "new-snapshot"
+                                },
+                            }
+                        }
+                        if snapshot_id == new_snapshot_id
+                        else {}
+                    ),
                 ),
                 (
                     KnowledgeChunk(
@@ -461,70 +508,164 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
                     ),
                 ),
             )
-        self.repository.store_embeddings(
-            self.project_id,
-            (
-                ChunkEmbedding(
-                    project_id=self.project_id,
-                    chunk_id=f"{old_snapshot_id}:0000",
-                    snapshot_id=old_snapshot_id,
-                    embedding_model=MODEL_ID,
-                    vector=axis_vector(),
-                ),
-            ),
-        )
-        self.repository.activate_snapshot(
-            self.project_id,
-            source_id,
-            old_snapshot_id,
-            MODEL_ID,
-        )
+            with self.engine.begin() as connection:
+                self.repository.set_pending_snapshot_in_transaction(
+                    connection,
+                    self.project_id,
+                    source_id,
+                    snapshot_id,
+                )
+                if snapshot_id == old_snapshot_id:
+                    self.reviews.append_review_in_transaction(
+                        connection,
+                        project_id=self.project_id,
+                        source_id=source_id,
+                        snapshot_id=old_snapshot_id,
+                        receipt_id="publish-old-approved",
+                        decision="approve",
+                        source_kind="knowledge_page",
+                        trust_tier="hard_fact",
+                        reason="Current Snapshot was approved before refresh.",
+                        reviewer_kind="legacy_migration",
+                        reviewer_id=None,
+                    )
+            if snapshot_id == old_snapshot_id:
+                self.repository.store_embeddings(
+                    self.project_id,
+                    (
+                        ChunkEmbedding(
+                            project_id=self.project_id,
+                            chunk_id=f"{old_snapshot_id}:0000",
+                            snapshot_id=old_snapshot_id,
+                            embedding_model=MODEL_ID,
+                            vector=axis_vector(),
+                        ),
+                    ),
+                )
+                self.repository.activate_snapshot(
+                    self.project_id,
+                    source_id,
+                    old_snapshot_id,
+                    MODEL_ID,
+                )
 
-    def _store_product(self) -> None:
-        self.catalog.upsert_product(
-            KnowledgeProduct(
-                project_id=self.project_id,
-                product_id="confirmed-product",
-                name="Private Product Name",
-                canonical_url=(
-                    f"https://{self.project_id}/confirmed-product"
-                ),
+    def _store_products(self) -> None:
+        for product_id in ("pending-product", "current-product"):
+            self.catalog.upsert_product(
+                KnowledgeProduct(
+                    project_id=self.project_id,
+                    product_id=product_id,
+                    name=f"Private {product_id}",
+                    canonical_url=f"https://{self.project_id}/{product_id}",
+                )
             )
-        )
         self.catalog.store_source_evidence(
             ProductSourceEvidence(
                 project_id=self.project_id,
-                product_id="confirmed-product",
+                product_id="pending-product",
                 source_id="review-source",
                 snapshot_id="review-source-snapshot",
                 relation="primary_detail",
                 confidence=0.99,
-                reason="Private evidence reason.",
+                reason="Pending evidence must not authorize confirmation.",
             )
         )
+        for snapshot_id in ("publish-old", "publish-new"):
+            self.catalog.store_source_evidence(
+                ProductSourceEvidence(
+                    project_id=self.project_id,
+                    product_id="current-product",
+                    source_id="publish-source",
+                    snapshot_id=snapshot_id,
+                    relation="primary_detail",
+                    confidence=0.99,
+                    reason="Only the current published version is authoritative.",
+                )
+            )
 
-    def test_review_reauthorizes_and_redacts_audit_details(self) -> None:
-        reviewed = self.service.review_source(
+    def _review(
+        self,
+        *,
+        source_id: str = "publish-source",
+        snapshot_id: str = "publish-new",
+        receipt_id: str = "publish-new-approved",
+        source_kind: str = "product_detail",
+        trust_tier: str = "reference_material",
+        decision: str = "approve",
+        reason: str = "Reviewed exact Snapshot.",
+    ):
+        return self.service.review_snapshot(
             actor=self.editor,
             project_id=self.project_id,
-            source_id="review-source",
-            source_kind="knowledge_page",
-            trust_tier="hard_fact",
-            decision="approve",
-            reason="Secret reason https://private.example/source",
+            source_id=source_id,
+            snapshot_id=snapshot_id,
+            receipt_id=receipt_id,
+            source_kind=source_kind,
+            trust_tier=trust_tier,
+            decision=decision,
+            reason=reason,
         )
 
-        self.assertEqual(reviewed.status, "inbox")
-        self.assertEqual(reviewed.metadata["review"]["decision"], "approve")
+    def test_review_receipt_is_idempotent_conflict_safe_and_versioned(
+        self,
+    ) -> None:
+        first = self._review(
+            source_id="review-source",
+            snapshot_id="review-source-snapshot",
+            receipt_id="review-receipt-1",
+            source_kind="knowledge_page",
+            trust_tier="hard_fact",
+            reason="Secret reason https://private.example/source",
+        )
+        retry = self._review(
+            source_id="review-source",
+            snapshot_id="review-source-snapshot",
+            receipt_id="review-receipt-1",
+            source_kind="knowledge_page",
+            trust_tier="hard_fact",
+            reason="Secret reason https://private.example/source",
+        )
+        self.assertEqual(first, retry)
+        self.assertEqual(first.review_version, 1)
         self.assertEqual(len(self.audit.events), 1)
+
+        with self.assertRaisesRegex(
+            SnapshotReviewConflict,
+            "different content",
+        ):
+            self._review(
+                source_id="review-source",
+                snapshot_id="review-source-snapshot",
+                receipt_id="review-receipt-1",
+                source_kind="knowledge_page",
+                trust_tier="hard_fact",
+                reason="A reused identity cannot change its payload.",
+            )
+
+        second = self._review(
+            source_id="review-source",
+            snapshot_id="review-source-snapshot",
+            receipt_id="review-receipt-2",
+            source_kind="official_blog",
+            trust_tier="reference_material",
+            decision="needs_review",
+            reason="A later classification needs another review.",
+        )
+        self.assertEqual(second.review_version, 2)
+        self.assertEqual(len(self.audit.events), 2)
         event = self.audit.events[0]
-        self.assertEqual(event.action, "knowledge.source.reviewed")
+        self.assertEqual(event.action, "knowledge.snapshot.reviewed")
+        self.assertEqual(event.target_type, "source_snapshot")
+        self.assertEqual(event.target_id, "review-source-snapshot")
         self.assertEqual(
             event.details,
             {
+                "source_id": "review-source",
                 "decision": "approve",
                 "source_kind": "knowledge_page",
                 "trust_tier": "hard_fact",
+                "review_version": 1,
+                "receipt_id": "review-receipt-1",
             },
         )
         serialized = str(event)
@@ -532,75 +673,227 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
         self.assertNotIn("private.example", serialized)
         self.assertNotIn("Private source body", serialized)
 
+    def test_review_reauthorizes_and_rejects_invalid_requests(self) -> None:
         with self.assertRaises(ProjectAccessDenied):
-            self.service.review_source(
+            self.service.review_snapshot(
                 actor=self.viewer,
                 project_id=self.project_id,
                 source_id="review-source",
+                snapshot_id="review-source-snapshot",
+                receipt_id="viewer-review",
                 source_kind="private_file",
                 trust_tier="reference_material",
                 decision="reject",
                 reason="Viewer may not review.",
             )
         with self.assertRaises(ProjectAccessDenied):
-            self.service.review_source(
+            self.service.review_snapshot(
                 actor=self.editor,
                 project_id=self.other_project_id,
                 source_id="other-source",
+                snapshot_id="other-source-snapshot",
+                receipt_id="cross-project-review",
                 source_kind="private_file",
                 trust_tier="reference_material",
                 decision="reject",
                 reason="Cross-project attempt.",
             )
         with self.assertRaisesRegex(ValueError, "reason is too long"):
-            self.service.review_source(
+            self.service.review_snapshot(
                 actor=self.editor,
                 project_id=self.project_id,
                 source_id="review-source",
+                snapshot_id="review-source-snapshot",
+                receipt_id="long-reason-review",
                 source_kind="private_file",
                 trust_tier="reference_material",
                 decision="approve",
                 reason="x" * 501,
             )
-        self.assertEqual(len(self.audit.events), 1)
+        self.assertEqual(self.audit.events, [])
 
-    def test_audit_failure_rolls_back_review_and_product_confirmation(
+    def test_legacy_source_metadata_does_not_authorize_snapshot(self) -> None:
+        self._store_source(self.project_id, "metadata-only-source")
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.update()
+                .where(
+                    knowledge_sources.c.project_id == self.project_id,
+                    knowledge_sources.c.source_id == "metadata-only-source",
+                )
+                .values(
+                    metadata={
+                        "review": {
+                            "decision": "approve",
+                            "reason": "Legacy source-scoped decision.",
+                        }
+                    }
+                )
+            )
+
+        with self.assertRaisesRegex(
+            KnowledgePublicationError,
+            "snapshot classification must be approved",
+        ):
+            self.service.publish_source(
+                actor=self.editor,
+                project_id=self.project_id,
+                source_id="metadata-only-source",
+                snapshot_id="metadata-only-source-snapshot",
+            )
+        self.assertIsNone(
+            self.reviews.get_latest_review(
+                self.project_id,
+                "metadata-only-source",
+                "metadata-only-source-snapshot",
+            )
+        )
+
+    def test_current_snapshot_receipt_does_not_authorize_pending_snapshot(
+        self,
+    ) -> None:
+        current_receipt = self.reviews.get_latest_review(
+            self.project_id,
+            "publish-source",
+            "publish-old",
+        )
+        self.assertIsNotNone(current_receipt)
+        self.assertEqual(current_receipt.decision, "approve")
+        self.assertIsNone(
+            self.reviews.get_latest_review(
+                self.project_id,
+                "publish-source",
+                "publish-new",
+            )
+        )
+        with self.assertRaisesRegex(
+            KnowledgePublicationError,
+            "snapshot classification must be approved",
+        ):
+            self.service.publish_source(
+                actor=self.editor,
+                project_id=self.project_id,
+                source_id="publish-source",
+                snapshot_id="publish-new",
+            )
+        source = self.library.get_source(self.project_id, "publish-source")
+        self.assertEqual(source.current_snapshot_id, "publish-old")
+        self.assertEqual(source.pending_snapshot_id, "publish-new")
+
+    def test_published_source_keeps_current_during_pending_review_and_reject(
+        self,
+    ) -> None:
+        self._review(
+            receipt_id="publish-new-needs-review",
+            source_kind="official_blog",
+            decision="needs_review",
+        )
+        source = self.library.get_source(self.project_id, "publish-source")
+        self.assertEqual(source.status, "published")
+        self.assertEqual(source.current_snapshot_id, "publish-old")
+        self.assertEqual(source.pending_snapshot_id, "publish-new")
+        self.assertEqual(source.source_kind, "knowledge_page")
+        self.assertEqual(source.trust_tier, "hard_fact")
+
+        self._review(
+            receipt_id="publish-new-rejected",
+            source_kind="official_blog",
+            decision="reject",
+            reason="The pending Snapshot is not authoritative.",
+        )
+        source = self.library.get_source(self.project_id, "publish-source")
+        self.assertEqual(source.status, "published")
+        self.assertEqual(source.current_snapshot_id, "publish-old")
+        self.assertIsNone(source.pending_snapshot_id)
+        self.assertEqual(source.display_name, "Publish source")
+        self.assertEqual(source.source_kind, "knowledge_page")
+        self.assertEqual(source.trust_tier, "hard_fact")
+
+    def test_approved_snapshot_publish_switches_pointer_and_projection(
+        self,
+    ) -> None:
+        receipt = self._review(receipt_id="publish-new-approved")
+        result = self.service.publish_source(
+            actor=self.editor,
+            project_id=self.project_id,
+            source_id="publish-source",
+            snapshot_id="publish-new",
+        )
+        self.assertEqual(result.snapshot_id, "publish-new")
+        source = self.library.get_source(self.project_id, "publish-source")
+        self.assertEqual(source.status, "published")
+        self.assertEqual(source.current_snapshot_id, "publish-new")
+        self.assertIsNone(source.pending_snapshot_id)
+        self.assertEqual(source.display_name, "Projected publish source")
+        self.assertEqual(source.source_kind, "product_detail")
+        self.assertEqual(source.trust_tier, "reference_material")
+        self.assertEqual(
+            source.canonical_url,
+            f"https://{self.project_id}/projected",
+        )
+        self.assertEqual(source.metadata, {"projection_marker": "new-snapshot"})
+        self.assertEqual(
+            [event.action for event in self.audit.events],
+            ["knowledge.snapshot.reviewed", "knowledge.snapshot.published"],
+        )
+        self.assertEqual(
+            self.audit.events[1].details,
+            {
+                "source_id": "publish-source",
+                "snapshot_id": "publish-new",
+                "previous_snapshot_id": "publish-old",
+                "review_version": receipt.review_version,
+                "receipt_id": receipt.receipt_id,
+                "chunk_count": 1,
+                "embedding_model": MODEL_ID,
+            },
+        )
+
+    def test_audit_failure_rolls_back_receipt_pointer_projection_and_product(
         self,
     ) -> None:
         failing = self._service(audit=FailingAuditWriter())
         with self.assertRaises(
             ServerKnowledgeCommandUnavailable
         ) as captured:
-            failing.review_source(
+            failing.review_snapshot(
                 actor=self.editor,
                 project_id=self.project_id,
                 source_id="review-source",
+                snapshot_id="review-source-snapshot",
+                receipt_id="review-must-roll-back",
                 source_kind="knowledge_page",
                 trust_tier="hard_fact",
-                decision="approve",
-                reason="Must roll back.",
+                decision="reject",
+                reason="Must roll back Receipt and aggregate changes.",
             )
         self.assertNotIn("secret.example", str(captured.exception))
-        source = self.library.get_source(
-            self.project_id,
-            "review-source",
+        self.assertIsNone(
+            self.reviews.get_latest_review(
+                self.project_id,
+                "review-source",
+                "review-source-snapshot",
+            )
         )
+        source = self.library.get_source(self.project_id, "review-source")
         self.assertEqual(source.status, "inbox")
-        self.assertNotIn("review", source.metadata)
+        self.assertEqual(source.pending_snapshot_id, "review-source-snapshot")
+        self.assertEqual(source.display_name, "Private source title")
+        self.assertEqual(source.source_kind, "private_file")
+        self.assertEqual(source.trust_tier, "reference_material")
 
         with self.assertRaises(ServerKnowledgeCommandUnavailable):
             failing.confirm_product(
                 actor=self.editor,
                 project_id=self.project_id,
-                product_id="confirmed-product",
+                product_id="current-product",
             )
-        product = self.catalog.get_product(
-            self.project_id,
-            "confirmed-product",
-        )
+        product = self.catalog.get_product(self.project_id, "current-product")
         self.assertEqual(product.status, "inbox")
 
     def test_publish_audit_failure_retains_old_serving_snapshot(self) -> None:
+        self._review(receipt_id="publish-audit-failure-approved")
+        self.audit.events.clear()
         failing = self._service(audit=FailingAuditWriter())
         with self.assertRaises(
             ServerKnowledgeCommandUnavailable
@@ -609,14 +902,17 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
                 actor=self.editor,
                 project_id=self.project_id,
                 source_id="publish-source",
+                snapshot_id="publish-new",
             )
         self.assertNotIn("secret.example", str(captured.exception))
-        source = self.library.get_source(
-            self.project_id,
-            "publish-source",
-        )
+        source = self.library.get_source(self.project_id, "publish-source")
         self.assertEqual(source.status, "published")
         self.assertEqual(source.current_snapshot_id, "publish-old")
+        self.assertEqual(source.pending_snapshot_id, "publish-new")
+        self.assertEqual(source.display_name, "Publish source")
+        self.assertEqual(source.source_kind, "knowledge_page")
+        self.assertEqual(source.trust_tier, "hard_fact")
+        self.assertIn("review", source.metadata)
         with self.engine.connect() as connection:
             prepared_model = connection.execute(
                 sa.select(knowledge_chunks.c.embedding_model).where(
@@ -627,6 +923,8 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
         self.assertEqual(prepared_model, MODEL_ID)
 
     def test_publish_rechecks_revocation_after_embedding(self) -> None:
+        self._review(receipt_id="publish-revocation-approved")
+        self.audit.events.clear()
         revoking_provider = RevokingEmbeddingProvider(
             self.engine,
             organization_id=self.organization_id,
@@ -638,92 +936,139 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
             library=self.library,
             embedding_provider=revoking_provider,
         )
-        service = self._service(
-            audit=self.audit,
-            publication=publication,
-        )
+        service = self._service(audit=self.audit, publication=publication)
         with self.assertRaises(ProjectAccessDenied):
             service.publish_source(
                 actor=self.editor,
                 project_id=self.project_id,
                 source_id="publish-source",
+                snapshot_id="publish-new",
             )
-        source = self.library.get_source(
-            self.project_id,
-            "publish-source",
-        )
+        source = self.library.get_source(self.project_id, "publish-source")
         self.assertEqual(source.current_snapshot_id, "publish-old")
+        self.assertEqual(source.pending_snapshot_id, "publish-new")
         self.assertEqual(self.audit.events, [])
 
-    def test_publish_rejects_latest_snapshot_drift(self) -> None:
-        drifting_provider = DriftingSnapshotEmbeddingProvider(
-            self.repository,
+    def test_publish_rejects_receipt_drift_after_embedding(self) -> None:
+        self._review(receipt_id="publish-initial-approval")
+        self.audit.events.clear()
+        drifting_provider = DriftingReceiptEmbeddingProvider(
+            commands=self.service,
+            actor=self.editor,
             project_id=self.project_id,
             source_id="publish-source",
+            snapshot_id="publish-new",
         )
         publication = KnowledgePublicationService(
             repository=self.repository,
             library=self.library,
             embedding_provider=drifting_provider,
         )
-        service = self._service(
-            audit=self.audit,
-            publication=publication,
-        )
+        service = self._service(audit=self.audit, publication=publication)
         with self.assertRaisesRegex(
-            RuntimeError,
-            "source snapshot changed during publication",
+            KnowledgePublicationError,
+            "snapshot review changed during publication",
         ):
             service.publish_source(
                 actor=self.editor,
                 project_id=self.project_id,
                 source_id="publish-source",
+                snapshot_id="publish-new",
             )
-        source = self.library.get_source(
+        source = self.library.get_source(self.project_id, "publish-source")
+        self.assertEqual(source.status, "published")
+        self.assertEqual(source.current_snapshot_id, "publish-old")
+        self.assertEqual(source.pending_snapshot_id, "publish-new")
+        latest = self.reviews.get_latest_review(
             self.project_id,
             "publish-source",
+            "publish-new",
         )
-        self.assertEqual(source.current_snapshot_id, "publish-old")
-        self.assertEqual(self.audit.events, [])
+        self.assertEqual(latest.receipt_id, "publish-review-drift")
+        self.assertEqual(latest.review_version, 2)
+        self.assertEqual(latest.decision, "needs_review")
+        self.assertEqual(
+            [event.action for event in self.audit.events],
+            ["knowledge.snapshot.reviewed"],
+        )
 
-    def test_publish_and_confirm_retries_do_not_duplicate_audit(self) -> None:
-        first = self.service.publish_source(
-            actor=self.editor,
-            project_id=self.project_id,
-            source_id="publish-source",
-        )
-        second = self.service.publish_source(
-            actor=self.editor,
-            project_id=self.project_id,
-            source_id="publish-source",
-        )
-        self.assertEqual(first, second)
+    def test_server_confirm_requires_current_published_primary_detail(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ProductConfirmationError,
+            "current published primary detail",
+        ):
+            self.service.confirm_product(
+                actor=self.editor,
+                project_id=self.project_id,
+                product_id="pending-product",
+            )
+        pending = self.catalog.get_product(self.project_id, "pending-product")
+        self.assertEqual(pending.status, "inbox")
+
         self.assertTrue(
             self.service.confirm_product(
                 actor=self.editor,
                 project_id=self.project_id,
-                product_id="confirmed-product",
+                product_id="current-product",
             )
         )
         self.assertFalse(
             self.service.confirm_product(
                 actor=self.editor,
                 project_id=self.project_id,
-                product_id="confirmed-product",
+                product_id="current-product",
             )
         )
-        actions = [event.action for event in self.audit.events]
         self.assertEqual(
-            actions,
-            [
-                "knowledge.source.published",
-                "knowledge.product.confirmed",
-            ],
+            [event.action for event in self.audit.events],
+            ["knowledge.product.confirmed"],
+        )
+
+    def test_publish_and_confirm_retries_do_not_duplicate_audit(self) -> None:
+        receipt = self._review(receipt_id="publish-retry-approved")
+        self.audit.events.clear()
+        first = self.service.publish_source(
+            actor=self.editor,
+            project_id=self.project_id,
+            source_id="publish-source",
+            snapshot_id="publish-new",
+        )
+        second = self.service.publish_source(
+            actor=self.editor,
+            project_id=self.project_id,
+            source_id="publish-source",
+            snapshot_id="publish-new",
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.provider.calls), 1)
+        self.assertTrue(
+            self.service.confirm_product(
+                actor=self.editor,
+                project_id=self.project_id,
+                product_id="current-product",
+            )
+        )
+        self.assertFalse(
+            self.service.confirm_product(
+                actor=self.editor,
+                project_id=self.project_id,
+                product_id="current-product",
+            )
+        )
+        self.assertEqual(
+            [event.action for event in self.audit.events],
+            ["knowledge.snapshot.published", "knowledge.product.confirmed"],
         )
         self.assertEqual(
             self.audit.events[0].details,
             {
+                "source_id": "publish-source",
                 "snapshot_id": "publish-new",
+                "previous_snapshot_id": "publish-old",
+                "review_version": receipt.review_version,
+                "receipt_id": receipt.receipt_id,
                 "chunk_count": 1,
                 "embedding_model": MODEL_ID,
             },
@@ -763,9 +1108,11 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
             response = client.put(
                 (
                     f"/api/knowledge/{self.project_id}/sources/"
-                    "review-source/review"
+                    "review-source/snapshots/"
+                    "review-source-snapshot/review"
                 ),
                 json={
+                    "receipt_id": "http-review-receipt",
                     "source_kind": "knowledge_page",
                     "trust_tier": "hard_fact",
                     "decision": "approve",
@@ -774,9 +1121,12 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["snapshot_id"], "review-source-snapshot")
+        self.assertEqual(response.json()["receipt_id"], "http-review-receipt")
+        self.assertEqual(response.json()["review_version"], 1)
         self.assertEqual(
             [event.action for event in self.audit.events],
-            ["knowledge.source.reviewed"],
+            ["knowledge.snapshot.reviewed"],
         )
 
 

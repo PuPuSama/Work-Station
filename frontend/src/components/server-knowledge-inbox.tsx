@@ -15,7 +15,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -98,7 +98,7 @@ function SourceReviewCard({
     key: string,
     action: Promise<unknown>,
     message: string,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   pending: string;
   projectPath: string;
   publishable: boolean;
@@ -107,13 +107,48 @@ function SourceReviewCard({
   const [sourceKind, setSourceKind] = useState(source.source_kind);
   const [trustTier, setTrustTier] = useState(source.trust_tier);
   const [decision, setDecision] = useState<ReviewDecision>(
-    source.review_decision || "approve",
+    source.pending_review_decision || "approve",
   );
   const [reason, setReason] = useState("");
+  const reviewReceiptId = useRef<string | null>(null);
   const sourcePath = `${projectPath}/sources/${encodeURIComponent(source.source_id)}`;
-  const locked = source.status === "published";
-  const reviewing = pending === `review:${source.source_id}`;
-  const publishing = pending === `publish:${source.source_id}`;
+  const pendingSnapshotId = source.pending_snapshot_id;
+  const pendingSnapshotPath = pendingSnapshotId
+    ? `${sourcePath}/snapshots/${encodeURIComponent(pendingSnapshotId)}`
+    : "";
+  const reviewKey = `review:${source.source_id}:${pendingSnapshotId || "none"}`;
+  const publishKey = `publish:${source.source_id}:${pendingSnapshotId || "none"}`;
+  const reviewing = pending === reviewKey;
+  const publishing = pending === publishKey;
+
+  async function reviewPendingSnapshot() {
+    if (!pendingSnapshotId) return;
+    const receiptId = reviewReceiptId.current || crypto.randomUUID();
+    reviewReceiptId.current = receiptId;
+    const reviewPromise = apiPut(pendingSnapshotPath + "/review", {
+      receipt_id: receiptId,
+      source_kind: sourceKind,
+      trust_tier: trustTier,
+      decision,
+      reason: reason.trim(),
+    });
+    const saved = await onChanged(
+      reviewKey,
+      reviewPromise,
+      `${source.display_name} 的待审 Snapshot 决定已保存。`,
+    );
+    if (saved) reviewReceiptId.current = null;
+  }
+
+  function publishPendingSnapshot() {
+    if (!pendingSnapshotId) return;
+    const publishPromise = apiPost(pendingSnapshotPath + "/publish");
+    void onChanged(
+      publishKey,
+      publishPromise,
+      `${source.display_name} 已切换到新的当前发布 Snapshot。`,
+    );
+  }
 
   return (
     <Card>
@@ -138,28 +173,83 @@ function SourceReviewCard({
         ) : null}
       </CardHeader>
       <CardContent className="grid gap-4">
-        <div className="grid grid-cols-2 gap-3 text-xs text-muted-foreground sm:grid-cols-4">
-          <div>
-            <span className="block text-foreground">{source.snapshot_count}</span>
-            Snapshot
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2 rounded-xl border bg-muted/10 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Current Snapshot
+              </span>
+              <Badge variant={source.current_snapshot_id ? "default" : "secondary"}>
+                {source.current_snapshot_id ? "检索中" : "尚未发布"}
+              </Badge>
+            </div>
+            <div className="break-all font-mono text-xs">
+              {source.current_snapshot_id || "—"}
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              {source.current_snapshot_id
+                ? "当前写作检索继续使用此不可变 Snapshot。"
+                : "当前没有已发布 Snapshot；待审证据不会参与检索。"}
+            </p>
           </div>
-          <div>
-            <span className="block text-foreground">{source.chunk_count}</span>
-            Chunk
-          </div>
-          <div>
-            <span className="block text-foreground">{source.asset_count}</span>
-            Asset
-          </div>
-          <div>
-            <span className="block text-foreground">
-              {formatDate(source.latest_fetched_at)}
-            </span>
-            最近入库
+
+          <div className="grid gap-2 rounded-xl border bg-muted/10 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Pending Snapshot
+              </span>
+              <Badge variant={pendingSnapshotId ? "secondary" : "outline"}>
+                {pendingSnapshotId ? "待审" : "无待审版本"}
+              </Badge>
+            </div>
+            {pendingSnapshotId ? (
+              <>
+                <div className="break-all font-mono text-xs">
+                  {pendingSnapshotId}
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                  <div>
+                    <span className="block text-foreground">
+                      {source.pending_chunk_count}
+                    </span>
+                    Chunk
+                  </div>
+                  <div>
+                    <span className="block text-foreground">
+                      {source.pending_asset_count}
+                    </span>
+                    Asset
+                  </div>
+                  <div>
+                    <span className="block text-foreground">
+                      {formatDate(source.pending_fetched_at)}
+                    </span>
+                    入库时间
+                  </div>
+                </div>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  Receipt：
+                  {source.pending_review_decision || "尚未审阅"}
+                  {source.pending_review_version !== null
+                    ? ` · v${source.pending_review_version}`
+                    : ""}
+                  {source.pending_reviewed_at
+                    ? ` · ${formatDate(source.pending_reviewed_at)}`
+                    : ""}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs leading-5 text-muted-foreground">
+                当前没有待审 Snapshot。
+                {source.latest_snapshot_id
+                  ? ` Latest 为 ${source.latest_snapshot_id}。`
+                  : " 尚未入库任何 Snapshot。"}
+              </p>
+            )}
           </div>
         </div>
 
-        {!locked ? (
+        {pendingSnapshotId ? (
           <div className="grid gap-4 rounded-xl border bg-muted/20 p-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="grid gap-2">
@@ -169,7 +259,10 @@ function SourceReviewCard({
                   value={sourceKind}
                   disabled={!editable || Boolean(pending)}
                   className="min-h-11 rounded-lg border bg-background px-3 text-sm"
-                  onChange={(event) => setSourceKind(event.target.value)}
+                  onChange={(event) => {
+                    reviewReceiptId.current = null;
+                    setSourceKind(event.target.value);
+                  }}
                 >
                   {Object.entries(sourceKindLabels).map(([value, label]) => (
                     <option key={value} value={value}>
@@ -185,7 +278,10 @@ function SourceReviewCard({
                   value={trustTier}
                   disabled={!editable || Boolean(pending)}
                   className="min-h-11 rounded-lg border bg-background px-3 text-sm"
-                  onChange={(event) => setTrustTier(event.target.value)}
+                  onChange={(event) => {
+                    reviewReceiptId.current = null;
+                    setTrustTier(event.target.value);
+                  }}
                 >
                   {Object.entries(trustTierLabels).map(([value, label]) => (
                     <option key={value} value={value}>
@@ -202,9 +298,10 @@ function SourceReviewCard({
                 value={decision}
                 disabled={!editable || Boolean(pending)}
                 className="min-h-11 rounded-lg border bg-background px-3 text-sm"
-                onChange={(event) =>
-                  setDecision(event.target.value as ReviewDecision)
-                }
+                onChange={(event) => {
+                  reviewReceiptId.current = null;
+                  setDecision(event.target.value as ReviewDecision);
+                }}
               >
                 <option value="approve">批准分类，进入待发布</option>
                 <option value="needs_review">保留并标记需复核</option>
@@ -219,7 +316,10 @@ function SourceReviewCard({
                 disabled={!editable || Boolean(pending)}
                 maxLength={500}
                 placeholder="记录为什么接受或拒绝当前分类"
-                onChange={(event) => setReason(event.target.value)}
+                onChange={(event) => {
+                  reviewReceiptId.current = null;
+                  setReason(event.target.value);
+                }}
               />
             </div>
             <Button
@@ -229,18 +329,7 @@ function SourceReviewCard({
               disabled={
                 !editable || Boolean(pending) || !reason.trim()
               }
-              onClick={() =>
-                void onChanged(
-                  `review:${source.source_id}`,
-                  apiPut(sourcePath + "/review", {
-                    source_kind: sourceKind,
-                    trust_tier: trustTier,
-                    decision,
-                    reason: reason.trim(),
-                  }),
-                  `${source.display_name} 的审阅决定已保存。`,
-                )
-              }
+              onClick={() => void reviewPendingSnapshot()}
             >
               {reviewing ? (
                 <Loader2 className="animate-spin" />
@@ -251,40 +340,44 @@ function SourceReviewCard({
             </Button>
           </div>
         ) : (
-          <div className="flex items-center gap-2 rounded-xl border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+          <div
+            className={
+              "flex items-center gap-2 rounded-xl border bg-muted/20 " +
+              "px-4 py-3 text-sm text-muted-foreground"
+            }
+          >
             <CheckCircle2 className="size-4" />
-            已发布来源不可原地改分类；需要变更时应产生新 Snapshot 并重新审阅。
+            当前没有 Pending Snapshot，来源信息与 Current Snapshot 仅供查看。
           </div>
         )}
 
-        {source.status === "inbox" && source.review_decision === "approve" ? (
+        {pendingSnapshotId && source.pending_review_decision === "approve" ? (
           <Button
             type="button"
             className="min-h-11"
             disabled={
               !publishable ||
               Boolean(pending) ||
-              source.chunk_count === 0
+              source.pending_chunk_count === 0
             }
-            onClick={() =>
-              void onChanged(
-                `publish:${source.source_id}`,
-                apiPost(sourcePath + "/publish"),
-                `${source.display_name} 已完成向量并切换为当前发布快照。`,
-              )
-            }
+            onClick={publishPendingSnapshot}
           >
             {publishing ? (
               <Loader2 className="animate-spin" />
             ) : (
               <PackageCheck />
             )}
-            发布当前 Snapshot
+            发布待审 Snapshot
           </Button>
-        ) : source.status === "inbox" ? (
-          <p className="rounded-xl border border-dashed px-4 py-3 text-xs leading-5 text-muted-foreground">
+        ) : pendingSnapshotId ? (
+          <p
+            className={
+              "rounded-xl border border-dashed px-4 py-3 text-xs " +
+              "leading-5 text-muted-foreground"
+            }
+          >
             先保存“批准分类”的审阅决定，服务端确认
-            `review_decision=approve` 后才显示发布命令。
+            `pending_review_decision=approve` 后才显示发布命令。
           </p>
         ) : null}
       </CardContent>
@@ -303,7 +396,7 @@ function ProductCard({
     key: string,
     action: Promise<unknown>,
     message: string,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   pending: string;
   product: KnowledgeProductSummary;
   projectPath: string;
@@ -395,7 +488,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
     key: string,
     action: Promise<unknown>,
     successMessage: string,
-  ) {
+  ): Promise<boolean> {
     setPending(key);
     setError("");
     setMessage("");
@@ -403,8 +496,10 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
       await action;
       setMessage(successMessage);
       await load();
+      return true;
     } catch (reason) {
       setError(errorMessage(reason));
+      return false;
     } finally {
       setPending("");
     }
@@ -423,16 +518,16 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   const sortedSources = useMemo(
     () =>
       [...(library?.sources || [])].sort((left, right) => {
-        const rank = (status: string) =>
-          status === "inbox"
+        const rank = (source: KnowledgeSourceSummary) =>
+          source.pending_snapshot_id
             ? 0
-            : status === "needs_review"
+            : source.status === "needs_review"
               ? 1
-              : status === "rejected"
+              : source.status === "rejected"
                 ? 2
                 : 3;
         return (
-          rank(left.status) - rank(right.status) ||
+          rank(left) - rank(right) ||
           left.display_name.localeCompare(right.display_name)
         );
       }),
@@ -441,7 +536,11 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   const editable = canEditKnowledge(role);
   const summaries = [
     { label: "全部来源", value: library?.source_count || 0, icon: FileStack },
-    { label: "Research Inbox", value: library?.inbox_count || 0, icon: Inbox },
+    {
+      label: "Pending Snapshot",
+      value: library?.pending_count || 0,
+      icon: Inbox,
+    },
     {
       label: "已发布来源",
       value: library?.published_count || 0,
@@ -568,7 +667,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           <div className="grid gap-4 xl:grid-cols-2">
             {sortedSources.map((source) => (
               <SourceReviewCard
-                key={source.source_id}
+                key={`${source.source_id}:${source.pending_snapshot_id || "none"}`}
                 source={source}
                 projectPath={projectPath}
                 editable={editable}

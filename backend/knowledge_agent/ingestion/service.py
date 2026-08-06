@@ -272,6 +272,13 @@ class PrivateDocumentIngestionService:
                 "title": parsed.title,
                 "block_count": len(parsed.blocks),
                 "asset_count": len(parsed.assets),
+                "source_projection": {
+                    "schema_version": 1,
+                    "display_name": source.display_name,
+                    "public_source": source.public_source,
+                    "canonical_url": source.canonical_url,
+                    "metadata": dict(source.metadata),
+                },
             },
         )
 

@@ -134,7 +134,7 @@ class _RecordingKnowledgeCommands:
         self.review_calls = 0
         self.publish_calls = 0
 
-    def review_source(self, **kwargs):
+    def review_snapshot(self, **kwargs):
         del kwargs
         self.review_calls += 1
         raise AssertionError("cancelled research must not review a source")
@@ -186,7 +186,12 @@ class ServerCandidateCancellationTests(unittest.TestCase):
                     trust_tier="reference_material",
                 )
                 if boundary == "review":
-                    return self.review_source(source, "approve", "safe reason")
+                    return self.review_source(
+                        source,
+                        "candidate-snapshot",
+                        "approve",
+                        "safe reason",
+                    )
                 if boundary == "publish":
                     return self.publish_source(source, "candidate-snapshot")
                 raise AssertionError(f"unsupported boundary: {boundary}")

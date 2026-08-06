@@ -165,6 +165,14 @@ class ServerRequestSecurityTests(unittest.TestCase):
             ): "knowledge.publish",
             (
                 "POST",
+                "/api/knowledge/{project}/sources/x/snapshots/y/publish",
+            ): "knowledge.publish",
+            (
+                "PUT",
+                "/api/knowledge/{project}/sources/x/snapshots/y/review",
+            ): "knowledge.edit",
+            (
+                "POST",
                 "/api/knowledge/{project}/products/x/confirm",
             ): "knowledge.publish",
             (

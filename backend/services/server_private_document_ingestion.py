@@ -248,13 +248,16 @@ class PostgresServerPrivateDocumentIngestion:
                 existing_snapshot = connection.execute(
                     sa.select(source_snapshots.c.snapshot_id).where(
                         source_snapshots.c.project_id == project_id,
+                        source_snapshots.c.source_id
+                        == normalized_source_id,
                         source_snapshots.c.snapshot_id
                         == prepared.snapshot.snapshot_id,
                     )
                 ).scalar_one_or_none()
-                current_snapshot_id = connection.execute(
+                source_row = connection.execute(
                     sa.select(
-                        knowledge_sources.c.current_snapshot_id
+                        knowledge_sources.c.current_snapshot_id,
+                        knowledge_sources.c.pending_snapshot_id,
                     )
                     .where(
                         knowledge_sources.c.project_id == project_id,
@@ -262,27 +265,34 @@ class PostgresServerPrivateDocumentIngestion:
                         == normalized_source_id,
                     )
                     .with_for_update()
-                ).scalar_one_or_none()
+                ).mappings().one_or_none()
 
                 if existing_snapshot is None:
-                    if current_snapshot_id is not None:
-                        # Source-level moderation cannot represent a pending
-                        # replacement while the old current snapshot remains
-                        # published. Use a new Source identity until a future
-                        # snapshot-level review model exists.
+                    if (
+                        source_row is not None
+                        and source_row["pending_snapshot_id"] is not None
+                    ):
                         raise ServerPrivateDocumentUploadConflict(
-                            "published source requires a new upload identity"
+                            "knowledge source already has a pending snapshot"
                         )
-                    self._repository.upsert_source_in_transaction(
-                        connection,
-                        prepared.source,
-                    )
+                    if source_row is None:
+                        self._repository.upsert_source_in_transaction(
+                            connection,
+                            prepared.source,
+                        )
                 created = self._repository.store_snapshot_in_transaction(
                     connection,
                     project_id,
                     prepared.snapshot,
                     prepared.chunks,
                 )
+                if created:
+                    self._repository.set_pending_snapshot_in_transaction(
+                        connection,
+                        project_id,
+                        normalized_source_id,
+                        prepared.snapshot.snapshot_id,
+                    )
                 stored_assets = []
                 stored_asset_ids: dict[str, str] = {}
                 for asset in prepared.assets:
@@ -316,8 +326,18 @@ class PostgresServerPrivateDocumentIngestion:
                         stored_link,
                     )
                     stored_links.append(stored_link)
+                stored_source = self._repository.get_source_in_transaction(
+                    connection,
+                    project_id,
+                    normalized_source_id,
+                )
+                if stored_source is None:
+                    raise ServerPrivateDocumentUploadConflict(
+                        "stored knowledge source is unavailable"
+                    )
                 committed = replace(
                     prepared,
+                    source=stored_source,
                     assets=tuple(stored_assets),
                     snapshot_assets=tuple(stored_links),
                 )

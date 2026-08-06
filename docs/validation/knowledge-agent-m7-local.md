@@ -11,7 +11,7 @@
 - Python：`backend/.venv/Scripts/python.exe`
 - PostgreSQL/pgvector：`pgvector/pgvector:0.8.5-pg17-bookworm`
 - 本地端口：`127.0.0.1:55433`
-- Alembic Head：`20260731_0018`
+- Alembic Head：`20260806_0019`
 
 ## 已通过验证
 
@@ -1906,3 +1906,39 @@ Set-Location frontend
 - 组件职责、五阶段状态机、事务边界、Audit 白名单、Orphan、Exact Retry、当前刷新限制
   和未来显式 Execution Context/Snapshot Review Receipt 接缝记录在
   `docs/architecture/m7-server-web-evidence-ingestion.md`。
+
+### M7 Snapshot Review Receipt 与 Current/Pending 刷新
+
+```powershell
+$env:ARTICLE_AGENT_CONFIG = '<仓库根目录>\config.ci.yaml'
+$env:ARTICLE_AGENT_DATABASE_URL = '<由安全环境注入>'
+Set-Location backend
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m alembic current
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+
+Set-Location ..\frontend
+& '<工作区 Node 绝对路径>' .\node_modules\eslint\bin\eslint.js .
+& '<工作区 Node 绝对路径>' .\node_modules\next\dist\bin\next build
+& '<工作区 Node 绝对路径>' .\node_modules\typescript\bin\tsc --noEmit
+```
+
+结果：
+
+- Alembic 从 `20260731_0018` 升级到 `20260806_0019`，重复 `upgrade head` 成功，
+  `current` 为 `20260806_0019 (head)`；
+- 完整后端回归 743 tests 全部通过，2 tests 按显式外部环境门禁跳过；测试使用确定性
+  Fake Embedding/Research/Object Store，不调用真实供应商、客户资料或生产对象存储；
+- 覆盖 Snapshot Review Receipt 幂等冲突、版本递增、跨项目/来源拒绝、append-only、
+  Pending 约束、刷新旧 Current 保留、驳回/撤权/审核漂移、Audit 回滚、精确 Snapshot
+  发布和产品证据仅绑定 Published Current Snapshot；
+- 前端全量 ESLint 通过；Next.js 16.2.10 production build 已在 16 秒完成生产编译，
+  随后宿主命令在 TypeScript 阶段因 120 秒执行时限终止，未取得完整 build 成功回执；
+  针对中断点执行的 `tsc --noEmit` 通过。因此本记录不把完整 production build 标记为
+  已验证，下一次发布门禁仍需取得一次完整 build 的退出码 0；
+- `npm.cmd` 不在当前 Codex 进程 PATH，首次命令未实际执行，不计为验证结果；备用 pnpm
+  运行时生成的临时 lock/workspace 文件已移除，仓库继续以 `package-lock.json` 为准；
+- Current/Pending 数据模型、Receipt/version/idempotency 语义、Review -> Embedding ->
+  Activate 事务顺序、Server HTTP/UI 契约、Local 兼容边界与后续重构接缝记录在
+  `docs/architecture/m7-snapshot-review-receipts.md`。
