@@ -179,6 +179,19 @@ result: pass | fail
 | `operation_inventory_digest` | `PENDING` | `products` Enqueue 到 drain 全链身份与状态已纳入 Inventory |
 | `staged_secret_scan` | `PASS` | 精确暂存的 20 个文件通过高置信 Secret/Token/Private Key 扫描 |
 
+### 6.1 后续本地可执行验证（2026-08-06）
+
+- Local Humanize 的旧绝对路径已改为 checked-in `backend/prompts/humanize_ci.txt`，原失败用例定向补跑 `2/2` 通过；
+- Docker PostgreSQL/pgvector 已健康启动，Alembic 当前版本为 `20260806_0019 (head)`；
+- 先前因未注入数据库而跳过的 Server Job Control 集成测试已运行 `11/11` 通过；
+- 正式产品选择的 PostgreSQL 用例已运行 `1/1` 通过；
+- Product Generation Registry 新增 bounded drain/idempotent stop 覆盖，文件定向测试 `14/14` 通过；
+- Candidate Inventory 已对 clean commit 在仓库外生成两次，本地文件 SHA-256 逐字节一致。该文件仍只是
+  local staging artifact，没有被外部不可变 Evidence 系统接收，因此本表的 Inventory、Smoke 和 Drain
+  Evidence 位继续保持 `PENDING`；
+- 只读 Deployment Preflight 正确返回 `no-go`：当前没有 Server Mode、OIDC、Actor Session、Embedding、
+  ObjectStore、签名恢复证据或生产 Provider 配置，且四项 Cutover Capability 仍未宣告完成。
+
 执行时间：`2026-08-06T07:17:14Z`。完整后端回归共运行 776 项，除 3 个本切片新增测试的
 错误外，其余结果完成；错误分别是测试 Fixture 缺少 permission，以及两处私有模板/Prompt
 异常未转换为稳定公共错误。修复后只运行 `backend/tests/test_m7_server_product_generation.py`，

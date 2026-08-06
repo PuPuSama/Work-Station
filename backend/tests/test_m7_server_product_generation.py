@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -216,6 +217,45 @@ def make_job(task: TaskRecord, products) -> dict[str, object]:
             ],
         },
     }
+
+
+class ServerProductGenerationRegistryTests(unittest.TestCase):
+    def test_stop_reports_bounded_drain_and_is_idempotent(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.timeouts: list[float] = []
+
+            def stop(self, *, timeout_seconds: float):
+                self.timeouts.append(timeout_seconds)
+                return SimpleNamespace(
+                    dispatcher_stopped=True,
+                    remaining_jobs=0,
+                )
+
+        runner = FakeRunner()
+        registry = ServerProductGenerationRegistry(
+            object(),
+            access=object(),
+            provider=SimpleNamespace(ready=True),
+            handler=None,
+            context=object(),
+            access_repository=object(),
+            audit=object(),
+        )
+        registry._projects[("organization-a", "project-a")] = SimpleNamespace(
+            runner=runner,
+        )
+
+        report = registry.stop(timeout_seconds=0.25)
+
+        self.assertTrue(report.drained)
+        self.assertEqual(report.project_runner_count, 1)
+        self.assertEqual(report.remaining_jobs, 0)
+        self.assertEqual(len(runner.timeouts), 1)
+        self.assertGreaterEqual(runner.timeouts[0], 0.0)
+        self.assertLessEqual(runner.timeouts[0], 0.25)
+        self.assertEqual(registry.stop(timeout_seconds=0.25), report)
+        self.assertEqual(len(runner.timeouts), 1)
 
 
 class ServerProductProviderTests(unittest.TestCase):
