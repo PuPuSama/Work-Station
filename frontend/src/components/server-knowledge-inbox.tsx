@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { KnowledgeReviewGuide } from "@/components/knowledge-review-guide";
 import { ServerPrivateDocumentUpload } from "@/components/server-private-document-upload";
 import { apiGet, apiPost, apiPut } from "@/lib/api";
 import type {
@@ -147,7 +148,7 @@ function SnapshotEvidencePanel({
       if (
         !hasExactSnapshotIdentity(result, projectId, sourceId, snapshotId)
       ) {
-        throw new Error("证据清单与当前 Snapshot 不匹配。");
+        throw new Error("证据清单与当前资料版本不匹配。");
       }
       if (manifestRequestId.current === requestId) {
         setManifest(result);
@@ -186,7 +187,7 @@ function SnapshotEvidencePanel({
         !hasExactSnapshotIdentity(result, projectId, sourceId, snapshotId) ||
         result.slot !== manifest?.slot
       ) {
-        throw new Error("规范化预览与当前 Snapshot 不匹配。");
+        throw new Error("内容预览与当前资料版本不匹配。");
       }
       setPreview(result);
       setPreviewVisible(true);
@@ -208,7 +209,7 @@ function SnapshotEvidencePanel({
         !hasExactSnapshotIdentity(result, projectId, sourceId, snapshotId) ||
         result.slot !== manifest?.slot
       ) {
-        throw new Error("原始证据下载与当前 Snapshot 不匹配。");
+        throw new Error("原始文件与当前资料版本不匹配。");
       }
       window.open(result.download_url, "_blank", "noopener,noreferrer");
     } catch (error) {
@@ -222,7 +223,7 @@ function SnapshotEvidencePanel({
     return (
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Loader2 className="size-3.5 animate-spin" />
-        正在读取此 Snapshot 的证据清单…
+        正在读取此版本的证据清单…
       </div>
     );
   }
@@ -369,7 +370,7 @@ function SourceReviewCard({
     const saved = await onChanged(
       reviewKey,
       reviewPromise,
-      `${source.display_name} 的待审 Snapshot 决定已保存。`,
+      `${source.display_name} 的审核结果已保存。`,
     );
     if (saved) reviewReceiptId.current = null;
   }
@@ -380,7 +381,7 @@ function SourceReviewCard({
     void onChanged(
       publishKey,
       publishPromise,
-      `${source.display_name} 已切换到新的当前发布 Snapshot。`,
+      `${source.display_name} 已发布，新版本开始参与文章检索。`,
     );
   }
 
@@ -392,8 +393,8 @@ function SourceReviewCard({
             <CardTitle className="break-words text-base">
               {source.display_name}
             </CardTitle>
-            <CardDescription className="mt-1 break-all font-mono text-[11px]">
-              {source.source_id}
+            <CardDescription className="mt-1 break-all text-[11px]">
+              内部编号：{source.source_id}
             </CardDescription>
           </div>
           <Badge variant={source.status === "published" ? "default" : "secondary"}>
@@ -402,7 +403,7 @@ function SourceReviewCard({
         </div>
         {source.classification_reason ? (
           <p className="text-xs leading-5 text-muted-foreground">
-            {source.classification_reason}
+            系统判断：{source.classification_reason}
           </p>
         ) : null}
       </CardHeader>
@@ -411,20 +412,23 @@ function SourceReviewCard({
           <div className="grid gap-2 rounded-xl border bg-muted/10 p-4">
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Current Snapshot
+                当前在线版本
               </span>
               <Badge variant={source.current_snapshot_id ? "default" : "secondary"}>
                 {source.current_snapshot_id ? "检索中" : "尚未发布"}
               </Badge>
             </div>
-            <div className="break-all font-mono text-xs">
-              {source.current_snapshot_id || "—"}
-            </div>
             <p className="text-xs leading-5 text-muted-foreground">
               {source.current_snapshot_id
-                ? "当前写作检索继续使用此不可变 Snapshot。"
-                : "当前没有已发布 Snapshot；待审证据不会参与检索。"}
+                ? "文章检索目前正在使用这个版本。"
+                : "当前没有已发布版本；待审核资料不会参与检索。"}
             </p>
+            {source.current_snapshot_id ? (
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer">技术信息</summary>
+                <div className="mt-1 break-all font-mono">{source.current_snapshot_id}</div>
+              </details>
+            ) : null}
             {source.current_snapshot_id ? (
               <SnapshotEvidencePanel
                 key={source.current_snapshot_id}
@@ -439,7 +443,7 @@ function SourceReviewCard({
           <div className="grid gap-2 rounded-xl border bg-muted/10 p-4">
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Pending Snapshot
+                本次待审核版本
               </span>
               <Badge variant={pendingSnapshotId ? "secondary" : "outline"}>
                 {pendingSnapshotId ? "待审" : "无待审版本"}
@@ -447,21 +451,22 @@ function SourceReviewCard({
             </div>
             {pendingSnapshotId ? (
               <>
-                <div className="break-all font-mono text-xs">
-                  {pendingSnapshotId}
-                </div>
+                <details className="text-xs text-muted-foreground">
+                  <summary className="cursor-pointer">技术信息</summary>
+                  <div className="mt-1 break-all font-mono">{pendingSnapshotId}</div>
+                </details>
                 <div className="grid grid-cols-3 gap-2 text-xs text-muted-foreground">
                   <div>
                     <span className="block text-foreground">
                       {source.pending_chunk_count}
                     </span>
-                    Chunk
+                    可检索段落
                   </div>
                   <div>
                     <span className="block text-foreground">
                       {source.pending_asset_count}
                     </span>
-                    Asset
+                    图片/附件
                   </div>
                   <div>
                     <span className="block text-foreground">
@@ -471,8 +476,14 @@ function SourceReviewCard({
                   </div>
                 </div>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  Receipt：
-                  {source.pending_review_decision || "尚未审阅"}
+                  最近审核：
+                  {source.pending_review_decision === "approve"
+                    ? "已通过"
+                    : source.pending_review_decision === "needs_review"
+                      ? "需负责人复核"
+                      : source.pending_review_decision === "reject"
+                        ? "不采用"
+                        : "尚未审阅"}
                   {source.pending_review_version !== null
                     ? ` · v${source.pending_review_version}`
                     : ""}
@@ -490,10 +501,10 @@ function SourceReviewCard({
               </>
             ) : (
               <p className="text-xs leading-5 text-muted-foreground">
-                当前没有待审 Snapshot。
+                当前没有待审核版本。
                 {source.latest_snapshot_id
-                  ? ` Latest 为 ${source.latest_snapshot_id}。`
-                  : " 尚未入库任何 Snapshot。"}
+                  ? " 最近一次入库已完成。"
+                  : " 尚未入库任何资料版本。"}
               </p>
             )}
           </div>
@@ -522,7 +533,7 @@ function SourceReviewCard({
                 </select>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor={`trust-${source.source_id}`}>信任层级</Label>
+                <Label htmlFor={`trust-${source.source_id}`}>信息用途</Label>
                 <select
                   id={`trust-${source.source_id}`}
                   value={trustTier}
@@ -542,7 +553,7 @@ function SourceReviewCard({
               </div>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor={`decision-${source.source_id}`}>审阅决定</Label>
+              <Label htmlFor={`decision-${source.source_id}`}>审核结果</Label>
               <select
                 id={`decision-${source.source_id}`}
                 value={decision}
@@ -553,19 +564,19 @@ function SourceReviewCard({
                   setDecision(event.target.value as ReviewDecision);
                 }}
               >
-                <option value="approve">批准分类，进入待发布</option>
-                <option value="needs_review">保留并标记需复核</option>
-                <option value="reject">拒绝当前来源</option>
+                <option value="approve">通过，进入待发布</option>
+                <option value="needs_review">暂不发布，交给负责人复核</option>
+                <option value="reject">不采用这份资料</option>
               </select>
             </div>
             <div className="grid gap-2">
-              <Label htmlFor={`reason-${source.source_id}`}>审阅理由</Label>
+              <Label htmlFor={`reason-${source.source_id}`}>判断依据</Label>
               <Input
                 id={`reason-${source.source_id}`}
                 value={reason}
                 disabled={!editable || Boolean(pending)}
                 maxLength={500}
-                placeholder="记录为什么接受或拒绝当前分类"
+                placeholder="例如：官网产品详情页，规格和图片与产品一致"
                 onChange={(event) => {
                   reviewReceiptId.current = null;
                   setReason(event.target.value);
@@ -586,7 +597,7 @@ function SourceReviewCard({
               ) : (
                 <ShieldCheck />
               )}
-              保存审阅决定
+              保存审核结果
             </Button>
           </div>
         ) : (
@@ -597,7 +608,7 @@ function SourceReviewCard({
             }
           >
             <CheckCircle2 className="size-4" />
-            当前没有 Pending Snapshot，来源信息与 Current Snapshot 仅供查看。
+            当前没有待审核版本，来源信息与在线版本仅供查看。
           </div>
         )}
 
@@ -617,7 +628,7 @@ function SourceReviewCard({
             ) : (
               <PackageCheck />
             )}
-            发布待审 Snapshot
+            发布这份资料
           </Button>
         ) : pendingSnapshotId ? (
           <p
@@ -626,8 +637,7 @@ function SourceReviewCard({
               "leading-5 text-muted-foreground"
             }
           >
-            先保存“批准分类”的审阅决定，服务端确认
-            `pending_review_decision=approve` 后才显示发布命令。
+            审核通过后还要点击“发布这份资料”，它才会参与文章检索；原来的在线版本不会受影响。
           </p>
         ) : null}
       </CardContent>
@@ -760,7 +770,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
     setMessage(
       result.created
         ? `${result.message} 已生成 ${result.chunk_count} 个知识块、登记 ${result.asset_count} 个内嵌资产。`
-        : `${result.message} 本次没有重复创建 Snapshot 或 Audit 记录。`,
+        : `${result.message} 本次没有重复创建资料版本或审核记录。`,
     );
     await load();
   }
@@ -787,7 +797,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   const summaries = [
     { label: "全部来源", value: library?.source_count || 0, icon: FileStack },
     {
-      label: "Pending Snapshot",
+      label: "待审核版本",
       value: library?.pending_count || 0,
       icon: Inbox,
     },
@@ -810,12 +820,12 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
             <BookOpenText className="size-4" />
-            Server Research Inbox
+            知识库审核
           </div>
           <h1 className="text-2xl font-semibold">知识来源审阅</h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
             私有资料上传与 Rediscovery 都只把来源、产品和图片证据放入
-            Inbox。这里负责人工分类、发布 Snapshot 与确认产品身份；WordPress
+            待审核区。这里负责人工分类、发布资料与确认产品身份；WordPress
             Sync 和原始对象打开仍保持 Server 关闭。Research Run 已迁移到独立的
             PostgreSQL Worker，可在“资料研究”页签中运行。
           </p>
@@ -846,6 +856,8 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           <AlertDescription>{message}</AlertDescription>
         </Alert>
       ) : null}
+
+      <KnowledgeReviewGuide />
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {summaries.map((item) => (
@@ -888,8 +900,8 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
               <h2 className="font-semibold">私有资料安全边界</h2>
               <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
                 上传先写入项目隔离、内容寻址的私有对象；数据库提交前会重新检查
-                knowledge.edit，并把 Source、Snapshot、Chunk、Asset 关系和脱敏
-                Audit 放进同一个事务。权限在上传期间被撤销时，不会留下可查询的半成品。
+                knowledge.edit，并把来源、版本、段落、图片关系和脱敏
+                审核记录放进同一个事务。权限在上传期间被撤销时，不会留下可查询的半成品。
               </p>
             </div>
           </div>
@@ -905,13 +917,13 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
         <div>
           <h2 className="text-lg font-semibold">来源队列</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            审阅决定与发布分成两个显式动作；Embedding 失败时旧快照继续服务。
+            先保存审核结果，再单独发布；处理失败时原来的在线资料仍然可用。
           </p>
         </div>
         {loading ? (
           <div className="flex min-h-44 items-center justify-center rounded-xl border text-sm text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
-            正在读取 Project-scoped Knowledge Library…
+            正在读取当前项目的知识库…
           </div>
         ) : sortedSources.length ? (
           <div className="grid gap-4 xl:grid-cols-2">
@@ -944,7 +956,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           <div>
             <h2 className="text-lg font-semibold">产品身份</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              确认只改变 Catalog 身份；文章工作台仍要求当前 Published Snapshot
+              确认只改变产品目录身份；文章工作台仍要求当前已发布资料版本
               Evidence 完整，不能把候选产品事实直接写入 Task。
             </p>
           </div>

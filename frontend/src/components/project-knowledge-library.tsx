@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { KnowledgeReviewGuide } from "@/components/knowledge-review-guide";
 import {
   Table,
   TableBody,
@@ -380,7 +381,7 @@ export function ProjectKnowledgeLibrary({
               icon: FileStack,
             },
             {
-              label: "Research Inbox",
+              label: "待审核资料",
               value: library?.inbox_count ?? 0,
               icon: Inbox,
             },
@@ -418,6 +419,8 @@ export function ProjectKnowledgeLibrary({
           ))}
         </section>
 
+        <KnowledgeReviewGuide />
+
         <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
           <Card className="min-w-0">
             <CardHeader>
@@ -438,9 +441,9 @@ export function ProjectKnowledgeLibrary({
                     <TableHeader>
                       <TableRow>
                         <TableHead>来源</TableHead>
-                        <TableHead>分类与信任</TableHead>
+                        <TableHead>分类与可信度</TableHead>
                         <TableHead>状态</TableHead>
-                        <TableHead>版本 / 块 / 图片</TableHead>
+                        <TableHead>版本 / 段落 / 图片</TableHead>
                         <TableHead>最近入库</TableHead>
                         <TableHead className="text-right">证据</TableHead>
                       </TableRow>
@@ -455,7 +458,7 @@ export function ProjectKnowledgeLibrary({
                             </div>
                             {source.classification_reason ? (
                               <div className="mt-2 text-xs leading-5 text-muted-foreground">
-                                {source.classification_reason}
+                                系统判断：{source.classification_reason}
                               </div>
                             ) : null}
                           </TableCell>
@@ -498,7 +501,7 @@ export function ProjectKnowledgeLibrary({
                                   ) : (
                                     <CheckCircle2 />
                                   )}
-                                  确认并发布
+                                  通过并发布
                                 </Button>
                               ) : null}
                               <SourceEvidenceLink source={source} />
@@ -512,7 +515,7 @@ export function ProjectKnowledgeLibrary({
               ) : (
                 <div className="flex min-h-52 flex-col items-center justify-center rounded-lg border border-dashed px-6 text-center">
                   <Inbox className="mb-3 size-8 text-muted-foreground" />
-                  <div className="font-medium">Research Inbox 还是空的</div>
+                  <div className="font-medium">待审核资料还是空的</div>
                   <p className="mt-1 max-w-md text-sm text-muted-foreground">
                     上传私有资料，或从右侧探测并同步 WordPress 官网产品分类页。
                   </p>
