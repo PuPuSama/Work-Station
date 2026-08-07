@@ -497,6 +497,11 @@ export function ServerArticleWorkbench({
   );
   const articleJobLabel = hasArticleDraft ? "重新生成正文" : "生成文章初稿";
   const articleJobEndpoint = hasArticleDraft ? "article/rewrite" : "article";
+  const titleGenerationBlockedReason = !editAllowed
+    ? `当前账号是“${roleLabel(role)}”，需要“编辑”或更高项目权限才能生成标题。`
+    : !allowed.has("generate_titles")
+      ? "当前任务状态暂不允许生成标题，请先刷新任务状态。"
+      : "";
 
   if (loading && !task) {
     return (
@@ -680,6 +685,11 @@ export function ServerArticleWorkbench({
                 <Button
                   type="button"
                   className="min-h-11"
+                  aria-describedby={
+                    titleGenerationBlockedReason
+                      ? `title-generation-help-${task.id}`
+                      : undefined
+                  }
                   disabled={
                     Boolean(pending) ||
                     !editAllowed ||
@@ -694,6 +704,15 @@ export function ServerArticleWorkbench({
                   )}
                   {task.title_candidates.length ? "重新生成候选" : "生成候选"}
                 </Button>
+                {titleGenerationBlockedReason ? (
+                  <p
+                    id={`title-generation-help-${task.id}`}
+                    className="text-xs leading-5 text-amber-700 dark:text-amber-300"
+                    role="alert"
+                  >
+                    {titleGenerationBlockedReason}
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
 
