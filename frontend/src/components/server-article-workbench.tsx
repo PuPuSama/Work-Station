@@ -382,7 +382,9 @@ export function ServerArticleWorkbench({
     const jobScope = workbenchScope;
     if (
       (writingSettingsDirty || writingSettingsPromptBlocked) &&
-      (endpoint === "outline" || endpoint === "article")
+      (endpoint === "outline" ||
+        endpoint === "article" ||
+        endpoint === "article/rewrite")
     ) {
       setMessage("");
       setError(
@@ -485,6 +487,16 @@ export function ServerArticleWorkbench({
   const allowed = new Set(task?.allowed_actions || []);
   const editAllowed = canEdit(role);
   const reviewAllowed = canReview(role);
+  const hasArticleDraft = Boolean(
+    (
+      task?.initial_article ||
+      task?.raw_draft_article ||
+      task?.article ||
+      ""
+    ).trim(),
+  );
+  const articleJobLabel = hasArticleDraft ? "重新生成正文" : "生成文章初稿";
+  const articleJobEndpoint = hasArticleDraft ? "article/rewrite" : "article";
 
   if (loading && !task) {
     return (
@@ -1010,14 +1022,16 @@ export function ServerArticleWorkbench({
                     !editAllowed ||
                     !allowed.has("generate_article")
                   }
-                  onClick={() => void runJob("生成文章初稿", "article")}
+                  onClick={() =>
+                    void runJob(articleJobLabel, articleJobEndpoint)
+                  }
                 >
-                  {pending === "生成文章初稿" ? (
+                  {pending === articleJobLabel ? (
                     <Loader2 className="animate-spin" />
                   ) : (
                     <Sparkles />
                   )}
-                  生成文章初稿
+                  {articleJobLabel}
                 </Button>
               </CardContent>
             </Card>

@@ -33,6 +33,7 @@ ServerTaskAuditAction = Literal[
     "article.outline_version.restored",
     "article.writing_settings.updated",
     "article.draft.generated",
+    "article.draft.regenerated",
     "article.initial_ai_screenshot.uploaded",
     "article.initial_ai_check.updated",
     "article.humanized.updated",
@@ -65,6 +66,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.outline_version.restored": "article.edit",
     "article.writing_settings.updated": "article.edit",
     "article.draft.generated": "article.edit",
+    "article.draft.regenerated": "article.edit",
     "article.initial_ai_screenshot.uploaded": "article.review",
     "article.initial_ai_check.updated": "article.review",
     "article.humanized.updated": "article.edit",
@@ -136,6 +138,16 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
         }
     ),
     "article.draft.generated": frozenset(
+        {
+            "context_chunk_count",
+            "initial_word_count",
+            "prompt_source",
+            "prompt_version",
+            "raw_word_count",
+            "target_words",
+        }
+    ),
+    "article.draft.regenerated": frozenset(
         {
             "context_chunk_count",
             "initial_word_count",

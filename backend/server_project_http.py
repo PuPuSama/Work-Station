@@ -79,6 +79,8 @@ from services.server_title_generation import (
     TitleGenerationUnavailable,
 )
 from services.server_article_generation import (
+    ARTICLE_GENERATION_OPERATION,
+    ARTICLE_REWRITE_OPERATION,
     ArticleGenerationUnavailable,
     ServerArticleGenerationRegistry,
 )
@@ -2025,6 +2027,47 @@ def read_project_task_title_generation_job(
     return TitleGenerationJobResponse.model_validate(job)
 
 
+def _enqueue_project_task_article_job(
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+    *,
+    operation: str,
+) -> ArticleGenerationJobResponse:
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        job = _article_generation(request).enqueue(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+            operation=operation,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    except (ActiveJobError, JobConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ArticleGenerationUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server article generation is not available.",
+        ) from exc
+    return ArticleGenerationJobResponse.model_validate(job)
+
+
 @router.post(
     "/{project}/tasks/{task_id}/article",
     response_model=ArticleGenerationJobResponse,
@@ -2039,17 +2082,53 @@ def enqueue_project_task_article_generation(
     ),
 ) -> ArticleGenerationJobResponse:
     del project
-    authorized = _require_project_permission(
+    return _enqueue_project_task_article_job(
+        task_id,
+        payload,
         request,
         authorized,
-        "article.edit",
+        operation=ARTICLE_GENERATION_OPERATION,
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/article/rewrite",
+    response_model=ArticleGenerationJobResponse,
+)
+def enqueue_project_task_article_rewrite(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ArticleGenerationJobResponse:
+    del project
+    return _enqueue_project_task_article_job(
+        task_id,
+        payload,
+        request,
+        authorized,
+        operation=ARTICLE_REWRITE_OPERATION,
+    )
+
+
+def _read_project_task_article_job(
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest,
+    *,
+    operation: str,
+) -> ArticleGenerationJobResponse:
     try:
-        job = _article_generation(request).enqueue(
+        job = _article_generation(request).get_job(
             actor=authorized.actor,
             project_id=authorized.project_id,
             task_id=task_id,
-            source_revision=payload.revision,
+            job_id=job_id,
+            operation=operation,
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -2059,10 +2138,8 @@ def enqueue_project_task_article_generation(
     except KeyError:
         raise HTTPException(
             status_code=404,
-            detail="Task was not found in the requested project.",
+            detail="Article generation job was not found.",
         ) from None
-    except (ActiveJobError, JobConflict) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ArticleGenerationUnavailable as exc:
         raise HTTPException(
             status_code=503,
@@ -2085,29 +2162,36 @@ def read_project_task_article_generation_job(
     ),
 ) -> ArticleGenerationJobResponse:
     del project
-    try:
-        job = _article_generation(request).get_job(
-            actor=authorized.actor,
-            project_id=authorized.project_id,
-            task_id=task_id,
-            job_id=job_id,
-        )
-    except ProjectAccessDenied as exc:
-        raise HTTPException(
-            status_code=403,
-            detail="project access denied",
-        ) from exc
-    except KeyError:
-        raise HTTPException(
-            status_code=404,
-            detail="Article generation job was not found.",
-        ) from None
-    except ArticleGenerationUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Server article generation is not available.",
-        ) from exc
-    return ArticleGenerationJobResponse.model_validate(job)
+    return _read_project_task_article_job(
+        task_id,
+        job_id,
+        request,
+        authorized,
+        operation=ARTICLE_GENERATION_OPERATION,
+    )
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/article/rewrite/jobs/{job_id}",
+    response_model=ArticleGenerationJobResponse,
+)
+def read_project_task_article_rewrite_job(
+    project: str,
+    task_id: str,
+    job_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ArticleGenerationJobResponse:
+    del project
+    return _read_project_task_article_job(
+        task_id,
+        job_id,
+        request,
+        authorized,
+        operation=ARTICLE_REWRITE_OPERATION,
+    )
 
 
 @router.post(

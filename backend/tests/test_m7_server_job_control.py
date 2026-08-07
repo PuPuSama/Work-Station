@@ -384,12 +384,12 @@ class ServerJobControlTests(unittest.TestCase):
             self.task_ids[0],
             operation="humanize",
         )
-        hidden_batch = self._create_job(
+        rewrite_batch = self._create_job(
             self.queue_a,
             self.task_ids[3],
             operation="rewrite_article",
         )
-        self.queue_a.cancel_batch(str(hidden_batch["id"]))
+        self.queue_a.cancel_batch(str(rewrite_batch["id"]))
         link_batch = self._create_job(
             self.queue_a,
             self.task_ids[3],
@@ -407,7 +407,7 @@ class ServerJobControlTests(unittest.TestCase):
             project_id=self.project_a,
         )
 
-        self.assertEqual(len(page.items), 6)
+        self.assertEqual(len(page.items), 7)
         self.assertEqual(
             {item.batch_id for item in page.items},
             {
@@ -415,6 +415,7 @@ class ServerJobControlTests(unittest.TestCase):
                 title_batch["id"],
                 article_batch["id"],
                 humanize_batch["id"],
+                rewrite_batch["id"],
                 link_batch["id"],
                 seo_review_batch["id"],
             },

@@ -798,6 +798,19 @@ class ServerRequestSecurityTests(unittest.TestCase):
         self.assertTrue(
             server_http_route_available(
                 "POST",
+                "/api/projects/example.com/tasks/task-a/article/rewrite",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "GET",
+                "/api/projects/example.com/tasks/task-a/"
+                "article/rewrite/jobs/job-a",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
                 "/api/projects/example.com/tasks/task-a/restore-links",
             )
         )

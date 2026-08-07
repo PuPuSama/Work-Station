@@ -88,6 +88,11 @@ from workflow.state_machine import (
 
 
 ARTICLE_GENERATION_OPERATION = "article"
+ARTICLE_REWRITE_OPERATION = "rewrite_article"
+ARTICLE_GENERATION_OPERATIONS = (
+    ARTICLE_GENERATION_OPERATION,
+    ARTICLE_REWRITE_OPERATION,
+)
 MAX_GENERATED_ARTICLE_CHARACTERS = 200_000
 
 
@@ -116,6 +121,23 @@ class ArticleGenerationProvider(Protocol):
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedGenerationContextChunk],
     ) -> str: ...
+
+
+def _validate_article_operation(
+    task: TaskRecord,
+    operation: str,
+) -> None:
+    if operation not in ARTICLE_GENERATION_OPERATIONS:
+        raise JobConflict("unsupported server job operation")
+    has_draft = bool(
+        task.raw_draft_article.strip()
+        or task.initial_article.strip()
+        or task.article.strip()
+    )
+    if operation == ARTICLE_GENERATION_OPERATION and has_draft:
+        raise JobConflict("article draft already exists; use rewrite")
+    if operation == ARTICLE_REWRITE_OPERATION and not has_draft:
+        raise JobConflict("article draft is required for rewrite")
 
 
 def build_server_article_prompt(
@@ -365,7 +387,8 @@ class ServerArticleGenerationHandler:
         job: dict[str, Any],
         cancelled: Callable[[], bool],
     ) -> int:
-        if str(job.get("operation") or "") != ARTICLE_GENERATION_OPERATION:
+        operation = str(job.get("operation") or "")
+        if operation not in ARTICLE_GENERATION_OPERATIONS:
             raise JobConflict("unsupported server job operation")
         organization_id = str(
             job.get("organization_id") or ""
@@ -409,6 +432,7 @@ class ServerArticleGenerationHandler:
         task = TaskRecord.model_validate(payload)
         if task.revision != source_revision:
             raise JobConflict("source task revision changed")
+        _validate_article_operation(task, operation)
         try:
             ensure_action_allowed(task, ACTION_GENERATE_ARTICLE)
         except WorkflowActionNotAllowed as exc:
@@ -455,7 +479,11 @@ class ServerArticleGenerationHandler:
                 task,
                 expected_revision=source_revision,
                 actor=ActorIdentity(organization_id, requester),
-                action="article.draft.generated",
+                action=(
+                    "article.draft.regenerated"
+                    if operation == ARTICLE_REWRITE_OPERATION
+                    else "article.draft.generated"
+                ),
                 details={
                     "context_chunk_count": len(context_chunks),
                     "initial_word_count": visible_word_count(initial),
@@ -569,7 +597,7 @@ class ServerArticleGenerationRegistry:
                     access=self._access,
                 ),
                 concurrency=1,
-                operations=(ARTICLE_GENERATION_OPERATION,),
+                operations=ARTICLE_GENERATION_OPERATIONS,
             )
             current.runner = runner
             try:
@@ -590,8 +618,9 @@ class ServerArticleGenerationRegistry:
                     background_jobs.c.project_id,
                 )
                 .where(
-                    background_jobs.c.operation
-                    == ARTICLE_GENERATION_OPERATION,
+                    background_jobs.c.operation.in_(
+                        ARTICLE_GENERATION_OPERATIONS
+                    ),
                     background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
                 )
                 .distinct()
@@ -615,7 +644,10 @@ class ServerArticleGenerationRegistry:
         project_id: str,
         task_id: str,
         source_revision: int,
+        operation: str = ARTICLE_GENERATION_OPERATION,
     ) -> dict[str, object]:
+        if operation not in ARTICLE_GENERATION_OPERATIONS:
+            raise JobConflict("unsupported server job operation")
         self._access.require(actor, project_id, "article.edit")
         repository = PostgresTaskRepository(
             self._engine,
@@ -628,6 +660,7 @@ class ServerArticleGenerationRegistry:
         task = TaskRecord.model_validate(payload)
         if task.revision != source_revision:
             raise JobConflict("source task revision changed")
+        _validate_article_operation(task, operation)
         try:
             ensure_action_allowed(task, ACTION_GENERATE_ARTICLE)
         except WorkflowActionNotAllowed as exc:
@@ -701,7 +734,7 @@ class ServerArticleGenerationRegistry:
                 }
                 batch = project.queue.create_batch_in_transaction(
                     connection,
-                    ARTICLE_GENERATION_OPERATION,
+                    operation,
                     [
                         {
                             "task_id": task_id,
@@ -721,7 +754,7 @@ class ServerArticleGenerationRegistry:
                         actor.organization_id,
                         project_id,
                         job_id,
-                        ARTICLE_GENERATION_OPERATION,
+                        operation,
                     )
                 )
                 self._audit.append(
@@ -737,12 +770,16 @@ class ServerArticleGenerationRegistry:
                         ),
                         actor_user_id=actor.user_id,
                         project_id=project_id,
-                        action="article.article_generation.queued",
+                        action=(
+                            "article.article_regeneration.queued"
+                            if operation == ARTICLE_REWRITE_OPERATION
+                            else "article.article_generation.queued"
+                        ),
                         target_type="background_job",
                         target_id=job_id,
                         details={
                             "context_chunk_count": len(context_chunks),
-                            "operation": ARTICLE_GENERATION_OPERATION,
+                            "operation": operation,
                             "prompt_source": reference.source,
                             "prompt_version": reference.version,
                             "source_revision": source_revision,
@@ -775,7 +812,10 @@ class ServerArticleGenerationRegistry:
         project_id: str,
         task_id: str,
         job_id: str,
+        operation: str = ARTICLE_GENERATION_OPERATION,
     ) -> dict[str, object]:
+        if operation not in ARTICLE_GENERATION_OPERATIONS:
+            raise KeyError(job_id)
         self._access.require(actor, project_id, "project.view")
         project = self._ensure_project(
             actor.organization_id,
@@ -785,7 +825,7 @@ class ServerArticleGenerationRegistry:
         job = project.queue.get_job(job_id)
         if (
             str(job["task_id"]) != task_id
-            or str(job["operation"]) != ARTICLE_GENERATION_OPERATION
+            or str(job["operation"]) != operation
         ):
             raise KeyError(job_id)
         return self._public_job(job)
@@ -863,6 +903,8 @@ class ServerArticleGenerationRegistry:
 
 __all__ = [
     "ARTICLE_GENERATION_OPERATION",
+    "ARTICLE_GENERATION_OPERATIONS",
+    "ARTICLE_REWRITE_OPERATION",
     "ArticleGenerationProvider",
     "ArticleGenerationStopReport",
     "ArticleGenerationUnavailable",

@@ -2381,6 +2381,21 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             self.assertEqual(
                 TestClient(app_module.app).post(
                     f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article/rewrite",
+                    json={"revision": 0},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).get(
+                    f"/api/projects/{self.project_a}/tasks/"
+                    f"{self.task_a}/article/rewrite/jobs/job-a",
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                TestClient(app_module.app).post(
+                    f"/api/projects/{self.project_a}/tasks/"
                     f"{self.task_a}/restore-links",
                     json={"revision": 0},
                 ).status_code,
@@ -4831,6 +4846,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     ).status_code,
                     422,
                 )
+                rewrite_path = f"{path}/rewrite"
+                self.assertEqual(
+                    client.post(
+                        rewrite_path,
+                        json={"revision": 0},
+                    ).status_code,
+                    409,
+                )
                 self.assertEqual(
                     client.post(
                         (
@@ -4910,6 +4933,74 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     str(audit.events),
                 )
                 self.assertFalse(local_state.exists())
+                self.assertEqual(
+                    client.post(path, json={"revision": 1}).status_code,
+                    409,
+                )
+                rewritten = client.post(
+                    rewrite_path,
+                    json={"revision": 1},
+                )
+                self.assertEqual(
+                    rewritten.status_code,
+                    200,
+                    rewritten.text,
+                )
+                rewrite_job = rewritten.json()
+                self.assertEqual(
+                    rewrite_job["operation"],
+                    "rewrite_article",
+                )
+                self.assertNotIn("request", rewrite_job)
+                rewrite_status_path = (
+                    f"{rewrite_path}/jobs/{rewrite_job['job_id']}"
+                )
+                rewrite_terminal = None
+                for _attempt in range(100):
+                    response = client.get(rewrite_status_path)
+                    self.assertEqual(
+                        response.status_code,
+                        200,
+                        response.text,
+                    )
+                    rewrite_terminal = response.json()
+                    if rewrite_terminal["status"] in {
+                        "succeeded",
+                        "failed",
+                        "conflict",
+                        "cancelled",
+                    }:
+                        break
+                    time.sleep(0.02)
+                assert rewrite_terminal is not None
+                self.assertEqual(
+                    rewrite_terminal["status"],
+                    "succeeded",
+                )
+                self.assertEqual(rewrite_terminal["result_revision"], 2)
+                rewritten_payload = repository.get(self.task_a)
+                assert rewritten_payload is not None
+                rewritten_task = TaskRecord.model_validate(
+                    rewritten_payload
+                )
+                self.assertEqual(rewritten_task.revision, 2)
+                self.assertEqual(len(provider.calls), 2)
+                self.assertEqual(
+                    [item.kind for item in rewritten_task.article_versions],
+                    ["raw_draft", "initial", "raw_draft", "initial"],
+                )
+                self.assertEqual(
+                    rewritten_task.article_versions[-1].source_kind,
+                    "regenerated_raw_draft",
+                )
+                self.assertIn(
+                    "article.article_regeneration.queued",
+                    [event.action for event in audit.events],
+                )
+                self.assertIn(
+                    "article.draft.regenerated",
+                    [event.action for event in audit.events],
+                )
 
     def test_outline_context_rejects_unpublished_pinned_chunk(
         self,

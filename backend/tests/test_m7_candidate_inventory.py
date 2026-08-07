@@ -37,7 +37,7 @@ from services import candidate_inventory as candidate_module  # noqa: E402
 
 
 RELEASE_COMMIT = "1" * 40
-EXPECTED_ROUTE_COUNT = 182
+EXPECTED_ROUTE_COUNT = 185
 
 
 def application_routes() -> list[Route]:
@@ -76,6 +76,15 @@ class CandidateInventoryTests(unittest.TestCase):
                 "jobs/{job_id}",
             ),
             ("PUT", "/api/projects/{project}/tasks/{task_id}/products"),
+            (
+                "POST",
+                "/api/projects/{project}/tasks/{task_id}/article/rewrite",
+            ),
+            (
+                "GET",
+                "/api/projects/{project}/tasks/{task_id}/article/rewrite/"
+                "jobs/{job_id}",
+            ),
         ):
             self.assertEqual(by_identity[identity]["state"], "server_ready")
         self.assertEqual(
@@ -403,7 +412,7 @@ class CandidateInventoryTests(unittest.TestCase):
             self.assertEqual(verify.call_count, 3)
             self.assertEqual(public["release_commit"], RELEASE_COMMIT)
             self.assertEqual(public["route_count"], EXPECTED_ROUTE_COUNT)
-            self.assertEqual(public["operation_count"], 9)
+            self.assertEqual(public["operation_count"], 10)
             written = output.read_text(encoding="utf-8")
             expected = inventory_json(build_candidate_inventory(
                 application_routes(), release_commit=RELEASE_COMMIT,

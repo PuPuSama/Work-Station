@@ -58,6 +58,7 @@ _REPRESENTATIVE_ROUTE_VALUES = {
 
 _OPERATION_COMMIT_BOUNDARIES = {
     "article": "postgres_task_cas_and_audit",
+    "rewrite_article": "postgres_task_cas_and_audit",
     "humanize": "postgres_task_cas_and_audit",
     "knowledge_research": "postgres_research_checkpoint_and_publication",
     "outline": "postgres_task_cas_and_audit",
@@ -72,6 +73,10 @@ _OPERATION_AUDIT_ACTIONS = {
     "article": (
         "article.article_generation.queued",
         "article.draft.generated",
+    ),
+    "rewrite_article": (
+        "article.article_regeneration.queued",
+        "article.draft.regenerated",
     ),
     "humanize": (
         "article.humanize.queued",
@@ -204,6 +209,7 @@ _PROJECT_VIEW_ROUTES = frozenset(
         "read_project_product_rediscovery_job",
         "read_project_task",
         "read_project_task_article_generation_job",
+        "read_project_task_article_rewrite_job",
         "read_project_task_humanize_job",
         "read_project_task_link_restoration_job",
         "read_project_task_outline_generation_job",
@@ -217,6 +223,7 @@ _ARTICLE_EDIT_ROUTES = frozenset(
         "create_project_task",
         "create_server_project_prompt",
         "enqueue_project_task_article_generation",
+        "enqueue_project_task_article_rewrite",
         "enqueue_project_task_humanize",
         "enqueue_project_task_link_restoration",
         "enqueue_project_task_outline_generation",
@@ -273,6 +280,7 @@ _WORKER_ENQUEUE_ROUTES = frozenset(
     {
         "enqueue_project_product_rediscovery",
         "enqueue_project_task_article_generation",
+        "enqueue_project_task_article_rewrite",
         "enqueue_project_task_humanize",
         "enqueue_project_task_link_restoration",
         "enqueue_project_task_outline_generation",

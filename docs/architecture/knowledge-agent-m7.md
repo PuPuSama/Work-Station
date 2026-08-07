@@ -1401,8 +1401,8 @@ POST /api/projects/{project_id}/jobs/{job_id}/retry
 Attempt、时间戳、`cancel_requested` 与 `has_error` 布尔值。列表在 SQL 中固定
 Organization/Project 和已迁移 Operation，并按 `created_at + batch_id` 做稳定 Keyset
 分页；当前可见 Operation 是
-`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`。旧
-`/api/batches*` 继续 503，未迁移的 `products/rewrite_article/...` 即使误写入
+`product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products/knowledge_research`。旧
+`/api/batches*` 继续 503，未迁移的其他 Operation 即使误写入
 PostgreSQL 也不会出现在控制面。
 
 读取要求 `project.view`。取消与重试先锁定 Organization/User/Project 及全部可撤权

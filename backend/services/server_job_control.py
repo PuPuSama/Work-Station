@@ -29,6 +29,7 @@ from services.postgres_job_queue import PostgresJobQueue
 SERVER_JOB_CONTROL_OPERATIONS = frozenset(
     {
         "article",
+        "rewrite_article",
         "humanize",
         "knowledge_research",
         "outline",

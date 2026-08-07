@@ -175,7 +175,7 @@ Status、既有产物或最后一次实际生成的 Prompt Snapshot。Preview �
 | `restore_links` | Project-scoped、固定 Task Revision/Template Hash/Initial 与 Humanized Hash/链接数 | Project Registry；模型只产候选，确定性校验后写 Linked Version | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `seo_review` | Project-scoped、固定 Task Revision/Initial Article Hash/Prompt Version/System Template Hash/Published Chunk ID | 共享 Lifecycle + Operation-specific Enqueue/Handler；只追加 Open Review Run | `article.review` | `article.review` | Project-scoped 状态与 Batch/Job 控制已完成 |
 | `products` | Project-scoped、固定 Task Revision/Template Hash/Provider Model/完整 Current Published Product Evidence Binding | Project Registry，只写 `product_candidate_ids` | `article.edit` | `article.edit` | Project-scoped 状态、取消、重试与有界排空已完成；人工 `PUT .../products` 仍独立重验正式证据 |
-| `rewrite_article` | Local SQLite | Local Runner | 无 Server Actor | 无 Server Actor | Local Only |
+| `rewrite_article` | Project-scoped、固定 Task Revision/Prompt Version/Published Chunk ID | 与 `article` 共享 Project Registry 和 Server-only Handler；保留历史 Article Version 并失效下游 | `article.edit` | `article.edit` | Project-scoped 状态与 Batch/Job 控制已完成；无既有正文时拒绝 |
 | `knowledge_research` | 已确认 PostgreSQL Task、Plan/Run/Event/Batch/Job/Audit 同事务；Resume 只接受 Candidate ID | Server-only Handler + PostgreSQL Checkpointer + Project-scoped S3 | `knowledge.publish` | `knowledge.publish`；逐候选抓取与 Publish 再复核 | 列表已开放；通用 Cancel/Retry fail closed，只能创建领域 Resume Job |
 
 不能因为 `PostgresJobQueue` 支持任意 Operation 字符串，就把某个 Operation 标成已迁移。
@@ -252,9 +252,9 @@ Operation、Task 或 Source Revision；它重放服务器已保存的同一可�
 旧 `/api/batches*` 在控制面完成后仍保持 503，调用方必须使用 Project-scoped 路径，
 不能建立无 Project 的兼容别名。下一项 Operation 只有在可信 Enqueue、两阶段权限、
 Server-only Handler、私有存储和停机测试全部完成后，才能加入显式 Operation 集合。
-`products` 主生成链现已完成候选/提交分离、Current Published Context、Provider
-错误脱敏、Task CAS/Audit、两阶段授权、Job Control 与有界停机，并进入显式 Operation
-集合。该切片只证明单个 Operation 的链路完整；`rewrite_article` 继续保持 Local-only，
+`products` 主生成链与 `rewrite_article` 现已完成各自的 Task CAS/Audit、两阶段授权、
+Job Control 与有界停机，并进入显式 Operation 集合。`rewrite_article` 复用正式 Article
+Provider、固定 Prompt/Published Context 和版本保留逻辑，不建立第二套生成链。
 Route/Operation Inventory Digest、真实受控冒烟和其余 Capability 证据仍需在候选 Commit
 冻结后独立生成，不能据此把整体 M7 改为 `go`。
 

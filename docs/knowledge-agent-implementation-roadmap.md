@@ -378,8 +378,9 @@
   具体生产 IdP 注册与 Conformance 冒烟仍待部署环境；
 - Deployment Capability Evidence Consumer 的实现、自动化验证和整体回归已完成；
   `products` 主生成链现已按候选/提交分离、Published Current Context、Provider 脱敏、
-  CAS/Audit、两阶段授权、Job Control 和停机语义进入 Server Operation 白名单，但现有
-  Capability true/false 继续保持不变，`rewrite_article` 仍为 Local-only。随后按“冻结
+  CAS/Audit、两阶段授权、Job Control 和停机语义进入 Server Operation 白名单；
+  `rewrite_article` 也已复用正式 Article Provider 完成 Project-scoped PostgreSQL Job、
+  版本保留、下游失效和前端入口。现有 Capability true/false 继续保持不变。随后按“冻结
   候选 Commit 并生成 Route/Operation Digest 与受控产品冒烟 -> 生产 IdP Conformance 与
   逐 Operation API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据 -> 服务器 PostgreSQL
   单写切换 -> 真实备份恢复 Capture/独立 Review -> 签名 Evidence Preflight 与部署门禁”

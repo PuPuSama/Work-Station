@@ -2015,3 +2015,16 @@ Set-Location frontend
   Tavily、客户网站、生产 IdP 或生产 S3；
 - 接口、事务、Prompt 固定时点、组件职责、失败语义和后续重构接缝记录在
   `docs/architecture/m7-server-task-writing-settings.md`。
+
+### M7 Server 正文重写 Job
+
+- `POST /api/projects/{project}/tasks/{task_id}/article/rewrite` 与精确 Job 状态路由已接入；
+- `rewrite_article` 与首次 `article` 共享正式 Provider、固定 Prompt/Published Chunk、
+  PostgreSQL Runner、两阶段 `article.edit` 授权和有界停机；
+- 无既有正文时重写返回 409，已有正文再次调用首次生成也返回 409；
+- 成功重写保留旧 Article Version，新增 `regenerated_raw_draft` Version，失效下游产物，
+  并以 `article.draft.regenerated` 与队列 Audit 原子提交；
+- Route Inventory 当前为 185 条，Operation Inventory 当前为 10 条；本切片不会翻转
+  M7 Deployment Capability，整体发布结论仍为 `no-go`。
+- Server 定向回归 74 项、Task 审计回归 4 项、完整后端回归 835 项通过，2 项外部集成
+  按显式门禁跳过；前端全量 ESLint 与 Next.js 16.2.10 production build 通过。
