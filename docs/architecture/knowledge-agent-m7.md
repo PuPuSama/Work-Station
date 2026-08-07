@@ -11,7 +11,7 @@ M7 不一次性切换整个应用。采用 expand/contract：
 3. 再让 API、检索、对象下载与 Worker 强制执行 RBAC；
 4. 验证服务器端闭环后，才收缩 SQLite 正式写入路径和临时兼容层。
 
-## 2. 当前完成范围：M7-A / M7-B / M7-C1-C2 / M7-D1
+## 2. 当前完成范围：M7-A / M7-B / M7-C / M7-D2（代码侧）
 
 本阶段已实现：
 
@@ -261,9 +261,9 @@ M7 不一次性切换整个应用。采用 expand/contract：
 - 项目显式成员 UI 与 Organization Admin Console 已接入；Actor Session 全会话撤销已有
   组织级确认入口；
 - 不给旧项目自动补一个虚构 Organization；
-- 尚未把全部 Task/Job 正式写路径切换到 PostgreSQL；当前
-  `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 七条
-  Operation-specific Job 入口与独立的 `knowledge_research` 入口使用 PostgreSQL 单写；
+- 全部 Server-ready Task 写路径和 10 个正式 Operation 已切换到 PostgreSQL 单写；旧无
+  Project Task/Batch 入口与全局 TaskStore/JobQueue 在 Server Mode fail closed。尚未完成的是
+  每个正式 Project 的冻结窗口 matched Report 和真实环境切换证据；
 - 不改变 `knowledge_agent_enabled` 默认关闭；
 - 不接邮件发送服务与生产 IdP Provider 配置管理；Organization Admin Console 已接入
   Workspace User、全会话撤销、Team、TeamMembership、Invitation 与 External Identity 映射，
@@ -815,12 +815,11 @@ Job 不保存为不透明 JSON，而是结构化保存状态、Attempt、可运�
 SQLite Queue、不启动本地 Worker，并让全局 `store()/batch_queue()` fail closed；
 项目级 PostgreSQL Task 列表/单条读取、“完全重写”“选择已确认产品”“快照后替换一个
 已审阅章节”、私有图片准备和文章 DOCX 已经接线，并统一使用事务内 Audit；此外，
-`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review` 已有独立
-PostgreSQL Job API/Runner；`knowledge_research` 另有绑定 Plan/Run/Checkpoint 的专用
-API/Runner。
-其余正文后处理写入、通用 Batch 和 Worker 尚未接线。因此
-不能用一个全局“默认项目”强行切换 PostgreSQL，也不能把一个 Operation-specific
-Runner 描述成“服务器 Job 单写已完成”。
+`product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products`
+已有独立 PostgreSQL Job API/Runner；`knowledge_research` 另有绑定 Plan/Run/Checkpoint 的专用
+API/Runner。Operation Inventory 精确覆盖这 10 项；旧通用 Batch 只保留 Local Mode，不属于
+Server 回退路径。完整 Route/Operation 清单与结构不变量共同证明服务器 Task/Job 单写，不能用
+一个全局“默认项目”或未登记 Operation 绕过该边界。
 
 产品重新发现已经把 Worker 授权组件接入 Server Mode Lifespan：新 Job 保存
 `requested_by_user_id`，Claim Adapter 在返回私有 Request 前按 `knowledge.edit`
@@ -867,10 +866,12 @@ body: { revision, category_url, max_products }
 
 Registry 按 Organization/Project 懒创建单并发 Runner，这是明确的迁移适配器，不是最终
 全局调度器。后续可以改成共享 Dispatcher，但 Job Scope、Requester、两次授权和私有
-Request 不得丢失。Worker 在官网抓取前后检查取消；当前 WordPress 明细循环中没有逐项
-取消点，因此长抓取的停机/排空仍需后续补强。晚取消或中途失败可能已经留下不可变 Inbox
-证据，这些证据不发布、不删除旧产品，也不会替换 Task 选择。S3 与 PostgreSQL 没有跨系统
-事务，孤儿对象仍按 D2 对账后延迟清理。
+Request 不得丢失。`CheckpointingOfficialSiteFetcher` 在探测、分类页、每个产品明细和图片
+网络请求前后检查取消与
+撤权；单次 `SafeOfficialSiteFetcher` 请求仍受 10 秒超时约束。若正式停机窗口内仍未退出，
+Lifespan 按未排空失败而不伪造成功。晚取消或中途失败可能已经留下不可变 Inbox 证据，这些
+证据不发布、不删除旧产品，也不会替换 Task 选择。S3 与 PostgreSQL 没有跨系统事务，孤儿对象
+仍按 D2 对账后延迟清理。
 
 Server 产品选择采用“身份输入、服务端投影”接口，而不是复用旧
 `ProductsUpdateRequest`：

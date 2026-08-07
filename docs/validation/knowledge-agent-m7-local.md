@@ -2028,3 +2028,23 @@ Set-Location frontend
   M7 Deployment Capability，整体发布结论仍为 `no-go`。
 - Server 定向回归 74 项、Task 审计回归 4 项、完整后端回归 835 项通过，2 项外部集成
   按显式门禁跳过；前端全量 ESLint 与 Next.js 16.2.10 production build 通过。
+
+### M7 代码 Capability 与本机 Preflight 收口（2026-08-07）
+
+- Worker Reauthorization 收口提交为 `bfd679e`：10 个 Server Operation 使用显式权限表和
+  同时包装 Claim/Handler 授权的统一 Runner 工厂，未知 Operation fail closed；
+- PostgreSQL Single Write 收口提交为 `4fab37e`：Server TaskStore 固定使用 Project-scoped
+  `PostgresTaskRepository` 并禁用 Legacy Import；旧 `/api/tasks*` 写入口和全局
+  TaskStore/JobQueue fail closed，Server 模块不构造 SQLite `JobQueue`；
+- 两个切片的定向验证分别为 `39/39` 与 `44/44`；最终完整后端回归 `838` 项通过，`2` 项
+  真实外部集成按显式门禁跳过。六项代码 Capability 均为 true；
+- 在干净 `4fab37e` 上双生成 Candidate Inventory，185 条 Route、10 个 Operation 的两份 JSON
+  逐字节一致；该结果仅是本机 staging 校验，不冒充外部不可变 Artifact；
+- 本机实时 Deployment Preflight 已通过 Server Mode、OIDC 配置、Session、Knowledge Runtime、
+  Loopback Transport、PostgreSQL/pgvector、Auth0 Discovery/JWKS、MinIO Bucket 和 Server Cutover
+  Check；开发 MinIO 因显式 `ARTICLE_AGENT_OBJECT_STORE_SSE=none` 不通过生产加密门禁；
+- 对当前 MinIO 执行短生命周期 `AES256` Put 探针，服务端因未配置 KMS 在对象持久化前拒绝，未留下
+  对象。开发 profile 继续使用 `none`，不为本地绿灯引入 KES；生产必须提供受控 KMS/SSE、
+  Bucket Policy/版本/备份 Evidence；
+- Recovery Evidence Identity、Database Restore、Object Restore 与 Recovery Objectives 四项
+  仍为 `not verified`，因此整体继续 `no-go`。

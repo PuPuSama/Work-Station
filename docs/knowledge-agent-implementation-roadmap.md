@@ -195,12 +195,12 @@
   Artifact URL。结构记录见
   `docs/architecture/m7-server-knowledge-route-hardening.md`；
 - Server Mode 已停止构造和启动 SQLite Queue/Worker；全局本地 TaskStore/JobQueue
-  调用 fail closed；产品重新发现、标题、大纲、正文初稿、自动 Humanize、链接恢复和
-  SEO Review 生成已有独立
-  Project-scoped PostgreSQL Runner，
-  其余通用 Batch/Worker 尚未接线；
+  调用 fail closed；产品重新发现、标题、大纲、正文初稿/重写、产品候选、自动 Humanize、
+  链接恢复、SEO Review 和 Knowledge Research 共 10 个正式 Operation 均有 Project-scoped
+  PostgreSQL Runner；旧通用 Batch/Worker 只保留 Local Mode；
 - 已接入 Project-scoped PostgreSQL Batch/Job Control：列表、Batch 详情、取消和重试
-  只展示 `product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`，公开
+  只展示 `product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/`
+  `seo_review/products/knowledge_research`，公开
   DTO 不含私有 Request、Requester、URL、
   原始 Error 或对象 URI；读取要求 `project.view`，写入在同一事务锁定可撤权事实与
   Job 状态并追加安全 Audit；Retry 只重放服务端已保存命令，空 Body 之外的覆盖字段
@@ -342,8 +342,7 @@
   安全 Audit；非空差异目标拒绝覆盖，旧库未保存的历史 Version 不会被伪造；
 - Outline/Article/Humanize/SEO Review Worker 已消费精确 PostgreSQL Prompt Snapshot；
   旧 Prompt API 在 Server Mode 仍继续关闭。Link Restore 使用独立 checked-in Template；
-  这些后处理入口已经迁移，但未迁移的其余 Task/Job 写路径仍阻止整条服务器工作流被
-  描述为已完成；
+  全部 Server-ready Task/Job 写路径现已完成 PostgreSQL 单写，旧入口 fail closed；
 - 已接通 Project-scoped Server Prompt HTTP：Viewer 可读目录，Editor 可创建、追加版本、
   归档/恢复和切换精确 Default；严格 Body 与路由白名单不允许客户端提交 Actor、Role、
   Status 或内容 Hash；旧 SQLite Prompt API 仍不在 Server Mode 开放；
@@ -364,8 +363,8 @@
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界
   drain/join 报告也已完成，受控停机释放 Claim 而不伪装成用户取消；Knowledge Research
   也已有可信 Plan/Start/Resume、Server-only Handler 和专用 Runner，但因 Checkpoint
-  语义不同而显式禁止通用 Cancel/Retry。其余 Operation 与正式环境排空演练尚未完成，
-  所以整体 Preflight 能力仍保持 false；
+  语义不同而显式禁止通用 Cancel/Retry。10 个正式 Operation 已全部进入统一授权边界，
+  六项代码 Capability 均为 true；正式环境排空演练仍是独立发布证据；
 - 已实现 Task/Job 冻结窗口只读双读报告，比较顺序、ID、状态分布和内容摘要，
   Active SQLite Job、重复/空 ID 或任意差异都会阻止单写切换；
 - Server Mode 不接受旧 `APP_PASSWORD` 登录签发 Actor；已接通供应商无关 OIDC
