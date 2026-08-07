@@ -194,6 +194,7 @@ from workflow.state_machine import (
     ACTION_UPDATE_OUTLINE,
     ACTION_UPDATE_PRODUCTS,
     WorkflowActionNotAllowed,
+    allowed_actions,
     ensure_action_allowed,
     invalidate_downstream,
     reset_for_full_rewrite,
@@ -826,6 +827,13 @@ def _task_runtime(
             detail="Server project task storage is not available.",
         )
     return factory.create(authorized)
+
+
+def _expose_server_task(task: TaskRecord) -> TaskRecord:
+    """Expose workflow actions for Server clients just like the local API."""
+
+    task.allowed_actions = allowed_actions(task)
+    return task
 
 
 def _save_audited_task(
@@ -1485,10 +1493,13 @@ def list_project_tasks(
     tasks = _task_store(request, authorized).load()
     if status:
         tasks = [task for task in tasks if task.status == status]
-    return sorted(
-        tasks,
-        key=lambda task: (task.topic_index, task.id),
-    )
+    return [
+        _expose_server_task(task)
+        for task in sorted(
+            tasks,
+            key=lambda task: (task.topic_index, task.id),
+        )
+    ]
 
 
 @router.post(
@@ -1573,7 +1584,7 @@ def read_project_task(
 ) -> TaskRecord:
     del project
     try:
-        return _task_store(request, authorized).get(task_id)
+        return _expose_server_task(_task_store(request, authorized).get(task_id))
     except KeyError:
         raise HTTPException(
             status_code=404,
