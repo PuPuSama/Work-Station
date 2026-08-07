@@ -74,6 +74,9 @@ class LLMClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
+                # Some OpenAI-compatible gateways deny requests that use
+                # urllib's default Python user agent at their edge firewall.
+                "User-Agent": "article-agent/1.0",
             },
         )
         try:
