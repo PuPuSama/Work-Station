@@ -9,7 +9,9 @@
 - Operation Inventory：覆盖 `SERVER_JOB_CONTROL_OPERATIONS` 的每个 Server Job Operation。
 
 清单只证明代码图和声明语义已被完整枚举，不证明真实 IdP、PostgreSQL、ObjectStore、Provider、
-备份恢复或生产停机已经验收，也不修改 `CURRENT_SERVER_CUTOVER_CAPABILITIES`。
+备份恢复或生产停机已经验收。Route 全分类再结合精确 Server Gate、显式权限/重新授权元数据和
+旧入口 fail-closed 行为测试，构成 `project_routes_scoped=true` 的代码证据；它不证明其余
+Single Write、Worker 或外部发布 Capability。
 
 ## 2. Route Inventory
 
@@ -107,6 +109,6 @@ Digest 回写同一候选提交造成自引用；后续文档提交也只能引�
 
 外部 Reviewer 必须确认 Candidate Inventory 文件已包含在
 `RecoveryEvidenceEnvelope V1.payload.evidence_bundle_sha256` 所绑定的 Evidence Bundle 中，并
-核对内部两项 Digest。真实产品生成/选择冒烟、Worker Drain、完整 API/Worker 覆盖、PostgreSQL
-单写、恢复演练和生产 IdP/ObjectStore 仍须独立完成；任一为空时 Capability 常量不变，M7
-继续 `no-go`。
+核对内部两项 Digest。真实产品生成/选择冒烟、Worker Drain、PostgreSQL 单写、恢复演练和
+生产 IdP/ObjectStore 仍须独立完成；`project_routes_scoped=true` 不替代这些证据，M7 继续
+`no-go`。

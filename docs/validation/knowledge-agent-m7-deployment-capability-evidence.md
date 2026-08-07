@@ -48,8 +48,9 @@ $env:ARTICLE_AGENT_CONFIG = `
 - 缺少/无效 Evidence 时 Preflight 的
   `recovery_evidence_identity/database_restore/object_restore/recovery_objectives` 全部失败，
   且错误不泄露 Secret、Hash、身份、时间或路径；
-- 当前 Capability 常量仍只允许
-  `trusted_identity_source/object_download_reauthorizes=true`，其余保持 false。
+- 当前 Capability 常量允许
+  `trusted_identity_source/project_routes_scoped/object_download_reauthorizes=true`；
+  Task/Job Single Write 与 Worker Reauthorization 仍保持 false。
 
 2026-08-06 的整体后端发现命令包含上述三个模块，未另行重复执行定向命令：
 
@@ -143,6 +144,11 @@ artifact_id: local console output only
 脚本前被依赖策略检查拦截，因此未将它当作 lint/build 结果，也未保留其生成的 lock/workspace
 文件。随后使用捆绑 Node 直接调用项目现有 `eslint` 和 `next` CLI，未安装或更新依赖，两个
 正式前端检查均通过。后端没有因该环境问题重跑。
+
+2026-08-07 的 Route Capability 收口新增完整 Inventory 不变量测试，并将
+`project_routes_scoped` 改为代码事实 `true`。Candidate Inventory 与 Deployment Readiness
+定向测试 `18/18` 通过；完整后端回归 `836` 项通过，`2` 项真实外部集成按门禁跳过。该结果
+不改变恢复、Task/Job Single Write、Worker Drain 或生产外部证据状态。
 
 ## 4. 生产候选恢复验证（尚不可执行）
 

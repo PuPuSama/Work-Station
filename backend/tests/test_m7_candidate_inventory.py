@@ -31,6 +31,9 @@ from services.server_job_control import (  # noqa: E402
     SERVER_JOB_CONTROL_OPERATIONS,
     SERVER_JOB_DOMAIN_CONTROL_BLOCKED,
 )
+from services.deployment_readiness import (  # noqa: E402
+    CURRENT_SERVER_CUTOVER_CAPABILITIES,
+)
 from services.authorized_job_queue import worker_permission_for  # noqa: E402
 from knowledge_agent import m7_candidate_inventory as cli  # noqa: E402
 from services import candidate_inventory as candidate_module  # noqa: E402
@@ -169,6 +172,57 @@ class CandidateInventoryTests(unittest.TestCase):
             [options], release_commit=RELEASE_COMMIT,
         )
         self.assertEqual(option_inventory["entries"][0]["method"], "OPTIONS")
+
+    def test_project_route_capability_is_backed_by_complete_inventory(
+        self,
+    ) -> None:
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.project_routes_scoped
+        )
+        inventory = build_route_inventory(
+            application_routes(),
+            release_commit=RELEASE_COMMIT,
+        )
+        entries = inventory["entries"]
+        ready = [entry for entry in entries if entry["state"] == "server_ready"]
+        self.assertTrue(ready)
+        self.assertTrue(all(
+            entry["path"].startswith(
+                (
+                    "/api/auth/",
+                    "/api/health",
+                    "/api/knowledge/",
+                    "/api/organizations/",
+                    "/api/projects",
+                )
+            )
+            for entry in ready
+        ))
+        scoped = [
+            entry
+            for entry in ready
+            if entry["path"].startswith(
+                ("/api/knowledge/", "/api/projects/")
+            )
+        ]
+        self.assertTrue(scoped)
+        self.assertTrue(all(
+            entry["scope"] == "project"
+            and entry["permission"] != "not_applicable_fail_closed"
+            and entry["reauthorization"] != "fail_closed_before_handler"
+            for entry in scoped
+        ))
+        self.assertFalse(any(
+            entry["state"] == "server_ready"
+            for entry in entries
+            if entry["path"].startswith(
+                (
+                    "/api/batches",
+                    "/api/batch-jobs/",
+                    "/api/tasks",
+                )
+            )
+        ))
 
     def test_route_enumeration_fails_closed_when_incomplete(self) -> None:
         async def endpoint(request):

@@ -77,6 +77,7 @@ class ServerCutoverCapabilities:
 
 CURRENT_SERVER_CUTOVER_CAPABILITIES = ServerCutoverCapabilities(
     trusted_identity_source=True,
+    project_routes_scoped=True,
     object_download_reauthorizes=True,
 )
 

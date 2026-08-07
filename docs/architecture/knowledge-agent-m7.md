@@ -1510,12 +1510,14 @@ Alembic/pgvector、S3 Bucket、代码切换能力和恢复证明拆成稳定 Che
 契约见 `docs/architecture/m7-deployment-capability-evidence.md`。
 
 `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不是运维环境变量。私有资产下载的
-HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前正式
-身份代码链、已迁移 Task 写操作、
-`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review/knowledge_research`
+HTTP 入口和签名前二次授权已经接线，因此 `object_download_reauthorizes=true`。当前 185 条
+Route 已全部分类，所有 Server-ready Project/Knowledge 路由具有显式 Project Scope、权限和
+重新授权元数据，旧 Task/Batch/未迁移入口 fail closed，因此
+`project_routes_scoped=true`。正式身份代码链、已迁移 Task 写操作、
+`product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products/knowledge_research`
 的 Enqueue/Runner 和窄范围 Batch/Job Control 已接线；Research 仍禁用通用 Cancel/Retry。
-其余项目写路由、全部 Operation 单写和通用 Worker 仍未接线，
-所以整体仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
+整体 Task/Job 单写和正式 Worker 排空证据仍未完成，所以整体仍明确保持 no-go；不能靠设置
+一个环境变量把未实现能力标成通过。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
 `docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、

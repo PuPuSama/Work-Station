@@ -12,8 +12,8 @@
   真实恢复；
 - `CURRENT_SERVER_CUTOVER_CAPABILITIES` 是代码事实，不能由 Evidence 文件、命令参数或
   环境变量翻转；
-- 当前仍为明确 `no-go`：真实受控环境恢复演练、生产 IdP/ObjectStore、Route/Operation
-  完整覆盖和 PostgreSQL 单写切换均未完成；
+- 当前仍为明确 `no-go`：真实受控环境恢复演练、生产 IdP/ObjectStore、PostgreSQL
+  Task/Job 单写切换和正式 Worker 排空证据均未完成；
 - 本切片没有前端、HTTP、Evidence Capture/签发工具或新的业务 Operation。
 
 ## 2. 六项代码能力证据矩阵
@@ -21,7 +21,7 @@
 | Capability | 当前值 | 允许变为 true 的最小代码证据 | 当前结论 |
 |---|---:|---|---|
 | `trusted_identity_source` | true | OIDC Authorization Code + PKCE、精确 Issuer/Audience、RS256/JWKS、State/Nonce、本地 External Identity 映射和数据库 Session Version | 代码链已接通；生产 IdP Conformance 是独立发布证据 |
-| `project_routes_scoped` | false | Route Inventory 无未分类入口；Server 项目路由以路径 Project 为唯一身份准源并重新授权；旧无 Project/未迁移路由 fail closed | 尚未完成全部项目路由覆盖 |
+| `project_routes_scoped` | true | Route Inventory 无未分类入口；Server 项目路由以路径 Project 为唯一身份准源并重新授权；旧无 Project/未迁移路由 fail closed | 185 条 Route 全分类；Server-ready Project/Knowledge 路由具备显式 Scope/Permission/Reauthorization，旧 Task/Batch 入口 fail closed |
 | `postgres_task_single_write` | false | Server Task 写入口只写 PostgreSQL；冻结窗口内每个项目的 Task/Job Cutover Report 均 matched；切换后无 SQLite 双写或回灌 | 尚未完成整体单写切换 |
 | `postgres_job_single_write` | false | 所有可运行 Server Operation 只创建、Claim 和提交 PostgreSQL Job；旧 SQLite Queue 不在 Server 启动；无可信 Requester 的历史 Job 只作 Terminal History | 尚未完成全部 Operation 与正式切换 |
 | `worker_reauthorizes` | false | 每个可运行 Operation 在 Claim 前只读最小元数据授权，Handler/Provider/提交前再次授权；终态与安全 Audit 原子；有界 drain/join 可证明停机结果 | 只完成部分 Operation，尚无完整清单与正式排空证据 |
@@ -183,7 +183,7 @@ ObjectStore、六项 Capability 和签名恢复 Evidence 全部通过时，报�
 ## 7. 后续顺序
 
 1. 先完成 Evidence Consumer 的严格 Schema、Ed25519、Commit/Head/Time 与安全输出验证；
-2. `products` 主生成链切片已迁移；冻结候选 Commit 后生成 Route/Operation Inventory Digest 与受控冒烟证据；
+2. Route 全分类与项目路径授权不变量已使 `project_routes_scoped=true`；冻结候选 Commit 后仍须生成 Route/Operation Inventory Digest 与受控冒烟证据；
 3. 完成其余 API/Worker 覆盖、每项目冻结窗口 matched 报告和 PostgreSQL Task/Job 单写；
 4. 代码证据完整后才逐项修改 Capability 常量；
 5. 候选 Commit 冻结后，在真实环境执行 Capture、独立 Review、恢复演练和生产

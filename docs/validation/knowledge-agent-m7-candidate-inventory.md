@@ -8,13 +8,14 @@
 - 真实 Digest 只能在本切片提交完成、隔离 Checkout 的 HEAD 精确匹配且工作树干净后生成；
 - 当前没有产品生成、产品选择或 Worker Drain 的外部受控运行 Artifact，因此三项继续
   `PENDING`；不使用易变化的本机 Docker/Provider 状态解释 Evidence 结论；
-- Capability 常量不变，M7 保持 `no-go`。
+- Route 全分类、精确 Project Gate、显式权限/重新授权元数据与旧入口 fail closed 已形成
+  `project_routes_scoped=true` 的代码证据；其他 Capability 不变，M7 保持 `no-go`。
 
 ## 2. 自动验证
 
 `backend/tests/test_m7_candidate_inventory.py` 至少验证：
 
-1. 当前 182 个 FastAPI/Starlette 规范 method/path 全部且只被分类一次，包含
+1. 当前 185 个 FastAPI/Starlette 规范 method/path 全部且只被分类一次，包含
    `/openapi.json`、`/docs`、`/docs/oauth2-redirect` 与 `/redoc`；
 2. 产品候选 POST、Job GET 与正式产品 PUT 都是 `server_ready`；
 3. 旧 Local 自动产品 Route 是 `local_only_fail_closed`，旧无 Project Batch 是
@@ -27,7 +28,9 @@
 8. `knowledge_research` 继续使用 domain-controlled Cancel/Retry；
 9. Route 顺序变化不改变 JSON 或 Digest，Commit 变化必须改变两项 Digest；
 10. 非 lowercase 40-hex、重复 Route、HEAD 漂移、脏工作树、dubious ownership 与写出后漂移
-    全部 fail closed，公共错误不泄露 Git/应用底层异常。
+    全部 fail closed，公共错误不泄露 Git/应用底层异常；
+11. 所有 Server-ready Project/Knowledge 路由均为 Project Scope，具有显式 Permission 与
+    Reauthorization，旧 `/api/tasks*`、`/api/batches*`、`/api/batch-jobs*` 不可 Server-ready。
 
 第 7 项的运行行为不由清单字符串断言代替；必须同时保留
 `backend/tests/test_m7_server_product_generation.py`、
@@ -50,6 +53,16 @@ Candidate Inventory 通过证据，也不在本切片混入无关配置修复。
 `backend/prompts/humanize_ci.txt`，并只补跑最初失败的两个 Humanize 用例，结果 `2/2` 通过。
 完整 `787` 项套件未重复执行，因此本记录仍保留原始整体退出结果，不把定向补跑改写成完整回归退出码 0。
 
+### 2.2 Project Route Capability 收口（2026-08-07）
+
+- Candidate Inventory 定向测试现为 `12/12` 通过，其中新增一项完整 Route 图不变量；
+- 新测试要求每条 Server-ready Project/Knowledge Route 均为 Project Scope，具有显式
+  Permission 与 Reauthorization，并要求旧 Task/Batch/Batch Job 入口不可 Server-ready；
+- Deployment Readiness 定向测试与 Candidate Inventory 合计 `18/18` 通过；
+- 完整后端回归 `836` 项通过，`2` 项真实外部集成按显式门禁跳过；
+- 上述代码证据允许 `project_routes_scoped=true`，但真实 Candidate Digest、受控冒烟、
+  Worker Drain、Task/Job 单写和恢复证据仍为 `PENDING`。
+
 ## 3. Artifact 验证
 
 候选提交完成后，在隔离 Checkout 运行 CLI 两次：第一次写本地 staging artifact；第二次写
@@ -58,9 +71,9 @@ Candidate Inventory 通过证据，也不在本切片混入无关配置修复。
 ```text
 schema_version: 1
 release_commit: <当前完整 HEAD>
-route_count: 182
-route_counts.server_ready + local_only_fail_closed + intentionally_unsupported: 182
-operation_count: 9
+route_count: 185
+route_counts.server_ready + local_only_fail_closed + intentionally_unsupported: 185
+operation_count: 10
 products.state: server_ready
 products.commit_boundary: postgres_task_cas_and_audit
 knowledge_research.cancel/retry: domain_controlled_only
@@ -77,8 +90,8 @@ User、URL、Prompt、Evidence Binding、Provider 原文、环境值或 Secret�
 |---|---|---|
 | `candidate_inventory_tests` | `PENDING` | 定向测试和最终整体回归退出码 0 |
 | `candidate_commit_clean` | `PENDING` | Artifact 生成时 HEAD 精确匹配且工作树为空 |
-| `route_inventory_digest` | `PENDING` | 外部 Artifact 含 182 个 Route Entry 与稳定 SHA-256 |
-| `operation_inventory_digest` | `PENDING` | 外部 Artifact 含 9 个完整 Operation Entry 与稳定 SHA-256 |
+| `route_inventory_digest` | `PENDING` | 外部 Artifact 含 185 个 Route Entry 与稳定 SHA-256 |
+| `operation_inventory_digest` | `PENDING` | 外部 Artifact 含 10 个完整 Operation Entry 与稳定 SHA-256 |
 | `artifact_reproducible` | `PENDING` | 同一 Commit 二次生成逐字节相同 |
 | `product_generation_smoke` | `PENDING` | 真实受控环境 Artifact 通过 |
 | `product_selection_smoke` | `PENDING` | 与候选生成分离的正式选择 Artifact 通过 |

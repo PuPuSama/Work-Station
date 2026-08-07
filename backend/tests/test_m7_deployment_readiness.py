@@ -98,6 +98,9 @@ class DeploymentReadinessTests(unittest.TestCase):
             CURRENT_SERVER_CUTOVER_CAPABILITIES.trusted_identity_source
         )
         self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.project_routes_scoped
+        )
+        self.assertTrue(
             CURRENT_SERVER_CUTOVER_CAPABILITIES.object_download_reauthorizes
         )
         report = run_deployment_preflight(
@@ -117,6 +120,10 @@ class DeploymentReadinessTests(unittest.TestCase):
         self.assertFalse(by_id["server_cutover"].passed)
         self.assertNotIn(
             "trusted_identity_source",
+            by_id["server_cutover"].detail,
+        )
+        self.assertNotIn(
+            "project_routes_scoped",
             by_id["server_cutover"].detail,
         )
         for check_id in (
