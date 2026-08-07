@@ -833,11 +833,12 @@ Task Revision 锁、Job/Batch 创建和不含 URL 的 Audit Event 放进同一�
 退出的非用户取消 Job 释放回 `queued`，并返回有界 Join 报告。若报告仍有在途 Job，
 Lifespan 明确失败且不释放数据库 Engine。
 
-这套语义当前接到
-`product_rediscovery/titles/outline/article/humanize/restore_links/seo_review`。仍没有全部 Operation
-的 Runner 和正式环境排空演练，所以 `worker_reauthorizes` 与
-`postgres_job_single_write` 仍保持 false，不能把单条 Operation 的证据扩写成整体
-Worker Cutover 已完成。
+这套语义现已覆盖
+`product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products/knowledge_research`。
+全部 10 个 Server Operation 由显式权限表覆盖，并且只能通过统一工厂创建带 Claim 与 Handler
+二次授权的 Runner；未知 Operation fail closed，因此 `worker_reauthorizes=true`。正式环境排空
+Artifact 和 PostgreSQL Job 单写切换仍未完成，`postgres_job_single_write` 保持 false，不能把
+代码能力扩写成整体 Worker Cutover 已完成。
 
 当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
 PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化
@@ -1516,8 +1517,9 @@ Route 已全部分类，所有 Server-ready Project/Knowledge 路由具有显式
 `project_routes_scoped=true`。正式身份代码链、已迁移 Task 写操作、
 `product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products/knowledge_research`
 的 Enqueue/Runner 和窄范围 Batch/Job Control 已接线；Research 仍禁用通用 Cancel/Retry。
-整体 Task/Job 单写和正式 Worker 排空证据仍未完成，所以整体仍明确保持 no-go；不能靠设置
-一个环境变量把未实现能力标成通过。
+10 个 Server Operation 已由显式权限表和统一授权 Runner 工厂覆盖，未知 Operation fail closed，
+因此 `worker_reauthorizes=true`。整体 Task/Job 单写和正式 Worker 排空证据仍未完成，所以整体
+仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
 `docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、

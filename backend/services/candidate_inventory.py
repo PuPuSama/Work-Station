@@ -12,7 +12,10 @@ from typing import Any
 
 from starlette.routing import Route
 
-from services.authorized_job_queue import worker_permission_for
+from services.authorized_job_queue import (
+    WORKER_OPERATION_PERMISSIONS,
+    worker_permission_for,
+)
 from services.server_job_control import (
     SERVER_JOB_CONTROL_OPERATIONS,
     SERVER_JOB_DOMAIN_CONTROL_BLOCKED,
@@ -464,6 +467,7 @@ def build_operation_inventory(*, release_commit: str) -> dict[str, object]:
     if (
         set(_OPERATION_COMMIT_BOUNDARIES) != expected
         or set(_OPERATION_AUDIT_ACTIONS) != expected
+        or not expected.issubset(WORKER_OPERATION_PERMISSIONS)
         or not set(SERVER_JOB_DOMAIN_CONTROL_BLOCKED).issubset(expected)
     ):
         raise CandidateInventoryError("operation_inventory_incomplete")

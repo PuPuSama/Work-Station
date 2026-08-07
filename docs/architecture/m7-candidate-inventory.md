@@ -10,8 +10,9 @@
 
 清单只证明代码图和声明语义已被完整枚举，不证明真实 IdP、PostgreSQL、ObjectStore、Provider、
 备份恢复或生产停机已经验收。Route 全分类再结合精确 Server Gate、显式权限/重新授权元数据和
-旧入口 fail-closed 行为测试，构成 `project_routes_scoped=true` 的代码证据；它不证明其余
-Single Write、Worker 或外部发布 Capability。
+旧入口 fail-closed 行为测试，构成 `project_routes_scoped=true` 的代码证据。Operation 清单再结合
+显式权限表、统一授权 Runner 工厂和行为测试，构成 `worker_reauthorizes=true` 的代码证据；清单
+仍不证明 Single Write、正式 Worker Drain 或其他外部发布 Capability。
 
 ## 2. Route Inventory
 

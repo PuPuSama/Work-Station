@@ -9,33 +9,39 @@ from services.access_control import (
     ProjectAccessService,
     ProjectPermission,
 )
-from services.job_queue import JobConflict
+from services.job_queue import BatchJobRunner, JobConflict
 from services.postgres_job_queue import PostgresJobQueue
 
 
 JobHandler = Callable[[dict[str, Any], Callable[[], bool]], int]
 
 
+WORKER_OPERATION_PERMISSIONS: dict[str, ProjectPermission] = {
+    "article": "article.edit",
+    "export_docx": "article.deliver",
+    "generate_tdk": "article.deliver",
+    "humanize": "article.edit",
+    "knowledge_research": "knowledge.publish",
+    "outline": "article.edit",
+    "package_delivery": "article.deliver",
+    "prepare_images": "article.edit",
+    "product_rediscovery": "knowledge.edit",
+    "products": "article.edit",
+    "restore_links": "article.edit",
+    "rewrite_article": "article.edit",
+    "seo_review": "article.review",
+    "titles": "article.edit",
+}
+
+
 def worker_permission_for(operation: str) -> ProjectPermission:
-    """Map queued work to the least conservative existing M7 permission."""
+    """Map known queued work to its explicit M7 permission."""
 
     normalized = operation.strip()
-    if normalized == "seo_review":
-        return "article.review"
-    if normalized in {
-        "export_docx",
-        "generate_tdk",
-        "package_delivery",
-    }:
-        return "article.deliver"
-    if normalized == "knowledge_research":
-        # Resume can publish approved official evidence. Until Start/Resume
-        # become separate operations, the whole Server operation uses the
-        # conservative publication permission at Claim and Handler time.
-        return "knowledge.publish"
-    if normalized == "product_rediscovery":
-        return "knowledge.edit"
-    return "article.edit"
+    try:
+        return WORKER_OPERATION_PERMISSIONS[normalized]
+    except KeyError as exc:
+        raise ValueError("unsupported worker operation") from exc
 
 
 class AuthorizedPostgresJobQueue:
@@ -193,8 +199,32 @@ class ReauthorizingJobHandler:
         return self._handler(job, cancelled)
 
 
+def authorized_batch_runner(
+    queue: PostgresJobQueue,
+    handler: JobHandler,
+    *,
+    access: ProjectAccessService,
+    operations: Iterable[str],
+) -> BatchJobRunner:
+    """Build the only allowed Server runner with both authorization checks."""
+
+    normalized = tuple(operation.strip() for operation in operations)
+    if not normalized or len(set(normalized)) != len(normalized):
+        raise ValueError("worker operations are invalid")
+    for operation in normalized:
+        worker_permission_for(operation)
+    return BatchJobRunner(
+        AuthorizedPostgresJobQueue(queue, access=access),
+        ReauthorizingJobHandler(handler, access=access),
+        concurrency=1,
+        operations=normalized,
+    )
+
+
 __all__ = [
     "AuthorizedPostgresJobQueue",
     "ReauthorizingJobHandler",
+    "WORKER_OPERATION_PERMISSIONS",
+    "authorized_batch_runner",
     "worker_permission_for",
 ]

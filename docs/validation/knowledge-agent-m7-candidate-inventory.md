@@ -9,7 +9,9 @@
 - 当前没有产品生成、产品选择或 Worker Drain 的外部受控运行 Artifact，因此三项继续
   `PENDING`；不使用易变化的本机 Docker/Provider 状态解释 Evidence 结论；
 - Route 全分类、精确 Project Gate、显式权限/重新授权元数据与旧入口 fail closed 已形成
-  `project_routes_scoped=true` 的代码证据；其他 Capability 不变，M7 保持 `no-go`。
+  `project_routes_scoped=true` 的代码证据；10 个 Server Operation 的显式权限表、统一授权 Runner
+  工厂与未知 Operation fail closed 已形成 `worker_reauthorizes=true` 的代码证据。正式 Worker
+  Drain 和 Task/Job Single Write 仍未完成，M7 保持 `no-go`。
 
 ## 2. 自动验证
 
@@ -30,7 +32,9 @@
 10. 非 lowercase 40-hex、重复 Route、HEAD 漂移、脏工作树、dubious ownership 与写出后漂移
     全部 fail closed，公共错误不泄露 Git/应用底层异常；
 11. 所有 Server-ready Project/Knowledge 路由均为 Project Scope，具有显式 Permission 与
-    Reauthorization，旧 `/api/tasks*`、`/api/batches*`、`/api/batch-jobs*` 不可 Server-ready。
+    Reauthorization，旧 `/api/tasks*`、`/api/batches*`、`/api/batch-jobs*` 不可 Server-ready；
+12. 全部 10 个 Server Operation 均存在显式最小权限；未知 Operation fail closed；所有
+    `server_*.py` Runner 只能通过同时包装 Claim 与 Handler 授权的统一工厂创建。
 
 第 7 项的运行行为不由清单字符串断言代替；必须同时保留
 `backend/tests/test_m7_server_product_generation.py`、
@@ -62,6 +66,16 @@ Candidate Inventory 通过证据，也不在本切片混入无关配置修复。
 - 完整后端回归 `836` 项通过，`2` 项真实外部集成按显式门禁跳过；
 - 上述代码证据允许 `project_routes_scoped=true`，但真实 Candidate Digest、受控冒烟、
   Worker Drain、Task/Job 单写和恢复证据仍为 `PENDING`。
+
+### 2.3 Worker Reauthorization Capability 收口（2026-08-07）
+
+- Candidate Inventory 定向测试现为 `13/13` 通过；新增测试要求 10 个 Server Operation 均有
+  显式权限，未知 Operation fail closed，并禁止 `server_*.py` 绕过统一授权 Runner 工厂；
+- Candidate Inventory、Deployment Readiness、Worker 二次授权、产品生成和有界排空定向测试
+  合计 `39/39` 通过；
+- 完整后端回归 `837` 项通过，`2` 项真实外部集成按显式门禁跳过；
+- 上述代码证据允许 `worker_reauthorizes=true`。正式 Worker Drain Artifact、Task/Job 单写、
+  真实 Candidate Digest、受控冒烟和恢复证据仍为 `PENDING`。
 
 ## 3. Artifact 验证
 

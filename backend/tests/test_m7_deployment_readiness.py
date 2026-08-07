@@ -101,6 +101,9 @@ class DeploymentReadinessTests(unittest.TestCase):
             CURRENT_SERVER_CUTOVER_CAPABILITIES.project_routes_scoped
         )
         self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.worker_reauthorizes
+        )
+        self.assertTrue(
             CURRENT_SERVER_CUTOVER_CAPABILITIES.object_download_reauthorizes
         )
         report = run_deployment_preflight(
@@ -124,6 +127,10 @@ class DeploymentReadinessTests(unittest.TestCase):
         )
         self.assertNotIn(
             "project_routes_scoped",
+            by_id["server_cutover"].detail,
+        )
+        self.assertNotIn(
+            "worker_reauthorizes",
             by_id["server_cutover"].detail,
         )
         for check_id in (

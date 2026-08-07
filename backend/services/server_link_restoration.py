@@ -37,8 +37,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.authorized_job_queue import (
-    AuthorizedPostgresJobQueue,
-    ReauthorizingJobHandler,
+    authorized_batch_runner,
 )
 from services.generator import (
     article_output_token_limit,
@@ -532,16 +531,10 @@ class ServerLinkRestorationRegistry:
                 raise LinkRestorationUnavailable(
                     "link restoration runner is not configured"
                 )
-            runner = BatchJobRunner(
-                AuthorizedPostgresJobQueue(
-                    current.queue,
-                    access=self._access,
-                ),
-                ReauthorizingJobHandler(
-                    self._handler,
-                    access=self._access,
-                ),
-                concurrency=1,
+            runner = authorized_batch_runner(
+                current.queue,
+                self._handler,
+                access=self._access,
                 operations=(LINK_RESTORATION_OPERATION,),
             )
             current.runner = runner

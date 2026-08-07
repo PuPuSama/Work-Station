@@ -24,7 +24,7 @@
 | `project_routes_scoped` | true | Route Inventory 无未分类入口；Server 项目路由以路径 Project 为唯一身份准源并重新授权；旧无 Project/未迁移路由 fail closed | 185 条 Route 全分类；Server-ready Project/Knowledge 路由具备显式 Scope/Permission/Reauthorization，旧 Task/Batch 入口 fail closed |
 | `postgres_task_single_write` | false | Server Task 写入口只写 PostgreSQL；冻结窗口内每个项目的 Task/Job Cutover Report 均 matched；切换后无 SQLite 双写或回灌 | 尚未完成整体单写切换 |
 | `postgres_job_single_write` | false | 所有可运行 Server Operation 只创建、Claim 和提交 PostgreSQL Job；旧 SQLite Queue 不在 Server 启动；无可信 Requester 的历史 Job 只作 Terminal History | 尚未完成全部 Operation 与正式切换 |
-| `worker_reauthorizes` | false | 每个可运行 Operation 在 Claim 前只读最小元数据授权，Handler/Provider/提交前再次授权；终态与安全 Audit 原子；有界 drain/join 可证明停机结果 | 只完成部分 Operation，尚无完整清单与正式排空证据 |
+| `worker_reauthorizes` | true | 每个可运行 Operation 在 Claim 前只读最小元数据授权，Handler/Provider/提交前再次授权；终态与安全 Audit 原子；有界 drain/join 可证明停机结果 | 10 个 Server Operation 均通过显式权限表和唯一授权 Runner 工厂；正式 Worker Drain 仍是独立发布证据 |
 | `object_download_reauthorizes` | true | 私有下载 HTTP 入口和签名前分别授权，并校验 Bucket 与 Organization/Project Key Prefix；公开 DTO 不返回长期 URL/URI/Key/Hash | 代码链已接通；生产 Bucket Policy/加密/版本策略仍须外部证据 |
 
 Boolean 只能在 Inventory、自动验证和结构记录全部完成的代码提交中修改。Runbook 存在、

@@ -39,8 +39,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.authorized_job_queue import (
-    AuthorizedPostgresJobQueue,
-    ReauthorizingJobHandler,
+    authorized_batch_runner,
 )
 from services.job_queue import (
     ACTIVE_JOB_STATUSES,
@@ -355,17 +354,10 @@ class ServerProductRediscoveryRegistry:
                     "product rediscovery runner is not configured"
                 )
             queue = current.queue
-            authorized_queue = AuthorizedPostgresJobQueue(
+            runner = authorized_batch_runner(
                 queue,
+                self._handler,
                 access=self._access,
-            )
-            runner = BatchJobRunner(
-                authorized_queue,
-                ReauthorizingJobHandler(
-                    self._handler,
-                    access=self._access,
-                ),
-                concurrency=1,
                 operations=(PRODUCT_REDISCOVERY_OPERATION,),
             )
             current.runner = runner

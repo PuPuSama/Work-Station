@@ -49,8 +49,8 @@ $env:ARTICLE_AGENT_CONFIG = `
   `recovery_evidence_identity/database_restore/object_restore/recovery_objectives` 全部失败，
   且错误不泄露 Secret、Hash、身份、时间或路径；
 - 当前 Capability 常量允许
-  `trusted_identity_source/project_routes_scoped/object_download_reauthorizes=true`；
-  Task/Job Single Write 与 Worker Reauthorization 仍保持 false。
+  `trusted_identity_source/project_routes_scoped/worker_reauthorizes/object_download_reauthorizes=true`；
+  Task/Job Single Write 仍保持 false，正式 Worker Drain 继续作为独立发布证据。
 
 2026-08-06 的整体后端发现命令包含上述三个模块，未另行重复执行定向命令：
 
@@ -149,6 +149,12 @@ artifact_id: local console output only
 `project_routes_scoped` 改为代码事实 `true`。Candidate Inventory 与 Deployment Readiness
 定向测试 `18/18` 通过；完整后端回归 `836` 项通过，`2` 项真实外部集成按门禁跳过。该结果
 不改变恢复、Task/Job Single Write、Worker Drain 或生产外部证据状态。
+
+2026-08-07 的 Worker Reauthorization 收口新增 10 个 Server Operation 的显式权限表和唯一授权
+Runner 工厂；未知 Operation fail closed，所有 Server Runner 同时保留 Claim 与 Handler 二次授权。
+相关定向测试 `39/39` 通过；完整后端回归 `837` 项通过，`2` 项真实外部集成按门禁跳过。因此
+`worker_reauthorizes` 成为代码事实 `true`；正式 Worker Drain、Task/Job Single Write、恢复和
+生产外部证据状态不变。
 
 ## 4. 生产候选恢复验证（尚不可执行）
 

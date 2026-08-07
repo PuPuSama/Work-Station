@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import io
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from starlette.routing import Route
@@ -34,7 +36,13 @@ from services.server_job_control import (  # noqa: E402
 from services.deployment_readiness import (  # noqa: E402
     CURRENT_SERVER_CUTOVER_CAPABILITIES,
 )
-from services.authorized_job_queue import worker_permission_for  # noqa: E402
+from services.authorized_job_queue import (  # noqa: E402
+    AuthorizedPostgresJobQueue,
+    ReauthorizingJobHandler,
+    WORKER_OPERATION_PERMISSIONS,
+    authorized_batch_runner,
+    worker_permission_for,
+)
 from knowledge_agent import m7_candidate_inventory as cli  # noqa: E402
 from services import candidate_inventory as candidate_module  # noqa: E402
 
@@ -299,6 +307,54 @@ class CandidateInventoryTests(unittest.TestCase):
             self.assertEqual(entry["retry"], expected_control)
             self.assertTrue(entry["audit_actions"])
             self.assertTrue(entry["commit_boundary"])
+
+    def test_server_workers_share_fail_closed_authorization_boundary(
+        self,
+    ) -> None:
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.worker_reauthorizes
+        )
+        self.assertTrue(
+            set(SERVER_JOB_CONTROL_OPERATIONS).issubset(
+                WORKER_OPERATION_PERMISSIONS
+            )
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "^unsupported worker operation$",
+        ):
+            worker_permission_for("unknown_operation")
+
+        queue = SimpleNamespace(
+            organization_id="organization-inventory",
+            project_id="project-inventory",
+            worker_id="worker-inventory",
+        )
+        runner = authorized_batch_runner(
+            queue,  # type: ignore[arg-type]
+            lambda job, cancelled: 1,
+            access=mock.Mock(),
+            operations=SERVER_JOB_CONTROL_OPERATIONS,
+        )
+        self.addCleanup(runner.stop)
+        self.assertIsInstance(runner.queue, AuthorizedPostgresJobQueue)
+        self.assertIsInstance(runner.handler, ReauthorizingJobHandler)
+        self.assertEqual(
+            set(runner.operations),
+            set(SERVER_JOB_CONTROL_OPERATIONS),
+        )
+
+        direct_calls: list[str] = []
+        for path in sorted((BACKEND_DIR / "services").glob("server_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "BatchJobRunner"
+                for node in ast.walk(tree)
+            ):
+                direct_calls.append(path.name)
+        self.assertEqual(direct_calls, [])
 
     def test_operation_declaration_drift_fails_closed(self) -> None:
         incomplete = dict(candidate_module._OPERATION_AUDIT_ACTIONS)

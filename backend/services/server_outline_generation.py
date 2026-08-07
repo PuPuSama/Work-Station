@@ -34,8 +34,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.authorized_job_queue import (
-    AuthorizedPostgresJobQueue,
-    ReauthorizingJobHandler,
+    authorized_batch_runner,
 )
 from services.generator import (
     custom_instruction_value,
@@ -741,16 +740,10 @@ class ServerOutlineGenerationRegistry:
                 raise OutlineGenerationUnavailable(
                     "outline generation runner is not configured"
                 )
-            runner = BatchJobRunner(
-                AuthorizedPostgresJobQueue(
-                    current.queue,
-                    access=self._access,
-                ),
-                ReauthorizingJobHandler(
-                    self._handler,
-                    access=self._access,
-                ),
-                concurrency=1,
+            runner = authorized_batch_runner(
+                current.queue,
+                self._handler,
+                access=self._access,
                 operations=(OUTLINE_GENERATION_OPERATION,),
             )
             current.runner = runner
