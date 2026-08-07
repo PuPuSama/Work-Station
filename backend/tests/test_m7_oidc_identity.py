@@ -236,6 +236,34 @@ class OidcConfigurationTests(unittest.TestCase):
                 redirect_uri=REDIRECT_URI,
                 post_login_path="https://evil.example.test/",
             )
+        for origin in (
+            "http://app.example.test",
+            "https://app.example.test/path",
+            "https://user@app.example.test",
+        ):
+            with self.subTest(origin=origin):
+                with self.assertRaisesRegex(
+                    OidcConfigurationError,
+                    "safe origin",
+                ):
+                    OidcProviderSettings(
+                        issuer=ISSUER,
+                        client_id=CLIENT_ID,
+                        client_secret=CLIENT_SECRET,
+                        redirect_uri=REDIRECT_URI,
+                        post_login_origin=origin,
+                    )
+
+    def test_loopback_post_login_origin_builds_absolute_safe_url(self) -> None:
+        configured = replace(
+            settings(),
+            post_login_origin="http://127.0.0.1:3000/",
+        )
+
+        self.assertEqual(
+            configured.post_login_url("/projects/example?tab=knowledge"),
+            "http://127.0.0.1:3000/projects/example?tab=knowledge",
+        )
 
     def test_discovery_issuer_match_is_exact_including_trailing_slash(
         self,

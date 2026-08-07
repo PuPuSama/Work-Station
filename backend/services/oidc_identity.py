@@ -95,6 +95,36 @@ def _post_login_path(value: str) -> str:
     return normalized
 
 
+def _post_login_origin(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return ""
+    parsed = urlsplit(normalized)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise OidcConfigurationError(
+            "ARTICLE_AGENT_OIDC_POST_LOGIN_ORIGIN must be a safe origin"
+        ) from exc
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    allowed_schemes = {"http", "https"} if loopback else {"https"}
+    if (
+        parsed.scheme not in allowed_schemes
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or port is not None
+        and not 0 < port < 65536
+    ):
+        raise OidcConfigurationError(
+            "ARTICLE_AGENT_OIDC_POST_LOGIN_ORIGIN must be a safe origin"
+        )
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class OidcProviderSettings:
     """Provider-neutral OIDC relying-party configuration."""
@@ -104,6 +134,7 @@ class OidcProviderSettings:
     client_secret: str = field(repr=False)
     redirect_uri: str
     post_login_path: str = "/"
+    post_login_origin: str = ""
     request_timeout_seconds: float = 10.0
     cache_seconds: int = 10 * 60
     state_seconds: int = 10 * 60
@@ -153,6 +184,11 @@ class OidcProviderSettings:
             "post_login_path",
             _post_login_path(self.post_login_path),
         )
+        object.__setattr__(
+            self,
+            "post_login_origin",
+            _post_login_origin(self.post_login_origin),
+        )
         if not 1 <= self.request_timeout_seconds <= 60:
             raise OidcConfigurationError(
                 "OIDC request timeout must be between 1 and 60 seconds"
@@ -197,11 +233,19 @@ class OidcProviderSettings:
                 "ARTICLE_AGENT_OIDC_POST_LOGIN_PATH",
                 "/",
             ),
+            post_login_origin=source.get(
+                "ARTICLE_AGENT_OIDC_POST_LOGIN_ORIGIN",
+                "",
+            ),
         )
 
     @property
     def discovery_url(self) -> str:
         return f"{self.issuer.rstrip('/')}{OIDC_DISCOVERY_SUFFIX}"
+
+    def post_login_url(self, path: str) -> str:
+        normalized_path = _post_login_path(path)
+        return f"{self.post_login_origin}{normalized_path}"
 
 
 @dataclass(frozen=True, slots=True)

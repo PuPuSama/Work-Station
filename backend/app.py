@@ -1588,7 +1588,7 @@ def oidc_login_callback(
     ):
         return _oidc_failure(401)
     response = RedirectResponse(
-        url=result.redirect_path,
+        url=service.settings.post_login_url(result.redirect_path),
         status_code=303,
     )
     response.delete_cookie(

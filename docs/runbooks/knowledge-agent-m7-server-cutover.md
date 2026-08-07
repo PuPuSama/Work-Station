@@ -356,12 +356,18 @@ ARTICLE_AGENT_OIDC_CLIENT_ID
 ARTICLE_AGENT_OIDC_CLIENT_SECRET
 ARTICLE_AGENT_OIDC_REDIRECT_URI
 ARTICLE_AGENT_OIDC_POST_LOGIN_PATH
+ARTICLE_AGENT_OIDC_POST_LOGIN_ORIGIN
 ```
 
 Provider 注册的 Redirect URI 必须与配置逐字一致，并使用生产 HTTPS 域名。前端与
 `/api/auth/*` 必须经同一站点反向代理提供，`POST_LOGIN_PATH` 只能是 `/` 开头的站内
 路径。不要把 Client Secret、Authorization Code、ID Token、State Cookie 或签名下载
 URL 写入普通日志和发布证据。
+
+`ARTICLE_AGENT_OIDC_POST_LOGIN_ORIGIN` 仅用于本地前后端分端口调试。生产同站反向代理
+应保持为空；本地 Backend `8000` + Frontend `3000` 可设为
+`http://127.0.0.1:3000`。非 Loopback 只接受 HTTPS Origin，且不允许 Path、Query、
+Fragment 或内嵌凭据。
 
 Client Secret 轮换：
 

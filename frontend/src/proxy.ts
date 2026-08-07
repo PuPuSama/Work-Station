@@ -16,9 +16,7 @@ function safeDestination(request: NextRequest) {
 export function proxy(request: NextRequest) {
   const loginPage = request.nextUrl.pathname === "/login";
   if (!authenticationEnabled()) {
-    return loginPage
-      ? NextResponse.redirect(new URL("/", request.url))
-      : NextResponse.next();
+    return NextResponse.next();
   }
 
   const authenticated = validSessionToken(
