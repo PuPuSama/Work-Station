@@ -54,6 +54,10 @@ Source-level Raw Artifact HTTP 仍保持关闭，不能因同组窄路径已开�
 路由组。Server 已新增 Current/Pending 精确 Snapshot Evidence Manifest、文本化 Normalized
 Preview 和短时 Raw Attachment Download；Server Library 的 Source-level `raw_evidence_url`
 继续为 `null`，不能按 Latest 猜测对象地址。
+旧 Local `file://` Artifact 不会因开启 Server Mode 自动变成可读对象；离线迁移必须通过
+默认只读、显式确认并重新授权的 Project-scoped CLI，把经哈希验证的字节复制到当前私有
+ObjectStore，再以旧 URI 为 CAS 条件切换存储位置。该兼容边界见
+`docs/architecture/m7-legacy-knowledge-artifact-migration.md`。
 结构记录见 `docs/architecture/m7-server-knowledge-research.md` 和
 `docs/architecture/m7-server-web-evidence-ingestion.md`。Research Chat、通用 Evidence Pack
 Build、客户端 Evidence Link Write 与 Stale Review 也继续关闭；Server Plan 读取仅展示
@@ -326,13 +330,16 @@ Route/Operation Inventory Digest、真实受控冒烟和其余 Capability 证据
     进入 Retriever/Catalog？
 42. Server `raw_evidence_url` 是否仍为 `null`，在独立授权预览能力完成前没有回退 Local
     Raw 路由或泄露对象 URI？
-43. 写作要求 PUT 是否仍只接受 Revision + 完整十字段，并在同一事务持有稳定 Project
+43. 旧 Local Knowledge Artifact 是否只通过离线 Project-scoped 迁移进入 ObjectStore，
+    并同时验证精确项目内容寻址布局、持久化哈希/大小/Content-Type、上传后 GET 哈希，
+    以及事务内 Active Project/完整引用集/权限/CAS/Audit？
+44. 写作要求 PUT 是否仍只接受 Revision + 完整十字段，并在同一事务持有稳定 Project
     Prompt 锁、复核 `article.edit`、执行 Task CAS 与脱敏 Audit？
-44. `project_default` 行不存在时，并发插入/切换是否仍与写作设置保存竞争同一个稳定锁；
+45. `project_default` 行不存在时，并发插入/切换是否仍与写作设置保存竞争同一个稳定锁；
     显式 Prompt 归档/换版是否仍被 Head 锁阻止穿过验证窗口？
-45. Effective Prompt Preview 是否只接受未保存十字段 + `outline|article`，复用正式 Builder
+46. Effective Prompt Preview 是否只接受未保存十字段 + `outline|article`，复用正式 Builder
     与 Current Published Context，并保持无 LLM、无 Task/Job/Audit 写入及 `no-store`？
-46. 旧 Local writing-settings/prompt-preview 是否在 Server 继续 503，新 Project 路径是否在
+47. 旧 Local writing-settings/prompt-preview 是否在 Server 继续 503，新 Project 路径是否在
     Local 继续 404，且两种模式不共享 Task/Prompt Store？
-47. 前端是否仍在 Dirty、Prompt 不可用或 Revision 冲突时阻止 Outline/Article 生成，同时
+48. 前端是否仍在 Dirty、Prompt 不可用或 Revision 冲突时阻止 Outline/Article 生成，同时
     保留其他未保存草稿、当前步骤和动态 Task 请求隔离？

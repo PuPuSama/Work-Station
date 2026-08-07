@@ -353,6 +353,12 @@
   Published Context，不调用模型、不写 Task/Job/Audit，并返回 `no-store`。前端显式保存、
   Dirty/Prompt 可用性门禁和 `409` 草稿保护均留在独立组件，Local 路径与存储保持不变；
   结构记录见 `docs/architecture/m7-server-task-writing-settings.md`；
+- 已增加旧 Knowledge Artifact 的一次性受控迁移：默认只读检查，显式 Project 二次确认后
+  只读取精确项目子目录内的 `file://`，逐对象校验 SHA-256/大小并复制到当前
+  Organization/Project 内容寻址 ObjectStore；URI 切换、实时 `knowledge.delete` 重验和脱敏
+  Audit 同事务，旧文件保留，失败对象交给 Orphan Reconciler 延迟对账。该迁移不放宽
+  Server HTTP，也不改变 Snapshot 内容、Chunk、产品事实或发布指针；结构见
+  `docs/architecture/m7-legacy-knowledge-artifact-migration.md`；
 - 已为 PostgreSQL Job 增加可信 `requested_by_user_id`，并完成 Worker Claim 前最小
   元数据授权与 Handler 前二次授权；产品重新发现 Enqueue 的可撤权授权、Task Revision、
   Job/Batch 和安全 Audit 已在同一事务；该 Operation 的终态 Job/Audit 原子性和有界
