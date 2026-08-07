@@ -234,7 +234,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
         ):
             self.assertTrue(by_id[check_id].passed)
 
-    def test_signed_evidence_does_not_flip_current_code_capabilities(
+    def test_signed_evidence_does_not_flip_missing_code_capabilities(
         self,
     ) -> None:
         verified = self.verify(_payload())
@@ -246,6 +246,7 @@ class RecoveryEvidenceTests(unittest.TestCase):
             ),
             object_store_factory=lambda settings: _ReadyStore(),
             identity_provider_probe=lambda settings: None,
+            capabilities=ServerCutoverCapabilities(),
             recovery_evidence=verified,
         )
         by_id = {check.check_id: check for check in report.checks}

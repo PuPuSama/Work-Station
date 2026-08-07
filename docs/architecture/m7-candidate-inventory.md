@@ -12,7 +12,8 @@
 备份恢复或生产停机已经验收。Route 全分类再结合精确 Server Gate、显式权限/重新授权元数据和
 旧入口 fail-closed 行为测试，构成 `project_routes_scoped=true` 的代码证据。Operation 清单再结合
 显式权限表、统一授权 Runner 工厂和行为测试，构成 `worker_reauthorizes=true` 的代码证据；清单
-仍不证明 Single Write、正式 Worker Drain 或其他外部发布 Capability。
+结合 Server TaskStore/JobQueue 结构不变量还构成 PostgreSQL Task/Job Single Write 的代码证据。
+清单仍不证明正式冻结窗口 matched 报告、Worker Drain 或其他外部发布 Evidence。
 
 ## 2. Route Inventory
 

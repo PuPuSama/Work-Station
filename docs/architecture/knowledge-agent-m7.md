@@ -837,8 +837,9 @@ Lifespan 明确失败且不释放数据库 Engine。
 `product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products/knowledge_research`。
 全部 10 个 Server Operation 由显式权限表覆盖，并且只能通过统一工厂创建带 Claim 与 Handler
 二次授权的 Runner；未知 Operation fail closed，因此 `worker_reauthorizes=true`。正式环境排空
-Artifact 和 PostgreSQL Job 单写切换仍未完成，`postgres_job_single_write` 保持 false，不能把
-代码能力扩写成整体 Worker Cutover 已完成。
+Artifact 仍未完成，但 10 个 Operation 的 Server Job 已只创建、Claim 和提交 PostgreSQL Job，
+旧 SQLite Queue 不在 Server Lifespan 启动，因此 `postgres_job_single_write=true`。这仍不能把
+代码能力扩写成生产 Worker Cutover 已完成。
 
 当前 Task API 复用 `TaskStore` 的模型迁移与校验语义，底层 Repository 已是
 PostgreSQL；这是迁移兼容层，不是最终服务器领域模型。`TaskStore` 现有进程级锁会串行化
@@ -902,8 +903,8 @@ body: { revision, product_ids[1..3] }
 `knowledge_product_asset_evidence` 中选择。
 
 该操作提交 `article.products.confirmed` Audit Event；Task CAS 与 Audit 同事务，事件
-只含 Revision、Status 和产品数量。其他未迁移项目写路由仍使
-`postgres_task_single_write` 保持 false。
+只含 Revision、Status 和产品数量。单独完成该操作不构成 Task 单写证据；最终结论由完整
+Route Inventory、Server TaskStore 结构不变量和旧入口 fail-closed 行为共同证明。
 
 Server 章节替换同样采用“生成/审阅”和“提交”分离的接口：
 
@@ -1001,8 +1002,8 @@ WebP。若上传后发生并发 Revision 冲突，可能留下未引用但内容
 Server `ArticleImage` 只保存源/派生 `asset_id`、派生哈希、尺寸、文件名 Marker 和文章
 锚点；`source_path/prepared_path` 固定为空。展示继续通过授权后的短期下载 URL。现有
 本地模式仍使用文件路径，不受这一 Server 契约影响。Server 文章 DOCX、TDK、最终
-AI-rate 截图与 Delivery ZIP 已由后续各节迁移；本操作完成仍不代表全部文章写路由或
-`postgres_task_single_write` 已完成。
+AI-rate 截图与 Delivery ZIP 已由后续各节迁移；单独完成本操作仍不代表全部文章写路由
+已经完成 PostgreSQL 单写。
 派生资产可能被多篇文章按内容复用，所以来源图、产品、文章角色和锚点只属于
 `ArticleImage` 关系，不写入共享 `knowledge_assets.metadata`；共享元数据只记录
 `derivative_kind` 与由字节确定的感知哈希。
@@ -1518,8 +1519,10 @@ Route 已全部分类，所有 Server-ready Project/Knowledge 路由具有显式
 `product_rediscovery/titles/outline/article/rewrite_article/humanize/restore_links/seo_review/products/knowledge_research`
 的 Enqueue/Runner 和窄范围 Batch/Job Control 已接线；Research 仍禁用通用 Cancel/Retry。
 10 个 Server Operation 已由显式权限表和统一授权 Runner 工厂覆盖，未知 Operation fail closed，
-因此 `worker_reauthorizes=true`。整体 Task/Job 单写和正式 Worker 排空证据仍未完成，所以整体
-仍明确保持 no-go；不能靠设置一个环境变量把未实现能力标成通过。
+因此 `worker_reauthorizes=true`。所有 Server-ready Task 写入口固定使用 PostgreSQL Repository，
+旧 TaskStore/JobQueue 和无 Project 写入口 fail closed；10 个 Server Operation 只使用 PostgreSQL
+Job，因此 `postgres_task_single_write=true`、`postgres_job_single_write=true`。正式冻结窗口
+matched 报告和 Worker 排空证据仍未完成，所以整体仍明确保持 no-go。
 
 备份恢复、对象版本/生命周期、密钥轮换、发布健康门和回滚步骤已经记录在
 `docs/runbooks/knowledge-agent-m7-server-cutover.md`。真实受控环境的恢复演练、

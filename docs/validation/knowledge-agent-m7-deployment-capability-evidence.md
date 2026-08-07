@@ -49,8 +49,9 @@ $env:ARTICLE_AGENT_CONFIG = `
   `recovery_evidence_identity/database_restore/object_restore/recovery_objectives` 全部失败，
   且错误不泄露 Secret、Hash、身份、时间或路径；
 - 当前 Capability 常量允许
-  `trusted_identity_source/project_routes_scoped/worker_reauthorizes/object_download_reauthorizes=true`；
-  Task/Job Single Write 仍保持 false，正式 Worker Drain 继续作为独立发布证据。
+  `trusted_identity_source/project_routes_scoped/postgres_task_single_write/postgres_job_single_write/`
+  `worker_reauthorizes/object_download_reauthorizes=true`；正式冻结窗口 matched 报告和 Worker Drain
+  继续作为独立发布证据。
 
 2026-08-06 的整体后端发现命令包含上述三个模块，未另行重复执行定向命令：
 
@@ -97,8 +98,8 @@ Hash、签名、公钥或解析异常正文。
 ### 2.3 有效测试 Envelope
 
 使用测试代码临时生成、由测试私钥签名并满足全部 V1 不变量的 Envelope。预期四项恢复
-Check 可以为 true，但 `server_cutover` 仍因当前四项代码 Capability 为 false，整体退出码
-仍为 `2`。不能把这一结果记录为真实恢复演练通过。
+Check 和 `server_cutover` 可以为 true；当其余测试 Probe 也通过时，自动化 Fixture 的整体
+结果可以为 ready。不能把测试私钥、Mock Probe 或该结果记录为真实恢复演练通过。
 
 自动化结果：
 
@@ -107,7 +108,7 @@ missing_evidence_exit_code: 2 (mocked live probes; safe report contract verified
 invalid_cases_checked: signature/key/commit/head/time/reviewer/schema/database/object/RPO-RTO
 safe_output_reviewed_by: automated assertions plus code review
 valid_fixture_recovery_checks: true
-valid_fixture_server_cutover: false with current capability constants
+valid_fixture_server_cutover: true with current capability constants
 artifact_id: local console output only
 ```
 
@@ -155,6 +156,13 @@ Runner 工厂；未知 Operation fail closed，所有 Server Runner 同时保留
 相关定向测试 `39/39` 通过；完整后端回归 `837` 项通过，`2` 项真实外部集成按门禁跳过。因此
 `worker_reauthorizes` 成为代码事实 `true`；正式 Worker Drain、Task/Job Single Write、恢复和
 生产外部证据状态不变。
+
+2026-08-07 的 PostgreSQL Single Write 收口新增结构不变量：Server TaskStore 固定使用
+Project-scoped `PostgresTaskRepository` 并禁用 Legacy Import；旧 `/api/tasks*` 写入口、全局
+TaskStore/JobQueue fail closed；10 个 Server Operation 不构造 SQLite `JobQueue`。相关定向测试
+`44/44` 通过；完整后端回归 `838` 项通过，`2` 项真实外部集成按门禁跳过。因此
+`postgres_task_single_write=true`、`postgres_job_single_write=true`，六项代码 Capability 均为
+true。正式冻结窗口 matched Report、Candidate Digest、Worker Drain、恢复和生产外部证据仍未完成。
 
 ## 4. 生产候选恢复验证（尚不可执行）
 

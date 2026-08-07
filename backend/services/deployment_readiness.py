@@ -78,6 +78,8 @@ class ServerCutoverCapabilities:
 CURRENT_SERVER_CUTOVER_CAPABILITIES = ServerCutoverCapabilities(
     trusted_identity_source=True,
     project_routes_scoped=True,
+    postgres_task_single_write=True,
+    postgres_job_single_write=True,
     worker_reauthorizes=True,
     object_download_reauthorizes=True,
 )

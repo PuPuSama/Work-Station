@@ -36,12 +36,22 @@ from services.server_job_control import (  # noqa: E402
 from services.deployment_readiness import (  # noqa: E402
     CURRENT_SERVER_CUTOVER_CAPABILITIES,
 )
+from services.access_control import ActorIdentity  # noqa: E402
 from services.authorized_job_queue import (  # noqa: E402
     AuthorizedPostgresJobQueue,
     ReauthorizingJobHandler,
     WORKER_OPERATION_PERMISSIONS,
     authorized_batch_runner,
     worker_permission_for,
+)
+from services.postgres_task_repository import (  # noqa: E402
+    PostgresTaskRepository,
+)
+from services.server_project_tasks import (  # noqa: E402
+    ServerProjectTaskStoreFactory,
+)
+from services.server_request_security import (  # noqa: E402
+    AuthorizedProjectRequest,
 )
 from knowledge_agent import m7_candidate_inventory as cli  # noqa: E402
 from services import candidate_inventory as candidate_module  # noqa: E402
@@ -355,6 +365,69 @@ class CandidateInventoryTests(unittest.TestCase):
             ):
                 direct_calls.append(path.name)
         self.assertEqual(direct_calls, [])
+
+    def test_server_task_and_job_writes_are_postgres_only(self) -> None:
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.postgres_task_single_write
+        )
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.postgres_job_single_write
+        )
+
+        runtime = ServerProjectTaskStoreFactory(
+            mock.Mock(),
+            mock.Mock(),
+        ).create(
+            AuthorizedProjectRequest(
+                actor=ActorIdentity(
+                    organization_id="organization-inventory",
+                    user_id="user-inventory",
+                ),
+                project_id="project-inventory",
+                permission="article.edit",
+            )
+        )
+        self.assertIsInstance(
+            runtime.store.repository,
+            PostgresTaskRepository,
+        )
+        self.assertFalse(runtime.store.legacy_import_enabled)
+
+        inventory = build_route_inventory(
+            application_routes(),
+            release_commit=RELEASE_COMMIT,
+        )
+        entries = inventory["entries"]
+        server_task_writes = [
+            entry
+            for entry in entries
+            if entry["state"] == "server_ready"
+            and entry["method"] in {"POST", "PUT", "PATCH", "DELETE"}
+            and "/tasks" in entry["path"]
+        ]
+        self.assertTrue(server_task_writes)
+        self.assertTrue(all(
+            entry["storage"].startswith("postgresql")
+            for entry in server_task_writes
+        ))
+        self.assertFalse(any(
+            entry["state"] == "server_ready"
+            for entry in entries
+            if entry["method"] in {"POST", "PUT", "PATCH", "DELETE"}
+            and entry["path"].startswith("/api/tasks")
+        ))
+
+        sqlite_job_queue_calls: list[str] = []
+        for path in sorted((BACKEND_DIR / "services").glob("server_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            if any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "JobQueue"
+                for node in ast.walk(tree)
+            ):
+                sqlite_job_queue_calls.append(path.name)
+        self.assertEqual(sqlite_job_queue_calls, [])
 
     def test_operation_declaration_drift_fails_closed(self) -> None:
         incomplete = dict(candidate_module._OPERATION_AUDIT_ACTIONS)

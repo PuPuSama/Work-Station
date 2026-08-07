@@ -11,7 +11,7 @@
 - Route 全分类、精确 Project Gate、显式权限/重新授权元数据与旧入口 fail closed 已形成
   `project_routes_scoped=true` 的代码证据；10 个 Server Operation 的显式权限表、统一授权 Runner
   工厂与未知 Operation fail closed 已形成 `worker_reauthorizes=true` 的代码证据。正式 Worker
-  Drain 和 Task/Job Single Write 仍未完成，M7 保持 `no-go`。
+  Drain、冻结窗口 matched 报告和其他生产证据仍未完成，M7 保持 `no-go`。
 
 ## 2. 自动验证
 
@@ -34,7 +34,10 @@
 11. 所有 Server-ready Project/Knowledge 路由均为 Project Scope，具有显式 Permission 与
     Reauthorization，旧 `/api/tasks*`、`/api/batches*`、`/api/batch-jobs*` 不可 Server-ready；
 12. 全部 10 个 Server Operation 均存在显式最小权限；未知 Operation fail closed；所有
-    `server_*.py` Runner 只能通过同时包装 Claim 与 Handler 授权的统一工厂创建。
+    `server_*.py` Runner 只能通过同时包装 Claim 与 Handler 授权的统一工厂创建；
+13. Server TaskStore 固定使用 Project-scoped `PostgresTaskRepository` 并禁用 Legacy Import；
+    所有 Server-ready Task 写入口声明 PostgreSQL 存储，旧 `/api/tasks*` 写入口 fail closed，
+    `server_*.py` 不得构造 SQLite `JobQueue`。
 
 第 7 项的运行行为不由清单字符串断言代替；必须同时保留
 `backend/tests/test_m7_server_product_generation.py`、
@@ -74,8 +77,20 @@ Candidate Inventory 通过证据，也不在本切片混入无关配置修复。
 - Candidate Inventory、Deployment Readiness、Worker 二次授权、产品生成和有界排空定向测试
   合计 `39/39` 通过；
 - 完整后端回归 `837` 项通过，`2` 项真实外部集成按显式门禁跳过；
-- 上述代码证据允许 `worker_reauthorizes=true`。正式 Worker Drain Artifact、Task/Job 单写、
-  真实 Candidate Digest、受控冒烟和恢复证据仍为 `PENDING`。
+- 上述代码证据允许 `worker_reauthorizes=true`。正式 Worker Drain Artifact、冻结窗口 matched
+  报告、真实 Candidate Digest、受控冒烟和恢复证据仍为 `PENDING`。
+
+### 2.4 PostgreSQL Task/Job Single Write 收口（2026-08-07）
+
+- Candidate Inventory 定向测试现为 `14/14` 通过；新增不变量证明 Server TaskStore 固定使用
+  Project-scoped `PostgresTaskRepository`、禁用 Legacy Import，旧 `/api/tasks*` 写入口 fail
+  closed，且 `server_*.py` 不构造 SQLite `JobQueue`；
+- Candidate Inventory、Deployment Readiness、Cutover Report、Recovery Evidence 与真实 Server
+  Lifespan 定向测试合计 `44/44` 通过；
+- 完整后端回归 `838` 项通过，`2` 项真实外部集成按显式门禁跳过；
+- `postgres_task_single_write=true`、`postgres_job_single_write=true`，六项代码 Capability 现均为
+  true。正式冻结窗口 matched Report、Candidate Digest、受控冒烟、Worker Drain、生产
+  IdP/ObjectStore 与恢复 Evidence 仍为 `PENDING`，M7 继续 `no-go`。
 
 ## 3. Artifact 验证
 

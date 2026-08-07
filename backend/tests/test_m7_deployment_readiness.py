@@ -101,6 +101,12 @@ class DeploymentReadinessTests(unittest.TestCase):
             CURRENT_SERVER_CUTOVER_CAPABILITIES.project_routes_scoped
         )
         self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.postgres_task_single_write
+        )
+        self.assertTrue(
+            CURRENT_SERVER_CUTOVER_CAPABILITIES.postgres_job_single_write
+        )
+        self.assertTrue(
             CURRENT_SERVER_CUTOVER_CAPABILITIES.worker_reauthorizes
         )
         self.assertTrue(
@@ -120,13 +126,21 @@ class DeploymentReadinessTests(unittest.TestCase):
         by_id = {
             check.check_id: check for check in report.checks
         }
-        self.assertFalse(by_id["server_cutover"].passed)
+        self.assertTrue(by_id["server_cutover"].passed)
         self.assertNotIn(
             "trusted_identity_source",
             by_id["server_cutover"].detail,
         )
         self.assertNotIn(
             "project_routes_scoped",
+            by_id["server_cutover"].detail,
+        )
+        self.assertNotIn(
+            "postgres_task_single_write",
+            by_id["server_cutover"].detail,
+        )
+        self.assertNotIn(
+            "postgres_job_single_write",
             by_id["server_cutover"].detail,
         )
         self.assertNotIn(

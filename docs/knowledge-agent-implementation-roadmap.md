@@ -383,9 +383,11 @@
   版本保留、下游失效和前端入口。185 条 Route 的全分类、精确 Project Gate、显式权限/
   重新授权元数据和旧入口 fail closed 已使 `project_routes_scoped=true`；10 个 Server Operation
   的显式权限表、统一授权 Runner 工厂和未知 Operation fail closed 已使
-  `worker_reauthorizes=true`。Task/Job Single Write 两项代码门禁继续保持 false。随后按“冻结
-  候选 Commit 并生成 Route/Operation Digest 与受控产品冒烟 -> 生产 IdP Conformance 与
-  逐 Operation API/Worker 授权覆盖 -> 保存冻结窗口 matched 证据 -> 服务器 PostgreSQL
-  单写切换 -> 真实备份恢复 Capture/独立 Review -> 签名 Evidence Preflight 与部署门禁”
+  `worker_reauthorizes=true`。Server TaskStore 固定使用 PostgreSQL Repository 且禁用 Legacy
+  Import，全局 TaskStore/JobQueue 和旧无 Project 写入口 fail closed；10 个 Server Operation
+  只使用 PostgreSQL Job，因此 Task/Job Single Write 两项代码门禁也为 true。随后按“冻结
+  候选 Commit 并生成 Route/Operation Digest 与受控产品冒烟 -> 生产 IdP Conformance ->
+  保存每项目冻结窗口 matched 证据与 Worker Drain -> 真实备份恢复 Capture/独立 Review ->
+  签名 Evidence Preflight 与部署门禁”
   顺序推进，完整结构与重构检查清单见
   `docs/architecture/knowledge-agent-m7.md`。
