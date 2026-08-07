@@ -153,6 +153,33 @@ class JobQueueTests(unittest.TestCase):
             queue.delete_customer("example.com")
             self.assertEqual(queue.list_batches(customer="example.com"), [])
 
+    def test_terminal_job_record_can_be_deleted_but_active_job_is_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            queue = JobQueue(Path(directory) / "jobs.sqlite3")
+            batch = queue.create_batch(
+                "article",
+                [queue_item("task-1"), queue_item("task-2")],
+                customer="example.com",
+            )
+            first_job, second_job = batch["jobs"]
+
+            with self.assertRaises(ValueError):
+                queue.delete_job(first_job["id"])
+
+            queue.request_cancel(first_job["id"])
+            result = queue.delete_job(first_job["id"])
+            self.assertFalse(result["batch_deleted"])
+            self.assertEqual(
+                [job["id"] for job in queue.get_batch(batch["id"])["jobs"]],
+                [second_job["id"]],
+            )
+
+            queue.request_cancel(second_job["id"])
+            result = queue.delete_job(second_job["id"])
+            self.assertTrue(result["batch_deleted"])
+            with self.assertRaises(KeyError):
+                queue.get_batch(batch["id"])
+
     def test_runner_only_claims_its_configured_operation_family(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             queue = JobQueue(Path(directory) / "jobs.sqlite3")

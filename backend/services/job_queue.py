@@ -527,6 +527,41 @@ class JobQueue:
             self._touch_batch(connection, job_id, now)
         return self.get_job(job_id)
 
+    def delete_job(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT batch_id, status FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(job_id)
+            if row["status"] in ACTIVE_JOB_STATUSES:
+                connection.rollback()
+                raise ValueError("Active jobs must be cancelled before their records can be deleted.")
+
+            batch_id = str(row["batch_id"])
+            connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            remaining = connection.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            batch_deleted = not remaining or int(remaining["count"]) == 0
+            if batch_deleted:
+                connection.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
+            else:
+                connection.execute(
+                    "UPDATE batches SET updated_at = ? WHERE id = ?",
+                    (_now_iso(), batch_id),
+                )
+            connection.commit()
+        return {
+            "job_id": job_id,
+            "batch_id": batch_id,
+            "batch_deleted": batch_deleted,
+        }
+
     def cancel_batch(self, batch_id: str) -> dict[str, Any]:
         now = _now_iso()
         with self._connect() as connection:
