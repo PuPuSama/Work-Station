@@ -80,6 +80,7 @@ function taskLabel(task: TaskRecord) {
 export function ServerResearchWorkspace({ customer }: { customer: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const queryString = searchParams.toString();
   const [plans, setPlans] = useState<KnowledgeRetrievalPlan[]>([]);
   const [runs, setRuns] = useState<ResearchRun[]>([]);
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
@@ -130,13 +131,6 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
       setSelectedPlanId((current) => current || nextPlans[0]?.retrieval_plan_id || "");
       setSelectedTaskId((current) => current || nextTasks[0]?.id || "");
       setSelectedThreadId((current) => {
-        const requested = searchParams.get("thread");
-        if (
-          requested &&
-          nextRuns.some((run) => run.thread_id === requested)
-        ) {
-          return requested;
-        }
         if (current && nextRuns.some((run) => run.thread_id === current)) {
           return current;
         }
@@ -147,7 +141,7 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
     } finally {
       setLoading(false);
     }
-  }, [customer, searchParams]);
+  }, [customer]);
 
   const refreshRuns = useCallback(async () => {
     const nextRuns = await listResearchRuns(customer);
@@ -182,12 +176,18 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
     resumeRequestId.current = "";
     setEvidencePack(null);
     void refreshDetail(selectedThreadId, true);
+  }, [refreshDetail, selectedThreadId]);
+
+  useEffect(() => {
     if (!selectedThreadId) return;
-    const next = new URLSearchParams(searchParams.toString());
+    const next = new URLSearchParams(queryString);
     next.set("tab", "research");
     next.set("thread", selectedThreadId);
-    router.replace(`?${next.toString()}`, { scroll: false });
-  }, [refreshDetail, router, searchParams, selectedThreadId]);
+    const nextQueryString = next.toString();
+    if (nextQueryString !== queryString) {
+      router.replace(`?${nextQueryString}`, { scroll: false });
+    }
+  }, [queryString, router, selectedThreadId]);
 
   const detailStatus = detail?.status;
 
