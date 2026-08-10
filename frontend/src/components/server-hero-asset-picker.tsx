@@ -32,12 +32,14 @@ function byteSize(value: number) {
 
 export function ServerHeroAssetPicker({
   assets,
+  description,
   disabled,
   onSelect,
   projectApi,
   selectedAssetId,
 }: {
   assets: ServerCatalogImageAsset[];
+  description?: string;
   disabled: boolean;
   onSelect: (assetId: string) => void;
   projectApi: string;
@@ -96,7 +98,7 @@ export function ServerHeroAssetPicker({
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
-          仅显示当前已发布快照中的图片，共 {assets.length} 张。
+          {description || `仅显示当前已发布快照中的图片，共 ${assets.length} 张。`}
         </p>
         <Button
           type="button"

@@ -62,6 +62,7 @@ class ServerCatalogImageAsset:
     """Safe image summary; storage identities and source URLs stay private."""
 
     asset_id: str
+    product_id: str
     content_type: str
     byte_size: int
     width: int | None
@@ -94,6 +95,7 @@ class PostgresServerProjectCatalog:
         *,
         product_limit: int = 100,
         image_limit: int = 48,
+        image_product_ids: tuple[str, ...] = (),
     ) -> ServerProjectCatalog:
         normalized_project_id = normalized_customer(project_id)
         if not 1 <= product_limit <= 200:
@@ -110,6 +112,7 @@ class PostgresServerProjectCatalog:
                 connection,
                 normalized_project_id,
                 image_limit,
+                image_product_ids,
             )
         return ServerProjectCatalog(products=products, image_assets=images)
 
@@ -257,10 +260,17 @@ class PostgresServerProjectCatalog:
         connection: sa.Connection,
         project_id: str,
         limit: int,
+        product_ids: tuple[str, ...],
     ) -> tuple[ServerCatalogImageAsset, ...]:
+        if not product_ids:
+            return ()
         source = knowledge_sources.alias("server_catalog_image_source")
+        product_asset = knowledge_product_asset_evidence.alias(
+            "server_catalog_image_product"
+        )
         ranked = (
             sa.select(
+                product_asset.c.product_id,
                 knowledge_assets.c.asset_id,
                 knowledge_assets.c.content_type,
                 knowledge_assets.c.byte_size,
@@ -273,7 +283,10 @@ class PostgresServerProjectCatalog:
                 source.c.display_name,
                 sa.func.row_number()
                 .over(
-                    partition_by=knowledge_assets.c.asset_id,
+                    partition_by=(
+                        product_asset.c.product_id,
+                        knowledge_assets.c.asset_id,
+                    ),
                     order_by=(
                         source.c.display_name.asc(),
                         snapshot_assets.c.ordinal.asc(),
@@ -283,13 +296,29 @@ class PostgresServerProjectCatalog:
                 .label("asset_rank"),
             )
             .select_from(
-                knowledge_assets.join(
+                product_asset.join(
+                    knowledge_products,
+                    sa.and_(
+                        knowledge_products.c.project_id
+                        == product_asset.c.project_id,
+                        knowledge_products.c.product_id
+                        == product_asset.c.product_id,
+                    ),
+                ).join(
+                    knowledge_assets,
+                    sa.and_(
+                        knowledge_assets.c.project_id
+                        == product_asset.c.project_id,
+                        knowledge_assets.c.asset_id
+                        == product_asset.c.asset_id,
+                    ),
+                ).join(
                     snapshot_assets,
                     sa.and_(
-                        snapshot_assets.c.project_id
-                        == knowledge_assets.c.project_id,
-                        snapshot_assets.c.asset_id
-                        == knowledge_assets.c.asset_id,
+                        snapshot_assets.c.project_id == product_asset.c.project_id,
+                        snapshot_assets.c.source_id == product_asset.c.source_id,
+                        snapshot_assets.c.snapshot_id == product_asset.c.snapshot_id,
+                        snapshot_assets.c.asset_id == product_asset.c.asset_id,
                     ),
                 ).join(
                     source,
@@ -301,6 +330,8 @@ class PostgresServerProjectCatalog:
             )
             .where(
                 knowledge_assets.c.project_id == project_id,
+                product_asset.c.product_id.in_(product_ids),
+                knowledge_products.c.status == "confirmed",
                 knowledge_assets.c.content_type.ilike("image/%"),
                 source.c.status == "published",
                 source.c.current_snapshot_id
@@ -332,6 +363,7 @@ class PostgresServerProjectCatalog:
             result.append(
                 ServerCatalogImageAsset(
                     asset_id=str(row["asset_id"]),
+                    product_id=str(row["product_id"]),
                     content_type=str(row["content_type"]),
                     byte_size=int(row["byte_size"]),
                     width=(
@@ -345,6 +377,58 @@ class PostgresServerProjectCatalog:
                 )
             )
         return tuple(result)
+
+    def image_asset_ids(
+        self,
+        project_id: str,
+        product_ids: tuple[str, ...],
+    ) -> dict[str, set[str]]:
+        """Return current published image evidence for selected products."""
+
+        normalized_project_id = normalized_customer(project_id)
+        normalized_product_ids = tuple(
+            dict.fromkeys(
+                value.strip() for value in product_ids if value.strip()
+            )
+        )
+        result = {product_id: set() for product_id in normalized_product_ids}
+        if not normalized_product_ids:
+            return result
+        evidence = knowledge_product_asset_evidence.alias(
+            "server_article_image_evidence"
+        )
+        source = knowledge_sources.alias("server_article_image_source")
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(evidence.c.product_id, evidence.c.asset_id)
+                .select_from(
+                    evidence.join(
+                        knowledge_products,
+                        sa.and_(
+                            knowledge_products.c.project_id
+                            == evidence.c.project_id,
+                            knowledge_products.c.product_id
+                            == evidence.c.product_id,
+                        ),
+                    ).join(
+                        source,
+                        sa.and_(
+                            source.c.project_id == evidence.c.project_id,
+                            source.c.source_id == evidence.c.source_id,
+                        ),
+                    )
+                )
+                .where(
+                    evidence.c.project_id == normalized_project_id,
+                    evidence.c.product_id.in_(normalized_product_ids),
+                    knowledge_products.c.status == "confirmed",
+                    source.c.status == "published",
+                    source.c.current_snapshot_id == evidence.c.snapshot_id,
+                )
+            ).mappings()
+            for row in rows:
+                result[str(row["product_id"])].add(str(row["asset_id"]))
+        return result
 
 
 __all__ = [

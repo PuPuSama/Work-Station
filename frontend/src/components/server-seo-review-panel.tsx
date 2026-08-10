@@ -98,6 +98,72 @@ function draftFor(
   );
 }
 
+function DiffLine({ prefix, text }: { prefix: " " | "-" | "+"; text: string }) {
+  const tone =
+    prefix === "-"
+      ? "bg-red-50 text-red-900 dark:bg-red-950/40 dark:text-red-200"
+      : prefix === "+"
+        ? "bg-emerald-50 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+        : "text-muted-foreground";
+  return (
+    <div className={`grid grid-cols-[2rem_minmax(0,1fr)] px-2 ${tone}`}>
+      <span aria-hidden="true" className="select-none text-center opacity-70">
+        {prefix}
+      </span>
+      <span className="whitespace-pre-wrap break-words py-0.5">{text || " "}</span>
+    </div>
+  );
+}
+
+function GitDiff({
+  source,
+  change,
+  reviewedText,
+}: {
+  source: string;
+  change: SeoReviewChange;
+  reviewedText: string;
+}) {
+  const validRange =
+    change.source_start >= 0 && change.source_end >= change.source_start;
+  const contextBefore = validRange
+    ? source.slice(0, change.source_start).split("\n").slice(-2)
+    : [];
+  const contextAfter = validRange
+    ? source.slice(change.source_end).split("\n").slice(0, 2)
+    : [];
+  const removed =
+    change.operation === "insert_after" ? [] : change.target_text.split("\n");
+  const added =
+    change.operation === "delete" ? [] : reviewedText.split("\n");
+
+  return (
+    <div
+      className="overflow-hidden rounded-md border bg-background font-mono text-xs leading-5"
+      role="region"
+      aria-label={`${change.title} 修改对比`}
+    >
+      <div className="border-b bg-muted/50 px-3 py-2 text-muted-foreground">
+        @@ {validRange ? `${change.source_start},${change.source_end}` : "定位不可用"} @@
+      </div>
+      <div className="max-h-96 overflow-auto py-1">
+        {contextBefore.map((line, index) => (
+          <DiffLine key={`before-${index}`} prefix=" " text={line} />
+        ))}
+        {removed.map((line, index) => (
+          <DiffLine key={`removed-${index}`} prefix="-" text={line} />
+        ))}
+        {added.map((line, index) => (
+          <DiffLine key={`added-${index}`} prefix="+" text={line} />
+        ))}
+        {contextAfter.map((line, index) => (
+          <DiffLine key={`after-${index}`} prefix=" " text={line} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ServerSeoReviewPanel({
   task,
   taskApi,
@@ -197,7 +263,7 @@ export function ServerSeoReviewPanel({
               project_default 选择。
             </p>
           </div>
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-4 xl:grid-cols-2">
             <div className="grid gap-2">
               <Label htmlFor="server-seo-primary-keyword">
                 Primary Keyword
@@ -276,7 +342,7 @@ export function ServerSeoReviewPanel({
               <h3 id="seo-run-title" className="text-sm font-semibold">
                 2. 选择 Review Run
               </h3>
-              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end">
                 <div className="grid gap-2">
                   <Label htmlFor="server-seo-review-run">
                     Review Run
@@ -302,7 +368,7 @@ export function ServerSeoReviewPanel({
                   </select>
                 </div>
                 {review && (
-                  <div className="grid grid-cols-4 gap-2 text-center text-xs">
+                  <div className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-4">
                     <div className="rounded-md border px-3 py-2">
                       <strong className="block text-base text-foreground">
                         {summary.accepted}
@@ -430,34 +496,30 @@ export function ServerSeoReviewPanel({
                             {change.rationale}
                           </p>
 
-                          <div className="grid gap-3 lg:grid-cols-2">
-                            <div className="grid gap-2">
-                              <Label htmlFor={`seo-target-${change.id}`}>
-                                原文定位
-                              </Label>
-                              <Textarea
-                                id={`seo-target-${change.id}`}
-                                value={change.target_text}
-                                readOnly
-                                className="min-h-28 resize-y bg-muted/30"
-                              />
-                            </div>
-                            <div className="grid gap-2">
-                              <Label htmlFor={`seo-reviewed-${change.id}`}>
-                                人工确认文本
-                              </Label>
-                              <Textarea
-                                id={`seo-reviewed-${change.id}`}
-                                value={draft.reviewedText}
-                                disabled={busy || !reviewAllowed || !open}
-                                className="min-h-28 resize-y"
-                                onChange={(event) =>
-                                  updateDraft(change, {
-                                    reviewedText: event.target.value,
-                                  })
-                                }
-                              />
-                            </div>
+                          <div className="grid gap-2">
+                            <Label>修改对比</Label>
+                            <GitDiff
+                              source={review.source_article}
+                              change={change}
+                              reviewedText={draft.reviewedText}
+                            />
+                          </div>
+
+                          <div className="grid gap-2">
+                            <Label htmlFor={`seo-reviewed-${change.id}`}>
+                              人工确认后的内容
+                            </Label>
+                            <Textarea
+                              id={`seo-reviewed-${change.id}`}
+                              value={draft.reviewedText}
+                              disabled={busy || !reviewAllowed || !open}
+                              className="min-h-32 resize-y font-mono text-sm leading-6"
+                              onChange={(event) =>
+                                updateDraft(change, {
+                                  reviewedText: event.target.value,
+                                })
+                              }
+                            />
                           </div>
 
                           {change.validation_errors.length > 0 && (

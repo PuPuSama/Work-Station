@@ -268,6 +268,7 @@ class ServerArticleImagePreparation:
         project_id: str,
         task: TaskRecord,
         hero_asset_id: str,
+        product_asset_ids: Mapping[str, str] | None = None,
         product_anchors: Mapping[str, str] | None = None,
     ) -> TaskRecord:
         article = task.linked_article or task.humanized_article
@@ -292,6 +293,10 @@ class ServerArticleImagePreparation:
         selectable_product_ids = {
             product.product_id for product in task.products
         }
+        selected_product_assets = {
+            str(product_id).strip(): str(asset_id).strip()
+            for product_id, asset_id in dict(product_asset_ids or {}).items()
+        }
         if (
             any(
                 not product_id or not heading
@@ -303,6 +308,16 @@ class ServerArticleImagePreparation:
         ):
             raise ServerArticleImageError(
                 "product image anchors do not match the selected products"
+            )
+        if (
+            any(
+                not product_id or not asset_id
+                for product_id, asset_id in selected_product_assets.items()
+            )
+            or not set(selected_product_assets).issubset(selectable_product_ids)
+        ):
+            raise ServerArticleImageError(
+                "product image choices do not match the selected products"
             )
         hero = self._read_derived(
             actor=actor,
@@ -321,7 +336,10 @@ class ServerArticleImagePreparation:
         for product in task.products:
             if len(selected) >= MAX_ARTICLE_IMAGES:
                 break
-            source_asset_id = product.selected_asset_id.strip()
+            source_asset_id = selected_product_assets.get(
+                product.product_id,
+                product.selected_asset_id,
+            ).strip()
             if not source_asset_id:
                 continue
             derived = self._read_derived(
@@ -429,6 +447,7 @@ class ServerArticleImagePreparation:
                     height=candidate.derived.height,
                     filename=filename,
                     marker=f"img.{filename}",
+                    product_id=candidate.product_id,
                     product_name=candidate.product_name,
                     product_url=candidate.product_url,
                     anchor_heading="" if anchor is None else anchor[2],

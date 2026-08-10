@@ -36,6 +36,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ServerOutlineHistory } from "@/components/server-outline-history";
 import { ServerHeroAssetPicker } from "@/components/server-hero-asset-picker";
 import { ServerProductRediscoveryPanel } from "@/components/server-product-rediscovery-panel";
+import { ServerResearchWorkspace } from "@/components/server-research-workspace";
 import { ServerSectionRewritePanel } from "@/components/server-section-rewrite-panel";
 import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
 import { ServerTaskResetPanel } from "@/components/server-task-reset-panel";
@@ -197,6 +198,9 @@ export function ServerArticleWorkbench({
   const [finalReport, setFinalReport] = useState("");
   const [finalScreenshot, setFinalScreenshot] = useState<File | null>(null);
   const [heroAssetId, setHeroAssetId] = useState("");
+  const [productAssetIds, setProductAssetIds] = useState<Record<string, string>>(
+    {},
+  );
   const [productAnchors, setProductAnchors] = useState<Record<string, string>>(
     {},
   );
@@ -231,11 +235,14 @@ export function ServerArticleWorkbench({
     setLoading(true);
     setError("");
     try {
-      const [nextTask, projects, nextCatalog] = await Promise.all([
+      const [nextTask, projects] = await Promise.all([
         apiGet<TaskRecord>(`${taskApi}`),
         apiGet<AccessibleProject[]>("/api/projects"),
-        apiGet<ServerProjectCatalog>(`${projectApi}/catalog?image_limit=24`),
       ]);
+      const imageProductIds = taskProductIds(nextTask).join(",");
+      const nextCatalog = await apiGet<ServerProjectCatalog>(
+        `${projectApi}/catalog?image_limit=100&image_product_ids=${encodeURIComponent(imageProductIds)}`,
+      );
       if (
         activeWorkbenchScopeRef.current !== requestScope ||
         loadRequestRef.current !== requestId
@@ -334,6 +341,21 @@ export function ServerArticleWorkbench({
         task.images?.find((image) => image.role === "hero")
           ?.source_asset_id || "",
       );
+      setProductAssetIds(
+        Object.fromEntries(
+          task.products.flatMap((product) => {
+            if (!product.product_id) return [];
+            const prepared = task.images?.find(
+              (image) =>
+                image.role === "product" &&
+                image.product_id === product.product_id,
+            );
+            const assetId =
+              prepared?.source_asset_id || product.selected_asset_id || "";
+            return assetId ? [[product.product_id, assetId] as const] : [];
+          }),
+        ),
+      );
     }
     if (recommendedTaskIdRef.current !== task.id) {
       recommendedTaskIdRef.current = task.id;
@@ -342,6 +364,33 @@ export function ServerArticleWorkbench({
       }
     }
   }, [initialStep, task]);
+
+  useEffect(() => {
+    if (!catalog?.image_assets.length) return;
+    setHeroAssetId((current) =>
+      catalog.image_assets.some((asset) => asset.asset_id === current)
+        ? current
+        : catalog.image_assets[0].asset_id,
+    );
+    setProductAssetIds((current) =>
+      Object.fromEntries(
+        (task?.products || []).flatMap((product) => {
+          if (!product.product_id) return [];
+          const options = catalog.image_assets.filter(
+            (asset) => asset.product_id === product.product_id,
+          );
+          if (!options.length) return [];
+          const selected = current[product.product_id];
+          return [[
+            product.product_id,
+            options.some((asset) => asset.asset_id === selected)
+              ? selected
+              : options[0].asset_id,
+          ] as const];
+        }),
+      ),
+    );
+  }, [catalog, task?.products]);
 
   function acceptWritingSettingsTask(updated: TaskRecord) {
     preserveDraftsForRevisionRef.current = updated.revision ?? 0;
@@ -497,6 +546,14 @@ export function ServerArticleWorkbench({
   );
   const articleJobLabel = hasArticleDraft ? "重新生成正文" : "生成文章初稿";
   const articleJobEndpoint = hasArticleDraft ? "article/rewrite" : "article";
+  const hasConfirmedOutline = Boolean(
+    task?.outline?.trim() &&
+      task.article_versions?.some(
+        (version) =>
+          version.kind === "outline" &&
+          version.source_kind === "manual_confirmed",
+      ),
+  );
   const titleGenerationBlockedReason = !editAllowed
     ? `当前账号是“${roleLabel(role)}”，需要“编辑”或更高项目权限才能生成标题。`
     : !allowed.has("generate_titles")
@@ -897,7 +954,8 @@ export function ServerArticleWorkbench({
         </div>
 
         {step === "outline" && (
-          <Card>
+          <div className="grid gap-4">
+            <Card>
             <CardHeader className="border-b">
               <CardTitle>大纲生成与人工确认</CardTitle>
               <CardDescription>
@@ -1002,7 +1060,23 @@ export function ServerArticleWorkbench({
                 runAction={runAction}
               />
             </CardContent>
-          </Card>
+            </Card>
+            {hasConfirmedOutline ? (
+              <ServerResearchWorkspace
+                customer={customer}
+                taskId={taskId}
+                embedded
+              />
+            ) : (
+              <Alert>
+                <FileCheck2 />
+                <AlertTitle>确认大纲后可研究资料</AlertTitle>
+                <AlertDescription>
+                  Research Agent 会按当前大纲逐节检索并生成 Evidence Pack；完成后再生成正文。
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
         )}
 
         {step === "draft" && (
@@ -1345,8 +1419,7 @@ export function ServerArticleWorkbench({
               <CardHeader className="border-b">
                 <CardTitle>私有图片准备</CardTitle>
                 <CardDescription>
-                  Hero 只接受项目内 Asset ID；产品图来自当前 Task 已确认产品的
-                  selected_asset_id，并按 H2 标题锚定。
+                  Hero 从本篇已选产品图片中选择；每个产品也可单独选择自己的正文图。
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
@@ -1354,6 +1427,7 @@ export function ServerArticleWorkbench({
                   <Label>Hero 图片</Label>
                   <ServerHeroAssetPicker
                     assets={catalog?.image_assets || []}
+                    description={`仅显示本篇 ${task.products.length} 个已选产品的图片。`}
                     projectApi={projectApi}
                     selectedAssetId={heroAssetId}
                     disabled={Boolean(pending) || !editAllowed}
@@ -1367,7 +1441,33 @@ export function ServerArticleWorkbench({
                 </div>
                 {task.products.map((product) =>
                   product.product_id ? (
-                    <div key={product.product_id} className="grid gap-2">
+                    <div
+                      key={product.product_id}
+                      className="grid gap-3 rounded-xl border p-3"
+                    >
+                      <div className="grid gap-1">
+                        <Label>{product.name} 的正文图片</Label>
+                        <p className="text-xs text-muted-foreground">
+                          只显示该产品当前已发布证据中的图片。
+                        </p>
+                      </div>
+                      <ServerHeroAssetPicker
+                        assets={(catalog?.image_assets || []).filter(
+                          (asset) => asset.product_id === product.product_id,
+                        )}
+                        description=""
+                        projectApi={projectApi}
+                        selectedAssetId={
+                          productAssetIds[product.product_id] || ""
+                        }
+                        disabled={Boolean(pending) || !editAllowed}
+                        onSelect={(assetId) =>
+                          setProductAssetIds((current) => ({
+                            ...current,
+                            [product.product_id as string]: assetId,
+                          }))
+                        }
+                      />
                       <Label htmlFor={`anchor-${product.product_id}`}>
                         {product.name} 的 H2 锚点
                       </Label>
@@ -1383,12 +1483,6 @@ export function ServerArticleWorkbench({
                           }))
                         }
                       />
-                      <p className="text-xs text-muted-foreground">
-                        Product Asset：{" "}
-                        <span className="font-mono">
-                          {product.selected_asset_id || "尚未选择"}
-                        </span>
-                      </p>
                     </div>
                   ) : null,
                 )}
@@ -1406,6 +1500,7 @@ export function ServerArticleWorkbench({
                       apiPost<TaskRecord>(`${taskApi}/prepare-images`, {
                         revision: task.revision ?? 0,
                         hero_asset_id: heroAssetId,
+                        product_asset_ids: productAssetIds,
                         product_anchors: Object.fromEntries(
                           Object.entries(productAnchors)
                             .map(([productId, heading]) => [

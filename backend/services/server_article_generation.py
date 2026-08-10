@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import uuid
@@ -12,6 +13,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import AppConfig
+from knowledge_agent.schema import (
+    evidence_pack_hits,
+    evidence_packs,
+    research_graph_runs,
+    retrieval_plans,
+)
 from models import ArticleVersion, PromptSnapshot, SourceLink, TaskRecord
 from server_schema import article_tasks, background_jobs
 from services.access_control import (
@@ -93,10 +100,226 @@ ARTICLE_GENERATION_OPERATIONS = (
     ARTICLE_REWRITE_OPERATION,
 )
 MAX_GENERATED_ARTICLE_CHARACTERS = 200_000
+MAX_ARTICLE_CONTEXT_CHUNKS = 6
 
 
 class ArticleGenerationUnavailable(RuntimeError):
     """The scoped article runner or provider cannot safely complete work."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ResearchArticleContext:
+    thread_id: str
+    retrieval_plan_id: str
+    evidence_pack_ids: tuple[str, ...]
+    chunk_ids: tuple[str, ...]
+
+
+def _article_research_identity(task: TaskRecord) -> tuple[str, int, str]:
+    return (
+        f"topic_{task.topic_index:03d}",
+        max(
+            1,
+            sum(
+                1
+                for version in task.article_versions
+                if version.kind == "outline"
+                and version.source_kind == "manual_confirmed"
+            ),
+        ),
+        hashlib.sha256(task.outline.strip().encode("utf-8")).hexdigest(),
+    )
+
+
+def _research_chunk_ids(
+    connection: sa.Connection,
+    *,
+    project_id: str,
+    retrieval_plan_id: str,
+    article_id: str,
+    outline_version: int,
+    evidence_pack_ids: Sequence[str],
+) -> tuple[str, ...]:
+    pack_ids = tuple(evidence_pack_ids)
+    if len(set(pack_ids)) != len(pack_ids):
+        raise JobConflict("article evidence identity is invalid")
+    if not pack_ids:
+        return ()
+    packs = connection.execute(
+        sa.select(
+            evidence_packs.c.evidence_pack_id,
+            evidence_packs.c.retrieval_plan_id,
+            evidence_packs.c.article_id,
+            evidence_packs.c.outline_version,
+        ).where(
+            evidence_packs.c.project_id == project_id,
+            evidence_packs.c.evidence_pack_id.in_(pack_ids),
+        )
+    ).mappings().all()
+    if len(packs) != len(pack_ids) or any(
+        str(row["retrieval_plan_id"]) != retrieval_plan_id
+        or str(row["article_id"]) != article_id
+        or int(row["outline_version"]) != outline_version
+        for row in packs
+    ):
+        raise JobConflict("article evidence context changed")
+    hit_rows = connection.execute(
+        sa.select(
+            evidence_pack_hits.c.evidence_pack_id,
+            evidence_pack_hits.c.chunk_id,
+            evidence_pack_hits.c.rank,
+        ).where(
+            evidence_pack_hits.c.project_id == project_id,
+            evidence_pack_hits.c.evidence_pack_id.in_(pack_ids),
+        )
+    ).mappings().all()
+    by_pack: dict[str, list[tuple[int, str]]] = {
+        pack_id: [] for pack_id in pack_ids
+    }
+    for row in hit_rows:
+        by_pack[str(row["evidence_pack_id"])].append(
+            (int(row["rank"]), str(row["chunk_id"]))
+        )
+    ranked = {
+        pack_id: [chunk_id for _, chunk_id in sorted(by_pack[pack_id])]
+        for pack_id in pack_ids
+    }
+    ordered = (
+        ranked[pack_id][rank]
+        for rank in range(max(map(len, ranked.values()), default=0))
+        for pack_id in pack_ids
+        if rank < len(ranked[pack_id])
+    )
+    return tuple(dict.fromkeys(ordered))[:MAX_ARTICLE_CONTEXT_CHUNKS]
+
+
+def _latest_completed_research_context(
+    engine: Engine,
+    *,
+    organization_id: str,
+    project_id: str,
+    task: TaskRecord,
+) -> _ResearchArticleContext | None:
+    article_id, outline_version, outline_hash = _article_research_identity(task)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.select(
+                research_graph_runs.c.thread_id,
+                research_graph_runs.c.retrieval_plan_id,
+                research_graph_runs.c.evidence_pack_ids,
+                retrieval_plans.c.metadata,
+            )
+            .join(
+                retrieval_plans,
+                sa.and_(
+                    retrieval_plans.c.project_id
+                    == research_graph_runs.c.project_id,
+                    retrieval_plans.c.retrieval_plan_id
+                    == research_graph_runs.c.retrieval_plan_id,
+                ),
+            )
+            .where(
+                research_graph_runs.c.organization_id == organization_id,
+                research_graph_runs.c.project_id == project_id,
+                research_graph_runs.c.article_id == article_id,
+                research_graph_runs.c.outline_version == outline_version,
+                research_graph_runs.c.status.in_(
+                    ("completed", "completed_with_warnings")
+                ),
+            )
+            .order_by(
+                research_graph_runs.c.finished_at.desc(),
+                research_graph_runs.c.created_at.desc(),
+                research_graph_runs.c.thread_id.desc(),
+            )
+        ).mappings()
+        for row in rows:
+            metadata = dict(row["metadata"] or {})
+            if (
+                str(metadata.get("task_id") or "") != task.id
+                or str(metadata.get("outline_hash") or "") != outline_hash
+                or metadata.get("generated_from")
+                != "confirmed_task_outline"
+            ):
+                continue
+            pack_ids = tuple(str(value) for value in row["evidence_pack_ids"])
+            retrieval_plan_id = str(row["retrieval_plan_id"])
+            return _ResearchArticleContext(
+                thread_id=str(row["thread_id"]),
+                retrieval_plan_id=retrieval_plan_id,
+                evidence_pack_ids=pack_ids,
+                chunk_ids=_research_chunk_ids(
+                    connection,
+                    project_id=project_id,
+                    retrieval_plan_id=retrieval_plan_id,
+                    article_id=article_id,
+                    outline_version=outline_version,
+                    evidence_pack_ids=pack_ids,
+                ),
+            )
+    return None
+
+
+def _validate_pinned_research_context(
+    engine: Engine,
+    *,
+    organization_id: str,
+    project_id: str,
+    task: TaskRecord,
+    thread_id: str,
+    retrieval_plan_id: str,
+    evidence_pack_ids: Sequence[str],
+    chunk_ids: Sequence[str],
+) -> None:
+    article_id, outline_version, outline_hash = _article_research_identity(task)
+    with engine.connect() as connection:
+        row = connection.execute(
+            sa.select(
+                research_graph_runs.c.status,
+                research_graph_runs.c.evidence_pack_ids,
+                retrieval_plans.c.metadata,
+            )
+            .join(
+                retrieval_plans,
+                sa.and_(
+                    retrieval_plans.c.project_id
+                    == research_graph_runs.c.project_id,
+                    retrieval_plans.c.retrieval_plan_id
+                    == research_graph_runs.c.retrieval_plan_id,
+                ),
+            )
+            .where(
+                research_graph_runs.c.organization_id == organization_id,
+                research_graph_runs.c.project_id == project_id,
+                research_graph_runs.c.thread_id == thread_id,
+                research_graph_runs.c.retrieval_plan_id == retrieval_plan_id,
+                research_graph_runs.c.article_id == article_id,
+                research_graph_runs.c.outline_version == outline_version,
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            raise JobConflict("article evidence context changed")
+        metadata = dict(row["metadata"] or {})
+        stored_pack_ids = tuple(str(value) for value in row["evidence_pack_ids"])
+        if (
+            str(row["status"])
+            not in {"completed", "completed_with_warnings"}
+            or stored_pack_ids != tuple(evidence_pack_ids)
+            or str(metadata.get("task_id") or "") != task.id
+            or str(metadata.get("outline_hash") or "") != outline_hash
+            or metadata.get("generated_from") != "confirmed_task_outline"
+        ):
+            raise JobConflict("article evidence context changed")
+        current_chunk_ids = _research_chunk_ids(
+            connection,
+            project_id=project_id,
+            retrieval_plan_id=retrieval_plan_id,
+            article_id=article_id,
+            outline_version=outline_version,
+            evidence_pack_ids=stored_pack_ids,
+        )
+    if current_chunk_ids != tuple(chunk_ids):
+        raise JobConflict("article evidence context changed")
 
 
 class ArticleLlmClient(Protocol):
@@ -416,6 +639,14 @@ class ServerArticleGenerationHandler:
             or any(not isinstance(value, str) for value in raw_chunk_ids)
         ):
             raise JobConflict("article context identity is invalid")
+        context_source = str(request.get("context_source") or "legacy")
+        raw_pack_ids = request.get("evidence_pack_ids") or []
+        if (
+            isinstance(raw_pack_ids, (str, bytes))
+            or not isinstance(raw_pack_ids, Sequence)
+            or any(not isinstance(value, str) for value in raw_pack_ids)
+        ):
+            raise JobConflict("article evidence identity is invalid")
         if cancelled():
             raise JobCancelled(
                 "Article generation cancelled before execution."
@@ -438,6 +669,21 @@ class ServerArticleGenerationHandler:
             raise JobConflict(
                 "article generation is not allowed"
             ) from exc
+        if context_source == "research":
+            _validate_pinned_research_context(
+                self._engine,
+                organization_id=organization_id,
+                project_id=project_id,
+                task=task,
+                thread_id=str(request.get("research_thread_id") or ""),
+                retrieval_plan_id=str(
+                    request.get("retrieval_plan_id") or ""
+                ),
+                evidence_pack_ids=cast(Sequence[str], raw_pack_ids),
+                chunk_ids=cast(Sequence[str], raw_chunk_ids),
+            )
+        elif context_source not in {"legacy", "broad_search"}:
+            raise JobConflict("article context source is invalid")
         prompt_snapshot = load_pinned_project_prompt(
             self._engine,
             organization_id=organization_id,
@@ -670,18 +916,31 @@ class ServerArticleGenerationRegistry:
             selection=task.article_prompt_selection,
         )
         reference = ProjectPromptReference.from_snapshot(snapshot)
-        context_chunks = self._context.select(
+        research_context = _latest_completed_research_context(
+            self._engine,
+            organization_id=actor.organization_id,
             project_id=project_id,
-            query=" ".join(
-                value
-                for value in (
-                    task.selected_title,
-                    task.topic,
-                    primary_keyword(task),
-                )
-                if value.strip()
-            ),
+            task=task,
         )
+        if research_context is None:
+            context_chunks = self._context.select(
+                project_id=project_id,
+                query=" ".join(
+                    value
+                    for value in (
+                        task.selected_title,
+                        task.topic,
+                        primary_keyword(task),
+                    )
+                    if value.strip()
+                ),
+            )
+            context_chunk_ids = tuple(
+                chunk.chunk_id for chunk in context_chunks
+            )
+        else:
+            context_chunks = ()
+            context_chunk_ids = research_context.chunk_ids
         project = self._ensure_project(
             actor.organization_id,
             project_id,
@@ -720,9 +979,27 @@ class ServerArticleGenerationRegistry:
                     raise JobConflict("source task revision changed")
                 request = {
                     **reference.private_values(),
-                    "context_chunk_ids": [
-                        chunk.chunk_id for chunk in context_chunks
-                    ],
+                    "context_source": (
+                        "research"
+                        if research_context is not None
+                        else "broad_search"
+                    ),
+                    "context_chunk_ids": list(context_chunk_ids),
+                    "evidence_pack_ids": (
+                        list(research_context.evidence_pack_ids)
+                        if research_context is not None
+                        else []
+                    ),
+                    "research_thread_id": (
+                        research_context.thread_id
+                        if research_context is not None
+                        else ""
+                    ),
+                    "retrieval_plan_id": (
+                        research_context.retrieval_plan_id
+                        if research_context is not None
+                        else ""
+                    ),
                     "target_words": self._target_words,
                 }
                 batch = project.queue.create_batch_in_transaction(
@@ -771,7 +1048,17 @@ class ServerArticleGenerationRegistry:
                         target_type="background_job",
                         target_id=job_id,
                         details={
-                            "context_chunk_count": len(context_chunks),
+                            "context_chunk_count": len(context_chunk_ids),
+                            "context_source": (
+                                "research"
+                                if research_context is not None
+                                else "broad_search"
+                            ),
+                            "evidence_pack_count": (
+                                len(research_context.evidence_pack_ids)
+                                if research_context is not None
+                                else 0
+                            ),
                             "operation": operation,
                             "prompt_source": reference.source,
                             "prompt_version": reference.version,

@@ -128,6 +128,7 @@ class ArticleImage(WorkflowModel):
     filename: str = ""
     marker: str = ""
     product_name: str = ""
+    product_id: str = ""
     product_url: str = ""
     anchor_heading: str = ""
     anchor_text: str = ""

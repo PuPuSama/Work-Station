@@ -325,6 +325,36 @@ class ServerArticleImageTests(unittest.TestCase):
         self.assertEqual(objects.reads, [])
         self.assertEqual(objects.uploads, [])
 
+    def test_uses_operator_product_image_choices(self) -> None:
+        objects = FakeObjects(
+            {
+                "hero-choice": image_bytes((180, 20, 20)),
+                "alpha-choice": image_bytes((20, 150, 40)),
+                "beta-choice": image_bytes((30, 60, 190)),
+            }
+        )
+
+        prepared = ServerArticleImagePreparation(objects).prepare(
+            actor=ActorIdentity("org-a", "editor-a"),
+            project_id="project-a",
+            task=task(),
+            hero_asset_id="hero-choice",
+            product_asset_ids={
+                "alpha": "alpha-choice",
+                "duplicate": "hero-choice",
+                "beta": "beta-choice",
+            },
+        )
+
+        self.assertEqual(
+            [image.source_asset_id for image in prepared.images],
+            ["hero-choice", "alpha-choice", "beta-choice"],
+        )
+        self.assertEqual(
+            [image.product_id for image in prepared.images],
+            ["", "alpha", "beta"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

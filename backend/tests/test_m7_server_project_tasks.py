@@ -2779,6 +2779,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 response = client.get(
                     f"/api/projects/{self.project_a}/catalog"
+                    f"?image_product_ids={self.product_a}"
                 )
                 self.assertEqual(response.status_code, 200, response.text)
                 body = response.json()
@@ -2801,6 +2802,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     set(image),
                     {
                         "asset_id",
+                        "product_id",
                         "byte_size",
                         "content_type",
                         "evidence_kind",
@@ -2928,6 +2930,9 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 payload = {
                     "revision": 0,
                     "hero_asset_id": hero_asset_id,
+                    "product_asset_ids": {
+                        self.product_a: product_asset_id,
+                    },
                 }
                 self.assertEqual(
                     client.post(path, json=payload).status_code,
@@ -2963,8 +2968,74 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     width=320,
                     height=240,
                 )
+                self._store_selectable_product(
+                    project_id=self.project_a,
+                    product_id=self.product_a,
+                    asset_id=product_asset_id,
+                )
+                with self.engine.begin() as connection:
+                    source_id = f"{self.product_a}-source"
+                    snapshot_id = f"{self.product_a}-snapshot"
+                    connection.execute(
+                        snapshot_assets.insert().values(
+                            project_id=self.project_a,
+                            source_id=source_id,
+                            snapshot_id=snapshot_id,
+                            asset_id=hero_asset_id,
+                            evidence_kind="gallery",
+                            ordinal=1,
+                            source_url=(
+                                f"https://{self.project_a}/products/"
+                                f"{self.product_a}/hero.png"
+                            ),
+                        )
+                    )
+                    connection.execute(
+                        knowledge_product_asset_evidence.insert().values(
+                            project_id=self.project_a,
+                            product_id=self.product_a,
+                            source_id=source_id,
+                            snapshot_id=snapshot_id,
+                            asset_id=hero_asset_id,
+                            role="hero",
+                            confidence=0.95,
+                            reason="Selected product hero image",
+                        )
+                    )
                 client.app.state.server_project_object_service = (
                     object_service
+                )
+
+                rejected_hero = client.post(
+                    path,
+                    json={
+                        **payload,
+                        "hero_asset_id": "asset-from-another-product",
+                    },
+                )
+                self.assertEqual(
+                    rejected_hero.status_code,
+                    422,
+                    rejected_hero.text,
+                )
+                self.assertIn(
+                    "must belong to a selected product",
+                    rejected_hero.text,
+                )
+
+                rejected = client.post(
+                    path,
+                    json={
+                        **payload,
+                        "product_asset_ids": {
+                            self.product_a: "asset-from-another-product",
+                        },
+                    },
+                )
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+                self.assertIn(
+                    "must belong to their selected products",
+                    rejected.text,
                 )
 
                 prepared = client.post(path, json=payload)

@@ -93,6 +93,7 @@ export type ArticleImage = {
   filename: string;
   marker: string;
   product_name?: string;
+  product_id?: string;
   product_url?: string;
   status?: string;
   error?: string;
@@ -583,6 +584,7 @@ export type ServerCatalogProduct = {
 
 export type ServerCatalogImageAsset = {
   asset_id: string;
+  product_id: string;
   byte_size: number;
   content_type: string;
   evidence_kind: string;

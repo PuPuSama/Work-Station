@@ -77,7 +77,15 @@ function taskLabel(task: TaskRecord) {
   return `topic_${String(task.topic_index).padStart(3, "0")} · ${task.topic}`;
 }
 
-export function ServerResearchWorkspace({ customer }: { customer: string }) {
+export function ServerResearchWorkspace({
+  customer,
+  embedded = false,
+  taskId = "",
+}: {
+  customer: string;
+  embedded?: boolean;
+  taskId?: string;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryString = searchParams.toString();
@@ -88,7 +96,7 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
     null,
   );
   const [selectedPlanId, setSelectedPlanId] = useState("");
-  const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState(taskId);
   const [selectedThreadId, setSelectedThreadId] = useState(
     searchParams.get("thread") || "",
   );
@@ -121,32 +129,61 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
         apiGet<TaskRecord[]>(`/api/projects/${projectPath}/tasks`),
         apiGet<AccessibleProject[]>("/api/projects"),
       ]);
-      setPlans(nextPlans);
-      setRuns(nextRuns);
+      const scopedTask = taskId
+        ? nextTasks.find((task) => task.id === taskId)
+        : null;
+      const scopedArticleId = scopedTask
+        ? `topic_${String(scopedTask.topic_index).padStart(3, "0")}`
+        : "";
+      const visiblePlans = scopedArticleId
+        ? nextPlans.filter((plan) => plan.article_id === scopedArticleId)
+        : nextPlans;
+      const visibleRuns = scopedArticleId
+        ? nextRuns.filter((run) => run.article_id === scopedArticleId)
+        : nextRuns;
+      setPlans(visiblePlans);
+      setRuns(visibleRuns);
       setTasks(nextTasks);
       setRole(
         projects.find((project) => project.project_id === customer)
           ?.effective_role ?? null,
       );
-      setSelectedPlanId((current) => current || nextPlans[0]?.retrieval_plan_id || "");
-      setSelectedTaskId((current) => current || nextTasks[0]?.id || "");
+      setSelectedPlanId((current) =>
+        visiblePlans.some((plan) => plan.retrieval_plan_id === current)
+          ? current
+          : visiblePlans[0]?.retrieval_plan_id || "",
+      );
+      setSelectedTaskId((current) => taskId || current || nextTasks[0]?.id || "");
       setSelectedThreadId((current) => {
-        if (current && nextRuns.some((run) => run.thread_id === current)) {
+        if (current && visibleRuns.some((run) => run.thread_id === current)) {
           return current;
         }
-        return nextRuns[0]?.thread_id || "";
+        return visibleRuns[0]?.thread_id || "";
       });
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
       setLoading(false);
     }
-  }, [customer]);
+  }, [customer, taskId]);
+
+  const scopedArticleId = useMemo(() => {
+    const scopedTask = taskId
+      ? tasks.find((task) => task.id === taskId)
+      : null;
+    return scopedTask
+      ? `topic_${String(scopedTask.topic_index).padStart(3, "0")}`
+      : "";
+  }, [taskId, tasks]);
 
   const refreshRuns = useCallback(async () => {
     const nextRuns = await listResearchRuns(customer);
-    setRuns(nextRuns);
-  }, [customer]);
+    setRuns(
+      scopedArticleId
+        ? nextRuns.filter((run) => run.article_id === scopedArticleId)
+        : nextRuns,
+    );
+  }, [customer, scopedArticleId]);
 
   const refreshDetail = useCallback(
     async (threadId: string, showSpinner = false) => {
@@ -179,6 +216,7 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
   }, [refreshDetail, selectedThreadId]);
 
   useEffect(() => {
+    if (embedded) return;
     if (!selectedThreadId) return;
     const next = new URLSearchParams(queryString);
     next.set("tab", "research");
@@ -187,7 +225,7 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
     if (nextQueryString !== queryString) {
       router.replace(`?${nextQueryString}`, { scroll: false });
     }
-  }, [queryString, router, selectedThreadId]);
+  }, [embedded, queryString, router, selectedThreadId]);
 
   const detailStatus = detail?.status;
 
@@ -262,7 +300,16 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
   ]);
 
   const eligibleTasks = useMemo(
-    () => tasks.filter((task) => Boolean(task.outline?.trim())),
+    () =>
+      tasks.filter(
+        (task) =>
+          Boolean(task.outline?.trim()) &&
+          task.article_versions?.some(
+            (version) =>
+              version.kind === "outline" &&
+              version.source_kind === "manual_confirmed",
+          ),
+      ),
     [tasks],
   );
   const canRun = canPublishKnowledge(role);
@@ -275,7 +322,11 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
     try {
       const plan = await createTaskResearchPlan(customer, selectedTaskId);
       const nextPlans = await listResearchPlans(customer);
-      setPlans(nextPlans);
+      setPlans(
+        taskId
+          ? nextPlans.filter((item) => item.article_id === plan.article_id)
+          : nextPlans,
+      );
       startRequestId.current = "";
       setSelectedPlanId(plan.retrieval_plan_id);
       setMessage("已从 PostgreSQL 中的已确认大纲生成不可变 Retrieval Plan。");
@@ -351,17 +402,26 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
   }
 
   return (
-    <main className="mx-auto grid w-full max-w-[1480px] gap-5 px-5 pb-8">
+    <main
+      className={
+        embedded
+          ? "grid w-full gap-4"
+          : "mx-auto grid w-full max-w-[1480px] gap-5 px-5 pb-8"
+      }
+    >
       <div className="flex flex-col gap-4 rounded-2xl border bg-card p-5 md:flex-row md:items-end md:justify-between">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
             <FileSearch className="size-4" />
             Server Research
           </div>
-          <h1 className="text-2xl font-semibold">项目资料研究</h1>
+          <h1 className={embedded ? "text-lg font-semibold" : "text-2xl font-semibold"}>
+            {embedded ? "大纲资料研究" : "项目资料研究"}
+          </h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-            从已确认文章大纲生成检索计划，运行项目隔离的资料检索，并只批准服务端发现的官网候选。
-            Organization、Task、Plan、Run 与 Job 身份全部由服务端校验。
+            {embedded
+              ? "确认大纲后运行研究；完成的 Evidence Pack 会固定到后续正文生成任务。"
+              : "从已确认文章大纲生成检索计划，运行项目隔离的资料检索，并只批准服务端发现的官网候选。Organization、Task、Plan、Run 与 Job 身份全部由服务端校验。"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -412,21 +472,31 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
-            <Label htmlFor="research-task">已确认大纲的文章任务</Label>
-            <select
-              id="research-task"
-              className="min-h-11 w-full rounded-md border bg-background px-3 text-sm"
-              value={selectedTaskId}
-              onChange={(event) => setSelectedTaskId(event.target.value)}
-              disabled={!canRun || planPending}
-            >
-              <option value="">选择文章任务</option>
-              {eligibleTasks.map((task) => (
-                <option key={task.id} value={task.id}>
-                  {taskLabel(task)}
-                </option>
-              ))}
-            </select>
+            {taskId ? (
+              <p className="rounded-lg border bg-muted/20 px-3 py-2 text-sm">
+                {eligibleTasks.find((task) => task.id === taskId)
+                  ? taskLabel(eligibleTasks.find((task) => task.id === taskId)!)
+                  : "请先确认当前文章大纲"}
+              </p>
+            ) : (
+              <>
+                <Label htmlFor="research-task">已确认大纲的文章任务</Label>
+                <select
+                  id="research-task"
+                  className="min-h-11 w-full rounded-md border bg-background px-3 text-sm"
+                  value={selectedTaskId}
+                  onChange={(event) => setSelectedTaskId(event.target.value)}
+                  disabled={!canRun || planPending}
+                >
+                  <option value="">选择文章任务</option>
+                  {eligibleTasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {taskLabel(task)}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             <Button
               type="button"
               className="min-h-11 justify-self-start"
@@ -699,6 +769,37 @@ export function ServerResearchWorkspace({ customer }: { customer: string }) {
                           {url}
                         </a>
                       ))}
+                      <div className="mt-3 grid gap-2">
+                        {evidencePack.hits.map((hit, index) => (
+                          <div
+                            key={hit.chunk_id}
+                            className="rounded-lg border bg-muted/20 p-3"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-medium">
+                                #{index + 1} {hit.heading_path.join(" / ") || "未命名知识块"}
+                              </span>
+                              <Badge variant="outline">
+                                score {hit.score.toFixed(3)}
+                              </Badge>
+                            </div>
+                            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
+                              {hit.text}
+                            </p>
+                            {hit.provenance?.canonical_url ? (
+                              <a
+                                href={hit.provenance.canonical_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-2 inline-flex min-h-11 items-center gap-2 break-all text-primary underline-offset-4 hover:underline"
+                              >
+                                <ExternalLink className="size-4 shrink-0" />
+                                {hit.provenance.display_name}
+                              </a>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                 </CardContent>

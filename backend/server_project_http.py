@@ -217,6 +217,7 @@ class ProjectCatalogProductResponse(BaseModel):
 
 class ProjectCatalogImageAssetResponse(BaseModel):
     asset_id: str
+    product_id: str
     byte_size: int
     content_type: str
     evidence_kind: str
@@ -580,6 +581,10 @@ class PrepareProjectImagesRequest(BaseModel):
 
     revision: int = Field(ge=0)
     hero_asset_id: str = Field(min_length=1, max_length=512)
+    product_asset_ids: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=3,
+    )
     product_anchors: dict[str, str] = Field(
         default_factory=dict,
         max_length=3,
@@ -591,6 +596,28 @@ class PrepareProjectImagesRequest(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("hero asset id must not be empty")
+        return normalized
+
+    @field_validator("product_asset_ids")
+    @classmethod
+    def validate_product_asset_ids(
+        cls,
+        value: dict[str, str],
+    ) -> dict[str, str]:
+        normalized = {
+            product_id.strip(): asset_id.strip()
+            for product_id, asset_id in value.items()
+        }
+        if (
+            len(normalized) != len(value)
+            or any(
+                not product_id or not asset_id
+                for product_id, asset_id in normalized.items()
+            )
+        ):
+            raise ValueError(
+                "product image choices require unique product and asset ids"
+            )
         return normalized
 
     @field_validator("product_anchors")
@@ -1601,15 +1628,29 @@ def read_project_catalog(
     request: Request,
     product_limit: int = Query(default=100, ge=1, le=200),
     image_limit: int = Query(default=48, ge=1, le=100),
+    image_product_ids: str = Query(default="", max_length=2048),
     authorized: AuthorizedProjectRequest = Depends(
         require_server_project_access
     ),
 ) -> ProjectCatalogResponse:
     del project
+    selected_image_products = tuple(
+        dict.fromkeys(
+            item.strip()
+            for item in image_product_ids.split(",")
+            if item.strip()
+        )
+    )
+    if len(selected_image_products) > 3:
+        raise HTTPException(
+            status_code=422,
+            detail="At most three image products are allowed.",
+        )
     catalog = _project_catalog(request).read(
         authorized.project_id,
         product_limit=product_limit,
         image_limit=image_limit,
+        image_product_ids=selected_image_products,
     )
     return ProjectCatalogResponse(
         products=[
@@ -1624,6 +1665,7 @@ def read_project_catalog(
         image_assets=[
             ProjectCatalogImageAssetResponse(
                 asset_id=item.asset_id,
+                product_id=item.product_id,
                 content_type=item.content_type,
                 byte_size=item.byte_size,
                 width=item.width,
@@ -3672,6 +3714,45 @@ def prepare_project_task_images(
             detail=str(exc),
         ) from exc
     try:
+        task_product_ids = tuple(
+            product.product_id
+            for product in task.products
+            if product.product_id
+        )
+        available_assets = _project_catalog(request).image_asset_ids(
+            authorized.project_id,
+            task_product_ids,
+        )
+        selected_product_assets = {
+            product.product_id: payload.product_asset_ids.get(
+                product.product_id,
+                product.selected_asset_id,
+            )
+            for product in task.products
+            if product.product_id
+            and payload.product_asset_ids.get(
+                product.product_id,
+                product.selected_asset_id,
+            )
+        }
+        if payload.hero_asset_id not in {
+            asset_id
+            for values in available_assets.values()
+            for asset_id in values
+        }:
+            raise ServerArticleImageError(
+                "hero image must belong to a selected product"
+            )
+        if (
+            not set(payload.product_asset_ids).issubset(task_product_ids)
+            or any(
+                asset_id not in available_assets.get(product_id, set())
+                for product_id, asset_id in selected_product_assets.items()
+            )
+        ):
+            raise ServerArticleImageError(
+                "product images must belong to their selected products"
+            )
         ServerArticleImagePreparation(
             _knowledge_object_service(request)
         ).prepare(
@@ -3679,6 +3760,7 @@ def prepare_project_task_images(
             project_id=authorized.project_id,
             task=task,
             hero_asset_id=payload.hero_asset_id,
+            product_asset_ids=selected_product_assets,
             product_anchors=payload.product_anchors,
         )
     except ServerArticleImageAnchorRequired as exc:
