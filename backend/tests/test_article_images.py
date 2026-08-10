@@ -16,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services.article_images import (  # noqa: E402
     ImageValidationError,
     build_image_audit_markdown,
+    find_product_image_anchor,
     prepare_task_images,
     resolve_image_placements,
     sanitize_image_stem,
@@ -33,6 +34,35 @@ def make_webp(path: Path, color: tuple[int, int, int]) -> None:
 
 
 class ArticleImageTests(unittest.TestCase):
+    def test_intro_product_match_is_moved_after_the_first_h2_content(self) -> None:
+        article = """# Product Guide
+
+Read about [Product Alpha](https://example.com/alpha).
+
+## First Section
+
+First section detail.
+
+## Second Section
+
+Second section detail.
+"""
+
+        anchor = find_product_image_anchor(
+            article,
+            "Product Alpha",
+            "https://example.com/alpha",
+            {"anchor_line": 2, "anchor_after": "Read about Product Alpha."},
+        )
+
+        self.assertIsNotNone(anchor)
+        assert anchor is not None
+        self.assertEqual(
+            anchor[0],
+            article.splitlines().index("First section detail."),
+        )
+        self.assertEqual(anchor[2], "First Section")
+
     def test_manual_product_image_override_order_controls_body_slots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             task_dir = Path(temporary) / "task"

@@ -295,15 +295,24 @@ def _find_product_anchor(
     override: object | None = None,
 ) -> tuple[int, str, str, str] | None:
     lines = (markdown or "").splitlines()
+    first_h2_index = next(
+        (
+            index
+            for index, raw_line in enumerate(lines)
+            if re.match(r"^\s*##\s+\S", raw_line)
+        ),
+        len(lines),
+    )
     if override is not None:
         manual = _find_manual_anchor(lines, override)
-        if manual:
+        if manual and manual[0] >= first_h2_index:
             index, match_kind = manual
             return index, _visible_markdown(lines[index]), _nearest_heading(lines, index), match_kind
 
     url = product_url.strip()
     name = _normalise_text(product_name)
     matches: list[tuple[int, int, str]] = []
+    introduction_matches: list[tuple[int, int, str]] = []
     faq_index = next(
         (
             index
@@ -319,14 +328,21 @@ def _find_product_anchor(
         if not raw_line.strip():
             continue
         is_heading = bool(re.match(r"^\s*#{1,6}\s+", raw_line))
+        target = introduction_matches if index < first_h2_index else matches
         if url and url in raw_line:
-            matches.append((0 if not is_heading else 2, index, "product_url"))
+            target.append((0 if not is_heading else 2, index, "product_url"))
         elif name and name in _normalise_text(raw_line):
-            matches.append((1 if not is_heading else 3, index, "product_name"))
+            target.append((1 if not is_heading else 3, index, "product_name"))
 
     if not matches:
-        return None
-    _, index, match_kind = min(matches)
+        if not introduction_matches or first_h2_index == len(lines):
+            return None
+        _, _, match_kind = min(introduction_matches)
+        index = _first_body_line_after_heading(lines, first_h2_index)
+        if index == first_h2_index:
+            return None
+    else:
+        _, index, match_kind = min(matches)
     if re.match(r"^\s*#{1,6}\s+", lines[index]):
         body_index = _first_body_line_after_heading(lines, index)
         if body_index == index:
