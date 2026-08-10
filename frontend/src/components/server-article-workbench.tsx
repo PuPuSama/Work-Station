@@ -197,6 +197,7 @@ export function ServerArticleWorkbench({
   const [finalScore, setFinalScore] = useState("");
   const [finalReport, setFinalReport] = useState("");
   const [finalScreenshot, setFinalScreenshot] = useState<File | null>(null);
+  const [useEvidencePack, setUseEvidencePack] = useState(true);
   const [heroAssetId, setHeroAssetId] = useState("");
   const [productAssetIds, setProductAssetIds] = useState<Record<string, string>>(
     {},
@@ -1100,6 +1101,23 @@ export function ServerArticleWorkbench({
                     </AlertDescription>
                   </Alert>
                 ) : null}
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      className="size-4 accent-primary"
+                      checked={useEvidencePack}
+                      disabled={Boolean(pending) || !editAllowed}
+                      onChange={(event) =>
+                        setUseEvidencePack(event.target.checked)
+                      }
+                    />
+                    <span>引用大纲页生成的 Evidence Pack</span>
+                  </label>
+                  <p className="mt-1 pl-7 text-xs leading-5 text-muted-foreground">
+                    开启时优先使用上一步资料研究固定的证据；没有匹配的 Evidence Pack 时自动回退到普通检索。关闭时完全不检索知识库，仅按当前 Task 内容和 Prompt 生成正文。
+                  </p>
+                </div>
                 <div className="max-h-[64dvh] overflow-auto rounded-lg border bg-muted/20 p-4">
                   <pre className="whitespace-pre-wrap font-sans text-sm leading-7">
                     {task.initial_article || task.article || "尚未生成初稿。"}
@@ -1116,7 +1134,9 @@ export function ServerArticleWorkbench({
                     !allowed.has("generate_article")
                   }
                   onClick={() =>
-                    void runJob(articleJobLabel, articleJobEndpoint)
+                    void runJob(articleJobLabel, articleJobEndpoint, {
+                      use_evidence_pack: useEvidencePack,
+                    })
                   }
                 >
                   {pending === articleJobLabel ? (

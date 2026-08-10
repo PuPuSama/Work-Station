@@ -640,6 +640,9 @@ class ServerArticleGenerationHandler:
         ):
             raise JobConflict("article context identity is invalid")
         context_source = str(request.get("context_source") or "legacy")
+        use_evidence_pack = request.get("use_evidence_pack", True)
+        if not isinstance(use_evidence_pack, bool):
+            raise JobConflict("article evidence option is invalid")
         raw_pack_ids = request.get("evidence_pack_ids") or []
         if (
             isinstance(raw_pack_ids, (str, bytes))
@@ -647,6 +650,10 @@ class ServerArticleGenerationHandler:
             or any(not isinstance(value, str) for value in raw_pack_ids)
         ):
             raise JobConflict("article evidence identity is invalid")
+        if not use_evidence_pack and (
+            context_source != "none" or raw_chunk_ids or raw_pack_ids
+        ):
+            raise JobConflict("article context source is invalid")
         if cancelled():
             raise JobCancelled(
                 "Article generation cancelled before execution."
@@ -682,7 +689,7 @@ class ServerArticleGenerationHandler:
                 evidence_pack_ids=cast(Sequence[str], raw_pack_ids),
                 chunk_ids=cast(Sequence[str], raw_chunk_ids),
             )
-        elif context_source not in {"legacy", "broad_search"}:
+        elif context_source not in {"legacy", "broad_search", "none"}:
             raise JobConflict("article context source is invalid")
         prompt_snapshot = load_pinned_project_prompt(
             self._engine,
@@ -884,9 +891,12 @@ class ServerArticleGenerationRegistry:
         task_id: str,
         source_revision: int,
         operation: str = ARTICLE_GENERATION_OPERATION,
+        use_evidence_pack: bool = True,
     ) -> dict[str, object]:
         if operation not in ARTICLE_GENERATION_OPERATIONS:
             raise JobConflict("unsupported server job operation")
+        if not isinstance(use_evidence_pack, bool):
+            raise JobConflict("article evidence option is invalid")
         self._access.require(actor, project_id, "article.edit")
         repository = PostgresTaskRepository(
             self._engine,
@@ -916,13 +926,20 @@ class ServerArticleGenerationRegistry:
             selection=task.article_prompt_selection,
         )
         reference = ProjectPromptReference.from_snapshot(snapshot)
-        research_context = _latest_completed_research_context(
-            self._engine,
-            organization_id=actor.organization_id,
-            project_id=project_id,
-            task=task,
+        research_context = (
+            _latest_completed_research_context(
+                self._engine,
+                organization_id=actor.organization_id,
+                project_id=project_id,
+                task=task,
+            )
+            if use_evidence_pack
+            else None
         )
-        if research_context is None:
+        if not use_evidence_pack:
+            context_chunks = ()
+            context_chunk_ids = ()
+        elif research_context is None:
             context_chunks = self._context.select(
                 project_id=project_id,
                 query=" ".join(
@@ -941,6 +958,13 @@ class ServerArticleGenerationRegistry:
         else:
             context_chunks = ()
             context_chunk_ids = research_context.chunk_ids
+        context_source = (
+            "none"
+            if not use_evidence_pack
+            else "research"
+            if research_context is not None
+            else "broad_search"
+        )
         project = self._ensure_project(
             actor.organization_id,
             project_id,
@@ -979,11 +1003,8 @@ class ServerArticleGenerationRegistry:
                     raise JobConflict("source task revision changed")
                 request = {
                     **reference.private_values(),
-                    "context_source": (
-                        "research"
-                        if research_context is not None
-                        else "broad_search"
-                    ),
+                    "use_evidence_pack": use_evidence_pack,
+                    "context_source": context_source,
                     "context_chunk_ids": list(context_chunk_ids),
                     "evidence_pack_ids": (
                         list(research_context.evidence_pack_ids)
@@ -1049,11 +1070,8 @@ class ServerArticleGenerationRegistry:
                         target_id=job_id,
                         details={
                             "context_chunk_count": len(context_chunk_ids),
-                            "context_source": (
-                                "research"
-                                if research_context is not None
-                                else "broad_search"
-                            ),
+                            "use_evidence_pack": use_evidence_pack,
+                            "context_source": context_source,
                             "evidence_pack_count": (
                                 len(research_context.evidence_pack_ids)
                                 if research_context is not None

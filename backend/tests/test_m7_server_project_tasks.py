@@ -5008,10 +5008,28 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     client.post(path, json={"revision": 1}).status_code,
                     409,
                 )
-                rewritten = client.post(
-                    rewrite_path,
-                    json={"revision": 1},
-                )
+                with (
+                    patch(
+                        "services.server_article_generation._latest_completed_research_context",
+                        side_effect=AssertionError(
+                            "disabled Evidence Pack lookup should not run"
+                        ),
+                    ),
+                    patch.object(
+                        PostgresPublishedOutlineContext,
+                        "select",
+                        side_effect=AssertionError(
+                            "disabled Evidence Pack generation must not search"
+                        ),
+                    ),
+                ):
+                    rewritten = client.post(
+                        rewrite_path,
+                        json={
+                            "revision": 1,
+                            "use_evidence_pack": False,
+                        },
+                    )
                 self.assertEqual(
                     rewritten.status_code,
                     200,
@@ -5049,6 +5067,16 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     "succeeded",
                 )
                 self.assertEqual(rewrite_terminal["result_revision"], 2)
+                with self.engine.connect() as connection:
+                    rewrite_request = connection.execute(
+                        sa.select(background_jobs.c.request).where(
+                            background_jobs.c.organization_id == self.org_a,
+                            background_jobs.c.project_id == self.project_a,
+                            background_jobs.c.job_id
+                            == rewrite_job["job_id"],
+                        )
+                    ).scalar_one()
+                self.assertFalse(rewrite_request["use_evidence_pack"])
                 rewritten_payload = repository.get(self.task_a)
                 assert rewritten_payload is not None
                 rewritten_task = TaskRecord.model_validate(
@@ -5056,6 +5084,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertEqual(rewritten_task.revision, 2)
                 self.assertEqual(len(provider.calls), 2)
+                self.assertEqual(provider.calls[1]["chunk_ids"], [])
                 self.assertEqual(
                     [item.kind for item in rewritten_task.article_versions],
                     ["raw_draft", "initial", "raw_draft", "initial"],

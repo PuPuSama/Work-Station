@@ -258,6 +258,12 @@ class ProjectRevisionRequest(BaseModel):
     revision: int = Field(ge=0)
 
 
+class ArticleGenerationRequest(ProjectRevisionRequest):
+    """Article generation options captured with the queued Job."""
+
+    use_evidence_pack: bool = True
+
+
 class ProjectTaskIntakeRowRequest(BaseModel):
     """One server-owned Task source row without identity or workflow fields."""
 
@@ -2082,7 +2088,7 @@ def read_project_task_title_generation_job(
 
 def _enqueue_project_task_article_job(
     task_id: str,
-    payload: ProjectRevisionRequest,
+    payload: ArticleGenerationRequest,
     request: Request,
     authorized: AuthorizedProjectRequest,
     *,
@@ -2100,6 +2106,7 @@ def _enqueue_project_task_article_job(
             task_id=task_id,
             source_revision=payload.revision,
             operation=operation,
+            use_evidence_pack=payload.use_evidence_pack,
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -2128,7 +2135,7 @@ def _enqueue_project_task_article_job(
 def enqueue_project_task_article_generation(
     project: str,
     task_id: str,
-    payload: ProjectRevisionRequest,
+    payload: ArticleGenerationRequest,
     request: Request,
     authorized: AuthorizedProjectRequest = Depends(
         require_server_project_access
@@ -2151,7 +2158,7 @@ def enqueue_project_task_article_generation(
 def enqueue_project_task_article_rewrite(
     project: str,
     task_id: str,
-    payload: ProjectRevisionRequest,
+    payload: ArticleGenerationRequest,
     request: Request,
     authorized: AuthorizedProjectRequest = Depends(
         require_server_project_access
