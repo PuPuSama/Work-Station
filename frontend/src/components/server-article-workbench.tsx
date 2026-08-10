@@ -1246,7 +1246,8 @@ export function ServerArticleWorkbench({
         )}
 
         {step === "review" && (
-          <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(360px,0.7fr)]">
+          <div className="grid items-start gap-4">
+            <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(360px,0.7fr)]">
             <Card>
               <CardHeader className="border-b">
                 <CardTitle>Humanized Article</CardTitle>
@@ -1420,7 +1421,9 @@ export function ServerArticleWorkbench({
                 </CardContent>
               </Card>
 
-              <ServerSeoReviewPanel
+            </div>
+
+            <ServerSeoReviewPanel
                 task={task}
                 taskApi={taskApi}
                 pending={pending}
@@ -1442,7 +1445,7 @@ export function ServerArticleWorkbench({
                   Hero 从本篇已选产品图片中选择；每个产品也可单独选择自己的正文图。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4">
+              <CardContent className="grid gap-4 max-h-[72dvh] overflow-y-auto overscroll-contain pr-3">
                 <div className="grid gap-2">
                   <Label>Hero 图片</Label>
                   <ServerHeroAssetPicker

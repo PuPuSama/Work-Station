@@ -729,7 +729,7 @@ export function ServerResearchWorkspace({
                     每个 Pack 固定到 Plan、Scope、Outline 和 Chunk 身份。
                   </CardDescription>
                 </CardHeader>
-                <CardContent className="grid gap-2">
+                <CardContent className="grid gap-2 max-h-[32rem] overflow-y-auto overscroll-contain pr-3">
                   {detail.evidence_pack_ids.length ? (
                     detail.evidence_pack_ids.map((id) => (
                       <Button
@@ -812,7 +812,7 @@ export function ServerResearchWorkspace({
                     Server 响应只保留白名单事件字段，不返回私有 Job Request。
                   </CardDescription>
                 </CardHeader>
-                <CardContent className="grid gap-2">
+                <CardContent className="grid max-h-[32rem] gap-2 overflow-y-auto overscroll-contain pr-3">
                   {detail.events.length ? (
                     detail.events.map((event) => (
                       <div
