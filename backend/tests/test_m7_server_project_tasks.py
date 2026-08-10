@@ -117,6 +117,7 @@ from services.server_humanize_generation import (  # noqa: E402
     ServerHumanizeGenerationHandler,
     ServerHumanizeGenerationRegistry,
 )
+from services.zerogpt import ZeroGPTDetectionResult  # noqa: E402
 from services.server_project_prompts import (  # noqa: E402
     PostgresProjectPromptService,
 )
@@ -275,6 +276,21 @@ class RecordingArticleProvider:
             }
         )
         return SERVER_ARTICLE
+
+
+class RecordingAiRateDetector:
+    ready = True
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def detect(self, text: str) -> ZeroGPTDetectionResult:
+        self.calls.append(text)
+        return ZeroGPTDetectionResult(
+            ai_percentage=18.5,
+            ai_words=37,
+            text_words=200,
+        )
 
 
 class RecordingLinkRestorationProvider:
@@ -4843,6 +4859,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             ),
         )
         provider = RecordingArticleProvider()
+        ai_rate = RecordingAiRateDetector()
         audit = RecordingAuditWriter()
         access = ProjectAccessService(
             PostgresProjectAccessRepository(self.engine)
@@ -4850,6 +4867,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         handler = ServerArticleGenerationHandler(
             self.engine,
             provider=provider,
+            ai_rate=ai_rate,
             audit=audit,
         )
         codec = ServerActorSessionCodec(b"a" * 32)
@@ -4988,6 +5006,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     stored.initial_article,
                     SERVER_ARTICLE.strip(),
                 )
+                self.assertEqual(len(ai_rate.calls), 1)
+                self.assertEqual(stored.initial_ai_check.provider, "zerogpt")
+                self.assertEqual(stored.initial_ai_check.score, 18.5)
+                self.assertEqual(
+                    stored.initial_ai_check.article_hash,
+                    content_hash(stored.initial_article),
+                )
+                self.assertFalse(stored.initial_ai_check.confirmed)
                 self.assertEqual(stored.article, stored.initial_article)
                 self.assertEqual(stored.humanized_article, "")
                 self.assertEqual(
@@ -5084,6 +5110,9 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertEqual(rewritten_task.revision, 2)
                 self.assertEqual(len(provider.calls), 2)
+                self.assertEqual(len(ai_rate.calls), 2)
+                self.assertEqual(rewritten_task.initial_ai_check.score, 18.5)
+                self.assertFalse(rewritten_task.initial_ai_check.confirmed)
                 self.assertEqual(provider.calls[1]["chunk_ids"], [])
                 self.assertEqual(
                     [item.kind for item in rewritten_task.article_versions],

@@ -274,6 +274,7 @@ from services.server_humanize_generation import (
     ServerHumanizeGenerationHandler,
     ServerHumanizeGenerationRegistry,
 )
+from services.zerogpt import ZeroGPTClient
 from services.server_job_control import PostgresServerJobControlService
 from storage import (
     RevisionConflictError,
@@ -720,10 +721,12 @@ async def app_lifespan(application: FastAPI):
             server_title_generation
         )
         article_provider = LlmServerArticleProvider(cfg)
+        zerogpt_client = ZeroGPTClient()
         article_handler = (
             ServerArticleGenerationHandler(
                 server_engine,
                 provider=article_provider,
+                ai_rate=zerogpt_client,
             )
             if article_provider.ready
             else None

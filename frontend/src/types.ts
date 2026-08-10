@@ -38,6 +38,8 @@ export type AiCheckRecord = {
   confirmed: boolean;
   score: number | null;
   report: string;
+  provider?: string;
+  checked_at?: string;
   screenshot_path: string;
   screenshot_asset_id?: string;
   screenshot_content_hash?: string;
@@ -641,6 +643,7 @@ export type PublicConfig = {
   };
   integrations?: {
     tavily_ready: boolean;
+    zerogpt_ready?: boolean;
   };
   features?: {
     knowledge_agent_enabled: boolean;

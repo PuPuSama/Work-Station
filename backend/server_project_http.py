@@ -3200,6 +3200,8 @@ def confirm_project_task_initial_ai(
         confirmed=payload.confirmed,
         score=payload.score,
         report=payload.report,
+        provider=previous.provider,
+        checked_at=previous.checked_at,
         screenshot_path="",
         screenshot_asset_id=previous.screenshot_asset_id,
         screenshot_content_hash=previous.screenshot_content_hash,

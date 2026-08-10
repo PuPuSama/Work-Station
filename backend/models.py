@@ -81,6 +81,10 @@ class AICheck(WorkflowModel):
     confirmed: bool = False
     score: float | None = None
     report: str = ""
+    # ``provider``/``checked_at`` distinguish an automatic detector result
+    # from the retained screenshot-based human confirmation flow.
+    provider: str = ""
+    checked_at: str = ""
     screenshot_path: str = ""
     screenshot_asset_id: str = ""
     screenshot_content_hash: str = ""

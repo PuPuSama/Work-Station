@@ -19,7 +19,7 @@ from knowledge_agent.schema import (
     research_graph_runs,
     retrieval_plans,
 )
-from models import ArticleVersion, PromptSnapshot, SourceLink, TaskRecord
+from models import AICheck, ArticleVersion, PromptSnapshot, SourceLink, TaskRecord
 from server_schema import article_tasks, background_jobs
 from services.access_control import (
     ActorIdentity,
@@ -84,6 +84,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.zerogpt import ZeroGPTDetectionResult
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
     ACTION_GENERATE_ARTICLE,
@@ -345,6 +346,13 @@ class ArticleGenerationProvider(Protocol):
     ) -> str: ...
 
 
+class ArticleAiRateDetector(Protocol):
+    @property
+    def ready(self) -> bool: ...
+
+    def detect(self, text: str) -> ZeroGPTDetectionResult: ...
+
+
 def _validate_article_operation(
     task: TaskRecord,
     operation: str,
@@ -594,11 +602,13 @@ class ServerArticleGenerationHandler:
         engine: Engine,
         *,
         provider: ArticleGenerationProvider,
+        ai_rate: ArticleAiRateDetector | None = None,
         context: PostgresPublishedGenerationContext | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
+        self._ai_rate = ai_rate
         self._context = context or PostgresPublishedGenerationContext(
             engine
         )
@@ -721,6 +731,38 @@ class ServerArticleGenerationHandler:
             raw_article=raw_article,
             prompt_snapshot=prompt_snapshot,
         )
+        if cancelled():
+            raise JobCancelled(
+                "Article generation cancelled before AI-rate detection."
+            )
+        # A rewrite invalidates the previous detector result even when the
+        # optional external service is not configured for this run.
+        task.zero_gpt_report = ""
+        if self._ai_rate is not None and self._ai_rate.ready:
+            try:
+                detection = self._ai_rate.detect(initial)
+            except Exception:
+                # The draft is already valid and must remain usable when the
+                # optional external detector is unavailable.  Keep a clear,
+                # non-secret note for the retained screenshot/manual path.
+                task.initial_ai_check = AICheck(
+                    confirmed=False,
+                    report="ZeroGPT 自动检测暂时不可用，请保留截图人工确认。",
+                    provider="zerogpt",
+                    checked_at=now_iso(),
+                    article_hash=content_hash(initial),
+                )
+                task.zero_gpt_report = task.initial_ai_check.report
+            else:
+                task.initial_ai_check = AICheck(
+                    confirmed=False,
+                    score=detection.ai_percentage,
+                    report=detection.report,
+                    provider="zerogpt",
+                    checked_at=now_iso(),
+                    article_hash=content_hash(initial),
+                )
+                task.zero_gpt_report = task.initial_ai_check.report
         try:
             saved = PostgresAuditedTaskWriter(
                 self._engine,

@@ -210,6 +210,13 @@ def public_config(config: AppConfig) -> dict[str, Any]:
         },
         "integrations": {
             "tavily_ready": bool(os.environ.get("TAVILY_API_KEY", "").strip()),
+            # Only expose readiness; never expose the provider key itself.
+            "zerogpt_ready": bool(
+                (
+                    os.environ.get("ARTICLE_AGENT_ZEROGPT_API_KEY", "")
+                    or os.environ.get("ZEROGPT_API_KEY", "")
+                ).strip()
+            ),
         },
         "features": {
             "knowledge_agent_enabled": config.knowledge_agent_enabled,

@@ -1157,6 +1157,22 @@ export function ServerArticleWorkbench({
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
+                {task.initial_ai_check?.provider === "zerogpt" &&
+                  task.initial_ai_check.article_hash ===
+                    task.initial_article_hash && (
+                    <Alert>
+                      <ShieldCheck />
+                      <AlertTitle>
+                        {task.initial_ai_check.score == null
+                          ? "ZeroGPT 自动检测未完成"
+                          : `ZeroGPT 自动检测：${task.initial_ai_check.score}%`}
+                      </AlertTitle>
+                      <AlertDescription>
+                        {task.initial_ai_check.report ||
+                          "可继续上传截图，保留现有人工确认凭证。"}
+                      </AlertDescription>
+                    </Alert>
+                  )}
                 <div className="grid gap-2">
                   <Label htmlFor="initial-screenshot">初检截图（PNG）</Label>
                   <Input
