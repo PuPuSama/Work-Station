@@ -22,11 +22,29 @@ cleanup_release() {
   git worktree prune
 }
 
+upgrade_database() {
+  "${docker_command[@]}" compose -p "$compose_project" run \
+    --rm \
+    --no-deps \
+    backend \
+    python -m alembic -c /app/backend/alembic.ini upgrade head
+  "${docker_command[@]}" compose -p "$compose_project" run \
+    --rm \
+    --no-deps \
+    backend \
+    python -m knowledge_agent.checkpoint_setup
+}
+
 rollback() {
   status=$?
   trap - ERR
   echo "Deployment failed with status $status." >&2
   if [[ "$replacement_started" == "1" ]]; then
+    "${docker_command[@]}" compose -p "$compose_project" ps || true
+    "${docker_command[@]}" compose -p "$compose_project" logs \
+      --no-color \
+      --tail 200 \
+      backend || true
     echo "Rebuilding and restoring the previously checked-out release." >&2
     cd "$repository"
     "${docker_command[@]}" compose -p "$compose_project" build
@@ -72,9 +90,10 @@ current_commit="$(git rev-parse HEAD)"
 
 if [[ "$current_commit" == "$target_commit" ]]; then
   echo "Commit $target_commit is already checked out; verifying the deployment."
+  "${docker_command[@]}" compose -p "$compose_project" build --pull
+  upgrade_database
   "${docker_command[@]}" compose -p "$compose_project" up \
     -d \
-    --build \
     --remove-orphans \
     --wait \
     --wait-timeout 180
@@ -99,6 +118,7 @@ git worktree add --detach "$release_directory" "$target_commit"
 cd "$release_directory"
 "${docker_command[@]}" compose -p "$compose_project" config --quiet
 "${docker_command[@]}" compose -p "$compose_project" build --pull
+upgrade_database
 replacement_started=1
 "${docker_command[@]}" compose -p "$compose_project" up \
   -d \
