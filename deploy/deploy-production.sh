@@ -28,13 +28,15 @@ upgrade_database() {
     --rm \
     --no-deps \
     backend \
-    python -m alembic -c /app/backend/alembic.ini upgrade head
+    python -m alembic -c /app/backend/alembic.ini upgrade head \
+    </dev/null
   "${docker_command[@]}" compose -p "$compose_project" run \
     -T \
     --rm \
     --no-deps \
     backend \
-    python -m knowledge_agent.checkpoint_setup
+    python -m knowledge_agent.checkpoint_setup \
+    </dev/null
 }
 
 rollback() {
