@@ -24,11 +24,13 @@ cleanup_release() {
 
 upgrade_database() {
   "${docker_command[@]}" compose -p "$compose_project" run \
+    -T \
     --rm \
     --no-deps \
     backend \
     python -m alembic -c /app/backend/alembic.ini upgrade head
   "${docker_command[@]}" compose -p "$compose_project" run \
+    -T \
     --rm \
     --no-deps \
     backend \
