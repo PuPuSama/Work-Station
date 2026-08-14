@@ -1212,7 +1212,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                 self.assertNotIn("Version two", str(audit.events))
                 self.assertFalse(local_state.exists())
 
-    def test_project_prompt_http_is_not_added_to_local_mode(self) -> None:
+    def test_project_prompt_http_requires_server_runtime(self) -> None:
         import app as app_module
 
         previous_mode = getattr(
@@ -1226,7 +1226,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                 TestClient(app_module.app).get(
                     f"/api/projects/{self.project_id}/prompt-snapshots"
                 ).status_code,
-                404,
+                503,
             )
         finally:
             app_module.app.state.server_mode_enabled = previous_mode

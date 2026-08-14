@@ -254,7 +254,7 @@ class DeploymentReadinessTests(unittest.TestCase):
             readiness = postgres_database_probe(engine)
         finally:
             engine.dispose()
-        self.assertEqual(readiness.revision, "20260812_0021")
+        self.assertEqual(readiness.revision, "20260813_0022")
         self.assertTrue(readiness.vector_extension)
 
 

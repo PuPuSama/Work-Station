@@ -438,7 +438,7 @@ class ServerProjectMetadataTests(unittest.TestCase):
         self.assertEqual(current.official_domain, self.project_id)
         self.assertEqual(current.revision, 0)
 
-    def test_http_is_strict_and_local_mode_does_not_mount_capability(
+    def test_http_is_strict_and_requires_server_runtime(
         self,
     ) -> None:
         codec = ServerActorSessionCodec(b"m" * 32)
@@ -509,7 +509,7 @@ class ServerProjectMetadataTests(unittest.TestCase):
             response = client.get(
                 f"/api/projects/{self.project_id}/metadata"
             )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 503)
 
 
 if __name__ == "__main__":

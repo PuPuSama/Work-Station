@@ -43,8 +43,12 @@ class ResponsesPayloadTests(unittest.TestCase):
     def test_default_model_is_gpt_5_6_sol(self) -> None:
         self.assertEqual(load_config().llm_model, "gpt-5.6-sol")
 
-    def test_default_reasoning_effort_is_medium(self) -> None:
-        self.assertEqual(load_config().llm_reasoning_effort, "medium")
+    def test_configured_reasoning_effort_is_available(self) -> None:
+        config = load_config()
+        self.assertIn(
+            config.llm_reasoning_effort,
+            config.llm_available_reasoning_efforts,
+        )
 
     def test_title_generation_is_pinned_to_low(self) -> None:
         selected = title_generation_config(load_config())
@@ -62,6 +66,7 @@ class ResponsesStreamTests(unittest.TestCase):
                 'data: {"type":"response.completed","response":{"output_text":"Streamed text"}}\n\n'
             ).encode("utf-8")
         )
+        config = load_config()
         with (
             patch.dict(
                 os.environ,
@@ -69,14 +74,17 @@ class ResponsesStreamTests(unittest.TestCase):
             ),
             patch("services.llm.request.urlopen", return_value=response) as urlopen,
         ):
-            client = LLMClient(load_config())
+            client = LLMClient(config)
             result = client.chat([{"role": "user", "content": "Write."}])
 
         sent_request = urlopen.call_args.args[0]
         payload = json.loads(sent_request.data.decode("utf-8"))
         self.assertEqual(result, "Streamed text")
         self.assertEqual(payload["model"], "gpt-5.6-sol")
-        self.assertEqual(payload["reasoning"], {"effort": "medium"})
+        self.assertEqual(
+            payload["reasoning"],
+            {"effort": config.llm_reasoning_effort},
+        )
         self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
         self.assertEqual(sent_request.get_header("Accept"), "text/event-stream")

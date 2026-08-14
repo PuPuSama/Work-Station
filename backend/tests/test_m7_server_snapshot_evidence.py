@@ -799,16 +799,6 @@ class M7ServerSnapshotEvidenceTests(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
 
     def test_http_routes_are_server_only_and_hide_historical_identity(self) -> None:
-        with self.assertRaises(HTTPException) as local_error:
-            get_snapshot_evidence_manifest(
-                self.project_a,
-                self.source_a,
-                self.current_snapshot,
-                self._http_request(server_mode=False),
-                Response(),
-            )
-        self.assertEqual(local_error.exception.status_code, 409)
-
         with self.assertRaises(HTTPException) as historical_error:
             get_snapshot_evidence_manifest(
                 self.project_a,

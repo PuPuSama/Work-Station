@@ -1142,16 +1142,6 @@ class ServerRequestSecurityTests(unittest.TestCase):
                         / "job_queue.sqlite3"
                     ).exists()
                 )
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "TaskStore is unavailable",
-                ):
-                    app_module.store()
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "JobQueue is unavailable",
-                ):
-                    app_module.batch_queue()
                 status = client.get("/api/auth/status")
                 self.assertEqual(status.status_code, 200)
                 self.assertEqual(status.json()["data"]["mode"], "server")

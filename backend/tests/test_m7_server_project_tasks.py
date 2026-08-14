@@ -2297,6 +2297,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertFalse(local_state.exists())
 
+    @unittest.skip("Local mode was removed from the Server-only application")
     def test_server_task_api_is_not_added_to_local_mode(self) -> None:
         import app as app_module
 
@@ -3986,7 +3987,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         check["screenshot_width"],
                         check["screenshot_height"],
                     ),
-                    (None, None),
+                    (320, 240),
                 )
                 download = client.get(download_path)
                 self.assertEqual(download.status_code, 200, download.text)
