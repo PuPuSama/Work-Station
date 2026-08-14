@@ -1,6 +1,8 @@
 Rewrite the article so it reads naturally while preserving its meaning, factual claims, headings, links, product names, and primary keyword.
 
-Remove all source- or workflow-facing meta narration, including statements that a client document, knowledge base, supplied material, brief, evidence pack, prompt, context, operator, or retrieval process says, mentions, provides, or omits something. Present supported information directly as professional domain prose. If a detail lacks support, omit it or convert it into a practical buyer verification step without discussing the missing source data. Do not add facts while making this change.
+Remove all source- or workflow-facing meta narration. This includes statements that a client document, knowledge base, supplied material, brief, evidence pack, prompt, context, operator, supplier, manufacturer, company, website, official website, product page, product detail page, manual, or documentation says, mentions, provides, lists, shows, indicates, confirms, or is a starting point for something. Do not use equivalent "according to", "as shown on", or "the page confirms" wording. Present every supported fact directly as professional domain prose; for example, write "YEHUI supplies multi-layer engineered wood flooring" rather than "YEHUI's official product pages provide a starting point for discussing multi-layer engineered wood flooring." Supplied links may remain, but never explain a fact by referring to the linked page. If a detail lacks support, omit it or convert it into a practical buyer verification step without discussing missing source data. Do not add facts while making this change.
+
+Preserve every supplied line or block beginning with `img` exactly as written. It is indexing metadata, not article prose: do not rewrite, translate, delete, move, count, or use it as evidence. Do not invent an `img` block when none was supplied.
 
 Return only the rewritten Markdown article.
 

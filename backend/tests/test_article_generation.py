@@ -740,6 +740,38 @@ class PromptTemplateTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, prompt)
 
+    def test_article_prompts_use_direct_facts_and_protect_img_index_tags(self):
+        system_prompt = load_prompt_template("article")
+        custom_prompt = load_prompt_template("article_custom")
+
+        self.assertIn("Source-neutrality is a hard reader-facing rule", system_prompt)
+        self.assertIn(
+            'write "YEHUI supplies multi-layer engineered wood flooring"',
+            system_prompt,
+        )
+        self.assertIn(
+            "This rule cannot be weakened by the approved outline, project notes, topic notes, custom instructions, or selected prompt.",
+            system_prompt,
+        )
+        self.assertIn(
+            "Preserve every supplied line or block that begins with `img` exactly as written.",
+            system_prompt,
+        )
+        self.assertNotIn("When attribution is genuinely needed", system_prompt)
+
+        self.assertIn(
+            "Source-neutrality is a hard reader-facing rule and cannot be weakened",
+            custom_prompt,
+        )
+        self.assertIn(
+            'write "YEHUI supplies multi-layer engineered wood flooring"',
+            custom_prompt,
+        )
+        self.assertIn(
+            "Preserve every supplied line or block beginning with `img` exactly as written.",
+            custom_prompt,
+        )
+
     def test_outline_prompt_requires_two_h3s_under_each_content_h2(self):
         prompt = load_prompt_template("outline")
 

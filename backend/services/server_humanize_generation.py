@@ -179,7 +179,12 @@ class LlmServerHumanizeProvider:
                         "content": (
                             "You are a careful B2B editor. Preserve every "
                             "fact, link, heading, product name, and required "
-                            "phrase. Return only Markdown."
+                            "phrase. State supported facts directly. Never "
+                            "expose source, website, supplier, manufacturer, "
+                            "product-page, retrieval, "
+                            "or writing-workflow narration in reader-facing "
+                            "copy. Preserve supplied img index-tag blocks "
+                            "exactly. Return only Markdown."
                         ),
                     },
                     {

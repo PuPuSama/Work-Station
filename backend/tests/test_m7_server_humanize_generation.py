@@ -109,7 +109,14 @@ class ServerHumanizeGenerationTests(unittest.TestCase):
 
         self.assertEqual(result, ARTICLE.strip())
         messages = llm.calls[0]  # type: ignore[assignment]
+        system_prompt = messages[0]["content"]  # type: ignore[index]
         user_prompt = messages[1]["content"]  # type: ignore[index]
+        self.assertIn("State supported facts directly", system_prompt)
+        self.assertIn(
+            "Never expose source, website, supplier, manufacturer, product-page",
+            system_prompt,
+        )
+        self.assertIn("Preserve supplied img index-tag blocks exactly", system_prompt)
         self.assertIn(ARTICLE.strip(), user_prompt)
         self.assertNotIn("{{ARTICLE}}", user_prompt)
 
