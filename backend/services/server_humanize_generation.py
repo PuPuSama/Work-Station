@@ -12,6 +12,7 @@ from config import AppConfig
 from models import (
     STATUS_HUMANIZED_READY,
     STATUS_FINAL_AI_CHECKED,
+    AICheck,
     ArticleVersion,
     PromptSnapshot,
     TaskRecord,
@@ -60,6 +61,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.zerogpt import ZeroGPTDetectionResult
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
     ACTION_HUMANIZE_ARTICLE,
@@ -97,6 +99,13 @@ class HumanizeGenerationProvider(Protocol):
         source_article: str,
         prompt_snapshot: PromptSnapshot,
     ) -> str: ...
+
+
+class HumanizeAiRateDetector(Protocol):
+    @property
+    def ready(self) -> bool: ...
+
+    def detect(self, text: str) -> ZeroGPTDetectionResult: ...
 
 
 def _source_article(task: TaskRecord) -> tuple[str, bool]:
@@ -271,10 +280,12 @@ class ServerHumanizeGenerationHandler:
         engine: Engine,
         *,
         provider: HumanizeGenerationProvider,
+        ai_rate: HumanizeAiRateDetector | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
+        self._ai_rate = ai_rate
         self._audit = audit
 
     def __call__(
@@ -339,6 +350,48 @@ class ServerHumanizeGenerationHandler:
             source_article=source_article,
             candidate=candidate,
         )
+        if cancelled():
+            raise JobCancelled(
+                "humanize cancelled before AI-rate detection"
+            )
+        checked_at = now_iso()
+        article_hash = task.humanized_article_hash
+        if self._ai_rate is None or not self._ai_rate.ready:
+            task.final_ai_check = AICheck(
+                confirmed=False,
+                report=(
+                    "ZeroGPT 自动复检未运行：服务端尚未配置 API Key。"
+                ),
+                provider="zerogpt",
+                checked_at=checked_at,
+                article_hash=article_hash,
+            )
+        else:
+            try:
+                detection = self._ai_rate.detect(task.humanized_article)
+            except Exception:
+                task.final_ai_check = AICheck(
+                    confirmed=False,
+                    report=(
+                        "ZeroGPT 自动复检暂时不可用，请稍后重试或保留截图人工确认。"
+                    ),
+                    provider="zerogpt",
+                    checked_at=checked_at,
+                    article_hash=article_hash,
+                )
+            else:
+                task.final_ai_check = AICheck(
+                    confirmed=False,
+                    score=detection.ai_percentage,
+                    report=detection.report,
+                    provider="zerogpt",
+                    checked_at=checked_at,
+                    article_hash=article_hash,
+                )
+        if cancelled():
+            raise JobCancelled(
+                "humanize cancelled before result commit"
+            )
         try:
             saved = PostgresAuditedTaskWriter(
                 self._engine,

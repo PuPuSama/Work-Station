@@ -92,15 +92,9 @@ if ! git merge-base --is-ancestor "$current_commit" "$target_commit"; then
   exit 1
 fi
 
-mkdir -p "$release_root" "$workspace/backups"
+mkdir -p "$release_root"
 cleanup_release
 git worktree add --detach "$release_directory" "$target_commit"
-
-timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-python3 \
-  "$release_directory/deploy/backup_sqlite.py" \
-  "$workspace/data" \
-  "$workspace/backups/deploy-$timestamp-$current_commit"
 
 cd "$release_directory"
 "${docker_command[@]}" compose -p "$compose_project" config --quiet

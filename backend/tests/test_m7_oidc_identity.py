@@ -894,7 +894,6 @@ class OidcLoginHttpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             isolated = replace(
                 base_config,
-                data_file=Path(directory) / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (

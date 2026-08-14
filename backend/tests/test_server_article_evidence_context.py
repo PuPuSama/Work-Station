@@ -119,6 +119,22 @@ class ServerArticleEvidenceContextTests(unittest.TestCase):
                 for index, chunk_id in enumerate(self.chunk_ids)
             ),
         )
+        # Article evidence may only use the published current snapshot. The
+        # test does not exercise embedding activation, so establish that
+        # already-reviewed state directly.
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.update()
+                .where(
+                    knowledge_sources.c.project_id == self.project_id,
+                    knowledge_sources.c.source_id == source_id,
+                )
+                .values(
+                    status="published",
+                    current_snapshot_id=snapshot_id,
+                    pending_snapshot_id=None,
+                )
+            )
         self.plan_id = f"{self.prefix}-plan"
         self.pack_id = f"{self.prefix}-pack"
         outline_hash = hashlib.sha256(

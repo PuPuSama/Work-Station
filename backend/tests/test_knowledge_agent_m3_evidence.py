@@ -35,6 +35,7 @@ def hit(
     source_id: str,
     trust_tier: str = "reference_material",
     public: bool = False,
+    source_kind: str = "knowledge_page",
 ) -> RetrievalHit:
     snapshot_id = f"snap-{source_id}"
     return RetrievalHit(
@@ -51,7 +52,7 @@ def hit(
             source_id=source_id,
             snapshot_id=snapshot_id,
             display_name=f"Source {source_id}",
-            source_kind="knowledge_page",
+            source_kind=source_kind,  # type: ignore[arg-type]
             trust_tier=trust_tier,  # type: ignore[arg-type]
             public_source=public,
             canonical_url=f"https://example.test/{source_id}" if public else None,
@@ -171,6 +172,23 @@ class EvidencePackBuilderTests(unittest.TestCase):
         )
         self.assertEqual(weak.sufficiency, "weak")
         self.assertEqual(len(weak.gap_reasons), 3)
+
+    def test_builder_excludes_official_blog_from_evidence(self) -> None:
+        blog_hit = hit(
+            "snap-blog:0",
+            source_id="blog",
+            public=True,
+            source_kind="official_blog",
+        )
+
+        pack = DefaultEvidencePackBuilder(minimum_hits=1).build(
+            self.request,
+            (blog_hit,),
+        )
+
+        self.assertEqual(pack.hits, ())
+        self.assertEqual(pack.sufficiency, "missing")
+        self.assertEqual(pack.public_citation_urls, ())
 
 
 class KnowledgeCoverageTests(unittest.TestCase):

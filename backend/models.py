@@ -64,6 +64,16 @@ class Product(WorkflowModel):
     asset_error: str = ""
 
 
+class OfficialLink(WorkflowModel):
+    """One current published official-site link pinned for article writing."""
+
+    source_id: str = ""
+    snapshot_id: str = ""
+    label: str = ""
+    url: str = ""
+    role: str = "other"
+
+
 class ArticleVersion(WorkflowModel):
     kind: str
     content: str = ""
@@ -79,6 +89,7 @@ class AICheck(WorkflowModel):
     """A manual AI-rate check bound to the exact article that was checked."""
 
     confirmed: bool = False
+    deferred: bool = False
     score: float | None = None
     report: str = ""
     # ``provider``/``checked_at`` distinguish an automatic detector result
@@ -120,8 +131,8 @@ class ArticleImage(WorkflowModel):
 
     id: str = ""
     role: str = "product"
-    # Local mode uses paths. Server mode keeps immutable object identities and
-    # leaves both path fields empty so private storage is never bypassed.
+    # Server records use immutable object identities. Path fields remain only
+    # for decoding historical payloads and stay empty in active writes.
     source_path: str = ""
     prepared_path: str = ""
     source_asset_id: str = ""
@@ -343,6 +354,7 @@ class TaskRecord(WorkflowModel):
     synced_from_week: str = ""
     topic_index: int
     topic: str
+    primary_keyword: str = ""
     competitor_keyword: str = ""
     competitor_blog: str = ""
     status: str = STATUS_NEW
@@ -380,6 +392,7 @@ class TaskRecord(WorkflowModel):
 
     product_candidate_ids: list[str] = Field(default_factory=list)
     products: list[Product] = Field(default_factory=list)
+    official_links: list[OfficialLink] = Field(default_factory=list)
     hero_image: str = ""
     images: list[ArticleImage] = Field(default_factory=list)
     transition_added: bool = False
@@ -389,8 +402,8 @@ class TaskRecord(WorkflowModel):
     source_links: list[SourceLink] = Field(default_factory=list)
     link_validation: LinkValidation = Field(default_factory=LinkValidation)
 
-    # Local mode stores a path. Server mode stores an immutable private Asset
-    # identity and leaves docx_path empty.
+    # Server records use an immutable private Asset identity. The historical
+    # path field remains empty in active writes.
     docx_path: str = ""
     docx_asset_id: str = ""
     docx_content_hash: str = ""
@@ -508,6 +521,7 @@ class AICheckUpdateRequest(RevisionedRequest):
     score: float | None = None
     report: str = ""
     confirmed: bool = True
+    deferred: bool = False
 
 
 class SeoReviewSettingsUpdateRequest(RevisionedRequest):

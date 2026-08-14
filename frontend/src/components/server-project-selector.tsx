@@ -8,6 +8,7 @@ import {
   Building2,
   FileText,
   Loader2,
+  Plus,
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
@@ -25,8 +26,24 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { apiGet } from "@/lib/api";
-import type { AccessibleProject } from "@/types";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { apiGet, apiPost } from "@/lib/api";
+import type {
+  AccessibleProject,
+  AuthStatus,
+  WorkspaceTeam,
+  WorkspaceTeamPage,
+} from "@/types";
 
 const ROLE_LABELS: Record<AccessibleProject["effective_role"], string> = {
   org_admin: "组织管理员",
@@ -44,6 +61,14 @@ export function ServerProjectSelector() {
   const [projects, setProjects] = useState<AccessibleProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createPending, setCreatePending] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [officialDomain, setOfficialDomain] = useState("");
+  const [owningTeamId, setOwningTeamId] = useState("");
+  const [teams, setTeams] = useState<WorkspaceTeam[]>([]);
+  const [organizationId, setOrganizationId] = useState("");
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
@@ -64,6 +89,45 @@ export function ServerProjectSelector() {
     (project) => project.effective_role === "org_admin",
   );
 
+  async function openCreateProject() {
+    setCreateOpen(true);
+    setCreateError("");
+    try {
+      const status = await apiGet<AuthStatus>("/api/auth/status");
+      const nextOrganizationId = status.data?.organization_id || "";
+      if (!nextOrganizationId) {
+        throw new Error("当前组织身份不可用，请重新登录。");
+      }
+      setOrganizationId(nextOrganizationId);
+      const page = await apiGet<WorkspaceTeamPage>(
+        `/api/organizations/${encodeURIComponent(nextOrganizationId)}/teams?limit=100`,
+      );
+      setTeams(page.items.filter((team) => team.status === "active"));
+    } catch (nextError) {
+      setCreateError(errorMessage(nextError));
+    }
+  }
+
+  async function createProject() {
+    setCreatePending(true);
+    setCreateError("");
+    try {
+      const created = await apiPost<AccessibleProject>("/api/projects", {
+        customer_name: customerName,
+        official_domain: officialDomain,
+        owning_team_id: owningTeamId || null,
+      });
+      setCreateOpen(false);
+      window.location.assign(
+        `/projects/${encodeURIComponent(created.project_id)}/articles`,
+      );
+    } catch (nextError) {
+      setCreateError(errorMessage(nextError));
+    } finally {
+      setCreatePending(false);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b bg-card">
@@ -83,14 +147,23 @@ export function ServerProjectSelector() {
           </div>
           <div className="flex items-center gap-2">
             {canManageOrganization && (
-              <Button
-                nativeButton={false}
-                variant="outline"
-                render={<Link href="/organization" />}
-              >
-                <Building2 />
-                组织管理
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  onClick={() => void openCreateProject()}
+                >
+                  <Plus />
+                  新建项目
+                </Button>
+                <Button
+                  nativeButton={false}
+                  variant="outline"
+                  render={<Link href="/organization" />}
+                >
+                  <Building2 />
+                  组织管理
+                </Button>
+              </>
             )}
             <Button
               type="button"
@@ -189,6 +262,89 @@ export function ServerProjectSelector() {
           )
         )}
       </div>
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>新建项目</DialogTitle>
+            <DialogDescription>
+              项目 ID 使用官网域名。创建后会建立空的文章工作区和知识库，不会自动导入旧数据。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            {createError && (
+              <Alert variant="destructive">
+                <AlertCircle />
+                <AlertTitle>无法创建项目</AlertTitle>
+                <AlertDescription>{createError}</AlertDescription>
+              </Alert>
+            )}
+            <div className="grid gap-2">
+              <Label htmlFor="project-customer-name">客户名称</Label>
+              <Input
+                id="project-customer-name"
+                value={customerName}
+                maxLength={120}
+                placeholder="例如 Acme Fasteners"
+                disabled={createPending}
+                onChange={(event) => setCustomerName(event.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="project-official-domain">官网域名</Label>
+              <Input
+                id="project-official-domain"
+                value={officialDomain}
+                maxLength={253}
+                placeholder="www.example.com（不要填写 https:// 或路径）"
+                disabled={createPending}
+                onChange={(event) => setOfficialDomain(event.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                域名会作为稳定的 Project ID，创建后不可直接改名。
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="project-owning-team">所属团队（可选）</Label>
+              <select
+                id="project-owning-team"
+                value={owningTeamId}
+                disabled={createPending || !organizationId}
+                className="h-11 w-full rounded-lg border border-input bg-background px-3 text-sm"
+                onChange={(event) => setOwningTeamId(event.target.value)}
+              >
+                <option value="">不指定团队（仅组织管理员默认可见）</option>
+                {teams.map((team) => (
+                  <option key={team.team_id} value={team.team_id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose
+              render={
+                <Button type="button" variant="outline" disabled={createPending} />
+              }
+            >
+              取消
+            </DialogClose>
+            <Button
+              type="button"
+              disabled={
+                createPending ||
+                !customerName.trim() ||
+                !officialDomain.trim() ||
+                Boolean(createError && !organizationId)
+              }
+              onClick={() => void createProject()}
+            >
+              {createPending ? <Loader2 className="animate-spin" /> : <Plus />}
+              创建并进入项目
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }

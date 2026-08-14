@@ -13,6 +13,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ServerProjectMembers } from "@/components/server-project-members";
+import { ServerProjectPromptLibrary } from "@/components/server-project-prompt-library";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 import { ApiError, apiGet, apiPut } from "@/lib/api";
 import type { ServerProjectMetadata } from "@/types";
 
@@ -36,6 +38,7 @@ type ServerProjectSettingsProps = {
 type MetadataForm = {
   customerName: string;
   officialDomain: string;
+  projectNotes: string;
 };
 
 type FieldErrors = Partial<Record<keyof MetadataForm, string>>;
@@ -54,6 +57,10 @@ function normalizeOfficialDomain(value: string) {
   return value.trim().replace(/\.$/, "").toLowerCase();
 }
 
+function normalizeProjectNotes(value: string) {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
 function validateForm(form: MetadataForm): {
   errors: FieldErrors;
   normalized: MetadataForm;
@@ -61,6 +68,7 @@ function validateForm(form: MetadataForm): {
   const normalized = {
     customerName: normalizeCustomerName(form.customerName),
     officialDomain: normalizeOfficialDomain(form.officialDomain),
+    projectNotes: normalizeProjectNotes(form.projectNotes),
   };
   const errors: FieldErrors = {};
   if (!normalized.customerName) {
@@ -80,6 +88,9 @@ function validateForm(form: MetadataForm): {
     errors.officialDomain =
       "只填写主机名，例如 www.example.com；不要包含协议、路径或账号信息。";
   }
+  if (normalized.projectNotes.length > 30000) {
+    errors.projectNotes = "项目注意事项不能超过 30000 个字符。";
+  }
   return { errors, normalized };
 }
 
@@ -96,6 +107,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
   const [form, setForm] = useState<MetadataForm>({
     customerName: "",
     officialDomain: "",
+    projectNotes: "",
   });
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -107,6 +119,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
     setForm({
       customerName: next.customer_name,
       officialDomain: next.official_domain,
+      projectNotes: next.project_notes,
     });
     setFieldErrors({});
   }, []);
@@ -141,7 +154,8 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
     metadata !== null &&
     (normalizeCustomerName(form.customerName) !== metadata.customer_name ||
       normalizeOfficialDomain(form.officialDomain) !==
-        metadata.official_domain);
+        metadata.official_domain ||
+      normalizeProjectNotes(form.projectNotes) !== metadata.project_notes);
 
   function validateField(field: keyof MetadataForm) {
     const result = validateForm(form);
@@ -171,6 +185,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
           revision: metadata.revision,
           customer_name: result.normalized.customerName,
           official_domain: result.normalized.officialDomain,
+          project_notes: result.normalized.projectNotes,
         },
       );
       applyMetadata(updated);
@@ -331,6 +346,43 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
           </div>
         </div>
 
+        <div className="grid min-w-0 gap-1.5">
+          <Label htmlFor="server-project-notes">项目注意事项</Label>
+          <Textarea
+            id="server-project-notes"
+            className="min-h-36 resize-y"
+            value={form.projectNotes}
+            maxLength={30000}
+            placeholder="例如：避免提及零售价；未经证据支持不要声称认证；统一使用指定品牌术语。"
+            aria-invalid={Boolean(fieldErrors.projectNotes)}
+            aria-describedby="server-project-notes-help"
+            disabled={!metadata || saving || loading}
+            onChange={(event) => {
+              setForm((current) => ({
+                ...current,
+                projectNotes: event.target.value,
+              }));
+              setFieldErrors((current) => ({
+                ...current,
+                projectNotes: undefined,
+              }));
+            }}
+            onBlur={() => validateField("projectNotes")}
+          />
+          <div
+            id="server-project-notes-help"
+            className="flex flex-wrap justify-between gap-2 text-xs text-muted-foreground"
+          >
+            <span
+              className={fieldErrors.projectNotes ? "text-destructive" : ""}
+            >
+              {fieldErrors.projectNotes ||
+                "保存后，新建或导入的文章会捕获这份注意事项；已有文章保留自己的快照，不会被静默覆盖。"}
+            </span>
+            <span>{form.projectNotes.length}/30000</span>
+          </div>
+        </div>
+
         <div className="grid gap-2 rounded-lg border bg-muted/30 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
           <div className="min-w-0">
             <p className="font-medium">不可变项目 ID</p>
@@ -350,7 +402,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
         </div>
 
         <p className="text-xs leading-5 text-muted-foreground">
-          客户事实与产品资料应发布到 Knowledge；写作规则应保存为不可变 Prompt Snapshot。此处不接收自由文本上下文。
+          项目注意事项用于给生成流程提供操作约束，不是事实证据；客户事实与产品资料仍应发布到 Knowledge，正式提示词规则仍由 Prompt Snapshot 管理。
         </p>
       </CardContent>
     </Card>
@@ -364,7 +416,12 @@ export function ServerProjectSettings({
     <ServerProjectMembers
       projectId={projectId}
       pageKind="settings"
-      beforeMemberCards={<ProjectMetadataCard projectId={projectId} />}
+      beforeMemberCards={
+        <>
+          <ProjectMetadataCard projectId={projectId} />
+          <ServerProjectPromptLibrary projectId={projectId} />
+        </>
+      }
     />
   );
 }

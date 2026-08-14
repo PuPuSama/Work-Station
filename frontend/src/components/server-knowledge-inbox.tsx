@@ -9,19 +9,23 @@ import {
   Download,
   Eye,
   FileStack,
+  Globe2,
   ImageIcon,
   Inbox,
   Loader2,
-  PackageCheck,
   PackageSearch,
   RefreshCw,
+  ScanSearch,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { KnowledgeSourceFilters } from "@/components/knowledge-source-filters";
+import { KnowledgeSectionNav } from "@/components/knowledge-section-nav";
 import {
   Card,
   CardContent,
@@ -31,43 +35,33 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { KnowledgeReviewGuide } from "@/components/knowledge-review-guide";
 import { ServerPrivateDocumentUpload } from "@/components/server-private-document-upload";
-import { apiGet, apiPost, apiPut } from "@/lib/api";
+import { apiDelete, apiGet, apiPost } from "@/lib/api";
+import {
+  countKnowledgeSourceOrigins,
+  filterKnowledgeSources,
+  type KnowledgeSourceSort,
+} from "@/lib/knowledge-source-filters";
+import { sameProjectId } from "@/lib/project-id";
 import type {
   AccessibleProject,
   KnowledgeLibrary,
-  KnowledgeProductSummary,
   KnowledgeSnapshotEvidenceManifest,
   KnowledgeSnapshotEvidencePreview,
   KnowledgeSnapshotRawDownload,
   KnowledgeSourceSummary,
   KnowledgeUploadResult,
+  OfficialSiteScanStart,
+  OfficialSiteScanStatus,
 } from "@/types";
-
-type ReviewDecision = "approve" | "needs_review" | "reject";
-
-const sourceKindLabels: Record<string, string> = {
-  private_file: "私有资料",
-  product_detail: "产品详情",
-  product_category: "产品分类",
-  official_blog: "官网博客",
-  knowledge_page: "知识页面",
-};
-
-const trustTierLabels: Record<string, string> = {
-  hard_fact: "硬事实",
-  reference_material: "参考资料",
-  writing_instruction: "写作指令",
-};
 
 const statusLabels: Record<string, string> = {
   inbox: "待发布",
   needs_review: "需复核",
-  rejected: "已拒绝",
+  rejected: "已撤下",
   published: "已发布",
-  candidate: "待确认",
-  confirmed: "已确认",
+  candidate: "待发布",
+  confirmed: "已发布",
 };
 
 function errorMessage(error: unknown) {
@@ -78,6 +72,12 @@ function canEditKnowledge(
   role: AccessibleProject["effective_role"] | null,
 ) {
   return role === "org_admin" || role === "team_lead" || role === "editor";
+}
+
+function canDeleteKnowledge(
+  role: AccessibleProject["effective_role"] | null,
+) {
+  return role === "org_admin";
 }
 
 function formatDate(value: string | null) {
@@ -282,7 +282,7 @@ function SnapshotEvidencePanel({
           ) : (
             <Eye />
           )}
-          {previewVisible ? "收起规范化文本" : "查看规范化文本"}
+          {previewVisible ? "收起正文预览" : "查看正文预览"}
         </Button>
         <Button
           type="button"
@@ -321,14 +321,13 @@ function SnapshotEvidencePanel({
 }
 
 function SourceReviewCard({
-  editable,
+  deletable,
   onChanged,
   pending,
   projectPath,
-  publishable,
   source,
 }: {
-  editable: boolean;
+  deletable: boolean;
   onChanged: (
     key: string,
     action: Promise<unknown>,
@@ -336,52 +335,19 @@ function SourceReviewCard({
   ) => Promise<boolean>;
   pending: string;
   projectPath: string;
-  publishable: boolean;
   source: KnowledgeSourceSummary;
 }) {
-  const [sourceKind, setSourceKind] = useState(source.source_kind);
-  const [trustTier, setTrustTier] = useState(source.trust_tier);
-  const [decision, setDecision] = useState<ReviewDecision>(
-    source.pending_review_decision || "approve",
-  );
-  const [reason, setReason] = useState("");
-  const reviewReceiptId = useRef<string | null>(null);
   const sourcePath = `${projectPath}/sources/${encodeURIComponent(source.source_id)}`;
   const pendingSnapshotId = source.pending_snapshot_id;
-  const pendingSnapshotPath = pendingSnapshotId
-    ? `${sourcePath}/snapshots/${encodeURIComponent(pendingSnapshotId)}`
-    : "";
-  const reviewKey = `review:${source.source_id}:${pendingSnapshotId || "none"}`;
-  const publishKey = `publish:${source.source_id}:${pendingSnapshotId || "none"}`;
-  const reviewing = pending === reviewKey;
-  const publishing = pending === publishKey;
 
-  async function reviewPendingSnapshot() {
-    if (!pendingSnapshotId) return;
-    const receiptId = reviewReceiptId.current || crypto.randomUUID();
-    reviewReceiptId.current = receiptId;
-    const reviewPromise = apiPut(pendingSnapshotPath + "/review", {
-      receipt_id: receiptId,
-      source_kind: sourceKind,
-      trust_tier: trustTier,
-      decision,
-      reason: reason.trim(),
-    });
-    const saved = await onChanged(
-      reviewKey,
-      reviewPromise,
-      `${source.display_name} 的审核结果已保存。`,
-    );
-    if (saved) reviewReceiptId.current = null;
-  }
-
-  function publishPendingSnapshot() {
-    if (!pendingSnapshotId) return;
-    const publishPromise = apiPost(pendingSnapshotPath + "/publish");
+  function withdrawSource() {
+    if (!window.confirm(`确定撤下「${source.display_name}」吗？原文件和历史版本会保留。`)) {
+      return;
+    }
     void onChanged(
-      publishKey,
-      publishPromise,
-      `${source.display_name} 已发布，新版本开始参与文章检索。`,
+      `withdraw:${source.source_id}`,
+      apiDelete(sourcePath),
+      `${source.display_name} 已从当前检索中撤下，历史版本仍保留。`,
     );
   }
 
@@ -397,9 +363,23 @@ function SourceReviewCard({
               内部编号：{source.source_id}
             </CardDescription>
           </div>
-          <Badge variant={source.status === "published" ? "default" : "secondary"}>
-            {statusLabels[source.status] || source.status}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant={source.status === "published" ? "default" : "secondary"}>
+              {pendingSnapshotId ? "自动发布中" : statusLabels[source.status] || source.status}
+            </Badge>
+            {deletable && (source.current_snapshot_id || pendingSnapshotId) ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={Boolean(pending)}
+                onClick={withdrawSource}
+              >
+                <Trash2 />
+                撤下
+              </Button>
+            ) : null}
+          </div>
         </div>
         {source.classification_reason ? (
           <p className="text-xs leading-5 text-muted-foreground">
@@ -421,7 +401,7 @@ function SourceReviewCard({
             <p className="text-xs leading-5 text-muted-foreground">
               {source.current_snapshot_id
                 ? "文章检索目前正在使用这个版本。"
-                : "当前没有已发布版本；待审核资料不会参与检索。"}
+                : "当前没有已发布版本；解析成功后系统会自动发布。"}
             </p>
             {source.current_snapshot_id ? (
               <details className="text-xs text-muted-foreground">
@@ -443,10 +423,10 @@ function SourceReviewCard({
           <div className="grid gap-2 rounded-xl border bg-muted/10 p-4">
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                本次待审核版本
+                本次解析版本
               </span>
               <Badge variant={pendingSnapshotId ? "secondary" : "outline"}>
-                {pendingSnapshotId ? "待审" : "无待审版本"}
+                {pendingSnapshotId ? "自动发布中" : "已处理"}
               </Badge>
             </div>
             {pendingSnapshotId ? (
@@ -476,20 +456,7 @@ function SourceReviewCard({
                   </div>
                 </div>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  最近审核：
-                  {source.pending_review_decision === "approve"
-                    ? "已通过"
-                    : source.pending_review_decision === "needs_review"
-                      ? "需负责人复核"
-                      : source.pending_review_decision === "reject"
-                        ? "不采用"
-                        : "尚未审阅"}
-                  {source.pending_review_version !== null
-                    ? ` · v${source.pending_review_version}`
-                    : ""}
-                  {source.pending_reviewed_at
-                    ? ` · ${formatDate(source.pending_reviewed_at)}`
-                    : ""}
+                  系统会自动完成发布，不需要人工审核或点击确认。
                 </p>
                 <SnapshotEvidencePanel
                   key={pendingSnapshotId}
@@ -501,7 +468,7 @@ function SourceReviewCard({
               </>
             ) : (
               <p className="text-xs leading-5 text-muted-foreground">
-                当前没有待审核版本。
+                当前没有待处理版本。
                 {source.latest_snapshot_id
                   ? " 最近一次入库已完成。"
                   : " 尚未入库任何资料版本。"}
@@ -510,202 +477,12 @@ function SourceReviewCard({
           </div>
         </div>
 
-        {pendingSnapshotId ? (
-          <div className="grid gap-4 rounded-xl border bg-muted/20 p-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label htmlFor={`kind-${source.source_id}`}>来源类型</Label>
-                <select
-                  id={`kind-${source.source_id}`}
-                  value={sourceKind}
-                  disabled={!editable || Boolean(pending)}
-                  className="min-h-11 rounded-lg border bg-background px-3 text-sm"
-                  onChange={(event) => {
-                    reviewReceiptId.current = null;
-                    setSourceKind(event.target.value);
-                  }}
-                >
-                  {Object.entries(sourceKindLabels).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor={`trust-${source.source_id}`}>信息用途</Label>
-                <select
-                  id={`trust-${source.source_id}`}
-                  value={trustTier}
-                  disabled={!editable || Boolean(pending)}
-                  className="min-h-11 rounded-lg border bg-background px-3 text-sm"
-                  onChange={(event) => {
-                    reviewReceiptId.current = null;
-                    setTrustTier(event.target.value);
-                  }}
-                >
-                  {Object.entries(trustTierLabels).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor={`decision-${source.source_id}`}>审核结果</Label>
-              <select
-                id={`decision-${source.source_id}`}
-                value={decision}
-                disabled={!editable || Boolean(pending)}
-                className="min-h-11 rounded-lg border bg-background px-3 text-sm"
-                onChange={(event) => {
-                  reviewReceiptId.current = null;
-                  setDecision(event.target.value as ReviewDecision);
-                }}
-              >
-                <option value="approve">通过，进入待发布</option>
-                <option value="needs_review">暂不发布，交给负责人复核</option>
-                <option value="reject">不采用这份资料</option>
-              </select>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor={`reason-${source.source_id}`}>判断依据</Label>
-              <Input
-                id={`reason-${source.source_id}`}
-                value={reason}
-                disabled={!editable || Boolean(pending)}
-                maxLength={500}
-                placeholder="例如：官网产品详情页，规格和图片与产品一致"
-                onChange={(event) => {
-                  reviewReceiptId.current = null;
-                  setReason(event.target.value);
-                }}
-              />
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              className="min-h-11"
-              disabled={
-                !editable || Boolean(pending) || !reason.trim()
-              }
-              onClick={() => void reviewPendingSnapshot()}
-            >
-              {reviewing ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <ShieldCheck />
-              )}
-              保存审核结果
-            </Button>
-          </div>
-        ) : (
-          <div
-            className={
-              "flex items-center gap-2 rounded-xl border bg-muted/20 " +
-              "px-4 py-3 text-sm text-muted-foreground"
-            }
-          >
-            <CheckCircle2 className="size-4" />
-            当前没有待审核版本，来源信息与在线版本仅供查看。
-          </div>
-        )}
-
-        {pendingSnapshotId && source.pending_review_decision === "approve" ? (
-          <Button
-            type="button"
-            className="min-h-11"
-            disabled={
-              !publishable ||
-              Boolean(pending) ||
-              source.pending_chunk_count === 0
-            }
-            onClick={publishPendingSnapshot}
-          >
-            {publishing ? (
-              <Loader2 className="animate-spin" />
-            ) : (
-              <PackageCheck />
-            )}
-            发布这份资料
-          </Button>
-        ) : pendingSnapshotId ? (
-          <p
-            className={
-              "rounded-xl border border-dashed px-4 py-3 text-xs " +
-              "leading-5 text-muted-foreground"
-            }
-          >
-            审核通过后还要点击“发布这份资料”，它才会参与文章检索；原来的在线版本不会受影响。
-          </p>
-        ) : null}
+        <div className="flex items-center gap-2 rounded-xl border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+          <CheckCircle2 className="size-4" />
+          资料与资产解析成功后直接发布；这里只保留证据预览和撤下操作。
+        </div>
       </CardContent>
     </Card>
-  );
-}
-
-function ProductCard({
-  onChanged,
-  pending,
-  product,
-  projectPath,
-  publishable,
-}: {
-  onChanged: (
-    key: string,
-    action: Promise<unknown>,
-    message: string,
-  ) => Promise<boolean>;
-  pending: string;
-  product: KnowledgeProductSummary;
-  projectPath: string;
-  publishable: boolean;
-}) {
-  const confirming = pending === `product:${product.product_id}`;
-  return (
-    <div className="grid gap-3 rounded-xl border bg-card p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="font-medium">{product.name}</div>
-          <div className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
-            {product.product_id}
-          </div>
-        </div>
-        <Badge variant={product.status === "confirmed" ? "default" : "secondary"}>
-          {statusLabels[product.status] || product.status}
-        </Badge>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        {product.category_path.length
-          ? product.category_path.join(" / ")
-          : "尚未确认分类路径"}
-      </p>
-      {product.status !== "confirmed" ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="min-h-11"
-          disabled={!publishable || Boolean(pending)}
-          onClick={() =>
-            void onChanged(
-              `product:${product.product_id}`,
-              apiPost(
-                `${projectPath}/products/${encodeURIComponent(product.product_id)}/confirm`,
-              ),
-              `${product.name} 已确认；只有 Published Current Evidence 完整时才会出现在文章选择器。`,
-            )
-          }
-        >
-          {confirming ? (
-            <Loader2 className="animate-spin" />
-          ) : (
-            <PackageSearch />
-          )}
-          确认产品身份
-        </Button>
-      ) : null}
-    </div>
   );
 }
 
@@ -718,7 +495,16 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [startUrl, setStartUrl] = useState("");
+  const [maxPages, setMaxPages] = useState("100");
+  const [scanMessage, setScanMessage] = useState("");
+  const [scanStatus, setScanStatus] = useState<OfficialSiteScanStatus | null>(null);
+  const [sourceQuery, setSourceQuery] = useState("");
+  const [sourceSort, setSourceSort] = useState<KnowledgeSourceSort>("newest");
+  const [includeLocalSources, setIncludeLocalSources] = useState(true);
+  const [includeWebsiteSources, setIncludeWebsiteSources] = useState(true);
   const projectPath = `/api/knowledge/${encodeURIComponent(customer)}`;
+  const editable = canEditKnowledge(role);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -730,9 +516,11 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
       ]);
       setLibrary(nextLibrary);
       setRole(
-        projects.find((project) => project.project_id === customer)
+        projects.find((project) => sameProjectId(project.project_id, customer))
           ?.effective_role ?? null,
       );
+      const project = projects.find((item) => sameProjectId(item.project_id, customer));
+      setStartUrl((current) => current || (project ? `https://${project.official_domain}/` : ""));
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -743,6 +531,48 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadScanStatus = useCallback(async () => {
+    try {
+      setScanStatus(
+        await apiGet<OfficialSiteScanStatus>(
+          `${projectPath}/official-site/scan/status`,
+        ),
+      );
+    } catch {
+      // The main knowledge view remains usable if status polling is unavailable.
+    }
+  }, [projectPath]);
+
+  useEffect(() => {
+    void loadScanStatus();
+  }, [loadScanStatus]);
+
+  useEffect(() => {
+    if (scanStatus?.status !== "running") return;
+    const timer = window.setInterval(() => {
+      void loadScanStatus();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [loadScanStatus, scanStatus?.status]);
+
+  useEffect(() => {
+    if (!scanStatus) return;
+    if (scanStatus.status === "running") {
+      setScanMessage(`扫描进行中 · 开始于 ${formatDate(scanStatus.started_at)}`);
+      return;
+    }
+    if (scanStatus.status === "succeeded") {
+      setScanMessage(
+        `扫描完成 · 本次收录 ${scanStatus.processed_pages} 个页面，其中 ${scanStatus.processed_products} 个产品；知识库现有 ${scanStatus.source_count} 个来源，产品库现有 ${scanStatus.product_count} 个产品。`,
+      );
+      void load();
+      return;
+    }
+    if (scanStatus.status === "failed") {
+      setScanMessage(`扫描失败 · ${scanStatus.error || "上一版资料继续可用。"}`);
+    }
+  }, [load, scanStatus]);
 
   async function run(
     key: string,
@@ -767,37 +597,77 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
 
   async function uploaded(result: KnowledgeUploadResult) {
     setError("");
+    const parserLabel =
+      result.parser_name === "mineru-content-list"
+        ? "MinerU"
+        : result.parser_name;
     setMessage(
       result.created
-        ? `${result.message} 已生成 ${result.chunk_count} 个知识块、登记 ${result.asset_count} 个内嵌资产。`
-        : `${result.message} 本次没有重复创建资料版本或审核记录。`,
+        ? `${result.message} 解析器：${parserLabel}；已生成 ${result.chunk_count} 个知识块、登记 ${result.asset_count} 个内嵌资产。`
+        : `${result.message} 解析器：${parserLabel}；本次没有重复创建资料版本或审核记录。`,
     );
     await load();
   }
 
-  const sortedSources = useMemo(
+  async function startOfficialSiteScan() {
+    setPending("official-site-scan");
+    setError("");
+    setMessage("");
+    setScanMessage("正在提交官网扫描任务…");
+    try {
+      const result = await apiPost<OfficialSiteScanStart>(`${projectPath}/official-site/scan`, {
+        start_url: startUrl.trim(),
+        max_pages: Number(maxPages),
+      });
+      setScanStatus({
+        scan_id: result.scan_id,
+        status: "running",
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        processed_pages: 0,
+        skipped_pages: 0,
+        processed_products: 0,
+        skipped_products: 0,
+        source_count: library?.published_count || 0,
+        product_count: library?.confirmed_product_count || 0,
+        error: "",
+      });
+      const accepted = "扫描已启动；页面会持续显示状态，完成后自动刷新产品数量。";
+      setScanMessage(accepted);
+      setMessage(accepted);
+      await load();
+    } catch (reason) {
+      setScanMessage("扫描启动失败，请查看错误提示。");
+      setError(errorMessage(reason));
+    } finally {
+      setPending("");
+    }
+  }
+
+  const visibleSources = useMemo(
     () =>
-      [...(library?.sources || [])].sort((left, right) => {
-        const rank = (source: KnowledgeSourceSummary) =>
-          source.pending_snapshot_id
-            ? 0
-            : source.status === "needs_review"
-              ? 1
-              : source.status === "rejected"
-                ? 2
-                : 3;
-        return (
-          rank(left) - rank(right) ||
-          left.display_name.localeCompare(right.display_name)
-        );
+      filterKnowledgeSources(library?.sources ?? [], {
+        query: sourceQuery,
+        sort: sourceSort,
+        includeLocal: includeLocalSources,
+        includeWebsite: includeWebsiteSources,
       }),
-    [library],
+    [
+      includeLocalSources,
+      includeWebsiteSources,
+      library?.sources,
+      sourceQuery,
+      sourceSort,
+    ],
   );
-  const editable = canEditKnowledge(role);
+  const sourceOriginCounts = useMemo(
+    () => countKnowledgeSourceOrigins(library?.sources ?? []),
+    [library?.sources],
+  );
   const summaries = [
     { label: "全部来源", value: library?.source_count || 0, icon: FileStack },
     {
-      label: "待审核版本",
+      label: "处理中版本",
       value: library?.pending_count || 0,
       icon: Inbox,
     },
@@ -807,7 +677,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
       icon: CheckCircle2,
     },
     {
-      label: "已确认产品",
+      label: "已发布产品",
       value: library?.confirmed_product_count || 0,
       icon: PackageSearch,
     },
@@ -816,18 +686,17 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
 
   return (
     <main className="mx-auto grid w-full max-w-[1480px] gap-5 px-5 py-6">
+      <KnowledgeSectionNav customer={customer} />
       <div className="flex flex-col gap-4 rounded-2xl border bg-card p-5 md:flex-row md:items-end md:justify-between">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
             <BookOpenText className="size-4" />
-            知识库审核
+            Published knowledge
           </div>
-          <h1 className="text-2xl font-semibold">知识来源审阅</h1>
+          <h1 className="text-2xl font-semibold">知识来源</h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
-            私有资料上传与 Rediscovery 都只把来源、产品和图片证据放入
-            待审核区。这里负责人工分类、发布资料与确认产品身份；WordPress
-            Sync 和原始对象打开仍保持 Server 关闭。Research Run 已迁移到独立的
-            PostgreSQL Worker，可在“资料研究”页签中运行。
+            官网和上传资料解析成功后直接发布，产品与图片会自动进入产品库；这里负责扫描、
+            查看来源预览和撤下异常内容。扫描失败时，上一版继续参与检索。
           </p>
         </div>
         <Button
@@ -838,7 +707,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           onClick={() => void load()}
         >
           {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-          刷新 Inbox
+          刷新来源
         </Button>
       </div>
 
@@ -857,7 +726,68 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
         </Alert>
       ) : null}
 
-      <KnowledgeReviewGuide />
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Globe2 className="size-5" />
+            扫描官网知识
+          </CardTitle>
+          <CardDescription>
+            从官网起始页自动读取 Sitemap、WordPress 公共接口和站内链接；产品、公司介绍、联系方式、博客与知识页面都会按内容分类后直接发布。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-[minmax(0,1fr)_140px_auto] md:items-end">
+          <div className="grid gap-2">
+            <Label htmlFor="official-site-start-url">官网起始页 URL</Label>
+            <Input
+              id="official-site-start-url"
+              type="url"
+              value={startUrl}
+              disabled={!editable || Boolean(pending)}
+              placeholder="https://www.example.com/"
+              onChange={(event) => setStartUrl(event.target.value)}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="official-site-max-pages">最多扫描页面</Label>
+            <Input
+              id="official-site-max-pages"
+              type="number"
+              min="1"
+              max="500"
+              value={maxPages}
+              disabled={!editable || Boolean(pending)}
+              onChange={(event) => setMaxPages(event.target.value)}
+            />
+          </div>
+          <Button
+            type="button"
+            className="min-h-11"
+            disabled={
+              !editable ||
+              Boolean(pending) ||
+              scanStatus?.status === "running" ||
+              !startUrl.trim() ||
+              !Number.isInteger(Number(maxPages)) ||
+              Number(maxPages) < 1 ||
+              Number(maxPages) > 500
+            }
+            onClick={() => void startOfficialSiteScan()}
+          >
+            {pending === "official-site-scan" || scanStatus?.status === "running" ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <ScanSearch />
+            )}
+            {scanStatus?.status === "running" ? "扫描中" : "开始扫描"}
+          </Button>
+          {scanMessage ? (
+            <p className="text-sm text-muted-foreground md:col-span-3" role="status">
+              {scanMessage}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         {summaries.map((item) => (
@@ -882,10 +812,10 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
       {!editable ? (
         <Alert>
           <ShieldCheck />
-          <AlertTitle>当前角色为只读审阅视图</AlertTitle>
+          <AlertTitle>当前角色为只读视图</AlertTitle>
           <AlertDescription>
-            Reviewer/Viewer 可以核对来源与产品状态，但只有
-            Editor、Team Lead 或 Organization Admin 可以审阅、发布或确认。
+            Reviewer/Viewer 可以查看来源与产品；只有 Editor、Team Lead 或
+            Organization Admin 可以扫描、上传或撤下内容。
           </AlertDescription>
         </Alert>
       ) : null}
@@ -901,7 +831,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
               <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
                 上传先写入项目隔离、内容寻址的私有对象；数据库提交前会重新检查
                 knowledge.edit，并把来源、版本、段落、图片关系和脱敏
-                审核记录放进同一个事务。权限在上传期间被撤销时，不会留下可查询的半成品。
+                发布记录放进同一个事务。权限在上传期间被撤销时，不会留下可查询的半成品。
               </p>
             </div>
           </div>
@@ -917,23 +847,36 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
         <div>
           <h2 className="text-lg font-semibold">来源队列</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            先保存审核结果，再单独发布；处理失败时原来的在线资料仍然可用。
+            解析成功的资料会直接发布；抓取或解析失败时，原来的在线资料仍然可用。
           </p>
         </div>
+        <KnowledgeSourceFilters
+          query={sourceQuery}
+          sort={sourceSort}
+          includeLocal={includeLocalSources}
+          includeWebsite={includeWebsiteSources}
+          localCount={sourceOriginCounts.local}
+          websiteCount={sourceOriginCounts.website}
+          totalCount={library?.sources.length ?? 0}
+          visibleCount={visibleSources.length}
+          onQueryChange={setSourceQuery}
+          onSortChange={setSourceSort}
+          onIncludeLocalChange={setIncludeLocalSources}
+          onIncludeWebsiteChange={setIncludeWebsiteSources}
+        />
         {loading ? (
           <div className="flex min-h-44 items-center justify-center rounded-xl border text-sm text-muted-foreground">
             <Loader2 className="mr-2 size-4 animate-spin" />
             正在读取当前项目的知识库…
           </div>
-        ) : sortedSources.length ? (
+        ) : visibleSources.length ? (
           <div className="grid gap-4 xl:grid-cols-2">
-            {sortedSources.map((source) => (
+            {visibleSources.map((source) => (
               <SourceReviewCard
                 key={`${source.source_id}:${source.pending_snapshot_id || "none"}`}
                 source={source}
                 projectPath={projectPath}
-                editable={editable}
-                publishable={editable}
+                deletable={canDeleteKnowledge(role)}
                 pending={pending}
                 onChanged={run}
               />
@@ -942,38 +885,20 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
         ) : (
           <div className="flex min-h-44 flex-col items-center justify-center rounded-xl border border-dashed px-6 text-center">
             <Inbox className="mb-3 size-8 text-muted-foreground" />
-            <div className="font-medium">当前 Project 的 Inbox 为空</div>
+            <div className="font-medium">
+              {library?.sources.length
+                ? "没有符合当前筛选条件的来源"
+                : "当前项目还没有知识来源"}
+            </div>
             <p className="mt-1 max-w-xl text-sm text-muted-foreground">
-              上传私有资料，或从文章 Setup 发起 Product Rediscovery。成功上传和
-              Job 都只进入 Inbox，不会自动发布知识或改变 Task 产品。
+              {library?.sources.length
+                ? "可以调整搜索词、时间排序或来源类型筛选。"
+                : "上传私有资料，或从文章 Setup 发起 Product Rediscovery。解析成功后会自动进入检索；异常内容可在来源卡片中撤下，不会改变 Task 产品。"}
             </p>
           </div>
         )}
       </section>
 
-      {library?.products.length ? (
-        <section className="grid gap-4">
-          <div>
-            <h2 className="text-lg font-semibold">产品身份</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              确认只改变产品目录身份；文章工作台仍要求当前已发布资料版本
-              Evidence 完整，不能把候选产品事实直接写入 Task。
-            </p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {library.products.map((product) => (
-              <ProductCard
-                key={product.product_id}
-                product={product}
-                projectPath={projectPath}
-                publishable={editable}
-                pending={pending}
-                onChanged={run}
-              />
-            ))}
-          </div>
-        </section>
-      ) : null}
     </main>
   );
 }

@@ -15,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from config import load_config  # noqa: E402
+from services.generator import title_generation_config  # noqa: E402
 from services.llm import LLMClient, build_responses_payload, extract_stream_text  # noqa: E402
 
 
@@ -42,8 +43,13 @@ class ResponsesPayloadTests(unittest.TestCase):
     def test_default_model_is_gpt_5_6_sol(self) -> None:
         self.assertEqual(load_config().llm_model, "gpt-5.6-sol")
 
-    def test_default_reasoning_effort_is_xhigh(self) -> None:
-        self.assertEqual(load_config().llm_reasoning_effort, "xhigh")
+    def test_default_reasoning_effort_is_medium(self) -> None:
+        self.assertEqual(load_config().llm_reasoning_effort, "medium")
+
+    def test_title_generation_is_pinned_to_low(self) -> None:
+        selected = title_generation_config(load_config())
+        self.assertEqual(selected.llm_reasoning_effort, "low")
+        self.assertTrue(selected.llm_runtime_override)
 
 
 class ResponsesStreamTests(unittest.TestCase):
@@ -70,7 +76,7 @@ class ResponsesStreamTests(unittest.TestCase):
         payload = json.loads(sent_request.data.decode("utf-8"))
         self.assertEqual(result, "Streamed text")
         self.assertEqual(payload["model"], "gpt-5.6-sol")
-        self.assertEqual(payload["reasoning"], {"effort": "xhigh"})
+        self.assertEqual(payload["reasoning"], {"effort": "medium"})
         self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
         self.assertEqual(sent_request.get_header("Accept"), "text/event-stream")

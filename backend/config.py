@@ -48,7 +48,6 @@ class AppConfig:
     topic_library: Path
     knowledge_base: Path
     output_root: Path
-    data_file: Path
     week_owner: str
     week_name_format: str
     language: str
@@ -137,7 +136,6 @@ def load_config() -> AppConfig:
         topic_library=_configured_path(paths["topic_library"]),
         knowledge_base=_configured_path(paths["knowledge_base"]),
         output_root=_configured_path(paths["output_root"]),
-        data_file=_configured_path(paths["data_file"]),
         # Compatibility-only fields. Task identity and paths no longer use
         # owner/date formatting.
         week_owner=str(legacy_week.get("owner", "")),
@@ -179,7 +177,6 @@ def public_config(config: AppConfig) -> dict[str, Any]:
         "topic_library": str(config.topic_library),
         "knowledge_base": str(config.knowledge_base),
         "output_root": str(config.output_root),
-        "data_file": str(config.data_file),
         "current_week_folder": config.current_week_folder,
         "current_week_path": str(config.current_week_path),
         "article": {

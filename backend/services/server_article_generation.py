@@ -16,10 +16,19 @@ from config import AppConfig
 from knowledge_agent.schema import (
     evidence_pack_hits,
     evidence_packs,
+    knowledge_chunks,
+    knowledge_sources,
     research_graph_runs,
     retrieval_plans,
 )
-from models import AICheck, ArticleVersion, PromptSnapshot, SourceLink, TaskRecord
+from models import (
+    AICheck,
+    ArticleVersion,
+    OfficialLink,
+    PromptSnapshot,
+    SourceLink,
+    TaskRecord,
+)
 from server_schema import article_tasks, background_jobs
 from services.access_control import (
     ActorIdentity,
@@ -55,6 +64,7 @@ from services.generator import (
     ensure_article_hyperlinks,
     generation_context_value,
     normalized_article_word_count,
+    official_links_for_prompt,
     primary_keyword,
     products_for_prompt,
     render_prompt,
@@ -73,12 +83,14 @@ from services.llm import LLMClient
 from services.postgres_job_queue import PostgresJobQueue
 from services.postgres_task_repository import PostgresTaskRepository
 from services.server_outline_generation import (
+    BLOG_REFERENCE_SOURCE_KINDS,
     PostgresPublishedGenerationContext,
     ProjectPromptReference,
     PublishedGenerationContextChunk,
     load_pinned_project_prompt,
     published_generation_context_text,
 )
+from services.server_official_links import PostgresPublishedOfficialLinks
 from services.server_project_prompts import PostgresProjectPromptService
 from services.server_task_commands import (
     PostgresAuditedTaskWriter,
@@ -169,9 +181,33 @@ def _research_chunk_ids(
             evidence_pack_hits.c.evidence_pack_id,
             evidence_pack_hits.c.chunk_id,
             evidence_pack_hits.c.rank,
-        ).where(
+        )
+        .select_from(
+            evidence_pack_hits.join(
+                knowledge_chunks,
+                sa.and_(
+                    knowledge_chunks.c.project_id
+                    == evidence_pack_hits.c.project_id,
+                    knowledge_chunks.c.chunk_id
+                    == evidence_pack_hits.c.chunk_id,
+                ),
+            ).join(
+                knowledge_sources,
+                sa.and_(
+                    knowledge_sources.c.project_id
+                    == knowledge_chunks.c.project_id,
+                    knowledge_sources.c.source_id
+                    == knowledge_chunks.c.source_id,
+                    knowledge_sources.c.current_snapshot_id
+                    == knowledge_chunks.c.snapshot_id,
+                ),
+            )
+        )
+        .where(
             evidence_pack_hits.c.project_id == project_id,
             evidence_pack_hits.c.evidence_pack_id.in_(pack_ids),
+            knowledge_sources.c.status == "published",
+            knowledge_sources.c.source_kind != "official_blog",
         )
     ).mappings().all()
     by_pack: dict[str, list[tuple[int, str]]] = {
@@ -403,6 +439,7 @@ def build_server_article_prompt(
         ),
         "COMPETITOR_BLOG": task.competitor_blog or "Not supplied",
         "PRODUCTS": products_for_prompt(task.products),
+        "OFFICIAL_LINKS": official_links_for_prompt(task.official_links),
         "OUTLINE": sanitize_outline_keyword_directives(
             outline,
             task,
@@ -536,7 +573,7 @@ def apply_generated_article_draft(
                 "between its H1 and first H2."
             )
         initial = ensure_article_hyperlinks(raw, task)
-        validate_article_layout(initial)
+        validate_article_layout(initial, allow_legacy_faq=False)
         validate_minimum_h3_per_h2(initial)
     except (
         ArticleGenerationError,
@@ -604,12 +641,16 @@ class ServerArticleGenerationHandler:
         provider: ArticleGenerationProvider,
         ai_rate: ArticleAiRateDetector | None = None,
         context: PostgresPublishedGenerationContext | None = None,
+        official_links: PostgresPublishedOfficialLinks | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
         self._ai_rate = ai_rate
         self._context = context or PostgresPublishedGenerationContext(
+            engine
+        )
+        self._official_links = official_links or PostgresPublishedOfficialLinks(
             engine
         )
         self._audit = audit
@@ -660,8 +701,35 @@ class ServerArticleGenerationHandler:
             or any(not isinstance(value, str) for value in raw_pack_ids)
         ):
             raise JobConflict("article evidence identity is invalid")
+        raw_reference_chunk_ids = request.get("reference_chunk_ids") or []
+        if (
+            isinstance(raw_reference_chunk_ids, (str, bytes))
+            or not isinstance(raw_reference_chunk_ids, Sequence)
+            or any(
+                not isinstance(value, str)
+                for value in raw_reference_chunk_ids
+            )
+        ):
+            raise JobConflict("article reference identity is invalid")
+        raw_official_links = request.get("official_links") or []
+        if (
+            isinstance(raw_official_links, (str, bytes))
+            or not isinstance(raw_official_links, Sequence)
+            or any(not isinstance(value, Mapping) for value in raw_official_links)
+        ):
+            raise JobConflict("official link identity is invalid")
+        try:
+            official_link_references = tuple(
+                OfficialLink.model_validate(value)
+                for value in raw_official_links
+            )
+        except Exception as exc:
+            raise JobConflict("official link identity is invalid") from exc
         if not use_evidence_pack and (
-            context_source != "none" or raw_chunk_ids or raw_pack_ids
+            context_source != "none"
+            or raw_chunk_ids
+            or raw_pack_ids
+            or raw_reference_chunk_ids
         ):
             raise JobConflict("article context source is invalid")
         if cancelled():
@@ -680,6 +748,13 @@ class ServerArticleGenerationHandler:
         if task.revision != source_revision:
             raise JobConflict("source task revision changed")
         _validate_article_operation(task, operation)
+        task.official_links = list(
+            self._official_links.load_current(
+                project_id=project_id,
+                customer=task.customer,
+                references=official_link_references,
+            )
+        )
         try:
             ensure_action_allowed(task, ACTION_GENERATE_ARTICLE)
         except WorkflowActionNotAllowed as exc:
@@ -712,6 +787,16 @@ class ServerArticleGenerationHandler:
             project_id=project_id,
             chunk_ids=cast(Sequence[str], raw_chunk_ids),
         )
+        blog_reference_chunks = (
+            self._context.load_current(
+                project_id=project_id,
+                chunk_ids=cast(Sequence[str], raw_reference_chunk_ids),
+                source_kinds=BLOG_REFERENCE_SOURCE_KINDS,
+            )
+            if raw_reference_chunk_ids
+            else ()
+        )
+        context_chunks = (*context_chunks, *blog_reference_chunks)
         if cancelled():
             raise JobCancelled(
                 "Article generation cancelled before provider call."
@@ -824,6 +909,7 @@ class ServerArticleGenerationRegistry:
         access: ProjectAccessService,
         handler: ArticleGenerationJobHandler | None,
         context: PostgresPublishedGenerationContext | None = None,
+        official_links: PostgresPublishedOfficialLinks | None = None,
         access_repository: PostgresProjectAccessRepository | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
@@ -839,6 +925,9 @@ class ServerArticleGenerationRegistry:
         self._audit = audit or PostgresAuditEventWriter()
         self._handler = handler
         self._context = context or PostgresPublishedGenerationContext(
+            engine
+        )
+        self._official_links = official_links or PostgresPublishedOfficialLinks(
             engine
         )
         self._lock = threading.Lock()
@@ -968,6 +1057,10 @@ class ServerArticleGenerationRegistry:
             selection=task.article_prompt_selection,
         )
         reference = ProjectPromptReference.from_snapshot(snapshot)
+        official_links = self._official_links.select(
+            project_id=project_id,
+            customer=task.customer,
+        )
         research_context = (
             _latest_completed_research_context(
                 self._engine,
@@ -981,6 +1074,8 @@ class ServerArticleGenerationRegistry:
         if not use_evidence_pack:
             context_chunks = ()
             context_chunk_ids = ()
+            blog_reference_chunks = ()
+            blog_reference_chunk_ids = ()
         elif research_context is None:
             context_chunks = self._context.select(
                 project_id=project_id,
@@ -997,9 +1092,43 @@ class ServerArticleGenerationRegistry:
             context_chunk_ids = tuple(
                 chunk.chunk_id for chunk in context_chunks
             )
+            blog_reference_chunks = self._context.select(
+                project_id=project_id,
+                query=" ".join(
+                    value
+                    for value in (
+                        task.selected_title,
+                        task.topic,
+                        primary_keyword(task),
+                    )
+                    if value.strip()
+                ),
+                limit=2,
+                source_kinds=BLOG_REFERENCE_SOURCE_KINDS,
+            )
+            blog_reference_chunk_ids = tuple(
+                chunk.chunk_id for chunk in blog_reference_chunks
+            )
         else:
             context_chunks = ()
             context_chunk_ids = research_context.chunk_ids
+            blog_reference_chunks = self._context.select(
+                project_id=project_id,
+                query=" ".join(
+                    value
+                    for value in (
+                        task.selected_title,
+                        task.topic,
+                        primary_keyword(task),
+                    )
+                    if value.strip()
+                ),
+                limit=2,
+                source_kinds=BLOG_REFERENCE_SOURCE_KINDS,
+            )
+            blog_reference_chunk_ids = tuple(
+                chunk.chunk_id for chunk in blog_reference_chunks
+            )
         context_source = (
             "none"
             if not use_evidence_pack
@@ -1048,6 +1177,9 @@ class ServerArticleGenerationRegistry:
                     "use_evidence_pack": use_evidence_pack,
                     "context_source": context_source,
                     "context_chunk_ids": list(context_chunk_ids),
+                    "reference_chunk_ids": list(
+                        blog_reference_chunk_ids
+                    ),
                     "evidence_pack_ids": (
                         list(research_context.evidence_pack_ids)
                         if research_context is not None
@@ -1064,6 +1196,9 @@ class ServerArticleGenerationRegistry:
                         else ""
                     ),
                     "target_words": self._target_words,
+                    "official_links": [
+                        link.model_dump() for link in official_links
+                    ],
                 }
                 batch = project.queue.create_batch_in_transaction(
                     connection,
@@ -1112,6 +1247,10 @@ class ServerArticleGenerationRegistry:
                         target_id=job_id,
                         details={
                             "context_chunk_count": len(context_chunk_ids),
+                            "blog_reference_chunk_count": len(
+                                blog_reference_chunk_ids
+                            ),
+                            "official_link_count": len(official_links),
                             "use_evidence_pack": use_evidence_pack,
                             "context_source": context_source,
                             "evidence_pack_count": (

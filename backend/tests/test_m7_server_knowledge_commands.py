@@ -1026,6 +1026,59 @@ class ServerKnowledgeCommandTests(unittest.TestCase):
             ["knowledge.product.confirmed"],
         )
 
+    def test_editor_can_correct_confirmed_product_specifications(self) -> None:
+        self.service.confirm_product(
+            actor=self.editor,
+            project_id=self.project_id,
+            product_id="current-product",
+        )
+        self.audit.events.clear()
+
+        product = self.service.update_product_specifications(
+            actor=self.editor,
+            project_id=self.project_id,
+            product_id="current-product",
+            specification_tables=[
+                {
+                    "headers": ["Parameter", "6000W", "8000W"],
+                    "rows": [["Surge Power", "12000VA", "16000VA"]],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            product.metadata["manual_specification_tables"][0]["rows"][0],
+            ["Surge Power", "12000VA", "16000VA"],
+        )
+        self.assertEqual(
+            [event.action for event in self.audit.events],
+            ["knowledge.product.specifications.updated"],
+        )
+        self.assertEqual(
+            self.audit.events[0].details,
+            {"table_count": 1, "row_count": 1},
+        )
+        self.service.update_product_specifications(
+            actor=self.editor,
+            project_id=self.project_id,
+            product_id="current-product",
+            specification_tables=[
+                {
+                    "headers": ["Parameter", "6000W", "8000W"],
+                    "rows": [["Surge Power", "12000VA", "16000VA"]],
+                }
+            ],
+        )
+        self.assertEqual(len(self.audit.events), 1)
+
+        with self.assertRaises(ProjectAccessDenied):
+            self.service.update_product_specifications(
+                actor=self.viewer,
+                project_id=self.project_id,
+                product_id="current-product",
+                specification_tables=[],
+            )
+
     def test_publish_and_confirm_retries_do_not_duplicate_audit(self) -> None:
         receipt = self._review(receipt_id="publish-retry-approved")
         self.audit.events.clear()

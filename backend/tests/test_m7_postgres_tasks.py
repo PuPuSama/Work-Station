@@ -38,7 +38,6 @@ from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
 from services.job_queue import (  # noqa: E402
     ActiveJobError,
     JobConflict,
-    JobQueue,
     JobStateTransitionError,
 )
 from services.access_control import (  # noqa: E402
@@ -50,20 +49,7 @@ from services.authorized_job_queue import (  # noqa: E402
     ReauthorizingJobHandler,
     worker_permission_for,
 )
-from services.job_queue_migration import (  # noqa: E402
-    JobQueueMigrationConflict,
-    migrate_terminal_job_history,
-)
-from services.task_repository import SQLiteTaskRepository  # noqa: E402
-from services.task_store_migration import (  # noqa: E402
-    TaskStoreMigrationConflict,
-    migrate_task_store,
-)
-from services.server_cutover_report import (  # noqa: E402
-    build_server_cutover_report,
-)
 from storage import RevisionConflictError, TaskStore  # noqa: E402
-
 
 DATABASE_URL_ENV = "ARTICLE_AGENT_DATABASE_URL"
 
@@ -267,12 +253,8 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
             )
 
     def test_task_store_keeps_revision_and_extension_semantics(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = TaskStore(
-                SimpleNamespace(data_file=Path(directory) / "tasks.json"),
-                repository=self.repository_a,
-                legacy_import_enabled=False,
-            )
+        with tempfile.TemporaryDirectory():
+            store = TaskStore(repository=self.repository_a)
             created = store.put(self._task("workflow-task"), expected_revision=0)
             stale = created.model_copy(deep=True)
             created.selected_title = "Chosen title"
@@ -286,34 +268,6 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
             with self.assertRaises(RevisionConflictError):
                 store.put(stale, expected_revision=0)
 
-    def test_sqlite_import_is_verified_and_never_overwrites_divergence(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source = SQLiteTaskRepository(Path(directory) / "tasks.json")
-            source.replace_all(
-                (
-                    self._record("import-1", topic_index=1),
-                    self._record("import-2", topic_index=2),
-                )
-            )
-
-            first = migrate_task_store(source, self.repository_a)
-            repeated = migrate_task_store(source, self.repository_a)
-            self.assertTrue(first.imported)
-            self.assertEqual(first.target_after_count, 2)
-            self.assertTrue(repeated.already_matched)
-            self.assertFalse(repeated.imported)
-            self.assertEqual(first.source_digest, first.target_digest)
-
-            changed = self.repository_a.get("import-1")
-            changed["topic"] = "Divergent target"  # type: ignore[index]
-            self.repository_a.upsert(changed)  # type: ignore[arg-type]
-            with self.assertRaisesRegex(
-                TaskStoreMigrationConflict,
-                "differs from source",
-            ):
-                migrate_task_store(source, self.repository_a)
 
     def test_database_rejects_scope_without_project_ownership(self) -> None:
         invalid_repository = PostgresTaskRepository(
@@ -940,165 +894,8 @@ class M7PostgresTaskRepositoryTests(unittest.TestCase):
         self.assertEqual(stored["revision"], 1)  # type: ignore[index]
         self.assertIn(stored["topic"], {"Writer A", "Writer B"})  # type: ignore[index]
 
-    def test_terminal_sqlite_job_history_import_is_drained_and_verified(
-        self,
-    ) -> None:
-        self.repository_a.replace_all(
-            (
-                self._record("history-task-1", topic_index=1),
-                self._record("history-task-2", topic_index=2),
-            )
-        )
-        target = PostgresJobQueue(
-            self.engine,
-            organization_id=self.organization_id,
-            project_id=self.project_a,
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            source = JobQueue(Path(directory) / "jobs.sqlite3")
-            succeeded_batch = source.create_batch(
-                "outline",
-                [
-                    {
-                        "task_id": "history-task-1",
-                        "source_revision": 0,
-                        "request": {"kind": "history"},
-                    }
-                ],
-            )
-            succeeded_job = source.claim_jobs(1)[0]
-            source.mark_succeeded(succeeded_job["id"], 1)
-            cancelled_batch = source.create_batch(
-                "article",
-                [
-                    {
-                        "task_id": "history-task-2",
-                        "source_revision": 2,
-                    }
-                ],
-            )
-            source.cancel_batch(cancelled_batch["id"])
 
-            first = migrate_terminal_job_history(source, target)
-            repeated = migrate_terminal_job_history(source, target)
 
-        self.assertTrue(first.imported)
-        self.assertEqual(first.source.batch_count, 2)
-        self.assertEqual(first.source.job_count, 2)
-        self.assertEqual(
-            first.source.status_counts,
-            {"cancelled": 1, "succeeded": 1},
-        )
-        self.assertEqual(first.source, first.target_after)
-        self.assertTrue(repeated.already_matched)
-        self.assertEqual(
-            target.get_batch(succeeded_batch["id"])["status"],
-            "succeeded",
-        )
-        self.assertIsNone(
-            target.get_batch(succeeded_batch["id"])["jobs"][0][
-                "requested_by_user_id"
-            ]
-        )
-
-        with self.engine.begin() as connection:
-            connection.execute(
-                background_jobs.update()
-                .where(
-                    background_jobs.c.organization_id == self.organization_id,
-                    background_jobs.c.project_id == self.project_a,
-                    background_jobs.c.job_id == succeeded_job["id"],
-                )
-                .values(error="divergent history")
-            )
-        with tempfile.TemporaryDirectory() as directory:
-            source = JobQueue(Path(directory) / "jobs.sqlite3")
-            source_batch = source.create_batch(
-                "outline",
-                [
-                    {
-                        "task_id": "history-task-1",
-                        "source_revision": 0,
-                        "request": {"kind": "history"},
-                    }
-                ],
-            )
-            source_job = source.claim_jobs(1)[0]
-            source.mark_succeeded(source_job["id"], 1)
-            # Stable IDs are part of the proof. This separately constructed
-            # history must never be treated as the already-imported source.
-            self.assertNotEqual(source_batch["id"], succeeded_batch["id"])
-            with self.assertRaisesRegex(
-                JobQueueMigrationConflict,
-                "differs from SQLite history",
-            ):
-                migrate_terminal_job_history(source, target)
-
-    def test_active_sqlite_job_blocks_history_cutover(self) -> None:
-        target = PostgresJobQueue(
-            self.engine,
-            organization_id=self.organization_id,
-            project_id=self.project_a,
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            source = JobQueue(Path(directory) / "jobs.sqlite3")
-            source.create_batch(
-                "outline",
-                [{"task_id": "still-active", "source_revision": 0}],
-            )
-            with self.assertRaisesRegex(
-                JobQueueMigrationConflict,
-                "still contains active jobs",
-            ):
-                migrate_terminal_job_history(source, target)
-
-    def test_real_dual_read_report_proves_then_detects_divergence(self) -> None:
-        target_jobs = PostgresJobQueue(
-            self.engine,
-            organization_id=self.organization_id,
-            project_id=self.project_a,
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            task_source = SQLiteTaskRepository(
-                Path(directory) / "tasks.json"
-            )
-            task_source.replace_all((self._record("dual-read-task"),))
-            migrate_task_store(task_source, self.repository_a)
-
-            job_source = JobQueue(Path(directory) / "jobs.sqlite3")
-            job_source.create_batch(
-                "outline",
-                [
-                    {
-                        "task_id": "dual-read-task",
-                        "source_revision": 0,
-                    }
-                ],
-            )
-            claimed = job_source.claim_jobs(1)[0]
-            job_source.mark_succeeded(claimed["id"], 1)
-            migrate_terminal_job_history(job_source, target_jobs)
-
-            matched = build_server_cutover_report(
-                task_source=task_source,
-                task_target=self.repository_a,
-                job_source=job_source,
-                job_target=target_jobs,
-            )
-            self.assertTrue(matched.ready_for_single_write)
-
-            divergent = self.repository_a.get("dual-read-task")
-            divergent["topic"] = "changed only in PostgreSQL"  # type: ignore[index]
-            self.repository_a.upsert(divergent)  # type: ignore[arg-type]
-            mismatch = build_server_cutover_report(
-                task_source=task_source,
-                task_target=self.repository_a,
-                job_source=job_source,
-                job_target=target_jobs,
-            )
-
-        self.assertFalse(mismatch.ready_for_single_write)
-        self.assertEqual(mismatch.tasks.changed_ids, ("dual-read-task",))
 
 
 if __name__ == "__main__":

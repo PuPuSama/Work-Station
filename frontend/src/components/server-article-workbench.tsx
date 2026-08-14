@@ -12,12 +12,21 @@ import {
   ImageIcon,
   Loader2,
   Package,
+  ClipboardPaste,
   RefreshCw,
+  Save,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+} from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +51,7 @@ import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
 import { ServerTaskResetPanel } from "@/components/server-task-reset-panel";
 import { ServerWritingRequirementsPanel } from "@/components/server-writing-requirements-panel";
 import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
+import { sameProjectId } from "@/lib/project-id";
 import { cn } from "@/lib/utils";
 import type {
   AccessibleProject,
@@ -197,6 +207,7 @@ export function ServerArticleWorkbench({
   const [finalScore, setFinalScore] = useState("");
   const [finalReport, setFinalReport] = useState("");
   const [finalScreenshot, setFinalScreenshot] = useState<File | null>(null);
+  const [finalScreenshotPreview, setFinalScreenshotPreview] = useState("");
   const [useEvidencePack, setUseEvidencePack] = useState(true);
   const [heroAssetId, setHeroAssetId] = useState("");
   const [productAssetIds, setProductAssetIds] = useState<Record<string, string>>(
@@ -213,6 +224,7 @@ export function ServerArticleWorkbench({
   const loadRequestRef = useRef(0);
   const productBaselineRef = useRef<string | null>(null);
   const productDraftIdsRef = useRef<string[]>([]);
+  const finalScreenshotInputRef = useRef<HTMLInputElement>(null);
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
   const taskApi = `${projectApi}/tasks/${encodeURIComponent(taskId)}`;
@@ -227,6 +239,16 @@ export function ServerArticleWorkbench({
       }
     };
   }, [workbenchScope]);
+
+  useEffect(() => {
+    if (!finalScreenshot) {
+      setFinalScreenshotPreview("");
+      return;
+    }
+    const previewUrl = URL.createObjectURL(finalScreenshot);
+    setFinalScreenshotPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [finalScreenshot]);
 
   const load = useCallback(async () => {
     const requestScope = workbenchScope;
@@ -250,7 +272,9 @@ export function ServerArticleWorkbench({
       ) {
         return;
       }
-      const project = projects.find((item) => item.project_id === customer);
+      const project = projects.find((item) =>
+        sameProjectId(item.project_id, customer),
+      );
       setTask(nextTask);
       setRole(project?.effective_role ?? null);
       setCatalog(nextCatalog);
@@ -274,6 +298,7 @@ export function ServerArticleWorkbench({
 
   useEffect(() => {
     setTask(null);
+    setFinalScreenshot(null);
     setSelectedProductIds([]);
     productDraftIdsRef.current = [];
     productBaselineRef.current = null;
@@ -401,7 +426,7 @@ export function ServerArticleWorkbench({
   async function runAction(
     label: string,
     action: () => Promise<unknown>,
-    successMessage = `${label}完成。`,
+    successMessage: string | (() => string) = `${label}完成。`,
   ): Promise<boolean> {
     const actionScope = workbenchScope;
     if (activeWorkbenchScopeRef.current !== actionScope) return false;
@@ -411,7 +436,9 @@ export function ServerArticleWorkbench({
     try {
       await action();
       if (activeWorkbenchScopeRef.current !== actionScope) return false;
-      setMessage(successMessage);
+      setMessage(
+        typeof successMessage === "function" ? successMessage() : successMessage,
+      );
       await load();
       return true;
     } catch (reason) {
@@ -427,6 +454,7 @@ export function ServerArticleWorkbench({
     label: string,
     endpoint: string,
     payload: Record<string, unknown> = {},
+    successMessage = `${label}完成，已读取最新 Task Revision。`,
   ) {
     if (!task) return;
     const jobScope = workbenchScope;
@@ -470,7 +498,7 @@ export function ServerArticleWorkbench({
           `${label}仍在后台运行。请稍后刷新任务；Job 不会因页面等待超时而取消。`,
         );
       },
-      `${label}完成，已读取最新 Task Revision。`,
+      successMessage,
     );
   }
 
@@ -481,6 +509,34 @@ export function ServerArticleWorkbench({
     await apiUpload<TaskRecord>(
       `${taskApi}/checks/${kind}-ai/screenshot?revision=${task.revision ?? 0}`,
       form,
+    );
+  }
+
+  function selectFinalScreenshot(file: File | null) {
+    if (!file) return;
+    setFinalScreenshot(file);
+    setMessage("已选中图片；再次粘贴或选择文件会替换它。");
+    setError("");
+  }
+
+  function pasteFinalScreenshot(event: ClipboardEvent<HTMLDivElement>) {
+    const image =
+      Array.from(event.clipboardData.files).find((file) =>
+        file.type.startsWith("image/"),
+      ) ||
+      Array.from(event.clipboardData.items)
+        .find(
+          (item) =>
+            item.kind === "file" && item.type.startsWith("image/"),
+        )
+        ?.getAsFile();
+    if (!image) return;
+    event.preventDefault();
+    const extension = image.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+    selectFinalScreenshot(
+      new File([image], `pasted-ai-rate-${Date.now()}.${extension}`, {
+        type: image.type,
+      }),
     );
   }
 
@@ -507,6 +563,9 @@ export function ServerArticleWorkbench({
     task !== null &&
     productSelectionKey(selectedProductIds) !==
     productSelectionKey(taskProductIds(task));
+  const humanizedDirty = Boolean(
+    task && humanizedDraft.trim() !== (task.humanized_article || "").trim(),
+  );
 
   function resetProductDraftToServer() {
     if (!task) return;
@@ -616,7 +675,11 @@ export function ServerArticleWorkbench({
                   <ShieldCheck />
                   {roleLabel(role)}
                 </Badge>
-                <Badge>{STATUS_LABELS[task.status]}</Badge>
+                <Badge>
+                  {task.status === "title_selected" && task.products.length
+                    ? "产品已保存 · 待生成大纲"
+                    : STATUS_LABELS[task.status]}
+                </Badge>
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 topic_{String(task.topic_index).padStart(3, "0")} · Revision{" "}
@@ -1280,6 +1343,11 @@ export function ServerArticleWorkbench({
                   aria-label="Humanized Article Markdown"
                   className="min-h-[52dvh] resize-y font-mono text-sm leading-6"
                 />
+                {humanizedDirty && (
+                  <p className="text-sm text-amber-700 dark:text-amber-300">
+                    正文有未保存修改。保存后系统会自动重新检测 AI 率，当前终检结果不再代表这份正文。
+                  </p>
+                )}
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button
                     type="button"
@@ -1290,7 +1358,14 @@ export function ServerArticleWorkbench({
                       !editAllowed ||
                       !allowed.has("humanize_article")
                     }
-                    onClick={() => void runJob("自动人化", "humanize")}
+                    onClick={() =>
+                      void runJob(
+                        "自动人化",
+                        "humanize",
+                        {},
+                        "自动人化完成，已自动复检 AI 率并读取最新 Task Revision。",
+                      )
+                    }
                   >
                     {pending === "自动人化" ? (
                       <Loader2 className="animate-spin" />
@@ -1306,18 +1381,37 @@ export function ServerArticleWorkbench({
                       Boolean(pending) ||
                       !editAllowed ||
                       !allowed.has("update_humanized_article") ||
-                      !humanizedDraft.trim()
+                      !humanizedDraft.trim() ||
+                      !humanizedDirty
                     }
-                    onClick={() =>
-                      void runAction("保存人工人化稿", () =>
-                        apiPut<TaskRecord>(`${taskApi}/humanized-article`, {
-                          revision: task.revision ?? 0,
-                          article: humanizedDraft,
-                        }),
-                      )
-                    }
+                    onClick={() => {
+                      let automaticCheck: TaskRecord["final_ai_check"] | undefined;
+                      void runAction(
+                        "保存并复检 AI 率",
+                        async () => {
+                          const updated = await apiPut<TaskRecord>(
+                            `${taskApi}/humanized-article`,
+                            {
+                              revision: task.revision ?? 0,
+                              article: humanizedDraft,
+                              recheck_ai_rate: true,
+                            },
+                          );
+                          automaticCheck = updated.final_ai_check;
+                        },
+                        () =>
+                          automaticCheck?.score == null
+                            ? `人工审阅稿已保存。${automaticCheck?.report || "ZeroGPT 自动复检未返回结果。"}`
+                            : `人工审阅稿已保存，ZeroGPT 自动复检为 ${automaticCheck.score}%。`,
+                      );
+                    }}
                   >
-                    保存人工审阅稿
+                    {pending === "保存并复检 AI 率" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Save />
+                    )}
+                    保存人工审阅稿并复检
                   </Button>
                 </div>
               </CardContent>
@@ -1332,18 +1426,112 @@ export function ServerArticleWorkbench({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3">
+                  {humanizedDirty ? (
+                    <Alert>
+                      <AlertCircle />
+                      <AlertTitle>等待保存后复检</AlertTitle>
+                      <AlertDescription>
+                        编辑内容或应用 SEO 修改后，请先保存人工审阅稿；旧 AI 率不会作为当前正文结果展示。
+                      </AlertDescription>
+                    </Alert>
+                  ) : (
+                    task.final_ai_check?.provider === "zerogpt" &&
+                    task.final_ai_check.article_hash ===
+                      task.humanized_article_hash && (
+                      <Alert>
+                        <ShieldCheck />
+                        <AlertTitle>
+                          {task.final_ai_check.score == null
+                            ? "ZeroGPT 自动复检未完成"
+                            : `ZeroGPT 自动复检：${task.final_ai_check.score}%`}
+                        </AlertTitle>
+                        <AlertDescription>
+                          {task.final_ai_check.report ||
+                            "仍可上传截图，保留人工确认凭证。"}
+                        </AlertDescription>
+                      </Alert>
+                    )
+                  )}
                   <div className="grid gap-2">
-                    <Label htmlFor="final-screenshot">终检截图（PNG）</Label>
+                    <Label htmlFor="final-screenshot">终检图片</Label>
+                    <div
+                      role="group"
+                      tabIndex={0}
+                      aria-label="粘贴或更换终检图片"
+                      className={cn(
+                        "grid min-h-32 gap-3 rounded-lg border border-dashed p-3 outline-none transition-colors",
+                        "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
+                        reviewAllowed && !pending
+                          ? "hover:bg-muted/40"
+                          : "cursor-not-allowed opacity-60",
+                      )}
+                      onClick={(event) => event.currentTarget.focus()}
+                      onPaste={pasteFinalScreenshot}
+                    >
+                      {finalScreenshotPreview ? (
+                        <div className="flex items-center gap-3">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={finalScreenshotPreview}
+                            alt="待上传终检图片预览"
+                            className="h-24 w-32 shrink-0 rounded-md border object-contain"
+                          />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">
+                              {finalScreenshot?.name}
+                            </p>
+                            <p className="mt-1 text-sm text-muted-foreground">
+                              已选中；点击选择或再次粘贴即可更换。
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex min-h-24 flex-col items-center justify-center gap-2 text-center">
+                          <ClipboardPaste className="size-5" />
+                          <p className="text-sm font-medium">
+                            在这里按 Ctrl+V 粘贴图片
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            也可以点击选择；新图片会替换当前图片。
+                          </p>
+                        </div>
+                      )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full"
+                        disabled={Boolean(pending) || !reviewAllowed}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          finalScreenshotInputRef.current?.click();
+                        }}
+                      >
+                        <ImageIcon />
+                        {finalScreenshot || task.final_ai_check?.screenshot_asset_id
+                          ? "更换图片"
+                          : "选择图片"}
+                      </Button>
+                    </div>
                     <Input
+                      ref={finalScreenshotInputRef}
                       id="final-screenshot"
                       type="file"
-                      accept="image/png"
-                      className="h-11"
+                      accept="image/*"
+                      className="sr-only"
                       disabled={Boolean(pending) || !reviewAllowed}
-                      onChange={(event) =>
-                        setFinalScreenshot(event.target.files?.[0] ?? null)
-                      }
+                      onChange={(event) => {
+                        selectFinalScreenshot(event.target.files?.[0] ?? null);
+                        event.target.value = "";
+                      }}
                     />
+                    {task.final_ai_check?.screenshot_asset_id && !finalScreenshot && (
+                      <p className="text-sm text-muted-foreground">
+                        已保存一张终检图片；粘贴或选择新图片即可更换。
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      系统只保存图片，不检查图片内容、格式或尺寸；单张最多 25MB。
+                    </p>
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="final-score">AI-rate 分数（可选）</Label>
@@ -1377,27 +1565,39 @@ export function ServerArticleWorkbench({
                       (!finalScreenshot &&
                         !task.final_ai_check?.screenshot_asset_id)
                     }
-                    onClick={() =>
-                      void runAction("确认终检", async () => {
-                        if (finalScreenshot) {
-                          await uploadScreenshot("final", finalScreenshot);
-                          const latest = await apiGet<TaskRecord>(taskApi);
-                          await apiPut<TaskRecord>(`${taskApi}/checks/final-ai`, {
-                            revision: latest.revision ?? 0,
-                            score: finalScore ? Number(finalScore) : null,
-                            report: finalReport,
-                            confirmed: true,
-                          });
-                          return;
-                        }
-                        await apiPut<TaskRecord>(`${taskApi}/checks/final-ai`, {
-                          revision: task.revision ?? 0,
-                          score: finalScore ? Number(finalScore) : null,
-                          report: finalReport,
-                          confirmed: true,
-                        });
-                      })
-                    }
+                    onClick={() => {
+                      void (async () => {
+                        const succeeded = await runAction(
+                          "确认终检",
+                          async () => {
+                            if (finalScreenshot) {
+                              await uploadScreenshot("final", finalScreenshot);
+                              const latest = await apiGet<TaskRecord>(taskApi);
+                              await apiPut<TaskRecord>(
+                                `${taskApi}/checks/final-ai`,
+                                {
+                                  revision: latest.revision ?? 0,
+                                  score: finalScore ? Number(finalScore) : null,
+                                  report: finalReport,
+                                  confirmed: true,
+                                },
+                              );
+                              return;
+                            }
+                            await apiPut<TaskRecord>(
+                              `${taskApi}/checks/final-ai`,
+                              {
+                                revision: task.revision ?? 0,
+                                score: finalScore ? Number(finalScore) : null,
+                                report: finalReport,
+                                confirmed: true,
+                              },
+                            );
+                          },
+                        );
+                        if (succeeded) setFinalScreenshot(null);
+                      })();
+                    }}
                   >
                     {pending === "确认终检" ? (
                       <Loader2 className="animate-spin" />

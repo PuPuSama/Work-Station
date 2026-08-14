@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
+from pathlib import Path
 from typing import Protocol
 
 from knowledge_agent.assets import KnowledgeAsset
@@ -17,6 +19,15 @@ from services.ai_screenshots import (
 
 
 MAX_SERVER_AI_SCREENSHOT_BYTES = 25 * 1024 * 1024
+_SAFE_SCREENSHOT_MEDIA_TYPES = {
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+}
 
 
 class ServerAiScreenshotError(ValueError):
@@ -33,8 +44,9 @@ class ServerAiScreenshotObjectService(Protocol):
         project_id: str,
         asset_id: str,
         data: bytes,
-        width: int,
-        height: int,
+        content_type: str = "image/png",
+        width: int | None = None,
+        height: int | None = None,
     ) -> KnowledgeAsset: ...
 
     def upload_initial_ai_screenshot(
@@ -114,7 +126,7 @@ class ServerInitialAiScreenshotPreparation:
 
 
 class ServerFinalAiScreenshotPreparation:
-    """Normalize and store one final-review screenshot without local paths."""
+    """Store one final-review image as supplied, without inspecting its pixels."""
 
     def __init__(
         self,
@@ -130,6 +142,8 @@ class ServerFinalAiScreenshotPreparation:
         project_id: str,
         task: TaskRecord,
         content: bytes,
+        filename: str = "",
+        content_type: str = "",
     ) -> TaskRecord:
         if not task.humanized_article.strip():
             raise ServerAiScreenshotError(
@@ -140,25 +154,37 @@ class ServerFinalAiScreenshotPreparation:
             raise ServerAiScreenshotError(
                 "AI-rate screenshot exceeds 25 MB"
             )
-        try:
-            png, width, height = build_ai_rate_screenshot_png(body)
-        except AIScreenshotError as exc:
-            raise ServerAiScreenshotError(str(exc)) from exc
+        if not body:
+            raise ServerAiScreenshotError("AI-rate screenshot is empty")
 
-        digest = hashlib.sha256(png).hexdigest()
+        declared_type = content_type.partition(";")[0].strip().casefold()
+        guessed_type = (
+            mimetypes.guess_type(Path(filename).name, strict=False)[0] or ""
+        ).casefold()
+        media_type = (
+            declared_type
+            if declared_type in _SAFE_SCREENSHOT_MEDIA_TYPES
+            else guessed_type
+            if guessed_type in _SAFE_SCREENSHOT_MEDIA_TYPES
+            else "application/octet-stream"
+        )
+        extension = _SAFE_SCREENSHOT_MEDIA_TYPES.get(media_type, ".bin")
+
+        digest = hashlib.sha256(body).hexdigest()
         asset = self._objects.upload_final_ai_screenshot(
             actor=actor,
             project_id=project_id,
             asset_id=f"asset_{digest}",
-            data=png,
-            width=width,
-            height=height,
+            data=body,
+            content_type=media_type,
+            width=None,
+            height=None,
         )
         if (
             asset.content_hash != digest
-            or asset.content_type != "image/png"
-            or asset.width != width
-            or asset.height != height
+            or asset.content_type != media_type
+            or asset.width is not None
+            or asset.height is not None
             or str(asset.metadata.get("artifact_kind") or "")
             != FINAL_AI_SCREENSHOT_ARTIFACT_KIND
         ):
@@ -170,10 +196,15 @@ class ServerFinalAiScreenshotPreparation:
         check.screenshot_path = ""
         check.screenshot_asset_id = asset.asset_id
         check.screenshot_content_hash = asset.content_hash
-        check.screenshot_filename = "final-ai-rate.png"
-        check.screenshot_width = width
-        check.screenshot_height = height
+        check.screenshot_filename = f"final-ai-rate{extension}"
+        check.screenshot_width = None
+        check.screenshot_height = None
+        check.confirmed = False
+        check.confirmed_at = ""
         task.delivery_package_path = ""
+        task.delivery_package_asset_id = ""
+        task.delivery_package_content_hash = ""
+        task.delivery_package_filename = ""
         task.workflow_error = None
         return task
 

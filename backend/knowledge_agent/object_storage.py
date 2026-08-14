@@ -257,10 +257,11 @@ class ProjectKnowledgeObjectService:
         project_id: str,
         asset_id: str,
         data: bytes,
-        width: int,
-        height: int,
+        content_type: str = "image/png",
+        width: int | None = None,
+        height: int | None = None,
     ) -> KnowledgeAsset:
-        """Persist a normalized final AI-rate review screenshot."""
+        """Persist a final AI-rate review attachment without decoding it."""
 
         self._access.require(actor, project_id, "article.review")
         return self._store_asset(
@@ -268,7 +269,7 @@ class ProjectKnowledgeObjectService:
             project_id=project_id,
             asset_id=asset_id,
             data=data,
-            content_type="image/png",
+            content_type=content_type,
             width=width,
             height=height,
             metadata={
@@ -564,8 +565,8 @@ class ProjectKnowledgeObjectService:
         project_id: str,
         asset_id: str,
         content_hash: str,
-        width: int,
-        height: int,
+        width: int | None,
+        height: int | None,
         expires_seconds: int = 300,
     ) -> str:
         """Sign a final-review screenshot after fresh review permission."""
@@ -576,7 +577,6 @@ class ProjectKnowledgeObjectService:
             asset is None
             or str(asset.metadata.get("artifact_kind") or "")
             != FINAL_AI_SCREENSHOT_ARTIFACT_KIND
-            or asset.content_type != "image/png"
             or asset.content_hash != content_hash.strip().casefold()
             or asset.width != width
             or asset.height != height

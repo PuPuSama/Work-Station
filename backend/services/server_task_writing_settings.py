@@ -24,6 +24,7 @@ from services.server_outline_generation import (
     PostgresPublishedGenerationContext,
     build_server_outline_prompt,
 )
+from services.server_official_links import PostgresPublishedOfficialLinks
 from services.server_project_prompts import (
     PostgresProjectPromptService,
     ServerProjectPromptError,
@@ -205,6 +206,7 @@ class PostgresServerTaskWritingSettingsService:
             audit=audit,
         )
         self._context = PostgresPublishedGenerationContext(engine)
+        self._official_links = PostgresPublishedOfficialLinks(engine)
         self.organization_id = self._repository.organization_id
         self.project_id = self._repository.project_id
 
@@ -390,6 +392,12 @@ class PostgresServerTaskWritingSettingsService:
             chunks = self._context.select(
                 project_id=self.project_id,
                 query=self._context_query(task),
+            )
+            task.official_links = list(
+                self._official_links.select(
+                    project_id=self.project_id,
+                    customer=task.customer,
+                )
             )
             target_words = normalized_article_word_count(
                 None,

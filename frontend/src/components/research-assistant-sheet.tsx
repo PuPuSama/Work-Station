@@ -152,6 +152,13 @@ export function ResearchAssistantSheet({
                             <span className="min-w-0 flex-1 truncate text-xs font-medium">
                               {citation.display_name}
                             </span>
+                            {typeof citation.locator.page_number === "number" &&
+                            Number.isInteger(citation.locator.page_number) &&
+                            citation.locator.page_number > 0 ? (
+                              <Badge variant="secondary">
+                                第 {citation.locator.page_number} 页
+                              </Badge>
+                            ) : null}
                             {citation.canonical_url ? (
                               <a
                                 href={citation.canonical_url}

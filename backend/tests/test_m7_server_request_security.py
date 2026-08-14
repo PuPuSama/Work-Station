@@ -715,6 +715,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
         )
         self.assertTrue(
             server_http_route_available(
+                "DELETE",
+                "/api/projects/example.com/prompt-snapshots/prompt-a",
+            )
+        )
+        self.assertTrue(
+            server_http_route_available(
                 "PUT",
                 "/api/projects/example.com/prompt-defaults/outline",
             )
@@ -897,7 +903,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 self.assertFalse(
                     server_http_route_available(method, path)
                 )
-        self.assertFalse(
+        self.assertTrue(
             server_http_route_available(
                 "DELETE",
                 "/api/projects/example.com/prompt-snapshots/prompt-a",
@@ -980,6 +986,10 @@ class ServerRequestSecurityTests(unittest.TestCase):
         from knowledge_agent.http import router
 
         self.assertTrue(router.routes)
+        self.assertIn(
+            "/api/knowledge/{project}/tasks/{task_id}/retrieval-plan",
+            {route.path for route in router.routes},
+        )
         for route in router.routes:
             with self.subTest(path=route.path):
                 self.assertIn("{project}", route.path)
@@ -1015,7 +1025,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
         app_module.app.state.knowledge_agent_runtime = None
         try:
             client = TestClient(app_module.app)
-            self.assertEqual(client.get("/api/tasks").status_code, 503)
+            self.assertEqual(client.get("/api/tasks").status_code, 404)
             self.assertEqual(
                 client.get("/api/knowledge/example.com").status_code,
                 401,
@@ -1075,7 +1085,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 client.post(
                     "/api/knowledge/example.com/tasks/task-a/retrieval-plan"
                 ).status_code,
-                404,
+                503,
             )
             self.assertEqual(
                 client.post(
@@ -1101,7 +1111,6 @@ class ServerRequestSecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             isolated = replace(
                 base_config,
-                data_file=Path(directory) / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -1121,7 +1130,7 @@ class ServerRequestSecurityTests(unittest.TestCase):
                     ServerRequestSecurity,
                 )
                 self.assertEqual(client.get("/api/health").status_code, 200)
-                self.assertEqual(client.get("/api/tasks").status_code, 503)
+                self.assertEqual(client.get("/api/tasks").status_code, 404)
                 self.assertIsNone(app_module.app.state.job_queue)
                 self.assertEqual(
                     app_module.app.state.batch_runners,

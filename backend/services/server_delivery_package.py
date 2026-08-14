@@ -65,7 +65,7 @@ def _require_artifact(
     *,
     asset_id: str,
     content_hash: str,
-    content_type: str,
+    content_type: str | None,
     artifact_kind: str,
     label: str,
 ) -> bytes:
@@ -73,7 +73,10 @@ def _require_artifact(
         not asset_id.strip()
         or stored.asset.asset_id != asset_id.strip()
         or stored.asset.content_hash != content_hash.strip().casefold()
-        or stored.asset.content_type != content_type
+        or (
+            content_type is not None
+            and stored.asset.content_type != content_type
+        )
         or str(stored.asset.metadata.get("artifact_kind") or "")
         != artifact_kind
     ):
@@ -100,9 +103,13 @@ class ServerDeliveryPackage:
         project_id: str,
         task: TaskRecord,
     ) -> TaskRecord:
-        if not task.final_ai_check.confirmed:
+        screenshot_deferred = (
+            task.final_ai_check.deferred
+            and not task.final_ai_check.confirmed
+        )
+        if not task.final_ai_check.confirmed and not screenshot_deferred:
             raise ServerDeliveryPackageError(
-                "the final AI review must be confirmed"
+                "the final AI review must be confirmed or explicitly deferred"
             )
         if (
             not task.humanized_article.strip()
@@ -112,11 +119,14 @@ class ServerDeliveryPackage:
             raise ServerDeliveryPackageError(
                 "the final AI review does not match the current article"
             )
-        required_asset_ids = (
+        required_asset_ids = [
             task.docx_asset_id,
             task.tdk_asset_id,
-            task.final_ai_check.screenshot_asset_id,
-        )
+        ]
+        if not screenshot_deferred:
+            required_asset_ids.append(
+                task.final_ai_check.screenshot_asset_id
+            )
         if any(not value.strip() for value in required_asset_ids):
             raise ServerDeliveryPackageError(
                 "required Server delivery assets are missing"
@@ -156,32 +166,24 @@ class ServerDeliveryPackage:
             artifact_kind=TDK_DOCX_ARTIFACT_KIND,
             label="TDK Word document",
         )
-        screenshot = self._objects.read_for_article_delivery(
-            actor=actor,
-            project_id=project_id,
-            asset_id=task.final_ai_check.screenshot_asset_id,
-            max_bytes=MAX_SERVER_AI_SCREENSHOT_BYTES,
-        )
-        screenshot_data = _require_artifact(
-            screenshot,
-            asset_id=task.final_ai_check.screenshot_asset_id,
-            content_hash=(
-                task.final_ai_check.screenshot_content_hash
-            ),
-            content_type="image/png",
-            artifact_kind=FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
-            label="Final AI-rate screenshot",
-        )
-        if (
-            screenshot.asset.width
-            != task.final_ai_check.screenshot_width
-            or screenshot.asset.height
-            != task.final_ai_check.screenshot_height
-        ):
-            raise ServerDeliveryPackageError(
-                "Final AI-rate screenshot identity is inconsistent"
+        screenshot_data: bytes | None = None
+        if not screenshot_deferred:
+            screenshot = self._objects.read_for_article_delivery(
+                actor=actor,
+                project_id=project_id,
+                asset_id=task.final_ai_check.screenshot_asset_id,
+                max_bytes=MAX_SERVER_AI_SCREENSHOT_BYTES,
             )
-
+            screenshot_data = _require_artifact(
+                screenshot,
+                asset_id=task.final_ai_check.screenshot_asset_id,
+                content_hash=(
+                    task.final_ai_check.screenshot_content_hash
+                ),
+                content_type=None,
+                artifact_kind=FINAL_AI_SCREENSHOT_ARTIFACT_KIND,
+                label="Final AI-rate screenshot",
+            )
         images: list[tuple[str, bytes]] = []
         for image in task.images:
             stored = self._objects.read_for_article_delivery(
@@ -203,10 +205,14 @@ class ServerDeliveryPackage:
             archive = build_delivery_zip_bytes(
                 article_docx=article_data,
                 article_filename=task.docx_filename,
-                tdk_docx=tdk_data,
-                images=images,
-                final_screenshot=screenshot_data,
-            )
+            tdk_docx=tdk_data,
+            images=images,
+            final_screenshot=screenshot_data,
+            final_screenshot_filename=(
+                task.final_ai_check.screenshot_filename
+                or "final-ai-rate.png"
+            ),
+        )
         except DeliveryPackageError as exc:
             raise ServerDeliveryPackageError(str(exc)) from exc
         if not archive or len(archive) > MAX_SERVER_DELIVERY_ZIP_BYTES:

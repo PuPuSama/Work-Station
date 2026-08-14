@@ -31,10 +31,12 @@ from services.authorized_job_queue import (
     authorized_batch_runner,
 )
 from services.generator import (
+    generation_context_value,
     load_prompt_template,
     parse_numbered_list,
     primary_keyword,
     render_prompt,
+    title_generation_config,
 )
 from services.job_queue import (
     ACTIVE_JOB_STATUSES,
@@ -173,6 +175,10 @@ def build_server_title_prompt(
             task.title_generation_instruction.strip()
             or "Not supplied"
         ),
+        PROJECT_NOTES=generation_context_value(
+            task.project_notes,
+            task.include_project_notes,
+        ),
         CUSTOMER_CONTEXT=published_generation_context_text(
             context_chunks
         ),
@@ -188,7 +194,7 @@ class LlmServerTitleProvider:
         *,
         llm: TitleLlmClient | None = None,
     ) -> None:
-        self._llm = llm or LLMClient(config)
+        self._llm = llm or LLMClient(title_generation_config(config))
 
     @property
     def ready(self) -> bool:

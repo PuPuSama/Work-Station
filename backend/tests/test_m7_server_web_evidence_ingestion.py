@@ -862,6 +862,30 @@ class ServerWebEvidenceIngestionTests(unittest.TestCase):
             first_updated_at,
         )
 
+    def test_identical_retry_restores_withdrawn_snapshot_as_pending(self) -> None:
+        first = self._ingest()
+        with self.engine.begin() as connection:
+            connection.execute(
+                knowledge_sources.update()
+                .where(
+                    knowledge_sources.c.project_id == self.project_id,
+                    knowledge_sources.c.source_id == first.source.source_id,
+                )
+                .values(
+                    status="rejected",
+                    current_snapshot_id=None,
+                    pending_snapshot_id=None,
+                )
+            )
+
+        retried = self._ingest()
+
+        self.assertEqual(retried.source.status, "rejected")
+        self.assertEqual(
+            retried.source.pending_snapshot_id,
+            first.snapshot.snapshot_id,
+        )
+
     def test_retry_returns_published_and_confirmed_stored_aggregates(
         self,
     ) -> None:

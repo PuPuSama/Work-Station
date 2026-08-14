@@ -43,6 +43,9 @@ SOURCE_KINDS = frozenset(
         "knowledge_page",
     }
 )
+EVIDENCE_SOURCE_KINDS = frozenset(
+    source_kind for source_kind in SOURCE_KINDS if source_kind != "official_blog"
+)
 TRUST_TIERS = frozenset(
     {"hard_fact", "reference_material", "writing_instruction"}
 )

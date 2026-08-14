@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -34,6 +34,7 @@ class ResearchCitation:
     canonical_url: str | None
     text: str
     ordinal: int
+    locator: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +240,7 @@ class PostgresResearchChatRepository:
                 knowledge_chunks.c.source_id,
                 knowledge_chunks.c.snapshot_id,
                 knowledge_chunks.c.text,
+                knowledge_chunks.c.locator,
                 knowledge_sources.c.display_name,
                 knowledge_sources.c.canonical_url,
             )
@@ -312,4 +314,5 @@ def _citation_from_row(row: RowMapping) -> ResearchCitation:
         ),
         text=str(row["text"]),
         ordinal=int(row["ordinal"]),
+        locator=dict(row["locator"] or {}),
     )

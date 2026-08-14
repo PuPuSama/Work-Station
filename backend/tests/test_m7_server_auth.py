@@ -25,19 +25,9 @@ SECRET = b"m7-test-only-secret-with-at-least-32-bytes"
 
 
 class ServerActorSessionTests(unittest.TestCase):
-    def test_server_mode_is_explicit_and_strict(self) -> None:
-        self.assertFalse(server_mode_enabled({}))
-        self.assertTrue(
-            server_mode_enabled({"ARTICLE_AGENT_SERVER_MODE": "true"})
-        )
-        self.assertFalse(
-            server_mode_enabled({"ARTICLE_AGENT_SERVER_MODE": "off"})
-        )
-        with self.assertRaisesRegex(
-            ServerActorSessionError,
-            "ARTICLE_AGENT_SERVER_MODE",
-        ):
-            server_mode_enabled({"ARTICLE_AGENT_SERVER_MODE": "sometimes"})
+    def test_server_mode_is_always_enabled(self) -> None:
+        self.assertTrue(server_mode_enabled({}))
+        self.assertTrue(server_mode_enabled({"ARTICLE_AGENT_SERVER_MODE": "off"}))
 
     def test_token_roundtrip_contains_identity_but_no_role(self) -> None:
         codec = ServerActorSessionCodec(SECRET)

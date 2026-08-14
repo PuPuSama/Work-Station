@@ -91,6 +91,7 @@ def _optional_http_url(value: str) -> str:
 @dataclass(frozen=True, slots=True)
 class ServerTaskIntakeRow:
     topic: str
+    primary_keyword: str = ""
     competitor_keyword: str = ""
     competitor_blog: str = ""
 
@@ -99,6 +100,11 @@ class ServerTaskIntakeRow:
             topic=_required_text(
                 self.topic,
                 "topic",
+                maximum=500,
+            ),
+            primary_keyword=_optional_text(
+                self.primary_keyword,
+                "primary_keyword",
                 maximum=500,
             ),
             competitor_keyword=_optional_text(
@@ -136,6 +142,7 @@ def _payload_digest(
                 {
                     "competitor_blog": row.competitor_blog,
                     "competitor_keyword": row.competitor_keyword,
+                    "primary_keyword": row.primary_keyword,
                     "topic": row.topic,
                 }
                 for row in rows
@@ -334,6 +341,7 @@ class PostgresServerTaskIntakeService:
             sa.select(
                 projects.c.customer_name,
                 projects.c.official_domain,
+                projects.c.project_notes,
             ).where(
                 projects.c.project_id == self.project_id,
                 projects.c.status == "active",
@@ -378,6 +386,27 @@ class PostgresServerTaskIntakeService:
                 )
             ).scalar_one()
         )
+        latest_project_context = connection.execute(
+            sa.select(article_tasks.c.payload)
+            .where(
+                article_tasks.c.organization_id
+                == self.organization_id,
+                article_tasks.c.project_id == self.project_id,
+            )
+            .order_by(
+                article_tasks.c.position.desc(),
+                article_tasks.c.task_id.desc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        inherited_project_introduction = str(
+            (latest_project_context or {}).get(
+                "project_introduction",
+                "",
+            )
+            or ""
+        ).strip()
+        inherited_project_notes = str(project["project_notes"] or "").strip()
 
         timestamp = now_iso()
         tasks: list[TaskRecord] = []
@@ -395,6 +424,8 @@ class PostgresServerTaskIntakeService:
                 week_folder="server",
                 customer=str(project["official_domain"]),
                 brand_name=str(project["customer_name"]),
+                project_introduction=inherited_project_introduction,
+                project_notes=inherited_project_notes,
                 source_key=(
                     f"server:{intake_kind}:{intake_id}:{offset}"
                 ),
@@ -405,6 +436,7 @@ class PostgresServerTaskIntakeService:
                 ),
                 topic_index=topic_index,
                 topic=row.topic,
+                primary_keyword=row.primary_keyword,
                 competitor_keyword=row.competitor_keyword,
                 competitor_blog=row.competitor_blog,
                 status=STATUS_NEW,

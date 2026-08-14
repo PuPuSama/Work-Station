@@ -302,12 +302,52 @@ class PostgresEvidencePackRepository:
 
     def save_evidence_pack(self, evidence_pack: EvidencePack) -> None:
         request = evidence_pack.request
+        if any(
+            hit.provenance is not None
+            and hit.provenance.source_kind == "official_blog"
+            for hit in evidence_pack.hits
+        ):
+            raise EvidenceTargetError(
+                "official blog chunks are writing references, not evidence"
+            )
         if request.retrieval_plan_id is None or request.scope_id is None:
             raise ValueError(
                 "persisted evidence packs require retrieval_plan_id and scope_id"
             )
         try:
             with self._engine.begin() as connection:
+                if evidence_pack.hits:
+                    hit_chunk_ids = tuple(
+                        hit.chunk.chunk_id for hit in evidence_pack.hits
+                    )
+                    source_kinds = tuple(
+                        connection.execute(
+                            sa.select(knowledge_sources.c.source_kind)
+                            .select_from(
+                                knowledge_chunks.join(
+                                    knowledge_sources,
+                                    sa.and_(
+                                        knowledge_sources.c.project_id
+                                        == knowledge_chunks.c.project_id,
+                                        knowledge_sources.c.source_id
+                                        == knowledge_chunks.c.source_id,
+                                        knowledge_sources.c.current_snapshot_id
+                                        == knowledge_chunks.c.snapshot_id,
+                                    ),
+                                )
+                            )
+                            .where(
+                                knowledge_chunks.c.project_id
+                                == evidence_pack.project_id,
+                                knowledge_chunks.c.chunk_id.in_(hit_chunk_ids),
+                                knowledge_sources.c.status == "published",
+                            )
+                        ).scalars()
+                    )
+                    if "official_blog" in source_kinds:
+                        raise EvidenceTargetError(
+                            "official blog chunks are writing references, not evidence"
+                        )
                 existing = self._get(
                     connection,
                     evidence_pack.project_id,
@@ -466,6 +506,7 @@ class PostgresEvidenceLinkRepository:
         with self._engine.begin() as connection:
             source = connection.execute(
                 sa.select(
+                    knowledge_sources.c.source_kind,
                     knowledge_sources.c.trust_tier,
                     knowledge_sources.c.public_source,
                     knowledge_sources.c.canonical_url,
@@ -492,6 +533,10 @@ class PostgresEvidenceLinkRepository:
             if source is None:
                 raise EvidenceTargetError(
                     "evidence links require a current published chunk"
+                )
+            if source["source_kind"] == "official_blog":
+                raise EvidenceTargetError(
+                    "official blog chunks are writing references, not evidence"
                 )
             if (
                 link.claim_type == "hard_fact"

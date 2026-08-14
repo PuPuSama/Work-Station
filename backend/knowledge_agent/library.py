@@ -43,6 +43,7 @@ class KnowledgeSourceSummary:
     pending_chunk_count: int = 0
     pending_asset_count: int = 0
     pending_review_decision: str | None = None
+    pending_review_reason: str | None = None
     pending_review_version: int | None = None
     pending_reviewed_at: datetime | None = None
 
@@ -261,6 +262,22 @@ class PostgresKnowledgeLibrary:
             .limit(1)
             .scalar_subquery()
         )
+        latest_review_reason = (
+            sa.select(source_snapshot_review_receipts.c.reason)
+            .where(
+                source_snapshot_review_receipts.c.project_id
+                == knowledge_sources.c.project_id,
+                source_snapshot_review_receipts.c.source_id
+                == knowledge_sources.c.source_id,
+                source_snapshot_review_receipts.c.snapshot_id
+                == knowledge_sources.c.pending_snapshot_id,
+            )
+            .order_by(
+                source_snapshot_review_receipts.c.review_version.desc()
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
         latest_reviewed_at = (
             sa.select(source_snapshot_review_receipts.c.reviewed_at)
             .where(
@@ -295,6 +312,7 @@ class PostgresKnowledgeLibrary:
                 pending_chunk_count.label("pending_chunk_count"),
                 pending_asset_count.label("pending_asset_count"),
                 latest_review_decision.label("pending_review_decision"),
+                latest_review_reason.label("pending_review_reason"),
                 latest_review_version.label("pending_review_version"),
                 latest_reviewed_at.label("pending_reviewed_at"),
             )
@@ -562,6 +580,11 @@ def _source_summary_from_row(row: Mapping[str, object]) -> KnowledgeSourceSummar
             None
             if row["pending_review_decision"] is None
             else str(row["pending_review_decision"])
+        ),
+        pending_review_reason=(
+            None
+            if row["pending_review_reason"] is None
+            else str(row["pending_review_reason"])
         ),
         pending_review_version=(
             None

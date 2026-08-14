@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from hashlib import sha256
+import logging
 from pathlib import PurePath
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Annotated, Literal
 from urllib.parse import quote
+import uuid
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -38,6 +42,12 @@ from services.server_private_document_ingestion import (
     ServerPrivateDocumentUploadUnavailable,
     default_private_source_id,
 )
+from services.server_product_rediscovery import (
+    OfficialSiteScanCommand,
+    ProductRediscoveryCommand,
+    ProductRediscoveryUnavailable,
+    ServerProductRediscoveryRegistry,
+)
 from services.server_snapshot_evidence import (
     PostgresServerSnapshotEvidenceService,
     SnapshotEvidenceNotFound,
@@ -47,8 +57,10 @@ from services.server_snapshot_evidence import (
 from .artifact_store import ArtifactStoreError
 from .assets import KnowledgeAssetRepositoryError
 from .catalog import (
+    MANUAL_SPECIFICATION_TABLES_KEY,
     KnowledgeProduct,
     ProductCatalogRepositoryError,
+    effective_product_specification_tables,
 )
 from .contracts import (
     EvidenceLink,
@@ -108,6 +120,7 @@ TrustTierValue = Literal[
     "reference_material",
     "writing_instruction",
 ]
+ReviewModeValue = Literal["manual", "automatic"]
 
 
 class KnowledgeApiModel(BaseModel):
@@ -129,6 +142,7 @@ class KnowledgeSourceResponse(KnowledgeApiModel):
     pending_chunk_count: int
     pending_asset_count: int
     pending_review_decision: str | None
+    pending_review_reason: str | None
     pending_review_version: int | None
     pending_reviewed_at: str | None
     snapshot_count: int
@@ -147,6 +161,24 @@ class KnowledgeProductResponse(KnowledgeApiModel):
     status: str
     canonical_url: str | None
     category_path: list[str]
+    description: str
+    main_content_facts: list[str]
+    specification_tables: list[dict[str, object]]
+    specification_tables_overridden: bool = False
+    faq: list[dict[str, str]]
+
+
+class ProductSpecificationTableUpdate(KnowledgeApiModel):
+    caption: str = Field(default="", max_length=500)
+    headers: list[str] = Field(default_factory=list, max_length=40)
+    rows: list[list[str]] = Field(default_factory=list, max_length=500)
+
+
+class ProductSpecificationsUpdateRequest(KnowledgeApiModel):
+    specification_tables: list[ProductSpecificationTableUpdate] = Field(
+        default_factory=list,
+        max_length=20,
+    )
 
 
 class KnowledgeLibraryResponse(KnowledgeApiModel):
@@ -173,6 +205,9 @@ class KnowledgeUploadResponse(KnowledgeApiModel):
     asset_count: int
     created: bool
     message: str
+    review_mode: ReviewModeValue = "manual"
+    review_decision: str | None = None
+    published: bool = False
 
 
 class ProductConfirmResponse(KnowledgeApiModel):
@@ -294,6 +329,37 @@ class WordPressSyncResponse(KnowledgeApiModel):
     warnings: list[str]
 
 
+class OfficialSiteScanRequest(KnowledgeApiModel):
+    start_url: str = Field(default="", max_length=4096)
+    max_pages: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Total HTML page budget for this official-site scan.",
+    )
+
+
+class OfficialSiteScanResponse(KnowledgeApiModel):
+    accepted: bool
+    message: str
+    scan_id: str
+    status: str
+
+
+class OfficialSiteScanStatusResponse(KnowledgeApiModel):
+    scan_id: str | None
+    status: str
+    started_at: str | None
+    finished_at: str | None
+    processed_pages: int
+    skipped_pages: int
+    processed_products: int
+    skipped_products: int
+    source_count: int
+    product_count: int
+    error: str
+
+
 class RetrievalScopeInput(KnowledgeApiModel):
     scope_id: str = Field(min_length=1, max_length=200)
     ordinal: int = Field(ge=0)
@@ -352,6 +418,7 @@ class EvidenceHitResponse(KnowledgeApiModel):
     chunk_id: str
     text: str
     heading_path: list[str]
+    locator: dict[str, object]
     score: float
     provenance: EvidenceProvenanceResponse | None
     explanation: dict[str, object]
@@ -542,6 +609,7 @@ class ResearchCitationResponse(KnowledgeApiModel):
     canonical_url: str | None
     text: str
     ordinal: int
+    locator: dict[str, object]
 
 
 class ResearchMessageResponse(KnowledgeApiModel):
@@ -574,13 +642,8 @@ def _runtime(request: Request) -> KnowledgeAgentRuntime:
 def _server_knowledge_context(
     request: Request,
     project: str,
-) -> tuple[ActorIdentity, str] | None:
-    """Return the trusted dependency result for Server-only write commands."""
-
-    if not bool(
-        getattr(request.app.state, "server_mode_enabled", False)
-    ):
-        return None
+) -> tuple[ActorIdentity, str]:
+    """Return the trusted authorization context for every knowledge request."""
     actor = getattr(request.state, "actor_identity", None)
     project_id = str(getattr(request.state, "project_id", "")).strip()
     if not isinstance(actor, ActorIdentity) or not project_id:
@@ -676,11 +739,42 @@ def _server_research(
     return configured
 
 
+def _server_product_rediscovery(
+    request: Request,
+) -> ServerProductRediscoveryRegistry:
+    configured = getattr(
+        request.app.state,
+        "server_product_rediscovery",
+        None,
+    )
+    if not isinstance(configured, ServerProductRediscoveryRegistry):
+        raise HTTPException(
+            status_code=503,
+            detail="Official-site scanning is not available.",
+        )
+    return configured
+
+
 def _project_id(value: str) -> str:
     normalized = value.strip().lower().rstrip(".")
     if normalized.startswith("www."):
         normalized = normalized[4:]
     return normalized
+
+
+def _automatic_review_receipt_id(
+    *,
+    organization_id: str,
+    project_id: str,
+    source_id: str,
+    snapshot_id: str,
+) -> str:
+    return "auto_review_" + uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "\x1f".join(
+            (organization_id, project_id, source_id, snapshot_id, "v2")
+        ),
+    ).hex
 
 
 def _source_response(
@@ -717,6 +811,7 @@ def _source_response(
         pending_chunk_count=item.pending_chunk_count,
         pending_asset_count=item.pending_asset_count,
         pending_review_decision=item.pending_review_decision,
+        pending_review_reason=item.pending_review_reason,
         pending_review_version=item.pending_review_version,
         pending_reviewed_at=(
             None
@@ -738,6 +833,10 @@ def _source_response(
 
 
 def _product_response(item: KnowledgeProduct) -> KnowledgeProductResponse:
+    description = item.metadata.get("description", "")
+    facts = item.metadata.get("main_content_facts", [])
+    tables = effective_product_specification_tables(item.metadata)
+    faq = item.metadata.get("faq", [])
     return KnowledgeProductResponse(
         project_id=item.project_id,
         product_id=item.product_id,
@@ -745,6 +844,27 @@ def _product_response(item: KnowledgeProduct) -> KnowledgeProductResponse:
         status=item.status,
         canonical_url=item.canonical_url,
         category_path=list(item.category_path),
+        description=description if isinstance(description, str) else "",
+        main_content_facts=(
+            [str(value) for value in facts] if isinstance(facts, list) else []
+        ),
+        specification_tables=(
+            [dict(value) for value in tables if isinstance(value, Mapping)]
+            if isinstance(tables, list)
+            else []
+        ),
+        specification_tables_overridden=(
+            MANUAL_SPECIFICATION_TABLES_KEY in item.metadata
+        ),
+        faq=(
+            [
+                {str(key): str(value) for key, value in entry.items()}
+                for entry in faq
+                if isinstance(entry, Mapping)
+            ]
+            if isinstance(faq, list)
+            else []
+        ),
     )
 
 
@@ -824,6 +944,7 @@ def _pack_response(pack: EvidencePack) -> EvidencePackResponse:
                 chunk_id=hit.chunk.chunk_id,
                 text=hit.chunk.text,
                 heading_path=list(hit.chunk.heading_path),
+                locator=dict(hit.chunk.locator),
                 score=hit.score,
                 provenance=(
                     None
@@ -1049,6 +1170,7 @@ def _conversation_response(
                         canonical_url=citation.canonical_url,
                         text=citation.text,
                         ordinal=citation.ordinal,
+                        locator=dict(citation.locator),
                     )
                     for citation in message.citations
                 ],
@@ -1058,11 +1180,144 @@ def _conversation_response(
     )
 
 
+logger = logging.getLogger(__name__)
+
+
 router = APIRouter(
     prefix="/api/knowledge",
     tags=["knowledge-agent"],
     dependencies=[Depends(require_knowledge_project_access)],
 )
+
+
+def _run_official_site_scan(
+    registry: ServerProductRediscoveryRegistry,
+    *,
+    actor: ActorIdentity,
+    project_id: str,
+    command: OfficialSiteScanCommand,
+    scan_id: str,
+) -> None:
+    try:
+        registry.run_manual_scan(
+            actor=actor,
+            project_id=project_id,
+            command=command,
+            scan_id=scan_id,
+        )
+    except Exception:
+        logger.exception(
+            "official-site scan failed; previous published snapshots remain active",
+            extra={"project_id": project_id},
+        )
+
+
+@router.post(
+    "/{project}/official-site/scan",
+    response_model=OfficialSiteScanResponse,
+    status_code=202,
+)
+def scan_official_site(
+    project: str,
+    payload: OfficialSiteScanRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> OfficialSiteScanResponse:
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Official-site scanning is only available in server mode.",
+        )
+    actor, project_id = server_context
+    registry = _server_product_rediscovery(request)
+    try:
+        scan = registry.begin_manual_scan(actor=actor, project_id=project_id)
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ProductRediscoveryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Official-site scanning is not configured.",
+        ) from exc
+    except ActiveJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="An official-site scan is already running for this project.",
+        ) from exc
+    # ponytail: keep project-level manual scans in-process; move them to the
+    # durable project queue only if restart-resume becomes a real requirement.
+    background_tasks.add_task(
+        _run_official_site_scan,
+        registry,
+        actor=actor,
+        project_id=project_id,
+        command=OfficialSiteScanCommand(
+            start_url=payload.start_url.strip(),
+            max_pages=payload.max_pages,
+        ),
+        scan_id=scan.scan_id,
+    )
+    return OfficialSiteScanResponse(
+        accepted=True,
+        message="Official-site knowledge scan started; accepted pages publish automatically.",
+        scan_id=scan.scan_id,
+        status=scan.status,
+    )
+
+
+@router.get(
+    "/{project}/official-site/scan/status",
+    response_model=OfficialSiteScanStatusResponse,
+)
+def read_official_site_scan_status(
+    project: str,
+    request: Request,
+) -> OfficialSiteScanStatusResponse:
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Official-site scanning is only available in server mode.",
+        )
+    actor, project_id = server_context
+    try:
+        scan = _server_product_rediscovery(request).manual_scan_status(
+            actor=actor,
+            project_id=project_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    if scan is None:
+        return OfficialSiteScanStatusResponse(
+            scan_id=None,
+            status="idle",
+            started_at=None,
+            finished_at=None,
+            processed_pages=0,
+            skipped_pages=0,
+            processed_products=0,
+            skipped_products=0,
+            source_count=0,
+            product_count=0,
+            error="",
+        )
+    return OfficialSiteScanStatusResponse(
+        scan_id=scan.scan_id,
+        status=scan.status,
+        started_at=scan.started_at,
+        finished_at=scan.finished_at,
+        processed_pages=scan.processed_pages,
+        skipped_pages=scan.skipped_pages,
+        processed_products=scan.processed_products,
+        skipped_products=scan.skipped_products,
+        source_count=scan.source_count,
+        product_count=scan.product_count,
+        error=scan.error,
+    )
 
 
 @router.post(
@@ -1169,6 +1424,40 @@ def read_knowledge_library(project: str, request: Request) -> KnowledgeLibraryRe
         ],
         products=[_product_response(item) for item in products],
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/retrieval-plan",
+    response_model=RetrievalPlanResponse,
+    status_code=201,
+)
+def create_task_retrieval_plan(
+    project: str,
+    task_id: str,
+    request: Request,
+) -> RetrievalPlanResponse:
+    actor, project_id = _server_knowledge_context(request, project)
+    try:
+        plan = _server_research(request).create_plan_from_task(
+            actor=actor,
+            project_id=project_id,
+            task_id=task_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from exc
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except (EvidenceRepositoryError, JobConflict, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeResearchUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _plan_response(plan)
 
 
 @router.post(
@@ -1356,7 +1645,7 @@ def create_research_run(
     if payload.organization_id is None or not payload.organization_id.strip():
         raise HTTPException(
             status_code=422,
-            detail="organization_id is required in local mode.",
+            detail="organization_id is required for this compatibility request.",
         )
     graph_request = ResearchGraphRequest(
         organization_id=payload.organization_id,
@@ -1937,6 +2226,7 @@ def upload_private_knowledge(
     source_id: str | None = Form(default=None),
     display_name: str | None = Form(default=None),
     trust_tier: TrustTierValue = Form(default="reference_material"),
+    review_mode: ReviewModeValue = Form(default="manual"),
 ) -> KnowledgeUploadResponse:
     runtime = _runtime(request)
     project_id = _project_id(project)
@@ -1981,6 +2271,14 @@ def upload_private_knowledge(
                 detail="project access denied",
             ) from exc
         except DocumentParserError as exc:
+            logger.warning(
+                "private knowledge document parsing failed",
+                extra={
+                    "project_id": authorized_project_id,
+                    "upload_filename": filename,
+                    "parser_error": str(exc),
+                },
+            )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1995,21 +2293,127 @@ def upload_private_knowledge(
                 detail="Private document ingestion is temporarily unavailable.",
             ) from exc
         result = upload.result
+        review_decision: str | None = None
+        published = False
+        status = result.source.status
+        message = (
+            "File parsed and stored in the Research Inbox."
+            if upload.created
+            else "The same immutable upload is already in the Research Inbox."
+        )
+        if review_mode == "automatic":
+            review_decision = "approve"
+            review_reason = "自动发布：资料解析完成；异常内容可由运营人员手动撤下。"
+            commands = _server_knowledge_commands(request, runtime)
+            current = runtime.library.get_source(
+                authorized_project_id,
+                result.source.source_id,
+            )
+            if (
+                current is not None
+                and current.status == "published"
+                and current.current_snapshot_id == result.snapshot.snapshot_id
+                and current.pending_snapshot_id is None
+            ):
+                review_decision = "approve"
+                status = "published"
+                published = True
+                message = "The same immutable upload is already published."
+                return KnowledgeUploadResponse(
+                    project_id=authorized_project_id,
+                    source_id=result.source.source_id,
+                    snapshot_id=result.snapshot.snapshot_id,
+                    status=status,
+                    parser_name=result.snapshot.parser_name,
+                    parser_version=result.snapshot.parser_version,
+                    chunk_count=len(result.chunks),
+                    asset_count=len(result.assets),
+                    created=upload.created,
+                    message=message,
+                    review_mode=review_mode,
+                    review_decision=review_decision,
+                    published=published,
+                )
+            receipt_id = _automatic_review_receipt_id(
+                organization_id=actor.organization_id,
+                project_id=authorized_project_id,
+                source_id=result.source.source_id,
+                snapshot_id=result.snapshot.snapshot_id,
+            )
+            try:
+                receipt = commands.review_snapshot(
+                    actor=actor,
+                    project_id=authorized_project_id,
+                    source_id=result.source.source_id,
+                    snapshot_id=result.snapshot.snapshot_id,
+                    receipt_id=receipt_id,
+                    source_kind="private_file",
+                    trust_tier=trust_tier,
+                    decision=review_decision,
+                    reason=review_reason,
+                    reviewer_kind="automation",
+                    reviewer_id="knowledge_auto_review_v2",
+                )
+                review_decision = receipt.decision
+                current = runtime.library.get_source(
+                    authorized_project_id,
+                    result.source.source_id,
+                )
+                status = result.source.status if current is None else current.status
+                if review_decision == "approve":
+                    try:
+                        commands.publish_source(
+                            actor=actor,
+                            project_id=authorized_project_id,
+                            source_id=result.source.source_id,
+                            snapshot_id=result.snapshot.snapshot_id,
+                        )
+                        status = "published"
+                        published = True
+                        message = (
+                            "File parsed and published automatically."
+                        )
+                    except (
+                        EmbeddingProviderError,
+                        KnowledgePublicationError,
+                        KnowledgeRepositoryError,
+                        ServerKnowledgeCommandUnavailable,
+                    ):
+                        message = (
+                            "Automatic publication did not finish; the previous published version remains active."
+                        )
+            except ProjectAccessDenied as exc:
+                raise HTTPException(
+                    status_code=403,
+                    detail="project access denied",
+                ) from exc
+            except (
+                EmbeddingProviderError,
+                KnowledgePublicationError,
+                KnowledgeRepositoryError,
+                ServerKnowledgeCommandUnavailable,
+                SnapshotReviewConflict,
+                SnapshotReviewRepositoryError,
+                ValueError,
+            ) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Automatic knowledge publication could not be completed.",
+                ) from exc
         return KnowledgeUploadResponse(
             project_id=authorized_project_id,
             source_id=result.source.source_id,
             snapshot_id=result.snapshot.snapshot_id,
-            status=result.source.status,
+            status=status,
             parser_name=result.snapshot.parser_name,
             parser_version=result.snapshot.parser_version,
             chunk_count=len(result.chunks),
             asset_count=len(result.assets),
             created=upload.created,
-            message=(
-                "File parsed and stored in the Research Inbox."
-                if upload.created
-                else "The same immutable upload is already in the Research Inbox."
-            ),
+            message=message,
+            review_mode=review_mode,
+            review_decision=review_decision,
+            published=published,
         )
     try:
         runtime.repository.upsert_project(
@@ -2031,22 +2435,126 @@ def upload_private_knowledge(
             trust_tier=trust_tier,
         )
     except DocumentParserError as exc:
+        logger.warning(
+            "knowledge document parsing failed",
+            extra={
+                "project_id": project_id,
+                "upload_filename": filename,
+                "parser_error": str(exc),
+            },
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (KnowledgeRepositoryError, ArtifactStoreError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    review_decision = None
+    published = False
+    status = result.source.status
+    message = "File parsed and stored in the Research Inbox."
+    if review_mode == "automatic":
+        review_decision = "approve"
+        review_reason = "自动发布：资料解析完成；异常内容可由运营人员手动撤下。"
+        source_metadata = dict(result.source.metadata)
+        source_metadata["review"] = {
+            "decision": review_decision,
+            "reason": review_reason,
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "actor": "knowledge_auto_review_v2",
+        }
+        reviewed = KnowledgeSource(
+            project_id=result.source.project_id,
+            source_id=result.source.source_id,
+            display_name=result.source.display_name,
+            source_kind="private_file",
+            trust_tier=trust_tier,
+            status=(
+                "inbox"
+                if review_decision == "approve"
+                else "needs_review"
+                if review_decision == "needs_review"
+                else "rejected"
+            ),
+            canonical_url=result.source.canonical_url,
+            public_source=result.source.public_source,
+            metadata=source_metadata,
+        )
+        try:
+            runtime.repository.upsert_source(reviewed)
+            status = reviewed.status
+            if review_decision == "approve" and runtime.publication is not None:
+                try:
+                    runtime.publication.publish(
+                        project_id=project_id,
+                        source_id=result.source.source_id,
+                        snapshot_id=result.snapshot.snapshot_id,
+                    )
+                    status = "published"
+                    published = True
+                    message = "File parsed and published automatically."
+                except (EmbeddingProviderError, KnowledgePublicationError):
+                    message = (
+                        "Automatic publication did not finish; the previous published version remains active."
+                    )
+            elif review_decision == "approve":
+                message = (
+                    "File parsed; embedding is not configured, so it remains outside retrieval."
+                )
+        except (KnowledgeRepositoryError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     return KnowledgeUploadResponse(
         project_id=project_id,
         source_id=result.source.source_id,
         snapshot_id=result.snapshot.snapshot_id,
-        status=result.source.status,
+        status=status,
         parser_name=result.snapshot.parser_name,
         parser_version=result.snapshot.parser_version,
         chunk_count=len(result.chunks),
         asset_count=len(result.assets),
         created=True,
-        message="File parsed and stored in the Research Inbox.",
+        message=message,
+        review_mode=review_mode,
+        review_decision=review_decision,
+        published=published,
+    )
+
+
+@router.delete(
+    "/{project}/sources/{source_id}",
+    response_model=KnowledgeSourceReviewResponse,
+)
+def withdraw_knowledge_source(
+    project: str,
+    source_id: str,
+    request: Request,
+) -> KnowledgeSourceReviewResponse:
+    runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    if server_context is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Source withdrawal is available only in Server mode.",
+        )
+    actor, project_id = server_context
+    try:
+        status = _server_knowledge_commands(request, runtime).withdraw_source(
+            actor=actor,
+            project_id=project_id,
+            source_id=source_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    except KnowledgeRecordNotFound as exc:
+        raise HTTPException(status_code=404, detail="Knowledge source was not found.") from exc
+    except ServerKnowledgeCommandUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return KnowledgeSourceReviewResponse(
+        project_id=project_id,
+        source_id=source_id,
+        status=status,
+        decision="reject",
     )
 
 
@@ -2500,6 +3008,57 @@ def confirm_knowledge_product(
         product_id=product_id,
         status="confirmed",
     )
+
+
+@router.put(
+    "/{project}/products/{product_id}/specifications",
+    response_model=KnowledgeProductResponse,
+)
+def update_knowledge_product_specifications(
+    project: str,
+    product_id: str,
+    payload: ProductSpecificationsUpdateRequest,
+    request: Request,
+) -> KnowledgeProductResponse:
+    runtime = _runtime(request)
+    server_context = _server_knowledge_context(request, project)
+    project_id = (
+        _project_id(project)
+        if server_context is None
+        else server_context[1]
+    )
+    specification_tables = [
+        table.model_dump() for table in payload.specification_tables
+    ]
+    try:
+        if server_context is None:
+            product = runtime.catalog_repository.update_product_specifications(
+                project_id,
+                product_id,
+                specification_tables,
+            )
+        else:
+            product = _server_knowledge_commands(
+                request,
+                runtime,
+            ).update_product_specifications(
+                actor=server_context[0],
+                project_id=project_id,
+                product_id=product_id,
+                specification_tables=specification_tables,
+            )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ProductCatalogRepositoryError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeCommandUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _product_response(product)
 
 
 @router.get(

@@ -6,7 +6,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Article Workflow Agent",
-  description: "Local workflow for topic-based article generation",
+  description: "Server workspace for topic-based article generation",
 };
 
 export default function RootLayout({

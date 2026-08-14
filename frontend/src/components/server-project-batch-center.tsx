@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { apiGet, apiPost } from "@/lib/api";
+import { sameProjectId } from "@/lib/project-id";
 import {
   canControlServerJob,
   serverJobHref,
@@ -75,7 +76,7 @@ export function ServerProjectBatchCenter({
       ]);
       setPage(next);
       setRole(
-        projects.find((project) => project.project_id === customer)
+        projects.find((project) => sameProjectId(project.project_id, customer))
           ?.effective_role ?? null,
       );
       setError("");

@@ -268,14 +268,33 @@ class ServerProductProviderTests(unittest.TestCase):
         )
 
     def test_prompt_contains_only_bounded_catalog_projection(self) -> None:
+        task = make_task()
+        task.project_notes = (
+            "Select engineered wood flooring only; exclude laminate."
+        )
         prompt = build_server_product_prompt(
-            make_task(),
+            task,
             products=(make_product("product-a"),),
         )
         self.assertIn('"product_id":"product-a"', prompt)
         self.assertIn("Published primary-detail fact", prompt)
+        self.assertIn("Select engineered wood flooring only", prompt)
         self.assertNotIn("snapshot-product-a", prompt)
         self.assertNotIn("source-product-a", prompt)
+
+    def test_prompt_respects_project_notes_exclusion_toggle(self) -> None:
+        task = make_task()
+        task.project_notes = "Never select excluded product family."
+        task.include_project_notes = False
+        prompt = build_server_product_prompt(
+            task,
+            products=(make_product("product-a"),),
+        )
+        self.assertNotIn("Never select excluded product family", prompt)
+        self.assertIn(
+            "[Not included for this generation by the operator.]",
+            prompt,
+        )
 
     def test_provider_requires_exact_json_and_rejects_duplicate_keys(
         self,

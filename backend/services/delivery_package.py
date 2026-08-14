@@ -136,19 +136,22 @@ def build_delivery_zip_bytes(
     article_filename: str,
     tdk_docx: bytes,
     images: Sequence[tuple[str, bytes]],
-    final_screenshot: bytes,
+    final_screenshot: bytes | None = None,
+    final_screenshot_filename: str = "final-ai-rate.png",
 ) -> bytes:
     """Build the public delivery layout without filesystem metadata."""
 
     article_data = bytes(article_docx)
     tdk_data = bytes(tdk_docx)
-    screenshot_data = bytes(final_screenshot)
+    screenshot_data = (
+        bytes(final_screenshot)
+        if final_screenshot is not None
+        else b""
+    )
     if not article_data:
         raise DeliveryPackageError("Article Word document is empty.")
     if not tdk_data:
         raise DeliveryPackageError("D document is empty.")
-    if not screenshot_data:
-        raise DeliveryPackageError("Final AI-rate screenshot is empty.")
     if not images:
         raise DeliveryPackageError(
             "No prepared article images are available for delivery."
@@ -169,11 +172,20 @@ def build_delivery_zip_bytes(
         )
     if normalized_article_name.casefold() == "d.docx":
         normalized_article_name = "Article.docx"
+    normalized_screenshot_name = ""
+    if screenshot_data:
+        normalized_screenshot_name = _archive_filename(
+            final_screenshot_filename,
+            "Final AI-rate screenshot",
+        )
+        if not normalized_screenshot_name.casefold().startswith("final-ai-rate."):
+            normalized_screenshot_name = "final-ai-rate.png"
     used_names = {
         normalized_article_name.casefold(),
         "d.docx",
-        "final-ai-rate.png",
     }
+    if normalized_screenshot_name:
+        used_names.add(normalized_screenshot_name.casefold())
     normalized_images: list[tuple[str, bytes]] = []
     seen_hashes: set[str] = set()
     for raw_filename, raw_data in images:
@@ -214,11 +226,12 @@ def build_delivery_zip_bytes(
         _write_deterministic_zip_entry(archive, "D.docx", tdk_data)
         for filename, data in normalized_images:
             _write_deterministic_zip_entry(archive, filename, data)
-        _write_deterministic_zip_entry(
-            archive,
-            "final-ai-rate.png",
-            screenshot_data,
-        )
+        if screenshot_data:
+            _write_deterministic_zip_entry(
+                archive,
+                normalized_screenshot_name,
+                screenshot_data,
+            )
     return output.getvalue()
 
 

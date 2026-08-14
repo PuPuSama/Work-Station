@@ -493,6 +493,25 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             self.access.calls[-1][2],
             "article.review",
         )
+        opaque_screenshot = self.service.upload_final_ai_screenshot(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id="final-ai-opaque-screenshot",
+            data=b"opaque-jpeg-bytes",
+            content_type="image/jpeg",
+            width=None,
+            height=None,
+        )
+        self.assertEqual(opaque_screenshot.content_type, "image/jpeg")
+        opaque_url = self.service.create_final_ai_screenshot_download_url(
+            actor=self.actor,
+            project_id="project-a",
+            asset_id=opaque_screenshot.asset_id,
+            content_hash=opaque_screenshot.content_hash,
+            width=None,
+            height=None,
+        )
+        self.assertTrue(opaque_url.startswith("https://signed.example.test/"))
         with self.assertRaisesRegex(
             KnowledgeObjectNotFound,
             "^knowledge object not found$",

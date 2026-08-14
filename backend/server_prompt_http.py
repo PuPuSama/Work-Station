@@ -5,7 +5,7 @@ from typing import Literal, NoReturn
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from models import PromptSnapshot
+from models import ApiMessage, PromptSnapshot
 from server_project_http import require_server_project_access
 from services.access_control import ProjectAccessDenied
 from services.server_project_prompts import (
@@ -48,6 +48,7 @@ class ServerPromptUpdateRequest(BaseModel):
 
     expected_version: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=120)
+    kind: PromptKind | None = None
     content: str = Field(min_length=1, max_length=40000)
 
 
@@ -207,6 +208,7 @@ def update_server_project_prompt(
             prompt_id=prompt_id,
             expected_version=payload.expected_version,
             name=payload.name,
+            kind=payload.kind,
             content=payload.content,
         )
     except (
@@ -218,6 +220,35 @@ def update_server_project_prompt(
     ) as exc:
         _raise_prompt_error(exc)
     return _snapshot_response(snapshot)
+
+
+@router.delete(
+    "/{project}/prompt-snapshots/{prompt_id}",
+    response_model=ApiMessage,
+)
+def delete_server_project_prompt(
+    project: str,
+    prompt_id: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ApiMessage:
+    del project
+    try:
+        _service(request, authorized).delete(
+            authorized.actor,
+            prompt_id=prompt_id,
+        )
+    except (
+        KeyError,
+        ProjectAccessDenied,
+        ServerProjectPromptConflict,
+        ServerProjectPromptError,
+        ServerProjectPromptUnavailable,
+    ) as exc:
+        _raise_prompt_error(exc)
+    return ApiMessage(message="提示词已删除。")
 
 
 @router.put(

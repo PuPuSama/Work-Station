@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { apiGet } from "@/lib/api";
+import { sameProjectId } from "@/lib/project-id";
 import {
   createTaskResearchPlan,
   getEvidencePack,
@@ -145,7 +146,7 @@ export function ServerResearchWorkspace({
       setRuns(visibleRuns);
       setTasks(nextTasks);
       setRole(
-        projects.find((project) => project.project_id === customer)
+        projects.find((project) => sameProjectId(project.project_id, customer))
           ?.effective_role ?? null,
       );
       setSelectedPlanId((current) =>

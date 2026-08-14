@@ -14,7 +14,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config import AppConfig
 from knowledge_agent.object_storage import (
@@ -23,6 +23,7 @@ from knowledge_agent.object_storage import (
 )
 from models import (
     STATUS_FINAL_AI_CHECKED,
+    STATUS_HUMANIZED_READY,
     STATUS_INITIAL_AI_CHECKED,
     AICheck,
     SeoReviewChangeDecision,
@@ -48,7 +49,7 @@ from services.project_memberships import (
     ProjectMembershipTargetUnavailable,
     ProjectMembershipUnavailable,
 )
-from services.server_auth import SERVER_AUTH_COOKIE_NAME, server_mode_enabled
+from services.server_auth import SERVER_AUTH_COOKIE_NAME
 from services.server_article_images import (
     ServerArticleImageAnchorRequired,
     ServerArticleImageError,
@@ -120,6 +121,7 @@ from services.server_project_prompts import (
 )
 from services.server_project_metadata import (
     PostgresServerProjectMetadata,
+    ServerProjectCreationConflict,
     ServerProjectMetadata,
     ServerProjectMetadataConflict,
     ServerProjectMetadataUnavailable,
@@ -178,6 +180,12 @@ from services.server_tdk_export import (
     ServerTdkError,
     ServerTdkUnavailable,
 )
+from services.server_task_workbook import (
+    MAX_WORKBOOK_BYTES,
+    ServerTaskWorkbookError,
+    preview_task_workbook,
+)
+from services.zerogpt import ZeroGPTClient
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
     ACTION_CONFIRM_FINAL_AI,
@@ -231,6 +239,20 @@ class ProjectCatalogResponse(BaseModel):
     products: list[ProjectCatalogProductResponse]
 
 
+class ProjectCreateRequest(BaseModel):
+    """Provision a Project under the signed-in Organization."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    customer_name: str = Field(min_length=1, max_length=120)
+    official_domain: str = Field(min_length=1, max_length=253)
+    owning_team_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+
+
 class ConfirmedProductsUpdateRequest(BaseModel):
     """Select catalog identities, never caller-supplied product facts or URLs."""
 
@@ -273,6 +295,7 @@ class ProjectTaskIntakeRowRequest(BaseModel):
     )
 
     topic: str = Field(min_length=1, max_length=500)
+    primary_keyword: str = Field(default="", max_length=500)
     competitor_keyword: str = Field(default="", max_length=500)
     competitor_blog: str = Field(default="", max_length=2048)
 
@@ -313,6 +336,7 @@ class ProjectTaskIntakeItemResponse(BaseModel):
     id: str
     topic_index: int
     topic: str
+    primary_keyword: str
     competitor_keyword: str
     competitor_blog: str
     status: str
@@ -328,12 +352,22 @@ class ProjectTaskIntakeResponse(BaseModel):
     tasks: list[ProjectTaskIntakeItemResponse]
 
 
+class ProjectTaskWorkbookPreviewResponse(BaseModel):
+    filename: str
+    sheet_name: str
+    headers: list[str]
+    rows: list[list[str]]
+    mapping: dict[str, int | None]
+    truncated: bool
+
+
 class ProjectMetadataResponse(BaseModel):
-    """Public Project identity; free-form facts belong in Knowledge."""
+    """Project settings; authoritative facts still belong in Knowledge."""
 
     project_id: str
     customer_name: str
     official_domain: str
+    project_notes: str
     revision: int
 
 
@@ -348,6 +382,7 @@ class ProjectMetadataUpdateRequest(BaseModel):
     revision: int = Field(ge=0)
     customer_name: str = Field(min_length=1, max_length=120)
     official_domain: str = Field(min_length=1, max_length=253)
+    project_notes: str = Field(default="", max_length=30000)
 
 
 def _project_metadata_response(
@@ -357,6 +392,7 @@ def _project_metadata_response(
         project_id=metadata.project_id,
         customer_name=metadata.customer_name,
         official_domain=metadata.official_domain,
+        project_notes=metadata.project_notes,
         revision=metadata.revision,
     )
 
@@ -547,6 +583,15 @@ class FinalAiCheckUpdateRequest(BaseModel):
     )
     report: str = Field(default="", max_length=30000)
     confirmed: bool = True
+    deferred: bool = False
+
+    @model_validator(mode="after")
+    def validate_review_state(self) -> "FinalAiCheckUpdateRequest":
+        if self.confirmed and self.deferred:
+            raise ValueError("AI review cannot be confirmed and deferred together")
+        if self.deferred and self.score is not None:
+            raise ValueError("a deferred AI review cannot record a score")
+        return self
 
 
 class InitialAiCheckUpdateRequest(FinalAiCheckUpdateRequest):
@@ -560,6 +605,7 @@ class ReviewedHumanizedArticleRequest(BaseModel):
 
     revision: int = Field(ge=0)
     article: str = Field(min_length=1, max_length=200000)
+    recheck_ai_rate: bool = False
 
 
 class ArticleSectionRewriteRequest(BaseModel):
@@ -710,21 +756,6 @@ def require_server_project_access(
 ) -> AuthorizedProjectRequest:
     """Authenticate and authorize one explicitly project-scoped server API."""
 
-    configured_mode = getattr(
-        request.app.state,
-        "server_mode_enabled",
-        None,
-    )
-    enabled = (
-        server_mode_enabled()
-        if configured_mode is None
-        else bool(configured_mode)
-    )
-    if not enabled:
-        raise HTTPException(
-            status_code=404,
-            detail="Server project API is not available in local mode.",
-        )
     security = getattr(
         request.app.state,
         "server_request_security",
@@ -756,21 +787,6 @@ def require_server_project_access(
 def require_server_actor(request: Request) -> ActorIdentity:
     """Authenticate a server Actor before the SQL-scoped project listing."""
 
-    configured_mode = getattr(
-        request.app.state,
-        "server_mode_enabled",
-        None,
-    )
-    enabled = (
-        server_mode_enabled()
-        if configured_mode is None
-        else bool(configured_mode)
-    )
-    if not enabled:
-        raise HTTPException(
-            status_code=404,
-            detail="Server project API is not available in local mode.",
-        )
     security = getattr(
         request.app.state,
         "server_request_security",
@@ -920,6 +936,7 @@ def _task_intake_response(
                 id=task.id,
                 topic_index=task.topic_index,
                 topic=task.topic,
+                primary_keyword=task.primary_keyword,
                 competitor_keyword=task.competitor_keyword,
                 competitor_blog=task.competitor_blog,
                 status=task.status,
@@ -1239,6 +1256,47 @@ def list_accessible_projects(
         ) from exc
 
 
+@router.post(
+    "",
+    response_model=AccessibleProject,
+    status_code=201,
+)
+def create_project(
+    payload: ProjectCreateRequest,
+    request: Request,
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> AccessibleProject:
+    try:
+        metadata = _project_metadata_service(request).create(
+            actor=actor,
+            customer_name=payload.customer_name,
+            official_domain=payload.official_domain,
+            owning_team_id=payload.owning_team_id,
+            event_id=f"project_create_{uuid.uuid4().hex}",
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="Only an organization administrator can create projects.",
+        ) from exc
+    except ServerProjectCreationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ServerProjectMetadataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project creation is temporarily unavailable.",
+        ) from exc
+    return AccessibleProject(
+        project_id=metadata.project_id,
+        customer_name=metadata.customer_name,
+        official_domain=metadata.official_domain,
+        revision=metadata.revision,
+        effective_role="org_admin",
+    )
+
+
 @router.get(
     "/{project}/metadata",
     response_model=ProjectMetadataResponse,
@@ -1294,6 +1352,7 @@ def update_project_metadata(
             expected_revision=payload.revision,
             customer_name=payload.customer_name,
             official_domain=payload.official_domain,
+            project_notes=payload.project_notes,
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -1560,10 +1619,43 @@ def create_project_task(
             intake_id=payload.intake_id,
             row=ServerTaskIntakeRow(
                 topic=payload.topic,
+                primary_keyword=payload.primary_keyword,
                 competitor_keyword=payload.competitor_keyword,
                 competitor_blog=payload.competitor_blog,
             ),
         )
+    )
+
+
+@router.post(
+    "/{project}/task-imports/preview",
+    response_model=ProjectTaskWorkbookPreviewResponse,
+)
+def preview_project_task_workbook(
+    project: str,
+    request: Request,
+    file: UploadFile = File(...),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectTaskWorkbookPreviewResponse:
+    del project
+    _require_project_permission(request, authorized, "article.edit")
+    content = file.file.read(MAX_WORKBOOK_BYTES + 1)
+    try:
+        preview = preview_task_workbook(
+            filename=file.filename or "",
+            content=content,
+        )
+    except ServerTaskWorkbookError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ProjectTaskWorkbookPreviewResponse(
+        filename=preview.filename,
+        sheet_name=preview.sheet_name,
+        headers=list(preview.headers),
+        rows=[list(row) for row in preview.rows],
+        mapping=preview.mapping,
+        truncated=preview.truncated,
     )
 
 
@@ -1594,6 +1686,7 @@ def import_project_tasks(
             rows=tuple(
                 ServerTaskIntakeRow(
                     topic=row.topic,
+                    primary_keyword=row.primary_keyword,
                     competitor_keyword=row.competitor_keyword,
                     competitor_blog=row.competitor_blog,
                 )
@@ -3198,6 +3291,7 @@ def confirm_project_task_initial_ai(
         )
     task.initial_ai_check = AICheck(
         confirmed=payload.confirmed,
+        deferred=payload.deferred,
         score=payload.score,
         report=payload.report,
         provider=previous.provider,
@@ -3212,7 +3306,7 @@ def confirm_project_task_initial_ai(
         article_hash=content_hash(initial),
     )
     task.zero_gpt_report = payload.report
-    if payload.confirmed:
+    if payload.confirmed or payload.deferred:
         transition_task(task, STATUS_INITIAL_AI_CHECKED)
     return _save_audited_task(
         request,
@@ -3222,6 +3316,7 @@ def confirm_project_task_initial_ai(
         action="article.initial_ai_check.updated",
         details={
             "confirmed": payload.confirmed,
+            "deferred": payload.deferred,
             "score_recorded": payload.score is not None,
         },
     )
@@ -3361,6 +3456,38 @@ def save_project_task_humanized_article(
         )
     except ServerHumanizedArticleError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if payload.recheck_ai_rate:
+        detector = ZeroGPTClient()
+        checked_at = now_iso()
+        article_hash = content_hash(candidate)
+        if not detector.ready:
+            task.final_ai_check = AICheck(
+                confirmed=False,
+                report="ZeroGPT 自动复检未运行：服务端尚未配置 API Key。",
+                provider="zerogpt",
+                checked_at=checked_at,
+                article_hash=article_hash,
+            )
+        else:
+            try:
+                detection = detector.detect(candidate)
+            except Exception:
+                task.final_ai_check = AICheck(
+                    confirmed=False,
+                    report="ZeroGPT 自动复检暂时不可用，请稍后重试或保留截图人工确认。",
+                    provider="zerogpt",
+                    checked_at=checked_at,
+                    article_hash=article_hash,
+                )
+            else:
+                task.final_ai_check = AICheck(
+                    confirmed=False,
+                    score=detection.ai_percentage,
+                    report=detection.report,
+                    provider="zerogpt",
+                    checked_at=checked_at,
+                    article_hash=article_hash,
+                )
     return _save_audited_task(
         request,
         authorized,
@@ -3500,6 +3627,8 @@ def upload_project_task_final_ai_screenshot(
             project_id=authorized.project_id,
             task=task,
             content=content,
+            filename=file.filename or "",
+            content_type=file.content_type or "",
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -3580,6 +3709,7 @@ def confirm_project_task_final_ai(
         )
     task.final_ai_check = AICheck(
         confirmed=payload.confirmed,
+        deferred=payload.deferred,
         score=payload.score,
         report=payload.report,
         screenshot_path="",
@@ -3591,7 +3721,7 @@ def confirm_project_task_final_ai(
         confirmed_at=now_iso() if payload.confirmed else "",
         article_hash=content_hash(task.humanized_article),
     )
-    if payload.confirmed:
+    if (payload.confirmed or payload.deferred) and task.status == STATUS_HUMANIZED_READY:
         transition_task(task, STATUS_FINAL_AI_CHECKED)
     return _save_audited_task(
         request,
@@ -3601,6 +3731,7 @@ def confirm_project_task_final_ai(
         action="article.final_ai_check.updated",
         details={
             "confirmed": payload.confirmed,
+            "deferred": payload.deferred,
             "score_recorded": payload.score is not None,
         },
     )
@@ -3650,8 +3781,8 @@ def create_project_task_final_ai_screenshot_download(
                 content_hash=(
                     task.final_ai_check.screenshot_content_hash
                 ),
-                width=task.final_ai_check.screenshot_width or 0,
-                height=task.final_ai_check.screenshot_height or 0,
+                width=task.final_ai_check.screenshot_width,
+                height=task.final_ai_check.screenshot_height,
                 expires_seconds=expires_seconds,
             )
         )
@@ -4188,7 +4319,11 @@ def package_project_task_delivery(
         expected_revision=payload.revision,
         action="article.delivery.packaged",
         details={
-            "file_count": len(task.images) + 3,
+            "file_count": (
+                len(task.images)
+                + 2
+                + int(bool(task.final_ai_check.screenshot_asset_id))
+            ),
             "image_count": len(task.images),
         },
     )

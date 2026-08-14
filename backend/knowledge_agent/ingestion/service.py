@@ -8,6 +8,7 @@ from pathlib import PurePath
 from typing import Mapping, Protocol
 
 from ..artifact_store import ArtifactStore
+from ..asset_review import review_embedded_asset
 from ..assets import (
     KnowledgeAsset,
     KnowledgeAssetRepository,
@@ -131,6 +132,9 @@ class PrivateDocumentIngestionService:
         self._parser_router = parser_router or DocumentParserRouter()
         self._chunker = chunker or ParsedDocumentChunker()
 
+    def close(self) -> None:
+        self._parser_router.close()
+
     def ingest(
         self,
         *,
@@ -161,7 +165,9 @@ class PrivateDocumentIngestionService:
         stored_asset_ids: dict[str, str] = {}
         for asset in prepared.assets:
             stored = self._asset_repository.put_asset(asset)
-            stored_assets.append(stored)
+            stored_assets.append(
+                replace(stored, metadata=asset.metadata)
+            )
             stored_asset_ids[asset.asset_id] = stored.asset_id
         stored_links: list[SnapshotAsset] = []
         for link in prepared.snapshot_assets:
@@ -258,6 +264,9 @@ class PrivateDocumentIngestionService:
             public_source=False,
             metadata=source_metadata,
         )
+        unique_asset_count = len(
+            {parsed_asset.content_hash for parsed_asset in parsed.assets}
+        )
         snapshot = existing_snapshot or SourceSnapshot(
             project_id=project_id,
             source_id=source_id,
@@ -271,7 +280,7 @@ class PrivateDocumentIngestionService:
             metadata={
                 "title": parsed.title,
                 "block_count": len(parsed.blocks),
-                "asset_count": len(parsed.assets),
+                "asset_count": unique_asset_count,
                 "source_projection": {
                     "schema_version": 1,
                     "display_name": source.display_name,
@@ -284,7 +293,16 @@ class PrivateDocumentIngestionService:
 
         prepared_assets: list[KnowledgeAsset] = []
         snapshot_asset_links: list[SnapshotAsset] = []
+        seen_asset_ids: set[str] = set()
         for parsed_asset in parsed.assets:
+            parsed_asset_id = _asset_id(parsed_asset.content_hash)
+            # The database models an asset once per snapshot. Catalog PDFs
+            # commonly repeat an identical logo or product image on several
+            # pages; keep the first evidence location instead of attempting
+            # conflicting links for the same content-addressed asset.
+            if parsed_asset_id in seen_asset_ids:
+                continue
+            seen_asset_ids.add(parsed_asset_id)
             artifact_uri = self._artifact_store.put(
                 project_id=project_id,
                 namespace="assets",
@@ -294,12 +312,23 @@ class PrivateDocumentIngestionService:
             )
             prepared_asset = KnowledgeAsset(
                 project_id=project_id,
-                asset_id=_asset_id(parsed_asset.content_hash),
+                asset_id=parsed_asset_id,
                 content_hash=parsed_asset.content_hash,
                 artifact_uri=artifact_uri,
                 content_type=parsed_asset.content_type,
                 byte_size=len(parsed_asset.content),
-                metadata=dict(parsed_asset.metadata),
+                metadata={
+                    **dict(parsed_asset.metadata),
+                    "knowledge_asset_review": review_embedded_asset(
+                        filename=parsed_asset.filename,
+                        content=parsed_asset.content,
+                        content_type=parsed_asset.content_type,
+                        metadata=parsed_asset.metadata,
+                    ).to_metadata(),
+                },
+            )
+            asset_review = dict(prepared_asset.metadata).get(
+                "knowledge_asset_review",
             )
             link = SnapshotAsset(
                 project_id=project_id,
@@ -309,7 +338,10 @@ class PrivateDocumentIngestionService:
                 evidence_kind="embedded",
                 ordinal=parsed_asset.ordinal,
                 locator=dict(parsed_asset.locator),
-                metadata={"original_filename": parsed_asset.filename},
+                metadata={
+                    "original_filename": parsed_asset.filename,
+                    "knowledge_asset_review": asset_review,
+                },
             )
             prepared_assets.append(prepared_asset)
             snapshot_asset_links.append(link)

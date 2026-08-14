@@ -18,15 +18,23 @@ HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 NUMBER_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)*(?:%|°[CF])?", re.IGNORECASE)
 FAQ_HEADING_TEXT = "FAQ"
 FAQ_QUESTION_PATTERN = re.compile(
+    r"^\s*###\s+(?!(?:\*\*)?Q:\s+)(?!\*\*).+?(?<!\*\*)\s*$",
+    re.MULTILINE,
+)
+FAQ_ANSWER_PATTERN = re.compile(
+    r"^(?!\s*#{1,6}\s+)(?!\s*(?:[-+*]|\d+[.)])\s+)"
+    r"(?!\s*(?:\*\*\s*)?(?:Q:|A:)\s+)\S.*$",
+    re.MULTILINE,
+)
+FAQ_LEGACY_BOLD_QUESTION_PATTERN = re.compile(
     r"^\s*\*\*Q:\s+.+?\*\*\s*$",
     re.MULTILINE,
 )
-FAQ_ANSWER_PATTERN = re.compile(r"^\s*A:\s+\S.*$", re.MULTILINE)
-FAQ_ANY_QUESTION_PATTERN = re.compile(
+FAQ_LEGACY_QUESTION_PATTERN = re.compile(
     r"^\s*(?:\*\*)?Q:\s+.+?(?:\*\*)?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-FAQ_ANY_ANSWER_PATTERN = re.compile(
+FAQ_LEGACY_ANSWER_PATTERN = re.compile(
     r"^\s*A:\s+\S.*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -72,6 +80,59 @@ def visible_word_count(markdown: str) -> int:
     return len(VISIBLE_WORD_PATTERN.findall(visible_markdown_text(markdown)))
 
 
+def _faq_block_lines(markdown: str) -> list[str]:
+    """Return non-empty lines directly under the first ``## FAQ`` heading."""
+
+    lines = (markdown or "").splitlines()
+    faq_index = next(
+        (
+            index
+            for index, raw_line in enumerate(lines)
+            if re.match(r"^\s*##\s+FAQ\s*$", raw_line, re.IGNORECASE)
+        ),
+        None,
+    )
+    if faq_index is None:
+        return []
+
+    result: list[str] = []
+    for raw_line in lines[faq_index + 1 :]:
+        stripped = raw_line.strip()
+        heading = HEADING_PATTERN.match(stripped)
+        if heading and len(heading.group(1)) == 2:
+            break
+        if stripped and stripped not in {"---", "***", "___"}:
+            result.append(stripped)
+    return result
+
+
+def _matches_faq_pairs(
+    lines: list[str],
+    question_pattern: re.Pattern[str],
+    answer_pattern: re.Pattern[str],
+) -> bool:
+    if len(lines) != FAQ_PAIR_COUNT * 2:
+        return False
+    return all(
+        question_pattern.fullmatch(lines[index])
+        and answer_pattern.fullmatch(lines[index + 1])
+        for index in range(0, len(lines), 2)
+    )
+
+
+def _faq_layout_kind(markdown: str) -> str | None:
+    lines = _faq_block_lines(markdown)
+    if _matches_faq_pairs(lines, FAQ_QUESTION_PATTERN, FAQ_ANSWER_PATTERN):
+        return "h3"
+    if _matches_faq_pairs(
+        lines,
+        FAQ_LEGACY_QUESTION_PATTERN,
+        FAQ_LEGACY_ANSWER_PATTERN,
+    ):
+        return "legacy"
+    return None
+
+
 def validate_humanized_article(
     source: str,
     candidate: str,
@@ -80,7 +141,23 @@ def validate_humanized_article(
 ) -> None:
     """Validate the hard, locally checkable parts of the humanization prompt."""
 
-    validate_article_layout(candidate)
+    source_faq_kind = _faq_layout_kind(source)
+    validate_article_layout(
+        candidate,
+        allow_legacy_faq=source_faq_kind == "legacy",
+    )
+    candidate_faq_kind = _faq_layout_kind(candidate)
+    if source_faq_kind == "h3" and candidate_faq_kind != "h3":
+        raise ArticleStructureError(
+            "Humanization changed the FAQ question heading structure."
+        )
+    if source_faq_kind == "legacy" and candidate_faq_kind not in {
+        "legacy",
+        "h3",
+    }:
+        raise ArticleStructureError(
+            "Humanization changed the FAQ question and answer structure."
+        )
 
     if canonical_heading_sequence(source) != canonical_heading_sequence(candidate):
         raise ArticleStructureError("Humanization changed the article heading hierarchy or heading text.")
@@ -93,17 +170,6 @@ def validate_humanized_article(
         raise ArticleStructureError(
             "Humanization changed, removed, or added numeric facts, units, or percentages."
         )
-
-    source_faq = (
-        len(FAQ_ANY_QUESTION_PATTERN.findall(source)),
-        len(FAQ_ANY_ANSWER_PATTERN.findall(source)),
-    )
-    candidate_faq = (
-        len(FAQ_ANY_QUESTION_PATTERN.findall(candidate)),
-        len(FAQ_ANY_ANSWER_PATTERN.findall(candidate)),
-    )
-    if source_faq != candidate_faq:
-        raise ArticleStructureError("Humanization changed the FAQ Q/A structure.")
 
     source_tables = [line.strip() for line in source.splitlines() if line.strip().startswith("|")]
     candidate_tables = [
@@ -286,13 +352,18 @@ def canonical_heading_sequence(markdown: str) -> list[tuple[int, str]]:
     return heading_sequence("\n".join(outside_faq)) + [(2, FAQ_HEADING_TEXT)]
 
 
-def validate_article_layout(markdown: str) -> None:
+def validate_article_layout(
+    markdown: str,
+    *,
+    allow_legacy_faq: bool = True,
+) -> None:
     """Enforce the operator's final FAQ contract on a complete article.
 
     The FAQ is deliberately strict because it is consumed by both the manual
-    humanization checkpoint and Word export. A single final ``## FAQ`` section
-    with three bold question lines prevents models from moving a conclusion or
-    CTA below it and makes the exported questions reliably bold.
+    humanization checkpoint and Word export. The current contract uses three H3
+    question headings, each followed by one plain answer line. Legacy bold
+    ``Q:``/``A:`` blocks can be read when explicitly allowed so existing saved
+    articles remain editable, but new generation paths disable that fallback.
     """
 
     lines = (markdown or "").splitlines()
@@ -320,28 +391,48 @@ def validate_article_layout(markdown: str) -> None:
     if not h2_indices or h2_indices[-1] != faq_index:
         raise ArticleStructureError("'## FAQ' must be the final H2 section in the article.")
 
-    faq_lines = [
-        line.strip()
-        for line in lines[faq_index + 1 :]
-        if line.strip() and line.strip() not in {"---", "***", "___"}
-    ]
+    faq_lines = _faq_block_lines(markdown)
     expected_line_count = FAQ_PAIR_COUNT * 2
     if len(faq_lines) != expected_line_count:
         raise ArticleStructureError(
-            "The final FAQ section must contain exactly three Q/A pairs and no content after them."
+            "The final FAQ section must contain exactly three Q/A pairs "
+            "(three questions with one answer each) and no content after them."
         )
+
+    if _matches_faq_pairs(faq_lines, FAQ_QUESTION_PATTERN, FAQ_ANSWER_PATTERN):
+        return
+
+    legacy_shape = _matches_faq_pairs(
+        faq_lines,
+        FAQ_LEGACY_QUESTION_PATTERN,
+        FAQ_LEGACY_ANSWER_PATTERN,
+    )
+    if allow_legacy_faq and legacy_shape:
+        for pair_index in range(FAQ_PAIR_COUNT):
+            question = faq_lines[pair_index * 2]
+            answer = faq_lines[pair_index * 2 + 1]
+            if not FAQ_LEGACY_BOLD_QUESTION_PATTERN.fullmatch(question):
+                raise ArticleStructureError(
+                    "Each legacy FAQ question must be a complete bold Markdown line such as "
+                    "'**Q: What should a buyer check?**'."
+                )
+            if not FAQ_LEGACY_ANSWER_PATTERN.fullmatch(answer):
+                raise ArticleStructureError(
+                    "Each legacy FAQ question must be followed by one 'A: ...' answer line."
+                )
+        return
 
     for pair_index in range(FAQ_PAIR_COUNT):
         question = faq_lines[pair_index * 2]
         answer = faq_lines[pair_index * 2 + 1]
         if not FAQ_QUESTION_PATTERN.fullmatch(question):
             raise ArticleStructureError(
-                "Each FAQ question must be a complete bold Markdown line such as "
-                "'**Q: What should a buyer check?**'."
+                "Each FAQ question must be a level-3 Markdown heading such as "
+                "'### What should a buyer check?' without a Q: prefix."
             )
         if not FAQ_ANSWER_PATTERN.fullmatch(answer):
             raise ArticleStructureError(
-                "Each bold FAQ question must be followed by one 'A: ...' answer line."
+                "Each FAQ question heading must be followed by one plain answer line without an A: prefix."
             )
 
 

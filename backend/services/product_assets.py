@@ -30,6 +30,19 @@ SOURCE_KIND_GALLERY = "main_gallery"
 SOURCE_KIND_BODY = "body_image"
 
 _BLOCKED_TAGS = {"header", "nav", "footer", "aside", "script", "style", "noscript", "template"}
+_ELEMENTOR_ALL_DEVICE_HIDDEN_CLASSES = frozenset(
+    {
+        "elementor-hidden-widescreen",
+        "elementor-hidden-desktop",
+        "elementor-hidden-laptop",
+        "elementor-hidden-tablet",
+        "elementor-hidden-mobile",
+    }
+)
+_HIDDEN_STYLE_PATTERN = re.compile(
+    r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)",
+    re.IGNORECASE,
+)
 _BLOCKED_CONTEXT_PATTERN = re.compile(
     r"(?:^|[\s_-])(?:"
     r"related(?:[\s_-]?products?)?|"
@@ -290,9 +303,24 @@ def _element_and_ancestors(element: Any):
     yield from element.iterancestors()
 
 
+def _is_explicitly_hidden(element: Any) -> bool:
+    attributes = getattr(element, "attrib", {})
+    if "hidden" in attributes:
+        return True
+    if _normalise_space(attributes.get("aria-hidden", "")).casefold() == "true":
+        return True
+    if _HIDDEN_STYLE_PATTERN.search(str(attributes.get("style") or "")):
+        return True
+    classes = frozenset(
+        value.casefold()
+        for value in _normalise_space(attributes.get("class", "")).split()
+    )
+    return _ELEMENTOR_ALL_DEVICE_HIDDEN_CLASSES.issubset(classes)
+
+
 def _is_blocked(element: Any) -> bool:
     for node in _element_and_ancestors(element):
-        if _tag(node) in _BLOCKED_TAGS:
+        if _tag(node) in _BLOCKED_TAGS or _is_explicitly_hidden(node):
             return True
         if _BLOCKED_CONTEXT_PATTERN.search(_context_text(node)):
             return True

@@ -126,6 +126,7 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
         *,
         trust_tier: str = "hard_fact",
         public: bool = True,
+        source_kind: str = "knowledge_page",
     ) -> tuple[str, RetrievalHit]:
         source_id = f"{self.prefix}-{source_suffix}"
         snapshot_id = f"{self.prefix}-{snapshot_suffix}"
@@ -141,7 +142,7 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
                     project_id=project_id,
                     source_id=source_id,
                     display_name=f"Source {source_suffix}",
-                    source_kind="knowledge_page",
+                    source_kind=source_kind,  # type: ignore[arg-type]
                     trust_tier=trust_tier,  # type: ignore[arg-type]
                     public_source=public,
                     canonical_url=canonical_url,
@@ -190,7 +191,7 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
                 source_id=source_id,
                 snapshot_id=snapshot_id,
                 display_name=f"Source {source_suffix}",
-                source_kind="knowledge_page",
+                source_kind=source_kind,  # type: ignore[arg-type]
                 trust_tier=trust_tier,  # type: ignore[arg-type]
                 public_source=public,
                 canonical_url=canonical_url,
@@ -363,6 +364,31 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
                     support_scope="sentence",
                     claim_type="hard_fact",
                     public_citation_url=retrieval_hit.provenance.canonical_url,  # type: ignore[union-attr]
+                )
+            )
+
+    def test_official_blog_cannot_be_saved_as_evidence_link(self) -> None:
+        project_id = self._project()
+        chunk_id, retrieval_hit = self._published_chunk(
+            project_id,
+            "blog",
+            "snapshot-blog",
+            trust_tier="reference_material",
+            source_kind="official_blog",
+        )
+
+        with self.assertRaisesRegex(EvidenceTargetError, "writing references"):
+            self.links.save_evidence_link(
+                EvidenceLink(
+                    project_id=project_id,
+                    evidence_link_id=f"{self.prefix}-blog-link",
+                    article_id=f"{self.prefix}-article",
+                    paragraph_id="p1",
+                    paragraph_hash=digest("editorial reference"),
+                    chunk_id=chunk_id,
+                    public_citation_url=(
+                        retrieval_hit.provenance.canonical_url  # type: ignore[union-attr]
+                    ),
                 )
             )
 

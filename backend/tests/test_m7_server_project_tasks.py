@@ -19,6 +19,7 @@ from zipfile import ZipFile
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from docx import Document
+from openpyxl import Workbook
 from PIL import Image
 
 
@@ -86,6 +87,9 @@ from services.server_product_rediscovery import (  # noqa: E402
     ProductRediscoveryUnavailable,
     ServerProductRediscoveryHandler,
     ServerProductRediscoveryRegistry,
+)
+from services.server_product_selection import (  # noqa: E402
+    PostgresConfirmedProductSelection,
 )
 from services.server_outline_generation import (  # noqa: E402
     PostgresPublishedOutlineContext,
@@ -158,17 +162,17 @@ Keep the original evidence guidance.
 
 ## FAQ
 
-**Q: What should buyers send?**
+### What should buyers send?
 
-A: Send requirements and quantities.
+Send requirements and quantities.
 
-**Q: When should buyers request samples?**
+### When should buyers request samples?
 
-A: Request samples before approval.
+Request samples before approval.
 
-**Q: Why compare supplier capability?**
+### Why compare supplier capability?
 
-A: Capability affects quality and support.
+Capability affects quality and support.
 """
 
 SERVER_TDK_RESPONSE = """{
@@ -849,6 +853,8 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         suffix: str,
         text: str,
         status: str = "published",
+        source_kind: str = "knowledge_page",
+        trust_tier: str = "hard_fact",
     ) -> str:
         source_id = f"{suffix}-source"
         snapshot_id = f"{suffix}-snapshot"
@@ -859,8 +865,8 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     project_id=project_id,
                     source_id=source_id,
                     display_name=f"{suffix} source",
-                    source_kind="knowledge_page",
-                    trust_tier="hard_fact",
+                    source_kind=source_kind,
+                    trust_tier=trust_tier,
                     status=status,
                     public_source=True,
                     canonical_url=f"https://{project_id}/{suffix}",
@@ -905,6 +911,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         asset_id: str | None = None,
         status: str = "confirmed",
         source_status: str = "published",
+        manual_specification_tables: list[dict[str, object]] | None = None,
     ) -> None:
         source_id = f"{product_id}-source"
         snapshot_id = f"{product_id}-snapshot"
@@ -959,6 +966,15 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                                 ],
                             }
                         ],
+                        **(
+                            {
+                                "manual_specification_tables": (
+                                    manual_specification_tables
+                                )
+                            }
+                            if manual_specification_tables is not None
+                            else {}
+                        ),
                     },
                 )
             )
@@ -1034,7 +1050,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -1122,7 +1137,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     client.get("/api/tasks").status_code,
-                    503,
+                    404,
                 )
                 download = client.get(
                     f"/api/projects/{self.project_a}/assets/"
@@ -1252,7 +1267,25 @@ class ServerProjectTaskApiTests(unittest.TestCase):
     ) -> None:
         import app as app_module
 
+        context_repository = self._task_repository(
+            organization_id=self.org_a,
+            project_id=self.project_a,
+        )
+        context_record = context_repository.get(self.task_a)
+        assert context_record is not None
+        context_record.update(
+            {
+                "project_introduction": "Shared project introduction",
+            }
+        )
+        context_repository.upsert(context_record)
+
         with self.engine.begin() as connection:
+            connection.execute(
+                projects.update()
+                .where(projects.c.project_id == self.project_a)
+                .values(project_notes="Shared operator project rules")
+            )
             connection.execute(
                 project_memberships.update()
                 .where(
@@ -1270,7 +1303,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -1296,6 +1328,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 create_body = {
                     "intake_id": "manual-request-001",
                     "topic": "How to compare forged fastener suppliers",
+                    "primary_keyword": "forged fastener suppliers",
                     "competitor_keyword": "forged fasteners",
                     "competitor_blog": (
                         "https://competitor.example.test/guide"
@@ -1325,6 +1358,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         "id",
                         "topic_index",
                         "topic",
+                        "primary_keyword",
                         "competitor_keyword",
                         "competitor_blog",
                         "status",
@@ -1345,6 +1379,18 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(stored["week_folder"], "server")
                 self.assertEqual(stored["task_dir"], "")
                 self.assertEqual(stored["source_kind"], "manual")
+                self.assertEqual(
+                    stored["project_introduction"],
+                    "Shared project introduction",
+                )
+                self.assertEqual(
+                    stored["project_notes"],
+                    "Shared operator project rules",
+                )
+                self.assertEqual(
+                    stored["primary_keyword"],
+                    "forged fastener suppliers",
+                )
                 self.assertNotIn(
                     str(local_state),
                     json.dumps(stored),
@@ -1369,6 +1415,48 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(conflict.status_code, 409)
                 self.assertNotIn("Different input", conflict.text)
 
+                workbook = Workbook()
+                worksheet = workbook.active
+                worksheet.append(
+                    [
+                        "文章话题",
+                        "目标关键词",
+                        "竞对关键词",
+                        "竞对 Blog URL",
+                    ]
+                )
+                worksheet.append(
+                    [
+                        "Bolt grade selection",
+                        "bolt grade guide",
+                        "bolt grades",
+                        "https://competitor.example.test/bolts",
+                    ]
+                )
+                workbook_output = BytesIO()
+                workbook.save(workbook_output)
+                workbook.close()
+                preview = client.post(
+                    f"/api/projects/{self.project_a}/task-imports/preview",
+                    files={
+                        "file": (
+                            "topics.xlsx",
+                            workbook_output.getvalue(),
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+                    },
+                )
+                self.assertEqual(preview.status_code, 200, preview.text)
+                self.assertEqual(
+                    preview.json()["mapping"],
+                    {
+                        "topic": 0,
+                        "primary_keyword": 1,
+                        "competitor_keyword": 2,
+                        "competitor_blog": 3,
+                    },
+                )
+
                 imported = client.post(
                     f"/api/projects/{self.project_a}/task-imports",
                     json={
@@ -1377,11 +1465,13 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         "rows": [
                             {
                                 "topic": "Bolt grade selection",
+                                "primary_keyword": "bolt grade guide",
                                 "competitor_keyword": "bolt grades",
                                 "competitor_blog": "",
                             },
                             {
                                 "topic": "Fastener coating guide",
+                                "primary_keyword": "fastener coatings",
                                 "competitor_keyword": "",
                                 "competitor_blog": (
                                     "https://competitor.example.test/coatings"
@@ -1406,6 +1496,14 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     imported_record = repository.get(item["id"])
                     assert imported_record is not None
                     source_kinds.append(str(imported_record["source_kind"]))
+                    self.assertEqual(
+                        imported_record["project_introduction"],
+                        "Shared project introduction",
+                    )
+                    self.assertEqual(
+                        imported_record["project_notes"],
+                        "Shared operator project rules",
+                    )
                 self.assertEqual(
                     source_kinds,
                     ["server_import", "server_import"],
@@ -1652,7 +1750,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -1806,7 +1903,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -2052,7 +2148,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -2575,7 +2670,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -2743,6 +2837,35 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 self.assertFalse(local_state.exists())
 
+    def test_manual_product_specifications_are_used_for_task_selection(
+        self,
+    ) -> None:
+        self._store_selectable_product(
+            project_id=self.project_a,
+            product_id=self.product_a,
+            manual_specification_tables=[
+                {
+                    "headers": ["Parameter", "6000W", "8000W"],
+                    "rows": [["Surge Power", "12000VA", "16000VA"]],
+                }
+            ],
+        )
+
+        selected = PostgresConfirmedProductSelection(self.engine).select(
+            self.project_a,
+            [self.product_a],
+        )[0]
+
+        self.assertTrue(selected.specifications_overridden)
+        self.assertEqual(
+            selected.specifications["Surge Power [8000W]"],
+            "16000VA",
+        )
+        self.assertEqual(
+            selected.specifications["Surge Power [6000W]"],
+            "12000VA",
+        )
+
     def test_server_catalog_is_minimal_current_and_project_scoped(
         self,
     ) -> None:
@@ -2773,7 +2896,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             isolated = replace(
                 base_config,
-                data_file=Path(directory) / "must-not-exist" / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -2915,7 +3037,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -3523,7 +3644,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -3609,19 +3729,32 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     ).status_code,
                     422,
                 )
-                saved = client.put(
-                    path,
-                    json={
-                        "revision": 0,
-                        "article": candidate,
-                    },
-                )
+                detector = RecordingAiRateDetector()
+                with patch(
+                    "server_project_http.ZeroGPTClient",
+                    return_value=detector,
+                ):
+                    saved = client.put(
+                        path,
+                        json={
+                            "revision": 0,
+                            "article": candidate,
+                            "recheck_ai_rate": True,
+                        },
+                    )
                 self.assertEqual(saved.status_code, 200, saved.text)
                 body = saved.json()
                 self.assertEqual(body["revision"], 1)
                 self.assertEqual(body["status"], "humanized_ready")
                 self.assertEqual(body["humanized_article"], candidate)
                 self.assertEqual(body["article"], candidate)
+                self.assertEqual(detector.calls, [candidate])
+                self.assertEqual(body["final_ai_check"]["provider"], "zerogpt")
+                self.assertEqual(body["final_ai_check"]["score"], 18.5)
+                self.assertEqual(
+                    body["final_ai_check"]["article_hash"],
+                    body["humanized_article_hash"],
+                )
                 self.assertEqual(body["final_article"], "")
                 self.assertEqual(
                     body["article_versions"][-1]["kind"],
@@ -3636,6 +3769,46 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     ["article.humanized.updated"],
                 )
                 self.assertNotIn(candidate, str(audit.events))
+
+                class FailingDetector:
+                    ready = True
+
+                    def detect(self, text: str) -> ZeroGPTDetectionResult:
+                        del text
+                        raise RuntimeError("secret-provider-detail")
+
+                revised_candidate = candidate.replace(
+                    "Keep the original evidence guidance.",
+                    "Use the reviewed evidence guidance.",
+                )
+                with patch(
+                    "server_project_http.ZeroGPTClient",
+                    return_value=FailingDetector(),
+                ):
+                    saved_without_detection = client.put(
+                        path,
+                        json={
+                            "revision": 1,
+                            "article": revised_candidate,
+                            "recheck_ai_rate": True,
+                        },
+                    )
+                self.assertEqual(
+                    saved_without_detection.status_code,
+                    200,
+                    saved_without_detection.text,
+                )
+                fallback_body = saved_without_detection.json()
+                self.assertEqual(fallback_body["revision"], 2)
+                self.assertEqual(
+                    fallback_body["humanized_article"],
+                    revised_candidate,
+                )
+                self.assertIsNone(fallback_body["final_ai_check"]["score"])
+                self.assertNotIn(
+                    "secret-provider-detail",
+                    fallback_body["final_ai_check"]["report"],
+                )
                 self.assertEqual(
                     client.put(
                         path,
@@ -3690,7 +3863,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -3814,7 +3986,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         check["screenshot_width"],
                         check["screenshot_height"],
                     ),
-                    (320, 240),
+                    (None, None),
                 )
                 download = client.get(download_path)
                 self.assertEqual(download.status_code, 200, download.text)
@@ -3931,7 +4103,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -4060,7 +4231,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         check["screenshot_width"],
                         check["screenshot_height"],
                     ),
-                    (320, 240),
+                    (None, None),
                 )
                 self.assertEqual(
                     [event.action for event in audit.events],
@@ -4070,6 +4241,35 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     "report",
                     audit.events[0].details,
                 )
+                replacement_bytes = b"replacement attachment without decoding"
+                replaced = client.post(
+                    upload_path,
+                    params={"revision": 1},
+                    files={
+                        "file": (
+                            "replacement.jpg",
+                            replacement_bytes,
+                            "image/jpeg",
+                        )
+                    },
+                )
+                self.assertEqual(replaced.status_code, 200, replaced.text)
+                replaced_task = replaced.json()
+                self.assertEqual(replaced_task["revision"], 2)
+                self.assertEqual(
+                    replaced_task["final_ai_check"]["screenshot_filename"],
+                    "final-ai-rate.jpg",
+                )
+                self.assertIsNone(
+                    replaced_task["final_ai_check"]["screenshot_width"]
+                )
+                self.assertIsNone(
+                    replaced_task["final_ai_check"]["screenshot_height"]
+                )
+                self.assertFalse(replaced_task["final_ai_check"]["confirmed"])
+                self.assertIn(replacement_bytes, private_store.objects.values())
+                screenshot_task = replaced_task
+                check = screenshot_task["final_ai_check"]
                 asset_id = check["screenshot_asset_id"]
                 self.assertEqual(
                     client.get(
@@ -4097,7 +4297,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 confirmed = client.put(
                     confirm_path,
                     json={
-                        "revision": 1,
+                        "revision": 2,
                         "score": 14.2,
                         "report": "Reviewed final AI result.",
                     },
@@ -4108,7 +4308,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     confirmed.text,
                 )
                 confirmed_task = confirmed.json()
-                self.assertEqual(confirmed_task["revision"], 2)
+                self.assertEqual(confirmed_task["revision"], 3)
                 self.assertEqual(
                     confirmed_task["status"],
                     "final_ai_checked",
@@ -4124,12 +4324,70 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     [event.action for event in audit.events],
                     [
                         "article.final_ai_screenshot.uploaded",
+                        "article.final_ai_screenshot.uploaded",
                         "article.final_ai_check.updated",
                     ],
                 )
                 self.assertNotIn(
                     "report",
-                    audit.events[1].details,
+                    audit.events[2].details,
+                )
+                linked_record = repository.get(self.task_a)
+                assert linked_record is not None
+                linked_record["status"] = "links_verified"
+                linked_record["revision"] = 3
+                linked_record["final_ai_check"]["confirmed"] = False
+                repository.upsert(linked_record)
+                reconfirmed = client.put(
+                    confirm_path,
+                    json={
+                        "revision": 3,
+                        "score": 13.8,
+                        "report": "Rechecked after link restoration.",
+                    },
+                )
+                self.assertEqual(reconfirmed.status_code, 200, reconfirmed.text)
+                self.assertEqual(reconfirmed.json()["revision"], 4)
+                self.assertEqual(
+                    reconfirmed.json()["status"],
+                    "links_verified",
+                )
+                self.assertTrue(
+                    reconfirmed.json()["final_ai_check"]["confirmed"]
+                )
+                replaced_after_confirmation = client.post(
+                    upload_path,
+                    params={"revision": 4},
+                    files={
+                        "file": (
+                            "newer.webp",
+                            b"newer opaque bytes",
+                            "image/webp",
+                        )
+                    },
+                )
+                self.assertEqual(
+                    replaced_after_confirmation.status_code,
+                    200,
+                    replaced_after_confirmation.text,
+                )
+                replaced_after_confirmation_task = (
+                    replaced_after_confirmation.json()
+                )
+                self.assertEqual(
+                    replaced_after_confirmation_task["status"],
+                    "links_verified",
+                )
+                self.assertFalse(
+                    replaced_after_confirmation_task["final_ai_check"][
+                        "confirmed"
+                    ]
+                )
+                self.assertEqual(
+                    replaced_after_confirmation_task["final_ai_check"][
+                        "screenshot_filename"
+                    ],
+                    "final-ai-rate.webp",
                 )
                 put_count = len(private_store.put_calls)
                 self.assertEqual(
@@ -4180,7 +4438,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             audit = RecordingAuditWriter()
@@ -4220,7 +4477,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         f"/api/tasks/{self.task_a}/writing-settings",
                         json=self._writing_settings_payload(),
                     ).status_code,
-                    503,
+                    404,
                 )
                 self.assertEqual(
                     client.post(
@@ -4230,7 +4487,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                             "selection": "system",
                         },
                     ).status_code,
-                    503,
+                    404,
                 )
 
                 unknown = dict(preview_payload)
@@ -4478,6 +4735,13 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             text="Topic 2 has one verified published positioning fact.",
         )
         self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-title-blog",
+            text="Topic 2 blog positioning must not influence titles.",
+            source_kind="official_blog",
+            trust_tier="reference_material",
+        )
+        self._store_outline_context(
             project_id=self.project_b,
             suffix=f"{self.task_b}-title-published",
             text="Topic 2 repeated is a cross-project positioning fact.",
@@ -4499,7 +4763,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             registry = ServerTitleGenerationRegistry(
@@ -4668,7 +4931,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -4841,6 +5103,16 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 "published project fact."
             ),
         )
+        blog_chunk = self._store_outline_context(
+            project_id=self.project_a,
+            suffix=f"{self.task_a}-article-blog",
+            text=(
+                "Example Buyer Guide for Topic 2 includes one relevant "
+                "editorial comparison."
+            ),
+            source_kind="official_blog",
+            trust_tier="reference_material",
+        )
         self._store_outline_context(
             project_id=self.project_a,
             suffix=f"{self.task_a}-article-inbox",
@@ -4877,7 +5149,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             registry = ServerArticleGenerationRegistry(
@@ -4983,7 +5254,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(len(provider.calls), 1)
                 self.assertEqual(
                     provider.calls[0]["chunk_ids"],
-                    [published_chunk],
+                    [published_chunk, blog_chunk],
                 )
                 self.assertEqual(
                     provider.calls[0]["prompt_source"],
@@ -5203,7 +5474,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -5345,7 +5615,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -5519,7 +5788,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -5678,6 +5946,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             captured_at="2026-07-31T00:00:00+00:00",
         )
         provider = RecordingHumanizeProvider()
+        detector = RecordingAiRateDetector()
         audit = RecordingAuditWriter()
         access = ProjectAccessService(
             PostgresProjectAccessRepository(self.engine)
@@ -5688,6 +5957,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             handler=ServerHumanizeGenerationHandler(
                 self.engine,
                 provider=provider,
+                ai_rate=detector,
                 audit=audit,
             ),
             audit=audit,
@@ -5699,7 +5969,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -5801,6 +6070,19 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 self.assertEqual(stored["revision"], 1)
                 self.assertEqual(stored["status"], "humanized_ready")
                 self.assertEqual(stored["humanized_article"], article)
+                self.assertEqual(detector.calls, [article])
+                self.assertEqual(
+                    stored["final_ai_check"]["provider"],
+                    "zerogpt",
+                )
+                self.assertEqual(
+                    stored["final_ai_check"]["score"],
+                    18.5,
+                )
+                self.assertEqual(
+                    stored["final_ai_check"]["article_hash"],
+                    stored["humanized_article_hash"],
+                )
                 self.assertEqual(
                     [event.action for event in audit.events],
                     [
@@ -6358,7 +6640,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             isolated = replace(
                 base_config,
-                data_file=Path(directory) / "must-not-exist" / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -6470,8 +6751,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     ).status_code,
                     409,
                 )
-                self.assertFalse(isolated.data_file.exists())
-
     def test_server_seo_review_complete_rolls_back_on_audit_failure(
         self,
     ) -> None:
@@ -6525,7 +6804,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             isolated = replace(
                 base_config,
-                data_file=Path(directory) / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -6792,7 +7070,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -7396,7 +7673,6 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (

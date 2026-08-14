@@ -35,8 +35,7 @@ class ServerProjectTaskStoreFactory:
     """Build project-scoped PostgreSQL TaskStore compatibility adapters.
 
     The factory deliberately receives an ``AuthorizedProjectRequest`` rather
-    than raw organization/project request fields. It never enables legacy JSON
-    or SQLite import and therefore cannot fall back to local application data.
+    than raw organization/project request fields and always uses PostgreSQL.
     """
 
     def __init__(
@@ -72,9 +71,7 @@ class ServerProjectTaskStoreFactory:
         return ServerProjectTaskRuntime(
             scope=scope,
             store=TaskStore(
-                self._config,
                 repository=repository,
-                legacy_import_enabled=False,
             ),
             intake=PostgresServerTaskIntakeService(
                 self._engine,

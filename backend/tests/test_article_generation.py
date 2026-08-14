@@ -33,12 +33,13 @@ from services.generator import (  # noqa: E402
     keyword_from_topic,
     load_prompt_template,
     primary_keyword,
+    official_links_for_prompt,
     products_for_prompt,
     restore_article_links,
     sanitize_outline_keyword_directives,
     validate_minimum_h3_per_h2,
 )
-from models import Product  # noqa: E402
+from models import OfficialLink, Product  # noqa: E402
 
 
 class FakeLLM:
@@ -94,12 +95,12 @@ def article_with_body_words(word_count: int) -> str:
         + "\n\n### Supplier Comparison\n\n"
         + " ".join("word" for _ in range(word_count - (word_count // 2)))
         + "\n\n## FAQ\n\n"
-        "**Q: What should buyers check first?**\n\n"
-        "A: Buyers should check the application requirements.\n\n"
-        "**Q: When should buyers request a sample?**\n\n"
-        "A: Buyers should request one before approval when fit matters.\n\n"
-        "**Q: Why should buyers compare suppliers?**\n\n"
-        "A: Buyers should compare capability, quality control, delivery, and support."
+        "### What should buyers check first?\n\n"
+        "Buyers should check the application requirements.\n\n"
+        "### When should buyers request a sample?\n\n"
+        "Buyers should request one before approval when fit matters.\n\n"
+        "### Why should buyers compare suppliers?\n\n"
+        "Buyers should compare capability, quality control, delivery, and support."
     )
 
 
@@ -175,6 +176,83 @@ class ProductReferencePromptTests(unittest.TestCase):
         self.assertNotIn("https://example.com/old", prompt)
 
 
+class OfficialCompanyLinkTests(unittest.TestCase):
+    def test_contact_link_is_available_to_prompt_as_published_reference(self):
+        contact = OfficialLink(
+            source_id="contact-source",
+            snapshot_id="contact-v1",
+            label="Contact Us",
+            url="https://example.com/contact-us/",
+            role="contact",
+        )
+
+        prompt = official_links_for_prompt([contact])
+
+        self.assertIn("current published official-site links", prompt)
+        self.assertIn("contact: Contact Us", prompt)
+        self.assertIn("https://example.com/contact-us/", prompt)
+        self.assertIn("Never invent a URL", prompt)
+
+    def test_existing_contact_us_copy_is_linked_without_adding_new_cta(self):
+        task = make_task(
+            official_links=[
+                OfficialLink(
+                    source_id="contact-source",
+                    snapshot_id="contact-v1",
+                    label="Contact Us",
+                    url="https://example.com/contact-us/",
+                    role="contact",
+                )
+            ]
+        )
+
+        linked = ensure_article_hyperlinks(
+            "Discuss the application, then Contact Us for a practical quote.",
+            task,
+        )
+        unchanged = ensure_article_hyperlinks(
+            "Discuss the application before requesting a quote.",
+            task,
+        )
+
+        self.assertIn(
+            "[Contact Us](https://example.com/contact-us/)",
+            linked,
+        )
+        self.assertNotIn("contact-us", unchanged)
+
+    def test_contact_phrase_is_not_linked_when_no_published_contact_url_exists(self):
+        result = ensure_article_hyperlinks(
+            "[Contact Us](https://example.com/made-up-contact/) to discuss the application.",
+            make_task(official_links=[]),
+        )
+
+        self.assertEqual(result, "Contact Us to discuss the application.")
+
+    def test_invented_contact_target_is_replaced_with_published_contact_url(self):
+        task = make_task(
+            official_links=[
+                OfficialLink(
+                    source_id="contact-source",
+                    snapshot_id="contact-v1",
+                    label="Contact Us",
+                    url="https://example.com/contact-us/",
+                    role="contact",
+                )
+            ]
+        )
+
+        result = ensure_article_hyperlinks(
+            "[Contact Us](https://example.com/made-up-contact/) for a quote.",
+            task,
+        )
+
+        self.assertEqual(
+            result,
+            "[Contact Us](https://example.com/contact-us/) for a quote.",
+        )
+
+
 class OperatorWritingContextTests(unittest.TestCase):
     def test_topic_title_is_reduced_to_core_keyword_instead_of_used_verbatim(self):
         task = make_task(
@@ -218,6 +296,18 @@ class OperatorWritingContextTests(unittest.TestCase):
         prompt = fake.calls[0]["messages"][1]["content"]
         self.assertIn("Avoid titles beginning with How to.", prompt)
         self.assertEqual(len(titles), 10)
+
+    @patch("services.generator.collect_customer_context", return_value="File knowledge")
+    def test_title_prompt_receives_project_notes(self, _context):
+        fake = FakeLLM("\n".join(f"{index}. Title {index}" for index in range(1, 11)))
+        task = make_task(project_notes="Never mention retail pricing.")
+
+        from services.generator import generate_titles
+
+        generate_titles(make_config(), task, llm=fake)
+
+        prompt = fake.calls[0]["messages"][1]["content"]
+        self.assertIn("Never mention retail pricing.", prompt)
 
     def test_legacy_outline_exact_topic_keyword_directive_is_neutralized(self):
         task = make_task(
@@ -275,7 +365,8 @@ class OperatorWritingContextTests(unittest.TestCase):
         self.assertIn("Write as a practical field guide.", prompt)
         self.assertIn("## First Section", prompt)
         self.assertIn("[Example Industrial](https://example.com/)", prompt)
-        self.assertIn("exactly three Q/A pairs", prompt)
+        self.assertIn("exactly three questions", prompt)
+        self.assertIn("level-3 Markdown heading", prompt)
 
     @patch("services.generator.collect_customer_context", return_value="File knowledge")
     def test_outline_prompt_receives_selected_notes_and_custom_instructions(self, _context):
@@ -457,7 +548,8 @@ class NoMaximumWordLimitTests(unittest.TestCase):
         self.assertIn("will not mechanically truncate", prompt)
         self.assertIn("final H2 of the article must be written exactly as `## FAQ`", prompt)
         self.assertIn("Every H2 section except the final `## FAQ` must contain at least two H3", prompt)
-        self.assertIn("`**Q: Complete question?**`", prompt)
+        self.assertIn("`### Complete question?`", prompt)
+        self.assertIn("without a `Q:` prefix", prompt)
         self.assertIn("Do not use first-person pronouns or first-person narration", prompt)
         self.assertIn("Vary sentence length, sentence openings, and paragraph rhythm", prompt)
         self.assertIn('"optimize", "leverage", and "ensure"', prompt)

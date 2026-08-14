@@ -16,12 +16,20 @@ from knowledge_agent.assets import (
     KnowledgeAssetNotFound,
     PostgresKnowledgeAssetRepository,
 )
+from knowledge_agent.catalog import (
+    KnowledgeProduct,
+    PostgresProductCatalogRepository,
+    ProductSourceEvidence,
+)
 from knowledge_agent.contracts import TrustTier
 from knowledge_agent.ingestion import (
     DocumentInput,
     DocumentParserError,
     IngestionResult,
     PrivateDocumentIngestionService,
+)
+from knowledge_agent.ingestion.mineru import (
+    document_parser_router_from_environment,
 )
 from knowledge_agent.library import PostgresKnowledgeLibrary
 from knowledge_agent.object_storage import ScopedS3ArtifactStore
@@ -122,6 +130,38 @@ def _asset_uri_matches_scope(
     )
 
 
+def _normalized_match_text(value: str) -> str:
+    return " ".join(
+        "".join(
+            character if character.isalnum() else " "
+            for character in value.casefold()
+        ).split()
+    )
+
+
+def _matching_confirmed_product(
+    products: tuple[KnowledgeProduct, ...],
+    *,
+    display_name: str,
+    chunks: tuple[object, ...],
+) -> KnowledgeProduct | None:
+    document_text = _normalized_match_text(
+        "\n".join(
+            (
+                display_name,
+                *(str(getattr(chunk, "text", "")) for chunk in chunks),
+            )
+        )
+    )
+    matches = tuple(
+        product
+        for product in products
+        if len(_normalized_match_text(product.name)) >= 4
+        and _normalized_match_text(product.name) in document_text
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
 class PostgresServerPrivateDocumentIngestion:
     """Prepare private S3 artifacts, then atomically commit Inbox evidence.
 
@@ -149,8 +189,13 @@ class PostgresServerPrivateDocumentIngestion:
         self._access = PostgresProjectAccessRepository(engine)
         self._repository = PostgresKnowledgeRepository(engine)
         self._assets = PostgresKnowledgeAssetRepository(engine)
+        self._catalog = PostgresProductCatalogRepository(engine)
         self._library = PostgresKnowledgeLibrary(engine)
         self._audit = audit or PostgresAuditEventWriter()
+        self._parser_router = document_parser_router_from_environment()
+
+    def close(self) -> None:
+        self._parser_router.close()
 
     def upload(
         self,
@@ -183,6 +228,7 @@ class PostgresServerPrivateDocumentIngestion:
                     project_id=project_id,
                 ),
                 snapshot_lookup=self._library,
+                parser_router=self._parser_router,
             )
             prepared = ingestion.prepare(
                 project_id=project_id,
@@ -204,6 +250,10 @@ class PostgresServerPrivateDocumentIngestion:
             ) from exc
 
         try:
+            confirmed_products = self._catalog.list_products(
+                project_id,
+                status="confirmed",
+            )
             with self._engine.begin() as connection:
                 facts = self._access.lock_project_access_in_connection(
                     connection,
@@ -310,7 +360,9 @@ class PostgresServerPrivateDocumentIngestion:
                         raise ServerPrivateDocumentUploadConflict(
                             "deduplicated asset is outside the server scope"
                         )
-                    stored_assets.append(stored)
+                    stored_assets.append(
+                        replace(stored, metadata=asset.metadata)
+                    )
                     stored_asset_ids[asset.asset_id] = stored.asset_id
                 stored_links = []
                 for link in prepared.snapshot_assets:
@@ -341,6 +393,29 @@ class PostgresServerPrivateDocumentIngestion:
                     assets=tuple(stored_assets),
                     snapshot_assets=tuple(stored_links),
                 )
+
+                matched_product = _matching_confirmed_product(
+                    confirmed_products,
+                    display_name=normalized_display_name,
+                    chunks=committed.chunks,
+                )
+                if matched_product is not None:
+                    self._catalog.store_source_evidence_in_transaction(
+                        connection,
+                        ProductSourceEvidence(
+                            project_id=project_id,
+                            product_id=matched_product.product_id,
+                            source_id=normalized_source_id,
+                            snapshot_id=prepared.snapshot.snapshot_id,
+                            relation="private_specification",
+                            confidence=1.0,
+                            reason=(
+                                "confirmed product name appears exactly in "
+                                "the uploaded document"
+                            ),
+                            metadata={"organizer": "exact_product_name_v1"},
+                        ),
+                    )
 
                 if not created:
                     return ServerPrivateDocumentUpload(

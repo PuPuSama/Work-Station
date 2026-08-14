@@ -27,6 +27,9 @@ Competitor blog supplied by the operator: {{COMPETITOR_BLOG}}
 Confirmed products:
 {{PRODUCTS}}
 
+Published official company links available for relevant citations and CTA anchors:
+{{OFFICIAL_LINKS}}
+
 Approved outline:
 {{OUTLINE}}
 
@@ -52,4 +55,6 @@ Topic-specific notes:
 - Introduce the customer naturally within the first 300 words and attach the homepage to the exact brand name: `[{{BRAND_NAME}}]({{HOMEPAGE_URL}})`.
 - Treat the article topic as an editorial brief, not as an exact-match keyword. Do not copy its full title-like wording into body paragraphs or headings unless it is identical to the approved H1 or genuinely natural in context. Use the shorter core keyword naturally, with grammar and suitable singular/plural forms taking priority.
 - Preserve confirmed product names, models, technical facts, numbers, and URLs. Use descriptive Markdown links, never bare URLs.
-- The final H2 must be exactly `## FAQ`. It must contain exactly three Q/A pairs, each formatted as one `**Q: Complete question?**` line followed by one plain `A: Complete answer.` line. Nothing may follow FAQ.
+- Never reveal or describe the source or writing workflow in the article. Remove phrases such as "the client-provided document says", "the knowledge base mentions", "the supplied materials state", "the brief indicates", or similar references to documents, prompts, context, evidence packs, operators, retrieval, or generation. State supported information directly. If a detail is unsupported, omit it or frame it as something the buyer should verify with the supplier instead of discussing missing source data.
+- When the selected prompt requires a CTA or contact point, use the supplied `contact` link on descriptive anchor text such as `Contact Us`. If no contact-role link was supplied, do not invent a URL.
+- The final H2 must be exactly `## FAQ`. It must contain exactly three questions. Format each question as a level-3 Markdown heading such as `### Complete question?`, without a `Q:` prefix or bold wrapper, followed by one plain answer paragraph without an `A:` prefix. Nothing else may follow or appear under FAQ.

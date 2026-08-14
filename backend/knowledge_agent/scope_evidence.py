@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 
-from .contracts import EvidencePack, RetrievalHit, RetrievalQuery, RetrievalScope
+from .contracts import (
+    EVIDENCE_SOURCE_KINDS,
+    EvidencePack,
+    RetrievalHit,
+    RetrievalQuery,
+    RetrievalScope,
+)
 from .evidence import DefaultEvidencePackBuilder
 from .evidence_repository import (
     PostgresEvidencePackRepository,
@@ -65,8 +72,23 @@ class ScopeEvidenceService:
             raise ScopeEvidenceNotFound("retrieval scope was not found")
 
         filters = normalized_retrieval_filters(scope)
+        configured_source_kinds = filters.get("source_kinds")
+        if configured_source_kinds is None:
+            eligible_source_kinds = tuple(sorted(EVIDENCE_SOURCE_KINDS))
+        else:
+            if (
+                isinstance(configured_source_kinds, (str, bytes))
+                or not isinstance(configured_source_kinds, Sequence)
+            ):
+                raise ValueError("source_kinds must be a sequence")
+            eligible_source_kinds = tuple(
+                source_kind
+                for source_kind in configured_source_kinds
+                if source_kind in EVIDENCE_SOURCE_KINDS
+            )
+        filters["source_kinds"] = eligible_source_kinds
         candidates: dict[str, tuple[RetrievalHit, list[str]]] = {}
-        for query_text in scope.query_variants:
+        for query_text in scope.query_variants if eligible_source_kinds else ():
             for hit in self._retriever.retrieve(
                 RetrievalQuery(
                     project_id=project_id,

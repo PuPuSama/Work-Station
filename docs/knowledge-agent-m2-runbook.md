@@ -12,7 +12,8 @@
 - 私有资料上传到 Research Inbox；
 - WordPress REST Site Probe、官网产品分类页同步和 Blog/产品二次分类；
 - 官网页面原始 HTML、规范化 JSON、产品事实与原图证据入库；
-- MinerU legacy `content_list.json` 到 `ParsedDocument` 的隔离适配与解析器对比指标；
+- MinerU 精准解析 API v4：PDF 签名上传、异步轮询、结果 ZIP 安全解包，
+  并通过 `content_list.json` 归一化标题、表格、定位信息和图片；
 - 打开 Inbox 或已发布来源的原始证据；
 - `/projects/{customer}/knowledge` 项目级知识库页面。
 
@@ -35,11 +36,21 @@ EMBEDDING_BASE_URL=https://your-gateway.example/v1
 EMBEDDING_API_KEY=replace-locally
 EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSIONS=1536
+
+# 配置后 PDF/DOCX 使用 MinerU；未配置时继续使用本地解析器。
+ARTICLE_AGENT_MINERU_API_KEY=replace-locally
+ARTICLE_AGENT_MINERU_BASE_URL=https://mineru.net
+ARTICLE_AGENT_MINERU_MODEL_VERSION=vlm
+ARTICLE_AGENT_MINERU_LANGUAGE=en
 ```
 
 `ARTICLE_AGENT_KNOWLEDGE_ROOT` 可省略。省略时使用当前 `data_file` 同级的 `knowledge-agent` 目录。
 
 密钥只写本机 `.env`，不要写进本文档、配置 YAML、测试夹具或提交。
+MinerU Key 配置后，PDF/DOCX 解析失败会明确返回错误，不静默回退到本地解析器；
+这样运营人员不会误以为 OCR、表格或图片已经由 MinerU 完成。可选超时配置为
+`ARTICLE_AGENT_MINERU_TIMEOUT_SECONDS` 和
+`ARTICLE_AGENT_MINERU_POLL_INTERVAL_SECONDS`。
 
 ## 3. 启动数据库并迁移
 

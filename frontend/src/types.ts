@@ -36,6 +36,7 @@ export type Product = {
 
 export type AiCheckRecord = {
   confirmed: boolean;
+  deferred?: boolean;
   score: number | null;
   report: string;
   provider?: string;
@@ -339,6 +340,7 @@ export type TaskRecord = {
   synced_from_week?: string;
   topic_index: number;
   topic: string;
+  primary_keyword?: string;
   competitor_keyword: string;
   competitor_blog: string;
   status: WorkflowStatus;
@@ -424,6 +426,7 @@ export type ServerProjectMetadata = {
   project_id: string;
   customer_name: string;
   official_domain: string;
+  project_notes: string;
   revision: number;
 };
 
@@ -431,6 +434,7 @@ export type ServerTaskIntakeItem = {
   id: string;
   topic_index: number;
   topic: string;
+  primary_keyword: string;
   competitor_keyword: string;
   competitor_blog: string;
   status: WorkflowStatus;
@@ -665,6 +669,7 @@ export type KnowledgeSourceSummary = {
   pending_chunk_count: number;
   pending_asset_count: number;
   pending_review_decision: "approve" | "needs_review" | "reject" | null;
+  pending_review_reason: string | null;
   pending_review_version: number | null;
   pending_reviewed_at: string | null;
   snapshot_count: number;
@@ -716,6 +721,16 @@ export type KnowledgeProductSummary = {
   status: string;
   canonical_url: string | null;
   category_path: string[];
+  description: string;
+  main_content_facts: string[];
+  specification_tables: Array<{
+    source_kind?: string;
+    caption?: string;
+    headers?: string[];
+    rows?: string[][];
+  }>;
+  specification_tables_overridden?: boolean;
+  faq: Array<Record<string, string>>;
 };
 
 export type KnowledgeLibrary = {
@@ -729,6 +744,27 @@ export type KnowledgeLibrary = {
   asset_count: number;
   sources: KnowledgeSourceSummary[];
   products: KnowledgeProductSummary[];
+};
+
+export type OfficialSiteScanStart = {
+  accepted: boolean;
+  message: string;
+  scan_id: string;
+  status: "running";
+};
+
+export type OfficialSiteScanStatus = {
+  scan_id: string | null;
+  status: "idle" | "running" | "succeeded" | "failed";
+  started_at: string | null;
+  finished_at: string | null;
+  processed_pages: number;
+  skipped_pages: number;
+  processed_products: number;
+  skipped_products: number;
+  source_count: number;
+  product_count: number;
+  error: string;
 };
 
 export type KnowledgeRetrievalScope = {
@@ -762,6 +798,7 @@ export type KnowledgeEvidenceHit = {
   chunk_id: string;
   text: string;
   heading_path: string[];
+  locator: Record<string, unknown>;
   score: number;
   provenance: {
     source_id: string;
@@ -804,6 +841,9 @@ export type KnowledgeUploadResult = {
   asset_count: number;
   created: boolean;
   message: string;
+  review_mode?: "manual" | "automatic";
+  review_decision?: string | null;
+  published?: boolean;
 };
 
 export type WordPressProbeResult = {
@@ -943,6 +983,7 @@ export type ResearchCitation = {
   canonical_url: string | null;
   text: string;
   ordinal: number;
+  locator: Record<string, unknown>;
 };
 
 export type ResearchMessage = {

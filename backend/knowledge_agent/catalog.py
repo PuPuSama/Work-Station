@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal, Mapping, Protocol, runtime_checkable
+from typing import Literal, Mapping, Protocol, Sequence, runtime_checkable
 from urllib.parse import urlsplit
 
 import sqlalchemy as sa
@@ -38,6 +38,12 @@ PRODUCT_SOURCE_RELATIONS = frozenset(
 PRODUCT_ASSET_ROLES = frozenset(
     {"candidate", "primary", "gallery", "detail", "hero"}
 )
+MANUAL_SPECIFICATION_TABLES_KEY = "manual_specification_tables"
+MAX_SPECIFICATION_TABLES = 20
+MAX_SPECIFICATION_COLUMNS = 40
+MAX_SPECIFICATION_ROWS_PER_TABLE = 500
+MAX_SPECIFICATION_CELLS = 5_000
+MAX_SPECIFICATION_CHARACTERS = 500_000
 
 
 class ProductCatalogRepositoryError(RuntimeError):
@@ -106,6 +112,127 @@ def _confidence(value: float) -> float:
     if not 0 <= normalized <= 1:
         raise ValueError("confidence must be a number between 0 and 1")
     return normalized
+
+
+def normalize_product_specification_tables(
+    value: object,
+) -> list[dict[str, object]]:
+    """Validate a bounded arbitrary-grid specification override.
+
+    Parsed source evidence remains immutable. This normalized grid is stored
+    separately on the aggregate product and takes precedence for product
+    display and future Task selection.
+    """
+
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("specification_tables must be a list")
+    if len(value) > MAX_SPECIFICATION_TABLES:
+        raise ValueError(
+            f"specification_tables may contain at most {MAX_SPECIFICATION_TABLES} tables"
+        )
+    result: list[dict[str, object]] = []
+    cell_count = 0
+    character_count = 0
+
+    def normalized_cell(cell: object, field_name: str) -> str:
+        nonlocal character_count
+        if not isinstance(cell, str):
+            raise ValueError(f"{field_name} must contain only text values")
+        text = cell.strip()
+        if len(text) > 5_000:
+            raise ValueError(f"{field_name} contains a value that is too long")
+        character_count += len(text)
+        if character_count > MAX_SPECIFICATION_CHARACTERS:
+            raise ValueError("specification_tables contain too much text")
+        return text
+
+    for table_index, table in enumerate(value):
+        if not isinstance(table, Mapping):
+            raise ValueError("each specification table must be an object")
+        caption = table.get("caption", "")
+        if not isinstance(caption, str):
+            raise ValueError("specification table caption must be text")
+        caption = caption.strip()
+        if len(caption) > 500:
+            raise ValueError("specification table caption is too long")
+        character_count += len(caption)
+        if character_count > MAX_SPECIFICATION_CHARACTERS:
+            raise ValueError("specification_tables contain too much text")
+
+        headers_value = table.get("headers", [])
+        rows_value = table.get("rows", [])
+        if (
+            isinstance(headers_value, (str, bytes))
+            or not isinstance(headers_value, Sequence)
+        ):
+            raise ValueError("specification table headers must be a list")
+        if len(headers_value) > MAX_SPECIFICATION_COLUMNS:
+            raise ValueError(
+                f"specification tables may contain at most {MAX_SPECIFICATION_COLUMNS} columns"
+            )
+        headers = [
+            normalized_cell(cell, f"table {table_index + 1} headers")
+            for cell in headers_value
+        ]
+        cell_count += len(headers)
+
+        if (
+            isinstance(rows_value, (str, bytes))
+            or not isinstance(rows_value, Sequence)
+        ):
+            raise ValueError("specification table rows must be a list")
+        if len(rows_value) > MAX_SPECIFICATION_ROWS_PER_TABLE:
+            raise ValueError(
+                "each specification table may contain at most "
+                f"{MAX_SPECIFICATION_ROWS_PER_TABLE} rows"
+            )
+        rows: list[list[str]] = []
+        for row_index, row in enumerate(rows_value):
+            if isinstance(row, (str, bytes)) or not isinstance(row, Sequence):
+                raise ValueError("each specification table row must be a list")
+            if len(row) > MAX_SPECIFICATION_COLUMNS:
+                raise ValueError(
+                    f"specification tables may contain at most {MAX_SPECIFICATION_COLUMNS} columns"
+                )
+            rows.append(
+                [
+                    normalized_cell(
+                        cell,
+                        f"table {table_index + 1} row {row_index + 1}",
+                    )
+                    for cell in row
+                ]
+            )
+            cell_count += len(row)
+        if cell_count > MAX_SPECIFICATION_CELLS:
+            raise ValueError(
+                f"specification_tables may contain at most {MAX_SPECIFICATION_CELLS} cells"
+            )
+        result.append(
+            {
+                "source_kind": "manual",
+                "caption": caption,
+                "headers": headers,
+                "rows": rows,
+            }
+        )
+    return result
+
+
+def effective_product_specification_tables(
+    metadata: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Return the manual grid when present, otherwise the parsed grid."""
+
+    key = (
+        MANUAL_SPECIFICATION_TABLES_KEY
+        if MANUAL_SPECIFICATION_TABLES_KEY in metadata
+        else "specification_tables"
+    )
+    value = metadata.get(key, [])
+    if not isinstance(value, list):
+        return []
+    return [dict(table) for table in value if isinstance(table, Mapping)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +350,13 @@ class ProductCatalogRepository(Protocol):
 
     def confirm_product(self, project_id: str, product_id: str) -> None: ...
 
+    def update_product_specifications(
+        self,
+        project_id: str,
+        product_id: str,
+        specification_tables: object,
+    ) -> KnowledgeProduct: ...
+
     def get_product(
         self, project_id: str, product_id: str
     ) -> KnowledgeProduct | None: ...
@@ -267,29 +401,29 @@ class PostgresProductCatalogRepository:
             category_path=list(product.category_path),
             metadata=dict(product.metadata),
         )
-        keep_confirmed = sa.and_(
-            knowledge_products.c.status == "confirmed",
+        keep_reviewed_status = sa.and_(
+            knowledge_products.c.status.in_(("confirmed", "rejected")),
             statement.excluded.status == "inbox",
         )
         effective_values = {
             "name": sa.case(
-                (keep_confirmed, knowledge_products.c.name),
+                (keep_reviewed_status, knowledge_products.c.name),
                 else_=statement.excluded.name,
             ),
             "status": sa.case(
-                (keep_confirmed, knowledge_products.c.status),
+                (keep_reviewed_status, knowledge_products.c.status),
                 else_=statement.excluded.status,
             ),
             "canonical_url": sa.case(
-                (keep_confirmed, knowledge_products.c.canonical_url),
+                (keep_reviewed_status, knowledge_products.c.canonical_url),
                 else_=statement.excluded.canonical_url,
             ),
             "category_path": sa.case(
-                (keep_confirmed, knowledge_products.c.category_path),
+                (keep_reviewed_status, knowledge_products.c.category_path),
                 else_=statement.excluded.category_path,
             ),
             "metadata": sa.case(
-                (keep_confirmed, knowledge_products.c.metadata),
+                (keep_reviewed_status, knowledge_products.c.metadata),
                 else_=statement.excluded.metadata,
             ),
         }
@@ -505,6 +639,71 @@ class PostgresProductCatalogRepository:
             .values(status="confirmed", updated_at=sa.func.now())
         )
         return True
+
+    def update_product_specifications(
+        self,
+        project_id: str,
+        product_id: str,
+        specification_tables: object,
+    ) -> KnowledgeProduct:
+        with self._engine.begin() as connection:
+            product, _changed = self.update_product_specifications_in_transaction(
+                connection,
+                project_id,
+                product_id,
+                specification_tables,
+            )
+        return product
+
+    def update_product_specifications_in_transaction(
+        self,
+        connection: Connection,
+        project_id: str,
+        product_id: str,
+        specification_tables: object,
+    ) -> tuple[KnowledgeProduct, bool]:
+        """Store a manual override without mutating immutable source evidence."""
+
+        if not connection.in_transaction():
+            raise ValueError(
+                "product specification updates require a business transaction"
+            )
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_product_id = _required_text(product_id, "product_id")
+        normalized_tables = normalize_product_specification_tables(
+            specification_tables
+        )
+        row = connection.execute(
+            sa.select(knowledge_products)
+            .where(
+                knowledge_products.c.project_id == normalized_project_id,
+                knowledge_products.c.product_id == normalized_product_id,
+            )
+            .with_for_update()
+        ).mappings().one_or_none()
+        if row is None:
+            raise ProductCatalogNotFound(
+                "product was not found in the requested project"
+            )
+        if row["status"] != "confirmed":
+            raise ProductConfirmationError(
+                "only confirmed products can have manual specifications"
+            )
+        metadata = dict(row["metadata"])
+        changed = metadata.get(MANUAL_SPECIFICATION_TABLES_KEY) != normalized_tables
+        metadata[MANUAL_SPECIFICATION_TABLES_KEY] = normalized_tables
+        if changed:
+            connection.execute(
+                knowledge_products.update()
+                .where(
+                    knowledge_products.c.project_id == normalized_project_id,
+                    knowledge_products.c.product_id == normalized_product_id,
+                )
+                .values(metadata=metadata, updated_at=sa.func.now())
+            )
+        updated_row = dict(row)
+        updated_row["metadata"] = metadata
+        return _product_from_row(updated_row), changed
 
     def get_product(
         self, project_id: str, product_id: str

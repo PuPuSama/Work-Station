@@ -12,6 +12,7 @@ from knowledge_agent.schema import (
     knowledge_products,
     knowledge_sources,
 )
+from knowledge_agent.catalog import MANUAL_SPECIFICATION_TABLES_KEY
 from models import Product
 from services.task_identity import normalized_customer
 
@@ -58,7 +59,7 @@ def _facts(metadata: Mapping[str, object]) -> list[str]:
 
 
 def _specifications(metadata: Mapping[str, object]) -> dict[str, str]:
-    """Flatten deterministic two-column table rows for the Task snapshot."""
+    """Flatten table cells while preserving model-column identity."""
 
     tables = metadata.get("specification_tables")
     if not isinstance(tables, list):
@@ -67,20 +68,83 @@ def _specifications(metadata: Mapping[str, object]) -> dict[str, str]:
     for table in tables:
         if not isinstance(table, Mapping):
             continue
+        headers_value = table.get("headers")
+        headers = (
+            [
+                _string(value, maximum=160)
+                for value in headers_value
+            ]
+            if isinstance(headers_value, list)
+            else []
+        )
         rows = table.get("rows")
         if not isinstance(rows, list):
             continue
-        for row in rows:
-            if (
-                not isinstance(row, list)
-                or len(row) != 2
-            ):
+        generic_column_labels = {"", "value", "值", "数值"}
+        header_model_labels = headers[1:]
+        model_labels = (
+            header_model_labels
+            if header_model_labels
+            and any(
+                label.casefold() not in generic_column_labels
+                for label in header_model_labels
+            )
+            else []
+        )
+        for row in rows if not model_labels else []:
+            if not isinstance(row, list) or len(row) < 3:
                 continue
-            key = _string(row[0], maximum=160)
-            value = _string(row[1], maximum=500)
-            if key and value and key not in result:
-                result[key] = value
-            if len(result) == 12:
+            label = _string(row[0], maximum=160).casefold()
+            if label in {
+                "model",
+                "models",
+                "model no.",
+                "model number",
+                "rated power",
+                "型号",
+                "产品型号",
+                "额定功率",
+            }:
+                candidates = [
+                    _string(value, maximum=160) for value in row[1:]
+                ]
+                if any(
+                    label.casefold() not in generic_column_labels
+                    for label in candidates
+                    if label
+                ):
+                    model_labels = candidates
+                break
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            parameter = _string(row[0], maximum=160)
+            if not parameter:
+                continue
+            if len(row) == 2:
+                value = _string(row[1], maximum=500)
+                if value and parameter not in result:
+                    result[parameter] = value
+            else:
+                for column_index, raw_value in enumerate(row[1:], start=1):
+                    value = _string(raw_value, maximum=500)
+                    if not value:
+                        continue
+                    column_label = (
+                        model_labels[column_index - 1]
+                        if column_index - 1 < len(model_labels)
+                        else ""
+                    )
+                    if not column_label and column_index < len(headers):
+                        column_label = headers[column_index]
+                    if not column_label:
+                        column_label = f"column {column_index + 1}"
+                    key = f"{parameter} [{column_label}]"
+                    if key not in result:
+                        result[key] = value
+                    if len(result) == 36:
+                        return result
+            if len(result) == 36:
                 return result
     return result
 
@@ -131,7 +195,8 @@ class PostgresConfirmedProductSelection:
         normalized_project_id = normalized_customer(project_id)
         requested = _required_ids(product_ids)
         product_statement = sa.select(
-            knowledge_products.c.product_id
+            knowledge_products.c.product_id,
+            knowledge_products.c.metadata,
         ).where(
             knowledge_products.c.project_id == normalized_project_id,
             knowledge_products.c.product_id.in_(requested),
@@ -223,11 +288,9 @@ class PostgresConfirmedProductSelection:
             )
         )
         with self._engine.connect() as connection:
-            confirmed_product_ids = set(
-                connection.execute(
-                    product_statement
-                ).scalars().all()
-            )
+            product_rows = connection.execute(
+                product_statement
+            ).mappings().all()
             evidence_rows = connection.execute(
                 evidence_statement
             ).mappings().all()
@@ -235,6 +298,15 @@ class PostgresConfirmedProductSelection:
                 asset_statement
             ).mappings().all()
 
+        confirmed_product_ids = {
+            str(row["product_id"]) for row in product_rows
+        }
+        product_metadata = {
+            str(row["product_id"]): (
+                row["metadata"] if isinstance(row["metadata"], Mapping) else {}
+            )
+            for row in product_rows
+        }
         evidence_by_product: dict[
             str,
             tuple[str, str, Mapping[str, object]],
@@ -277,6 +349,18 @@ class PostgresConfirmedProductSelection:
         result: list[Product] = []
         for product_id in requested:
             _, _, projection = evidence_by_product[product_id]
+            has_manual_specifications = (
+                MANUAL_SPECIFICATION_TABLES_KEY
+                in product_metadata[product_id]
+            )
+            manual_tables = product_metadata[product_id].get(
+                MANUAL_SPECIFICATION_TABLES_KEY
+            )
+            if isinstance(manual_tables, list):
+                projection = {
+                    **projection,
+                    "specification_tables": manual_tables,
+                }
             current_asset_ids = asset_ids.get(product_id, [])
             canonical_url = _string(
                 projection.get("canonical_url"),
@@ -286,38 +370,39 @@ class PostgresConfirmedProductSelection:
                 projection.get("description"),
                 maximum=2000,
             )
-            result.append(
-                Product(
-                    product_id=product_id,
-                    name=_string(
-                        projection.get("name"),
-                        maximum=240,
-                    ),
-                    url=canonical_url,
-                    canonical_url=canonical_url,
-                    image_path="",
-                    description=description,
-                    reference_summary=description,
-                    reference_facts=_facts(projection),
-                    specifications=_specifications(projection),
-                    reference_path="",
-                    asset_manifest_path="",
-                    asset_count=len(current_asset_ids),
-                    selected_asset_id=(
-                        current_asset_ids[0] if current_asset_ids else ""
-                    ),
-                    selection_reason=(
-                        "Operator selected a confirmed product from the "
-                        "published project catalog."
-                    ),
-                    discovery_source="knowledge_catalog",
-                    detail_page_verified=True,
-                    asset_status=(
-                        "ready" if current_asset_ids else "missing"
-                    ),
-                    asset_error="",
-                )
-            )
+            product_values: dict[str, object] = {
+                "product_id": product_id,
+                "name": _string(
+                    projection.get("name"),
+                    maximum=240,
+                ),
+                "url": canonical_url,
+                "canonical_url": canonical_url,
+                "image_path": "",
+                "description": description,
+                "reference_summary": description,
+                "reference_facts": _facts(projection),
+                "specifications": _specifications(projection),
+                "reference_path": "",
+                "asset_manifest_path": "",
+                "asset_count": len(current_asset_ids),
+                "selected_asset_id": (
+                    current_asset_ids[0] if current_asset_ids else ""
+                ),
+                "selection_reason": (
+                    "Operator selected a confirmed product from the "
+                    "published project catalog."
+                ),
+                "discovery_source": "knowledge_catalog",
+                "detail_page_verified": True,
+                "asset_status": (
+                    "ready" if current_asset_ids else "missing"
+                ),
+                "asset_error": "",
+            }
+            if has_manual_specifications:
+                product_values["specifications_overridden"] = True
+            result.append(Product.model_validate(product_values))
         return tuple(result)
 
 

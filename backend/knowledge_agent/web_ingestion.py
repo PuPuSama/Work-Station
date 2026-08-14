@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
 from pathlib import PurePosixPath
-from typing import Mapping, Protocol
-from urllib.parse import urlsplit
+from typing import Callable, Collection, Mapping, Protocol
+from urllib.robotparser import RobotFileParser
+from urllib.parse import unquote, urlsplit
 
 from PIL import Image, UnidentifiedImageError
 
@@ -44,14 +45,103 @@ from .wordpress import (
     WordPressProbeResult,
     WordPressSiteProbe,
     classify_web_page,
+    discover_category_pagination_links,
+    discover_internal_page_links,
     discover_product_links,
     normalize_official_url,
     normalize_site_url,
+    product_links_from_wordpress_rest,
+    sitemap_locations,
 )
 
 
 MAX_PRODUCT_IMAGES_PER_PAGE = 12
 MAX_PRODUCT_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_CATEGORY_DISCOVERY_PAGES = 100
+MAX_PRODUCT_LINKS_PER_CATEGORY_PAGE = 1000
+MAX_SITEMAP_INDEXES = 50
+OFFICIAL_SITE_CRAWLER_USER_AGENT = "ArticleAgentKnowledgeBot"
+
+_HIGH_VALUE_OFFICIAL_PAGE_TERMS = (
+    "contact",
+    "contact-us",
+    "get-in-touch",
+    "request-a-quote",
+    "inquiry",
+    "enquiry",
+    "about",
+    "about-us",
+    "company",
+    "company-profile",
+    "service",
+    "services",
+    "support",
+    "capabilities",
+    "certificate",
+    "certification",
+    "kontakt",
+    "contacto",
+    "contato",
+    "contactez",
+    "lianxi",
+)
+_EDITORIAL_PAGE_TERMS = ("blog", "news", "article", "post")
+
+
+def _looks_like_product_page_url(url: str) -> bool:
+    path = urlsplit(url).path.casefold().strip("/")
+    return path.startswith(("product/", "products/"))
+
+
+def _looks_like_localized_product_page_url(url: str) -> bool:
+    segments = [
+        unquote(segment).casefold()
+        for segment in urlsplit(url).path.split("/")
+        if segment
+    ]
+    if len(segments) < 2 or not re.fullmatch(
+        r"[a-z]{2,3}(?:-[a-z]{2})?",
+        segments[0],
+    ):
+        return False
+    return segments[1] in {
+        "product",
+        "products",
+        "produkt",
+        "produkte",
+        "produit",
+        "produits",
+        "producto",
+        "productos",
+        "prodotto",
+        "prodotti",
+    }
+
+
+def _looks_like_product_sitemap_url(url: str) -> bool:
+    filename = PurePosixPath(urlsplit(url).path).name.casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", filename))
+    return "product" in tokens and not tokens.intersection(
+        {"cat", "category", "categories"}
+    )
+
+
+def _official_page_discovery_priority(url: str) -> int:
+    """Prioritize scarce crawl budget without deciding the page's type."""
+
+    path = urlsplit(url).path.casefold().strip("/")
+    tokens = set(re.findall(r"[a-z0-9]+", path))
+    normalized = path.replace("_", "-")
+    if any(
+        term in tokens or term in normalized
+        for term in _HIGH_VALUE_OFFICIAL_PAGE_TERMS
+    ):
+        return 0
+    if not path:
+        return 1
+    if any(term in tokens for term in _EDITORIAL_PAGE_TERMS):
+        return 3
+    return 2
 
 
 class WebSnapshotLookup(Protocol):
@@ -67,12 +157,7 @@ class WebSnapshotLookup(Protocol):
 
 
 class WebPageIngestion(Protocol):
-    """Shared Local/Server page-ingestion surface.
-
-    Local mode persists through the M2 repositories. Server mode supplies a
-    wrapper with the same methods but commits the prepared evidence in one
-    authorized PostgreSQL transaction.
-    """
+    """Authorized page-ingestion surface backed by PostgreSQL."""
 
     def ingest_url(
         self,
@@ -92,6 +177,10 @@ class WebPageIngestion(Protocol):
         classification: ClassifiedWebPage,
         metadata: Mapping[str, object] | None = None,
     ) -> WebPageIngestionResult: ...
+
+
+class WebPageIngestionConflict(RuntimeError):
+    """One page cannot be ingested without overwriting pending evidence."""
 
 
 class WebPagePreparation(Protocol):
@@ -238,6 +327,24 @@ class WordPressCategorySyncResult:
     products: tuple[WebPageIngestionResult, ...]
     skipped_urls: tuple[str, ...]
     warnings: tuple[str, ...]
+
+    @property
+    def pages(self) -> tuple[WebPageIngestionResult, ...]:
+        return (self.category, *self.products)
+
+
+@dataclass(frozen=True, slots=True)
+class OfficialSiteScanResult:
+    """One bounded CMS-agnostic official-site knowledge scan."""
+
+    probe: WordPressProbeResult
+    pages: tuple[WebPageIngestionResult, ...]
+    skipped_urls: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+    @property
+    def products(self) -> tuple[WebPageIngestionResult, ...]:
+        return tuple(page for page in self.pages if page.product is not None)
 
 
 def _source_id(canonical_url: str) -> str:
@@ -426,7 +533,12 @@ def _image_dimensions(content: bytes) -> tuple[int, int]:
             image.verify()
         with Image.open(BytesIO(content)) as image:
             width, height = image.size
-    except (UnidentifiedImageError, OSError, ValueError) as exc:
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise WordPressIngestionError(
             "product image bytes are not a supported raster image"
         ) from exc
@@ -912,8 +1024,8 @@ class OfficialWebPageIngestionService:
         )
 
 
-class WordPressProductSyncService:
-    """Probe WordPress, ingest one category, then bounded product-detail candidates."""
+class OfficialSiteSyncService:
+    """Official-site sync with optional WordPress/product accelerators."""
 
     def __init__(
         self,
@@ -924,9 +1036,309 @@ class WordPressProductSyncService:
         self._fetcher = fetcher
         self._page_ingestion = page_ingestion
         self._probe = WordPressSiteProbe(fetcher)
+        self._page_ingested_callback: (
+            Callable[[WebPageIngestionResult], None] | None
+        ) = None
+
+    def set_page_ingested_callback(
+        self,
+        callback: Callable[[WebPageIngestionResult], None] | None,
+    ) -> None:
+        """Run a durable follow-up immediately after each page is committed."""
+
+        self._page_ingested_callback = callback
+
+    def _ingest_resource(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        resource: FetchedResource,
+        classification: ClassifiedWebPage,
+        metadata: Mapping[str, object] | None = None,
+    ) -> WebPageIngestionResult:
+        result = self._page_ingestion.ingest_resource(
+            project_id=project_id,
+            site_url=site_url,
+            resource=resource,
+            classification=classification,
+            metadata=metadata,
+        )
+        callback = self._page_ingested_callback
+        if callback is not None:
+            callback(result)
+        return result
 
     def probe(self, site_url: str) -> WordPressProbeResult:
         return self._probe.probe(site_url)
+
+    def sync_site(
+        self,
+        *,
+        project_id: str,
+        site_url: str,
+        start_url: str,
+        max_pages: int = 100,
+        known_urls: Collection[str] = (),
+    ) -> OfficialSiteScanResult:
+        """Discover and ingest useful official pages without assuming a CMS.
+
+        Discovery order is sitemap -> WordPress public content APIs -> ordinary
+        same-site navigation. Every fetched HTML page is classified by content
+        before ingestion, so URL patterns only prioritize work; they never
+        decide whether a page becomes a product, blog, or general knowledge
+        source.
+        """
+
+        if max_pages <= 0 or max_pages > 500:
+            raise ValueError("max_pages must be between 1 and 500")
+        site = normalize_site_url(site_url)
+        start = normalize_official_url(site, start_url or f"{site}/")
+        start_parts = urlsplit(start)
+        direct_page_scan = max_pages == 1 and bool(
+            start_parts.path.rstrip("/") or start_parts.query
+        )
+        normalized_known_urls: set[str] = set()
+        for known_url in known_urls:
+            try:
+                normalized_known_urls.add(normalize_official_url(site, known_url))
+            except (UnsafeOfficialSiteUrl, ValueError):
+                continue
+        probe = (
+            WordPressProbeResult(
+                site_url=site,
+                detected=False,
+                rest_api_url=None,
+                namespaces=(),
+                route_count=0,
+                reason="WordPress discovery skipped for an explicit single-page scan.",
+            )
+            if direct_page_scan
+            else self._probe.probe(site)
+        )
+        warnings: list[str] = []
+        skipped: list[str] = []
+        queued: list[str] = [start]
+        queued_set = {start}
+        product_urls: set[str] = (
+            {start} if _looks_like_product_page_url(start) else set()
+        )
+        robots = RobotFileParser(f"{site}/robots.txt")
+        robots.set_url(f"{site}/robots.txt")
+        try:
+            robots_resource = self._fetcher.fetch(
+                site_url=site,
+                url=f"{site}/robots.txt",
+                max_bytes=512 * 1024,
+            )
+            robots.parse(robots_resource.text.splitlines())
+            robots_available = True
+        except (OfficialSiteFetchError, UnsafeOfficialSiteUrl):
+            robots_available = False
+
+        def allowed(url: str) -> bool:
+            return not robots_available or robots.can_fetch(
+                OFFICIAL_SITE_CRAWLER_USER_AGENT,
+                url,
+            )
+
+        sitemap_urls = (
+            []
+            if direct_page_scan
+            else [
+                f"{site}/sitemap.xml",
+                f"{site}/sitemap_index.xml",
+                f"{site}/wp-sitemap.xml",
+            ]
+        )
+        seen_sitemaps: set[str] = set()
+        while sitemap_urls and len(seen_sitemaps) < MAX_SITEMAP_INDEXES:
+            sitemap_url = sitemap_urls.pop(0)
+            if sitemap_url in seen_sitemaps:
+                continue
+            seen_sitemaps.add(sitemap_url)
+            try:
+                resource = self._fetcher.fetch(
+                    site_url=site,
+                    url=sitemap_url,
+                    max_bytes=4 * 1024 * 1024,
+                )
+            except (OfficialSiteFetchError, UnsafeOfficialSiteUrl):
+                continue
+            product_sitemap = _looks_like_product_sitemap_url(sitemap_url)
+            for url in sitemap_locations(site_url=site, payload=resource.content):
+                if urlsplit(url).path.casefold().endswith(".xml"):
+                    if url not in seen_sitemaps:
+                        sitemap_urls.append(url)
+                    continue
+                if (
+                    product_sitemap
+                    and _looks_like_localized_product_page_url(url)
+                ):
+                    skipped.append(url)
+                    continue
+                if product_sitemap or _looks_like_product_page_url(url):
+                    product_urls.add(url)
+                if url not in queued_set:
+                    if not allowed(url):
+                        skipped.append(url)
+                        continue
+                    queued_set.add(url)
+                    queued.append(url)
+
+        if not direct_page_scan and probe.detected:
+            for post_type in ("product", "posts", "pages"):
+                seen_api_urls: set[str] = set()
+                for page_number in range(1, MAX_CATEGORY_DISCOVERY_PAGES + 1):
+                    suffix = "" if page_number == 1 else f"&page={page_number}"
+                    try:
+                        resource = self._fetcher.fetch(
+                            site_url=site,
+                            url=(
+                                f"{site}/wp-json/wp/v2/{post_type}"
+                                f"?per_page=100&_fields=link{suffix}"
+                            ),
+                            max_bytes=2 * 1024 * 1024,
+                        )
+                    except OfficialSiteFetchError:
+                        break
+                    page_urls = product_links_from_wordpress_rest(
+                        site_url=site,
+                        payload=resource.content,
+                        limit=100,
+                    )
+                    new_urls = [url for url in page_urls if url not in seen_api_urls]
+                    if not new_urls:
+                        break
+                    seen_api_urls.update(new_urls)
+                    for url in new_urls:
+                        if not allowed(url):
+                            skipped.append(url)
+                            continue
+                        if post_type == "product":
+                            product_urls.add(url)
+                        if url not in queued_set:
+                            queued_set.add(url)
+                            queued.append(url)
+                    if len(page_urls) < 100:
+                        break
+
+        pages: list[WebPageIngestionResult] = []
+        visited: set[str] = set()
+        ordinary_pages_visited = 0
+        product_pages_visited = 0
+        while queued:
+            eligible_indices = [
+                index
+                for index, url in enumerate(queued)
+                if (
+                    url in product_urls
+                )
+                or (
+                    url not in product_urls
+                    and ordinary_pages_visited < max_pages
+                )
+            ]
+            if not eligible_indices:
+                break
+            # Product URLs discovered through product sitemaps, WordPress product
+            # routes, or explicit product paths do not consume the ordinary-page
+            # budget. New URLs still go before known URLs within each group.
+            next_index = min(
+                eligible_indices,
+                key=lambda index: (
+                    queued[index] not in product_urls,
+                    queued[index] in normalized_known_urls,
+                    _official_page_discovery_priority(queued[index]),
+                    index,
+                ),
+            )
+            candidate = queued.pop(next_index)
+            if candidate in visited:
+                continue
+            visited.add(candidate)
+            if candidate in product_urls:
+                product_pages_visited += 1
+            else:
+                ordinary_pages_visited += 1
+            if not allowed(candidate):
+                skipped.append(candidate)
+                continue
+            try:
+                resource = self._fetcher.fetch(site_url=site, url=candidate)
+                content_type = resource.content_type.casefold()
+                if "html" not in content_type and "xhtml" not in content_type:
+                    skipped.append(candidate)
+                    continue
+                page = classify_web_page(
+                    requested_url=resource.final_url,
+                    html=resource.content,
+                )
+                if not direct_page_scan:
+                    for url in discover_internal_page_links(
+                        site_url=site,
+                        page_url=page.canonical_url,
+                        html=resource.content,
+                    ):
+                        if _looks_like_localized_product_page_url(url):
+                            skipped.append(url)
+                            continue
+                        if not allowed(url):
+                            skipped.append(url)
+                        elif url not in visited and url not in queued_set:
+                            queued_set.add(url)
+                            queued.append(url)
+                            if _looks_like_product_page_url(url):
+                                product_urls.add(url)
+                if page.page_type == "unknown":
+                    skipped.append(page.canonical_url)
+                    warnings.append(
+                        f"{page.canonical_url}: page content was not substantive enough"
+                    )
+                    continue
+                result = self._ingest_resource(
+                    project_id=project_id,
+                    site_url=site,
+                    resource=resource,
+                    classification=page,
+                    metadata={
+                        "discovery_strategy": (
+                            "official_site_direct_page_v1"
+                            if direct_page_scan
+                            else "official_site_multistrategy_v1"
+                        ),
+                        "scan_start_url": start,
+                        "wordpress_detected": probe.detected,
+                    },
+                )
+            except (
+                OfficialSiteFetchError,
+                UnsafeOfficialSiteUrl,
+                WordPressIngestionError,
+                WebPageIngestionConflict,
+                ValueError,
+            ) as exc:
+                skipped.append(candidate)
+                warnings.append(f"{candidate}: {exc}")
+                continue
+            pages.append(result)
+        remaining_products = sum(url in product_urls for url in queued)
+        remaining_ordinary = len(queued) - remaining_products
+        if remaining_ordinary:
+            warnings.append(
+                f"scan page budget reached ({max_pages}); "
+                f"{remaining_ordinary} ordinary URLs remain"
+            )
+        if not pages:
+            raise WordPressIngestionError(
+                "no useful official-site HTML pages could be ingested"
+            )
+        return OfficialSiteScanResult(
+            probe=probe,
+            pages=tuple(pages),
+            skipped_urls=tuple(dict.fromkeys(skipped)),
+            warnings=tuple(warnings),
+        )
 
     def sync_category(
         self,
@@ -953,7 +1365,7 @@ class WordPressProductSyncService:
             raise WordPressIngestionError(
                 "category_url was not classified as a product category"
             )
-        category = self._page_ingestion.ingest_resource(
+        category = self._ingest_resource(
             project_id=project_id,
             site_url=site,
             resource=category_resource,
@@ -966,15 +1378,91 @@ class WordPressProductSyncService:
                 }
             },
         )
-        candidates = discover_product_links(
-            site_url=site,
-            category_url=category_page.canonical_url,
-            html=category_resource.content,
-            limit=max_products,
+        warnings: list[str] = []
+        rest_candidates: list[str] = []
+        if probe.detected:
+            seen_rest: set[str] = set()
+            for page_number in range(1, MAX_CATEGORY_DISCOVERY_PAGES + 1):
+                page_suffix = "" if page_number == 1 else f"&page={page_number}"
+                try:
+                    product_index = self._fetcher.fetch(
+                        site_url=site,
+                        url=(
+                            f"{site}/wp-json/wp/v2/product"
+                            f"?per_page={max_products}&_fields=link{page_suffix}"
+                        ),
+                        max_bytes=2 * 1024 * 1024,
+                    )
+                except OfficialSiteFetchError:
+                    break
+                page_candidates = product_links_from_wordpress_rest(
+                    site_url=site,
+                    payload=product_index.content,
+                    limit=max_products,
+                )
+                new_candidates = [
+                    url for url in page_candidates if url not in seen_rest
+                ]
+                if not new_candidates:
+                    break
+                seen_rest.update(new_candidates)
+                rest_candidates.extend(new_candidates)
+                if len(page_candidates) < max_products:
+                    break
+
+        html_candidates: list[str] = []
+        seen_html_products: set[str] = set()
+        seen_category_pages = {category_page.canonical_url}
+        category_pages: list[tuple[str, bytes]] = [
+            (category_page.canonical_url, category_resource.content)
+        ]
+        queued_pages = list(
+            discover_category_pagination_links(
+                site_url=site,
+                category_url=category_page.canonical_url,
+                html=category_resource.content,
+            )
         )
+        while (
+            queued_pages
+            and len(category_pages) < MAX_CATEGORY_DISCOVERY_PAGES
+        ):
+            page_url = queued_pages.pop(0)
+            if page_url in seen_category_pages:
+                continue
+            seen_category_pages.add(page_url)
+            try:
+                page_resource = self._fetcher.fetch(
+                    site_url=site,
+                    url=page_url,
+                )
+            except OfficialSiteFetchError as exc:
+                warnings.append(f"{page_url}: {exc}")
+                continue
+            category_pages.append((page_resource.final_url, page_resource.content))
+            for next_page in discover_category_pagination_links(
+                site_url=site,
+                category_url=page_resource.final_url,
+                html=page_resource.content,
+            ):
+                if next_page not in seen_category_pages:
+                    queued_pages.append(next_page)
+
+        for page_url, page_html in category_pages:
+            for product_url in discover_product_links(
+                site_url=site,
+                category_url=page_url,
+                html=page_html,
+                limit=MAX_PRODUCT_LINKS_PER_CATEGORY_PAGE,
+            ):
+                if product_url in seen_html_products:
+                    continue
+                seen_html_products.add(product_url)
+                html_candidates.append(product_url)
+
+        candidates = tuple(dict.fromkeys((*rest_candidates, *html_candidates)))
         products: list[WebPageIngestionResult] = []
         skipped: list[str] = []
-        warnings: list[str] = []
         for candidate_url in candidates:
             try:
                 resource = self._fetcher.fetch(
@@ -992,7 +1480,7 @@ class WordPressProductSyncService:
                         f"{page.page_type}, not product_detail"
                     )
                     continue
-                result = self._page_ingestion.ingest_resource(
+                result = self._ingest_resource(
                     project_id=project_id,
                     site_url=site,
                     resource=resource,
@@ -1002,7 +1490,12 @@ class WordPressProductSyncService:
                         "wordpress_detected": probe.detected,
                     },
                 )
-            except (WordPressIngestionError, OfficialSiteFetchError, ValueError) as exc:
+            except (
+                WordPressIngestionError,
+                OfficialSiteFetchError,
+                WebPageIngestionConflict,
+                ValueError,
+            ) as exc:
                 skipped.append(candidate_url)
                 warnings.append(f"{candidate_url}: {exc}")
                 continue
@@ -1020,11 +1513,18 @@ __all__ = [
     "MAX_PRODUCT_IMAGES_PER_PAGE",
     "MAX_PRODUCT_IMAGE_BYTES",
     "OfficialWebPageIngestionService",
+    "OfficialSiteScanResult",
+    "OfficialSiteSyncService",
     "PreparedWebPageIngestion",
     "WebPageIngestion",
+    "WebPageIngestionConflict",
     "WebPagePreparation",
     "WebPageIngestionResult",
     "WebSnapshotLookup",
     "WordPressCategorySyncResult",
     "WordPressProductSyncService",
 ]
+
+
+# Backward-compatible name for the older product-category endpoint.
+WordPressProductSyncService = OfficialSiteSyncService

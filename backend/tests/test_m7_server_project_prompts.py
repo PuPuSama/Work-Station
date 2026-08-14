@@ -20,7 +20,7 @@ if str(BACKEND_DIR) not in sys.path:
 from knowledge_agent.database import create_knowledge_engine  # noqa: E402
 from knowledge_agent.schema import projects  # noqa: E402
 from config import load_config  # noqa: E402
-from models import PromptSnapshot, TaskRecord  # noqa: E402
+from models import OfficialLink, PromptSnapshot, TaskRecord  # noqa: E402
 from server_schema import (  # noqa: E402
     organizations,
     project_memberships,
@@ -43,7 +43,6 @@ from services.server_project_prompts import (  # noqa: E402
     ServerProjectPromptServiceFactory,
     _prompt_scope_lock_identity,
 )
-from services.project_prompts import ProjectPromptRepository  # noqa: E402
 from services.postgres_task_repository import (  # noqa: E402
     PostgresTaskRepository,
 )
@@ -58,17 +57,14 @@ from services.server_title_generation import (  # noqa: E402
     ServerTitleGenerationHandler,
     TitleGenerationUnavailable,
     TitleTemplateReference,
+    build_server_title_prompt,
 )
 from services.server_article_generation import (  # noqa: E402
     ArticleGenerationUnavailable,
     LlmServerArticleProvider,
     ServerArticleGenerationHandler,
     apply_generated_article_draft,
-)
-from services.server_project_prompt_migration import (  # noqa: E402
-    ProjectPromptMigrationConflict,
-    ProjectPromptMigrationUnavailable,
-    migrate_project_prompts,
+    build_server_article_prompt,
 )
 from services.server_task_commands import (  # noqa: E402
     ServerTaskCommandUnavailable,
@@ -165,17 +161,17 @@ Compare published evidence before approval.
 
 ## FAQ
 
-**Q: What should buyers confirm?**
+### What should buyers confirm?
 
-A: Buyers should confirm application requirements.
+Buyers should confirm application requirements.
 
-**Q: Why compare evidence?**
+### Why compare evidence?
 
-A: Evidence supports a reliable decision.
+Evidence supports a reliable decision.
 
-**Q: When should approval happen?**
+### When should approval happen?
 
-A: Approval should follow the documented checks.
+Approval should follow the documented checks.
 """
 
 
@@ -318,37 +314,8 @@ class ServerProjectPromptTests(unittest.TestCase):
             audit=self.audit,
         )
 
-    def _legacy_source(
-        self,
-        directory: str,
-    ) -> tuple[ProjectPromptRepository, str]:
-        customer = self.project_id
-        source = ProjectPromptRepository(
-            Path(directory) / "legacy-tasks.json"
-        )
-        outline = source.create(
-            customer,
-            "Legacy outline",
-            "outline",
-            "Legacy outline version one.",
-        )
-        source.update(
-            customer,
-            outline.id,
-            "Legacy outline v2",
-            "Legacy outline version two.",
-        )
-        article = source.create(
-            customer,
-            "Archived article",
-            "article",
-            "Archived article prompt.",
-        )
-        source.set_active(customer, article.id, False)
-        source.set_defaults(customer, outline.id, "")
-        return source, outline.id
 
-    def test_versions_are_immutable_and_default_is_exactly_pinned(
+    def test_edit_updates_current_prompt_version_and_default(
         self,
     ) -> None:
         created = self.service.create(
@@ -374,7 +341,7 @@ class ServerProjectPromptTests(unittest.TestCase):
             name="Buyer outline v2",
             content="Second prompt",
         )
-        self.assertEqual(updated.version, 2)
+        self.assertEqual(updated.version, 1)
         self.assertEqual(
             self.service.resolve(
                 self.viewer,
@@ -387,16 +354,24 @@ class ServerProjectPromptTests(unittest.TestCase):
             self.service.resolve(
                 self.viewer,
                 kind="outline",
+                selection="project_default",
+            ).content,
+            "Second prompt",
+        )
+        self.assertEqual(
+            self.service.resolve(
+                self.viewer,
+                kind="outline",
                 selection=created.prompt_id,
             ).version,
-            2,
+            1,
         )
         default_v2 = self.service.set_default(
             self.editor,
             kind="outline",
             prompt_id=created.prompt_id,
         )
-        self.assertEqual(default_v2.version, 2)
+        self.assertEqual(default_v2.version, 1)
 
         with self.engine.connect() as connection:
             versions = connection.execute(
@@ -417,7 +392,7 @@ class ServerProjectPromptTests(unittest.TestCase):
             ).all()
         self.assertEqual(
             [(row.version, row.content) for row in versions],
-            [(1, "First\nprompt"), (2, "Second prompt")],
+            [(1, "Second prompt")],
         )
         self.assertTrue(
             all(len(row.content_hash) == 64 for row in versions)
@@ -427,8 +402,7 @@ class ServerProjectPromptTests(unittest.TestCase):
             [
                 "project_prompt.created",
                 "project_prompt.default.updated",
-                "project_prompt.version.created",
-                "project_prompt.default.updated",
+                "project_prompt.updated",
             ],
         )
         self.assertNotIn("First", str(self.audit.events))
@@ -468,6 +442,73 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertEqual(resolved.prompt_id, created.prompt_id)
         self.assertEqual(resolved.kind, "humanize")
         self.assertEqual(resolved.content.count("{{ARTICLE}}"), 1)
+
+    def test_update_can_change_kind_without_mutating_old_history(self) -> None:
+        created = self.service.create(
+            self.editor,
+            name="Misclassified review prompt",
+            kind="outline",
+            content="Check factual and SEO requirements.",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="outline",
+            prompt_id=created.prompt_id,
+        )
+
+        replacement = self.service.update(
+            self.editor,
+            prompt_id=created.prompt_id,
+            expected_version=1,
+            name="Review prompt",
+            kind="review",
+            content="Check factual and SEO requirements.",
+        )
+
+        self.assertNotEqual(replacement.prompt_id, created.prompt_id)
+        self.assertEqual(replacement.kind, "review")
+        self.assertEqual(replacement.version, 1)
+        directory = self.service.list(self.viewer)
+        items = {item.snapshot.prompt_id: item for item in directory.prompts}
+        self.assertEqual(items[created.prompt_id].status, "archived")
+        self.assertEqual(items[replacement.prompt_id].status, "active")
+        self.assertEqual(
+            self.service.resolve(
+                self.viewer,
+                kind="outline",
+                selection="project_default",
+            ).source,
+            "system",
+        )
+        self.assertEqual(
+            self.service.resolve(
+                self.viewer,
+                kind="review",
+                selection=replacement.prompt_id,
+            ).prompt_id,
+            replacement.prompt_id,
+        )
+        with self.engine.connect() as connection:
+            versions = connection.execute(
+                sa.select(
+                    project_prompt_versions.c.prompt_id,
+                    project_prompt_versions.c.kind,
+                ).where(
+                    project_prompt_versions.c.organization_id
+                    == self.organization_id,
+                    project_prompt_versions.c.project_id == self.project_id,
+                    project_prompt_versions.c.prompt_id.in_(
+                        (created.prompt_id, replacement.prompt_id)
+                    ),
+                )
+            ).all()
+        self.assertEqual(
+            set(versions),
+            {
+                (created.prompt_id, "outline"),
+                (replacement.prompt_id, "review"),
+            },
+        )
 
     def test_writing_settings_resolution_holds_stable_prompt_scope_lock(
         self,
@@ -562,8 +603,66 @@ class ServerProjectPromptTests(unittest.TestCase):
                         project_prompt_versions.c.prompt_id
                         == created.prompt_id,
                     )
+            ).scalar_one(),
+            1,
+        )
+
+    def test_delete_removes_prompt_and_default(self) -> None:
+        created = self.service.create(
+            self.editor,
+            name="Temporary prompt",
+            kind="outline",
+            content="Delete this prompt.",
+        )
+        self.service.set_default(
+            self.editor,
+            kind="outline",
+            prompt_id=created.prompt_id,
+        )
+
+        self.service.delete(
+            self.editor,
+            prompt_id=created.prompt_id,
+        )
+
+        self.assertNotIn(
+            created.prompt_id,
+            {item.snapshot.prompt_id for item in self.service.list(self.viewer).prompts},
+        )
+        self.assertEqual(
+            self.service.resolve(
+                self.viewer,
+                kind="outline",
+                selection="project_default",
+            ).source,
+            "system",
+        )
+        with self.engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(project_prompt_heads)
+                    .where(
+                        project_prompt_heads.c.organization_id
+                        == self.organization_id,
+                        project_prompt_heads.c.project_id == self.project_id,
+                        project_prompt_heads.c.prompt_id == created.prompt_id,
+                    )
                 ).scalar_one(),
-                1,
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(project_prompt_versions)
+                    .where(
+                        project_prompt_versions.c.organization_id
+                        == self.organization_id,
+                        project_prompt_versions.c.project_id == self.project_id,
+                        project_prompt_versions.c.prompt_id == created.prompt_id,
+                    )
+                ).scalar_one(),
+                0,
             )
 
     def test_viewer_can_resolve_but_cannot_write_or_cross_project(
@@ -608,7 +707,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                 selection=created.prompt_id,
             )
 
-    def test_stale_update_and_kind_mismatch_fail_closed(self) -> None:
+    def test_update_keeps_version_and_rejects_wrong_current_version(self) -> None:
         created = self.service.create(
             self.editor,
             name="Outline prompt",
@@ -627,7 +726,7 @@ class ServerProjectPromptTests(unittest.TestCase):
             self.service.update(
                 self.editor,
                 prompt_id=created.prompt_id,
-                expected_version=1,
+                expected_version=2,
                 name="Stale",
                 content="Must not persist.",
             )
@@ -652,7 +751,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                         == created.prompt_id,
                     )
                 ).scalar_one(),
-                2,
+                1,
             )
 
     def test_audit_failure_rolls_back_prompt_creation(self) -> None:
@@ -691,7 +790,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                 0,
             )
 
-    def test_audit_failure_rolls_back_new_version_and_default(self) -> None:
+    def test_audit_failure_rolls_back_prompt_edit_and_default(self) -> None:
         created = self.service.create(
             self.editor,
             name="Stable prompt",
@@ -755,7 +854,7 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertEqual(version_count, 1)
         self.assertEqual(default_count, 0)
 
-    def test_database_rejects_version_mutation_and_cross_project_pointer(
+    def test_database_allows_version_edit_and_rejects_cross_project_pointer(
         self,
     ) -> None:
         created = self.service.create(
@@ -764,20 +863,27 @@ class ServerProjectPromptTests(unittest.TestCase):
             kind="outline",
             content="Immutable body.",
         )
-        with self.assertRaises(sa.exc.DBAPIError):
-            with self.engine.begin() as connection:
-                connection.execute(
-                    project_prompt_versions.update()
-                    .where(
-                        project_prompt_versions.c.organization_id
-                        == self.organization_id,
-                        project_prompt_versions.c.project_id
-                        == self.project_id,
-                        project_prompt_versions.c.prompt_id
-                        == created.prompt_id,
-                    )
-                    .values(content="mutated")
+        with self.engine.begin() as connection:
+            connection.execute(
+                project_prompt_versions.update()
+                .where(
+                    project_prompt_versions.c.organization_id
+                    == self.organization_id,
+                    project_prompt_versions.c.project_id
+                    == self.project_id,
+                    project_prompt_versions.c.prompt_id
+                    == created.prompt_id,
                 )
+                .values(content="mutated")
+            )
+        self.assertEqual(
+            self.service.resolve(
+                self.viewer,
+                kind="outline",
+                selection=created.prompt_id,
+            ).content,
+            "mutated",
+        )
         with self.assertRaises(sa.exc.IntegrityError):
             with self.engine.begin() as connection:
                 connection.execute(
@@ -895,7 +1001,6 @@ class ServerProjectPromptTests(unittest.TestCase):
             local_state = Path(directory) / "must-not-exist"
             isolated = replace(
                 base_config,
-                data_file=local_state / "tasks.json",
                 knowledge_agent_enabled=False,
             )
             with (
@@ -975,12 +1080,12 @@ class ServerProjectPromptTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(updated.status_code, 200, updated.text)
-                self.assertEqual(updated.json()["version"], 2)
+                self.assertEqual(updated.json()["version"], 1)
                 self.assertEqual(
                     client.put(
                         f"{base_path}/{prompt_id}",
                         json={
-                            "expected_version": 1,
+                            "expected_version": 2,
                             "name": "Stale",
                             "content": "Must not persist.",
                         },
@@ -993,7 +1098,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                     json={"prompt_id": prompt_id},
                 )
                 self.assertEqual(default.status_code, 200, default.text)
-                self.assertEqual(default.json()["version"], 2)
+                self.assertEqual(default.json()["version"], 1)
                 humanizer = client.post(
                     base_path,
                     json={
@@ -1026,7 +1131,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                     client.put(
                         f"{base_path}/{prompt_id}/active",
                         json={
-                            "expected_version": 1,
+                            "expected_version": 2,
                             "active": False,
                         },
                     ).status_code,
@@ -1035,7 +1140,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                 archived = client.put(
                     f"{base_path}/{prompt_id}/active",
                     json={
-                        "expected_version": 2,
+                        "expected_version": 1,
                         "active": False,
                     },
                 )
@@ -1070,6 +1175,15 @@ class ServerProjectPromptTests(unittest.TestCase):
                     listing.json()["defaults"]["humanize"]["prompt_id"],
                     humanizer_id,
                 )
+                deleted = client.delete(f"{base_path}/{prompt_id}")
+                self.assertEqual(deleted.status_code, 200, deleted.text)
+                self.assertNotIn(
+                    prompt_id,
+                    {
+                        item["prompt_id"]
+                        for item in client.get(base_path).json()["prompts"]
+                    },
+                )
                 self.assertEqual(
                     client.post(
                         f"/api/projects/{self.other_project_id}/"
@@ -1086,11 +1200,12 @@ class ServerProjectPromptTests(unittest.TestCase):
                     [event.action for event in audit.events],
                     [
                         "project_prompt.created",
-                        "project_prompt.version.created",
+                        "project_prompt.updated",
                         "project_prompt.default.updated",
                         "project_prompt.created",
                         "project_prompt.default.updated",
                         "project_prompt.status.updated",
+                        "project_prompt.deleted",
                     ],
                 )
                 self.assertNotIn("Version one", str(audit.events))
@@ -1116,58 +1231,6 @@ class ServerProjectPromptTests(unittest.TestCase):
         finally:
             app_module.app.state.server_mode_enabled = previous_mode
 
-    def test_explicit_sqlite_migration_preserves_current_snapshot(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source, outline_id = self._legacy_source(directory)
-            audit = RecordingAuditWriter()
-            report = migrate_project_prompts(
-                source,
-                customer=self.project_id,
-                engine=self.engine,
-                actor=self.editor,
-                project_id=self.project_id,
-                audit=audit,
-            )
-            self.assertTrue(report.imported)
-            self.assertEqual(report.source.prompt_count, 2)
-            self.assertEqual(report.source.active_count, 1)
-            self.assertEqual(report.source.default_count, 1)
-            resolved = self.service.resolve(
-                self.viewer,
-                kind="outline",
-                selection="project_default",
-            )
-            self.assertEqual(resolved.prompt_id, outline_id)
-            self.assertEqual(resolved.version, 2)
-            self.assertEqual(
-                resolved.content,
-                "Legacy outline version two.",
-            )
-            listing = self.service.list(self.viewer)
-            self.assertEqual(
-                {item.status for item in listing.prompts},
-                {"active", "archived"},
-            )
-            repeated = migrate_project_prompts(
-                source,
-                customer=self.project_id,
-                engine=self.engine,
-                actor=self.editor,
-                project_id=self.project_id,
-                audit=audit,
-            )
-            self.assertTrue(repeated.already_matched)
-            self.assertFalse(repeated.imported)
-            self.assertEqual(
-                [event.action for event in audit.events],
-                ["project_prompt.imported"],
-            )
-            self.assertNotIn(
-                "Legacy outline",
-                str(audit.events),
-            )
 
     def test_outline_worker_keeps_enqueued_prompt_version_after_default_moves(
         self,
@@ -1188,11 +1251,10 @@ class ServerProjectPromptTests(unittest.TestCase):
             kind="outline",
             selection="project_default",
         )
-        prompt_v2 = self.service.update(
+        prompt_v2 = self.service.create(
             self.editor,
-            prompt_id=prompt_v1.prompt_id,
-            expected_version=1,
             name="Outline v2",
+            kind="outline",
             content="New default instructions v2.",
         )
         self.service.set_default(
@@ -1260,7 +1322,8 @@ class ServerProjectPromptTests(unittest.TestCase):
             kind="outline",
             selection="project_default",
         )
-        self.assertEqual(current_default.version, 2)
+        self.assertEqual(current_default.version, 1)
+        self.assertEqual(current_default.prompt_id, prompt_v2.prompt_id)
 
     def test_outline_worker_rolls_back_generated_draft_when_audit_fails(
         self,
@@ -1389,11 +1452,10 @@ class ServerProjectPromptTests(unittest.TestCase):
             kind="article",
             selection="project_default",
         )
-        prompt_v2 = self.service.update(
+        prompt_v2 = self.service.create(
             self.editor,
-            prompt_id=prompt_v1.prompt_id,
-            expected_version=1,
             name="Article v2",
+            kind="article",
             content="New article instructions v2.",
         )
         self.service.set_default(
@@ -1466,7 +1528,8 @@ class ServerProjectPromptTests(unittest.TestCase):
             kind="article",
             selection="project_default",
         )
-        self.assertEqual(current_default.version, 2)
+        self.assertEqual(current_default.version, 1)
+        self.assertEqual(current_default.prompt_id, prompt_v2.prompt_id)
 
     def test_article_worker_rolls_back_draft_when_audit_fails(
         self,
@@ -1530,92 +1593,7 @@ class ServerProjectPromptTests(unittest.TestCase):
         self.assertEqual(stored.article_versions, [])
         self.assertIsNone(stored.last_article_prompt_snapshot)
 
-    def test_prompt_migration_dry_run_and_divergent_target(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source, _ = self._legacy_source(directory)
-            dry_run = migrate_project_prompts(
-                source,
-                customer=self.project_id,
-                engine=self.engine,
-                actor=self.editor,
-                project_id=self.project_id,
-                audit=self.audit,
-                dry_run=True,
-            )
-            self.assertFalse(dry_run.imported)
-            with self.engine.connect() as connection:
-                self.assertEqual(
-                    connection.execute(
-                        sa.select(sa.func.count())
-                        .select_from(project_prompt_heads)
-                        .where(
-                            project_prompt_heads.c.organization_id
-                            == self.organization_id,
-                            project_prompt_heads.c.project_id
-                            == self.project_id,
-                        )
-                    ).scalar_one(),
-                    0,
-                )
-            self.service.create(
-                self.editor,
-                name="Divergent target",
-                kind="outline",
-                content="Different content.",
-            )
-            with self.assertRaises(ProjectPromptMigrationConflict):
-                migrate_project_prompts(
-                    source,
-                    customer=self.project_id,
-                    engine=self.engine,
-                    actor=self.editor,
-                    project_id=self.project_id,
-                )
 
-    def test_prompt_migration_requires_editor_and_rolls_back_audit(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            source, _ = self._legacy_source(directory)
-            with self.assertRaises(ProjectAccessDenied):
-                migrate_project_prompts(
-                    source,
-                    customer=self.project_id,
-                    engine=self.engine,
-                    actor=self.viewer,
-                    project_id=self.project_id,
-                )
-            with self.assertRaises(ProjectAccessDenied):
-                migrate_project_prompts(
-                    source,
-                    customer=self.project_id,
-                    engine=self.engine,
-                    actor=self.editor,
-                    project_id=self.other_project_id,
-                )
-            with self.assertRaises(ProjectPromptMigrationUnavailable):
-                migrate_project_prompts(
-                    source,
-                    customer=self.project_id,
-                    engine=self.engine,
-                    actor=self.editor,
-                    project_id=self.project_id,
-                    audit=FailingAuditWriter(),
-                )
-            with self.engine.connect() as connection:
-                self.assertEqual(
-                    connection.execute(
-                        sa.select(sa.func.count())
-                        .select_from(project_prompt_heads)
-                        .where(
-                            project_prompt_heads.c.organization_id
-                            == self.organization_id,
-                            project_prompt_heads.c.project_id
-                            == self.project_id,
-                        )
-                    ).scalar_one(),
-                    0,
-                )
 
 
 class ServerOutlineProviderTests(unittest.TestCase):
@@ -1706,6 +1684,30 @@ class ServerTitleProviderTests(unittest.TestCase):
                 context_chunks=(),
             )
 
+    def test_title_prompt_includes_operator_project_rules(self) -> None:
+        task = self._task()
+        task.project_notes = (
+            "Use engineered wood flooring; exclude laminate topics."
+        )
+        prompt = build_server_title_prompt(
+            task,
+            title_count=3,
+            context_chunks=(),
+        )
+        self.assertIn("Use engineered wood flooring", prompt)
+
+        task.include_project_notes = False
+        excluded_prompt = build_server_title_prompt(
+            task,
+            title_count=3,
+            context_chunks=(),
+        )
+        self.assertNotIn("Use engineered wood flooring", excluded_prompt)
+        self.assertIn(
+            "[Not included for this generation by the operator.]",
+            excluded_prompt,
+        )
+
     def test_template_reference_detects_checked_in_prompt_drift(
         self,
     ) -> None:
@@ -1779,6 +1781,33 @@ class ServerArticleProviderTests(unittest.TestCase):
                 prompt_snapshot=snapshot,
                 context_chunks=(),
             )
+
+    def test_prompt_receives_only_pinned_official_contact_link(self) -> None:
+        task = self._task()
+        task.official_links = [
+            OfficialLink(
+                source_id="contact-source",
+                snapshot_id="contact-v1",
+                label="Contact Us",
+                url="https://example.test/contact-us/",
+                role="contact",
+            )
+        ]
+
+        prompt = build_server_article_prompt(
+            task,
+            target_words=1100,
+            prompt_snapshot=PromptSnapshot(
+                kind="article",
+                source="system",
+                captured_at="2026-07-31T00:00:00+00:00",
+            ),
+            context_chunks=(),
+        )
+
+        self.assertIn("contact: Contact Us", prompt)
+        self.assertIn("https://example.test/contact-us/", prompt)
+        self.assertIn("never guess a contact path", prompt)
 
     def test_invalid_structure_is_rejected_before_task_mutation(
         self,

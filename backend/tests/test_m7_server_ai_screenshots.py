@@ -42,6 +42,7 @@ class RecordingScreenshotObjects:
         self.data = b""
         self.width = 0
         self.height = 0
+        self.content_type = "image/png"
 
     def upload_final_ai_screenshot(
         self,
@@ -50,12 +51,14 @@ class RecordingScreenshotObjects:
         project_id,
         asset_id,
         data,
-        width,
-        height,
+        content_type="image/png",
+        width=None,
+        height=None,
     ) -> KnowledgeAsset:
         self.data = bytes(data)
-        self.width = int(width)
-        self.height = int(height)
+        self.content_type = str(content_type)
+        self.width = width
+        self.height = height
         return KnowledgeAsset(
             project_id=project_id,
             asset_id=asset_id,
@@ -65,7 +68,7 @@ class RecordingScreenshotObjects:
                 f"{actor.organization_id}/projects/{project_id}/"
                 f"blobs/aa/{asset_id}"
             ),
-            content_type="image/png",
+            content_type=self.content_type,
             byte_size=len(self.data),
             width=self.width,
             height=self.height,
@@ -88,6 +91,7 @@ class RecordingScreenshotObjects:
             project_id=project_id,
             asset_id=asset_id,
             data=data,
+            content_type="image/png",
             width=width,
             height=height,
         )
@@ -153,7 +157,7 @@ class ServerAiScreenshotTests(unittest.TestCase):
             INITIAL_AI_SCREENSHOT_ARTIFACT_KIND,
         )
 
-    def test_normalizes_private_png_without_local_path(self) -> None:
+    def test_stores_final_review_image_without_inspection(self) -> None:
         objects = RecordingScreenshotObjects()
         task = server_task()
 
@@ -163,7 +167,9 @@ class ServerAiScreenshotTests(unittest.TestCase):
             actor=ActorIdentity("org-a", "reviewer-a"),
             project_id="example.com",
             task=task,
-            content=screenshot_bytes(),
+            content=b"opaque screenshot bytes",
+            filename="review.jpg",
+            content_type="image/jpeg",
         )
 
         self.assertIs(saved, task)
@@ -175,20 +181,19 @@ class ServerAiScreenshotTests(unittest.TestCase):
         )
         self.assertEqual(
             saved.final_ai_check.screenshot_filename,
-            "final-ai-rate.png",
+            "final-ai-rate.jpg",
         )
         self.assertEqual(
             (
                 saved.final_ai_check.screenshot_width,
                 saved.final_ai_check.screenshot_height,
             ),
-            (640, 360),
+            (None, None),
         )
-        with Image.open(BytesIO(objects.data)) as image:
-            self.assertEqual(image.format, "PNG")
-            self.assertEqual(image.size, (640, 360))
+        self.assertEqual(objects.data, b"opaque screenshot bytes")
+        self.assertEqual(objects.content_type, "image/jpeg")
 
-    def test_rejects_missing_article_invalid_and_oversized_input(self) -> None:
+    def test_rejects_missing_article_empty_and_oversized_input(self) -> None:
         missing = server_task()
         missing.humanized_article = ""
         preparation = ServerFinalAiScreenshotPreparation(
@@ -206,13 +211,13 @@ class ServerAiScreenshotTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(
             ServerAiScreenshotError,
-            "not a valid image",
+            "is empty",
         ):
             preparation.prepare(
                 actor=ActorIdentity("org-a", "reviewer-a"),
                 project_id="example.com",
                 task=server_task(),
-                content=b"not-an-image",
+                content=b"",
             )
         with self.assertRaisesRegex(
             ServerAiScreenshotError,
@@ -239,6 +244,8 @@ class ServerAiScreenshotTests(unittest.TestCase):
                 project_id="example.com",
                 task=server_task(),
                 content=screenshot_bytes(),
+                filename="review.png",
+                content_type="image/png",
             )
 
 

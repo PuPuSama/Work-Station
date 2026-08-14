@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from services.llm import LLMClient
 
-from .contracts import RetrievalHit, RetrievalQuery
+from .contracts import EVIDENCE_SOURCE_KINDS, RetrievalHit, RetrievalQuery
 from .hybrid_retriever import BasicHybridRetriever
 from .research_chat_repository import (
     PostgresResearchChatRepository,
@@ -68,7 +68,18 @@ class LlmResearchAnswerProvider:
         recent_messages: Sequence[ResearchMessage],
     ) -> ResearchAnswer:
         evidence = "\n\n".join(
-            f"[{hit.chunk.chunk_id}]\n{hit.chunk.text}"
+            "\n".join(
+                (
+                    f"[{hit.chunk.chunk_id}]",
+                    "LOCATOR "
+                    + json.dumps(
+                        dict(hit.chunk.locator),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    hit.chunk.text,
+                )
+            )
             for hit in evidence_hits
         )
         history = "\n".join(
@@ -77,6 +88,8 @@ class LlmResearchAnswerProvider:
         )
         prompt = (
             "Answer only from EVIDENCE. If the evidence is insufficient, say so. "
+            "For factual answers, preserve table column relationships exactly; "
+            "when LOCATOR has page_number, include the page number in the answer. "
             "Return strict JSON with keys answer and citations. citations must be "
             "an array containing only exact chunk IDs shown below.\n\n"
             f"RECENT MESSAGES\n{history or '(none)'}\n\n"
@@ -172,6 +185,9 @@ class ResearchChatService:
                 project_id=project_id,
                 text=question,
                 limit=limit,
+                filters={
+                    "source_kinds": tuple(sorted(EVIDENCE_SOURCE_KINDS))
+                },
             )
         )
         recent = () if existing is None else existing.messages[-6:]

@@ -166,6 +166,7 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
     "article.initial_ai_check.updated": frozenset(
         {
             "confirmed",
+            "deferred",
             "score_recorded",
         }
     ),
@@ -241,6 +242,7 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
     "article.final_ai_check.updated": frozenset(
         {
             "confirmed",
+            "deferred",
             "score_recorded",
         }
     ),

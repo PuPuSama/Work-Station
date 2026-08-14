@@ -29,6 +29,11 @@ from knowledge_agent import (  # noqa: E402
     SnapshotAsset,
     SourceSnapshot,
     create_knowledge_engine,
+    effective_product_specification_tables,
+    normalize_product_specification_tables,
+)
+from knowledge_agent.schema import (  # noqa: E402
+    knowledge_product_source_evidence,
 )
 
 
@@ -64,6 +69,42 @@ class ProductCatalogContractTests(unittest.TestCase):
                 role="logo",  # type: ignore[arg-type]
                 confidence=0.8,
                 reason="Invalid role.",
+            )
+
+    def test_manual_specification_override_preserves_arbitrary_model_columns(
+        self,
+    ) -> None:
+        parsed = [
+            {
+                "headers": ["Technical specification", "6000W", "8000W"],
+                "rows": [["Surge Power", "12000VA", "16000VA"]],
+            }
+        ]
+        manual = normalize_product_specification_tables(
+            [
+                {
+                    "caption": "REVO HESS series",
+                    "headers": ["Parameter", "6000W", "8000W"],
+                    "rows": [["Surge Power", "12000VA", "16000VA"]],
+                }
+            ]
+        )
+        self.assertEqual(
+            effective_product_specification_tables(
+                {
+                    "specification_tables": parsed,
+                    "manual_specification_tables": manual,
+                }
+            ),
+            manual,
+        )
+        self.assertEqual(manual[0]["source_kind"], "manual")
+        self.assertEqual(manual[0]["rows"][0][2], "16000VA")
+
+    def test_manual_specification_override_is_bounded(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at most 40 columns"):
+            normalize_product_specification_tables(
+                [{"headers": ["column"] * 41, "rows": []}]
             )
 
 
@@ -247,6 +288,31 @@ class ProductCatalogRepositoryTests(unittest.TestCase):
             (confirmed,),
         )
 
+    def test_rediscovery_does_not_reopen_a_rejected_product(self) -> None:
+        self._store_product_and_asset()
+        with self.engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "UPDATE knowledge_products SET status='rejected' "
+                    "WHERE project_id='project-a' AND product_id='wood-screw'"
+                )
+            )
+
+        self.catalog_repository.upsert_product(
+            KnowledgeProduct(
+                project_id="project-a",
+                product_id="wood-screw",
+                name="Wrong rediscovered title",
+                canonical_url="https://project-a.example.com/wood-screw",
+                metadata={"rediscovered": True},
+            )
+        )
+
+        product = self.catalog_repository.get_product("project-a", "wood-screw")
+        self.assertIsNotNone(product)
+        self.assertEqual(product.status, "rejected")  # type: ignore[union-attr]
+        self.assertEqual(product.name, "Wood Screw")  # type: ignore[union-attr]
+
     def test_cross_project_product_evidence_is_rejected(self) -> None:
         self._store_product_and_asset()
         with self.assertRaises(ProductCatalogNotFound):
@@ -261,6 +327,67 @@ class ProductCatalogRepositoryTests(unittest.TestCase):
                     reason="Must not cross project boundaries.",
                 )
             )
+
+    def test_manual_specifications_update_confirmed_aggregate_only(self) -> None:
+        self._store_product_and_asset()
+        self.catalog_repository.store_source_evidence(
+            ProductSourceEvidence(
+                project_id="project-a",
+                product_id="wood-screw",
+                source_id="source-a",
+                snapshot_id="snapshot-a",
+                relation="primary_detail",
+                confidence=0.98,
+                reason="Current official product detail.",
+                metadata={
+                    "selection_projection": {
+                        "schema_version": 1,
+                        "name": "Wood Screw",
+                        "canonical_url": (
+                            "https://project-a.example.com/wood-screw"
+                        ),
+                        "specification_tables": [
+                            {"rows": [["Length", "40 mm"]]}
+                        ],
+                    }
+                },
+            )
+        )
+        self.catalog_repository.confirm_product("project-a", "wood-screw")
+
+        updated = self.catalog_repository.update_product_specifications(
+            "project-a",
+            "wood-screw",
+            [
+                {
+                    "headers": ["Parameter", "Value"],
+                    "rows": [["Length", "50 mm"]],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            effective_product_specification_tables(updated.metadata)[0][
+                "rows"
+            ],
+            [["Length", "50 mm"]],
+        )
+        with self.engine.connect() as connection:
+            source_metadata = connection.execute(
+                sa.select(knowledge_product_source_evidence.c.metadata)
+                .where(
+                    knowledge_product_source_evidence.c.project_id
+                    == "project-a",
+                    knowledge_product_source_evidence.c.product_id
+                    == "wood-screw",
+                )
+            ).scalar_one()
+        self.assertEqual(
+            source_metadata["selection_projection"]["specification_tables"][0][
+                "rows"
+            ],
+            [["Length", "40 mm"]],
+        )
 
 
 if __name__ == "__main__":

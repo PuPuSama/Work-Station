@@ -11,6 +11,7 @@ from .assets import PostgresKnowledgeAssetRepository
 from .catalog import PostgresProductCatalogRepository
 from .database import create_knowledge_engine
 from .ingestion import PrivateDocumentIngestionService
+from .ingestion.mineru import document_parser_router_from_environment
 from .interfaces import EmbeddingProvider
 from .evidence_repository import (
     PostgresEvidenceLinkRepository,
@@ -68,6 +69,7 @@ class KnowledgeAgentRuntime:
     research_execution: ResearchGraphExecutionService | None
 
     def close(self) -> None:
+        self.private_document_ingestion.close()
         close_provider = getattr(self.embedding_provider, "close", None)
         if callable(close_provider):
             close_provider()
@@ -169,6 +171,7 @@ def create_knowledge_runtime(
             asset_repository=asset_repository,
             artifact_store=artifact_store,
             snapshot_lookup=library,
+            parser_router=document_parser_router_from_environment(),
         ),
         wordpress_sync=WordPressProductSyncService(
             fetcher=official_site_fetcher,

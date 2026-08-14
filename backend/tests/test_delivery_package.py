@@ -80,6 +80,35 @@ class DeliveryPackageTests(unittest.TestCase):
                 b"screenshot",
             )
 
+    def test_in_memory_zip_keeps_the_final_attachment_extension(self) -> None:
+        archive_bytes = build_delivery_zip_bytes(
+            article_docx=b"article",
+            article_filename="Article.docx",
+            tdk_docx=b"tdk",
+            images=[("hero.webp", b"hero")],
+            final_screenshot=b"raw-jpeg-bytes",
+            final_screenshot_filename="final-ai-rate.jpg",
+        )
+        with ZipFile(BytesIO(archive_bytes)) as archive:
+            self.assertIn("final-ai-rate.jpg", archive.namelist())
+            self.assertEqual(
+                archive.read("final-ai-rate.jpg"),
+                b"raw-jpeg-bytes",
+            )
+
+    def test_in_memory_zip_can_defer_the_final_screenshot(self) -> None:
+        archive_bytes = build_delivery_zip_bytes(
+            article_docx=b"article",
+            article_filename="Article.docx",
+            tdk_docx=b"tdk",
+            images=[("hero.webp", b"hero")],
+        )
+        with ZipFile(BytesIO(archive_bytes)) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                ["Article.docx", "D.docx", "hero.webp"],
+            )
+
     def test_in_memory_zip_rejects_unsafe_article_filename(self) -> None:
         for filename in ("../article.docx", "final-ai-rate.png"):
             with self.subTest(filename=filename):

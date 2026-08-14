@@ -30,6 +30,7 @@ from knowledge_agent.repository import (
 from knowledge_agent.schema import knowledge_sources, projects, source_snapshots
 from knowledge_agent.web_ingestion import (
     PreparedWebPageIngestion,
+    WebPageIngestionConflict,
     WebPageIngestionResult,
     WebPagePreparation,
 )
@@ -62,7 +63,7 @@ from services.object_store import (
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-class ServerWebEvidenceConflict(JobConflict):
+class ServerWebEvidenceConflict(JobConflict, WebPageIngestionConflict):
     """Prepared evidence conflicts with the authorized PostgreSQL scope."""
 
 
@@ -407,7 +408,14 @@ class PostgresServerWebEvidenceIngestion:
                     )
                 )
                 pending_changed = False
-                if created_snapshot:
+                restore_withdrawn = (
+                    canonical_snapshot is not None
+                    and source_row is not None
+                    and source_row["status"] == "rejected"
+                    and source_row["current_snapshot_id"] is None
+                    and source_row["pending_snapshot_id"] is None
+                )
+                if created_snapshot or restore_withdrawn:
                     pending_changed = (
                         self._repository.set_pending_snapshot_in_transaction(
                             connection,

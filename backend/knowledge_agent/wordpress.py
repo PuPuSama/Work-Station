@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from html import unescape
 from types import MappingProxyType
 from typing import Literal, Mapping, Protocol, runtime_checkable
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 from lxml import etree
 from lxml import html as lxml_html
@@ -30,7 +30,135 @@ WebPageType = Literal[
 
 MAX_WEB_RESOURCE_BYTES = 8 * 1024 * 1024
 WORDPRESS_PROBE_VERSION = "wordpress-site-probe/1"
-WEB_PAGE_PARSER_VERSION = "official-web-page/1"
+WEB_PAGE_PARSER_VERSION = "official-web-page/3"
+_NON_HTML_SUFFIXES = frozenset(
+    {
+        ".7z",
+        ".avi",
+        ".css",
+        ".csv",
+        ".doc",
+        ".docx",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".json",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".pdf",
+        ".png",
+        ".ppt",
+        ".pptx",
+        ".rar",
+        ".rss",
+        ".svg",
+        ".tar",
+        ".txt",
+        ".webm",
+        ".webp",
+        ".xls",
+        ".xlsx",
+        ".xml",
+        ".zip",
+    }
+)
+_LOW_VALUE_PATH_MARKERS = (
+    "/cart",
+    "/checkout",
+    "/my-account",
+    "/login",
+    "/register",
+    "/search",
+    "/feed",
+    "/author/",
+    "/tag/",
+    "/wp-admin",
+    "/wp-login",
+)
+_NON_PRODUCT_CONTENT_TERMS = frozenset(
+    {
+        "about",
+        "contact",
+        "contacto",
+        "contactos",
+        "contactez",
+        "contacter",
+        "contato",
+        "kontakt",
+        "kontaktieren",
+        "lianxi",
+        "nous",
+        "ueber",
+    }
+)
+_NON_PRODUCT_CONTENT_PHRASES = (
+    "about us",
+    "contact us",
+    "get in touch",
+    "kontaktieren sie uns",
+    "nous contacter",
+    "contactez nous",
+    "pongase en contacto",
+    "póngase en contacto",
+    "uber uns",
+    "über uns",
+    "联系我们",
+)
+
+_FIXED_NON_PRODUCT_SLUGS = frozenset(
+    {
+        "home-2",
+        "home-3",
+        "homepage",
+        "oem-odm",
+        "politica-de-privacidad",
+        "politica-sulla-privacy",
+        "politique-de-confidentialite",
+        "privacy-policy",
+        "privacy-policy-2",
+        "datenschutz",
+        "datenschutzerklarung",
+        "thank-you",
+        "thanks",
+    }
+)
+
+
+def _looks_like_non_product_content_page(
+    *,
+    path: str,
+    title: str,
+    heading: str,
+    body_classes: set[str],
+) -> bool:
+    decoded_path = unquote(path).casefold()
+    path_segments = tuple(
+        segment for segment in decoded_path.strip("/").split("/") if segment
+    )
+    if path_segments and path_segments[-1] in _FIXED_NON_PRODUCT_SLUGS:
+        return True
+    normalized = re.sub(
+        r"[^\w\u4e00-\u9fff]+",
+        " ",
+        f"{decoded_path} {title.casefold()} {heading.casefold()}",
+    ).strip()
+    tokens = set(normalized.split())
+    if tokens & _NON_PRODUCT_CONTENT_TERMS:
+        return True
+    if any(phrase in normalized for phrase in _NON_PRODUCT_CONTENT_PHRASES):
+        return True
+    return bool(
+        body_classes
+        & {
+            "page-template-contact",
+            "page-template-contact-page",
+            "page-template-template-contact",
+        }
+    )
 
 
 class WordPressIngestionError(RuntimeError):
@@ -370,17 +498,6 @@ def _schema_types(document: etree._Element) -> set[str]:
     return types
 
 
-def _class_tokens(document: etree._Element) -> set[str]:
-    values: set[str] = set()
-    for value in document.xpath("//@class"):
-        values.update(
-            token.casefold()
-            for token in re.split(r"[\s_-]+", str(value))
-            if token
-        )
-    return values
-
-
 def _canonical_url(document: etree._Element, requested_url: str) -> str:
     links = document.xpath(
         "//link[contains(concat(' ', translate(@rel, "
@@ -471,7 +588,11 @@ def classify_web_page(
     title = _clean_text(title_values[0]) if title_values else ""
     heading = _clean_text(" ".join(str(value) for value in heading_values))
     schema_types = _schema_types(document)
-    classes = _class_tokens(document)
+    body_classes = {
+        token.casefold()
+        for value in document.xpath("//body/@class")
+        for token in str(value).split()
+    }
     path = urlsplit(canonical).path.casefold()
     crawler_terms = list(
         dict.fromkeys(
@@ -494,8 +615,8 @@ def classify_web_page(
     product_schema = "product" in schema_types
     article_schema = bool(schema_types & {"article", "blogposting", "newsarticle"})
     woo_detail = (
-        {"single", "product"} <= classes
-        or "single-product" in " ".join(document.xpath("//body/@class")).casefold()
+        {"single", "product"} <= body_classes
+        or "single-product" in body_classes
     )
     add_to_cart = bool(
         document.xpath(
@@ -512,17 +633,70 @@ def classify_web_page(
             "' products ')]"
         )
     )
-    category_signal = (
+    product_category_signal = (
         "tax-product_cat" in " ".join(document.xpath("//body/@class")).casefold()
         or "/product-category/" in path
-        or "/category/" in path
     )
     blog_path = any(marker in path for marker in ("/blog/", "/news/", "/article/"))
+    editorial_page = (
+        article_schema
+        or blog_path
+        or "single-post" in body_classes
+    )
+    home_page = not path.strip("/") or "home" in body_classes
+    non_product_content_page = _looks_like_non_product_content_page(
+        path=path,
+        title=title,
+        heading=heading,
+        body_classes=body_classes,
+    )
+    blocks = _text_blocks(document)
     page_type: WebPageType
     confidence: float
     reasons: list[str]
 
-    if product_schema or woo_detail or add_to_cart or crawler_detail:
+    if editorial_page and not woo_detail:
+        page_type = "official_blog"
+        confidence = 0.88 if article_schema else 0.72
+        reasons = [
+            (
+                "schema.org Article/BlogPosting data is present"
+                if article_schema
+                else "URL or WordPress body class identifies an editorial post"
+            )
+        ]
+    elif non_product_content_page:
+        page_type = "knowledge_page"
+        confidence = 0.9
+        reasons = ["URL, title, or page template identifies a non-product company page"]
+    elif home_page:
+        if product_listing or crawler_listing:
+            page_type = "product_category"
+            confidence = 0.72
+            reasons = ["the homepage contains a product-listing container"]
+        elif blocks:
+            page_type = "knowledge_page"
+            confidence = 0.68
+            reasons = ["the canonical homepage is company knowledge, not a product detail"]
+        else:
+            page_type = "unknown"
+            confidence = 0.2
+            reasons = ["the homepage did not expose substantive content"]
+    elif product_category_signal or (
+        (product_listing or crawler_listing)
+        and not woo_detail
+        and not add_to_cart
+    ):
+        page_type = "product_category"
+        confidence = 0.9 if product_category_signal else 0.84
+        reasons = [
+            (
+                "the page URL or template identifies the page itself as a product category"
+                if product_category_signal
+                else "a product-listing container identifies the page itself as a listing"
+            )
+        ]
+    elif product_schema or woo_detail or add_to_cart:
         page_type = "product_detail"
         reasons = []
         confidence = 0.72
@@ -535,36 +709,24 @@ def classify_web_page(
         if add_to_cart:
             reasons.append("an add-to-cart control is present")
             confidence += 0.04
-        if crawler_detail and not (product_schema or woo_detail or add_to_cart):
-            reasons.append(
-                "the conservative B2B product-page detector found a "
-                "substantive page with product identity and image evidence"
-            )
-            confidence += 0.06
-    elif article_schema or blog_path or "single-post" in " ".join(
-        document.xpath("//body/@class")
-    ).casefold():
-        page_type = "official_blog"
-        confidence = 0.88 if article_schema else 0.72
-        reasons = [
-            (
-                "schema.org Article/BlogPosting data is present"
-                if article_schema
-                else "URL or WordPress body class identifies an editorial post"
-            )
-        ]
-    elif product_listing or category_signal or crawler_listing:
+    elif product_listing or crawler_listing:
         page_type = "product_category"
-        confidence = 0.84 if product_listing or crawler_listing else 0.7
+        confidence = 0.84
         reasons = [
             (
                 "a product-listing container is present"
-                if product_listing or crawler_listing
-                else "URL or WordPress body class identifies a category archive"
+                if product_listing
+                else "URL or WordPress body class identifies a product category"
             )
         ]
+    elif crawler_detail:
+        page_type = "product_detail"
+        confidence = 0.78
+        reasons = [
+            "the conservative B2B product-page detector found a "
+            "substantive page with product identity and image evidence"
+        ]
     else:
-        blocks = _text_blocks(document)
         if heading and len(blocks) >= 2:
             page_type = "knowledge_page"
             confidence = 0.55
@@ -581,7 +743,6 @@ def classify_web_page(
         except ProductAssetError as exc:
             reasons.append(f"product detail extraction was partial: {type(exc).__name__}")
 
-    blocks = _text_blocks(document)
     return ClassifiedWebPage(
         requested_url=requested_url,
         canonical_url=canonical,
@@ -655,6 +816,202 @@ def discover_product_links(
     return tuple(url for _score, url in candidates[:limit])
 
 
+def discover_category_pagination_links(
+    *,
+    site_url: str,
+    category_url: str,
+    html: str | bytes,
+) -> tuple[str, ...]:
+    """Discover deterministic same-site pagination links from a category page."""
+
+    source = html if isinstance(html, bytes) else html.encode("utf-8")
+    parser = lxml_html.HTMLParser(encoding="utf-8", recover=True)
+    try:
+        document = lxml_html.fromstring(source, parser=parser, base_url=category_url)
+    except (ValueError, etree.ParserError) as exc:
+        raise WordPressIngestionError("category HTML could not be parsed") from exc
+    candidates: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for anchor in document.xpath("//a[@href]"):
+        href = str(anchor.get("href") or "").strip()
+        if not href:
+            continue
+        try:
+            url = normalize_official_url(site_url, urljoin(category_url, href))
+        except UnsafeOfficialSiteUrl:
+            continue
+        if url == category_url or url in seen:
+            continue
+        parsed = urlsplit(url)
+        rel = str(anchor.get("rel") or "").casefold().split()
+        context = " ".join(
+            str(value)
+            for node in [anchor, *anchor.iterancestors()]
+            for value in (node.get("class"), node.get("id"))
+            if value
+        ).casefold()
+        pagination_context = any(
+            marker in context
+            for marker in (
+                "pagination",
+                "page-numbers",
+                "nav-links",
+                "woocommerce-pagination",
+            )
+        )
+        pagination_url = bool(
+            re.search(r"/(?:page|paged)/\d+/?$", parsed.path.casefold())
+            or re.search(
+                r"(?:^|&)(?:page|paged|product-page|product_page)=\d+(?:&|$)",
+                parsed.query.casefold(),
+            )
+        )
+        if "next" not in rel and not pagination_context and not pagination_url:
+            continue
+        seen.add(url)
+        candidates.append((0 if "next" in rel else 1, url))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return tuple(url for _rank, url in candidates)
+
+
+def discover_internal_page_links(
+    *,
+    site_url: str,
+    page_url: str,
+    html: str | bytes,
+    limit: int = 500,
+) -> tuple[str, ...]:
+    """Return prioritized same-site HTML page candidates from any page.
+
+    This is deliberately CMS-agnostic. Sitemap and CMS adapters can seed the
+    frontier, while ordinary navigation links let the scan continue when a
+    site exposes neither WordPress nor a useful sitemap.
+    """
+
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    source = html if isinstance(html, bytes) else html.encode("utf-8")
+    parser = lxml_html.HTMLParser(encoding="utf-8", recover=True)
+    try:
+        document = lxml_html.fromstring(source, parser=parser, base_url=page_url)
+    except (ValueError, etree.ParserError) as exc:
+        raise WordPressIngestionError("official page HTML could not be parsed") from exc
+    candidates: dict[str, int] = {}
+    for anchor in document.xpath("//a[@href]"):
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        try:
+            url = normalize_official_url(site_url, urljoin(page_url, href))
+        except UnsafeOfficialSiteUrl:
+            continue
+        parsed = urlsplit(url)
+        path = parsed.path.casefold()
+        suffix = re.search(r"\.[a-z0-9]{1,8}$", path)
+        if (
+            url == page_url
+            or (suffix is not None and suffix.group(0) in _NON_HTML_SUFFIXES)
+            or any(marker in path for marker in _LOW_VALUE_PATH_MARKERS)
+        ):
+            continue
+        text = _clean_text(anchor.text_content()).casefold()
+        score = 0
+        if anchor.xpath("ancestor::nav | ancestor::header"):
+            score += 4
+        if any(
+            marker in path or marker in text
+            for marker in (
+                "product",
+                "solution",
+                "application",
+                "about",
+                "company",
+                "contact",
+                "blog",
+                "news",
+                "article",
+                "guide",
+                "support",
+                "service",
+            )
+        ):
+            score += 3
+        depth = len([part for part in path.split("/") if part])
+        score += max(0, 3 - depth)
+        previous = candidates.get(url)
+        if previous is None or score > previous:
+            candidates[url] = score
+    ranked = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
+    return tuple(url for url, _score in ranked[:limit])
+
+
+def sitemap_locations(
+    *,
+    site_url: str,
+    payload: str | bytes,
+) -> tuple[str, ...]:
+    """Read same-site URLs from either a sitemap or a sitemap index."""
+
+    source = payload if isinstance(payload, bytes) else payload.encode("utf-8")
+    try:
+        document = etree.fromstring(source, parser=etree.XMLParser(recover=True))
+    except (ValueError, etree.XMLSyntaxError):
+        return ()
+    locations: list[str] = []
+    seen: set[str] = set()
+    for raw in document.xpath("//*[local-name()='loc']/text()"):
+        try:
+            url = normalize_official_url(site_url, str(raw).strip())
+        except (UnsafeOfficialSiteUrl, ValueError):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        locations.append(url)
+    return tuple(locations)
+
+
+def product_links_from_wordpress_rest(
+    *,
+    site_url: str,
+    payload: str | bytes,
+    limit: int,
+) -> tuple[str, ...]:
+    """Read canonical product links from a public WordPress product route."""
+
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    source = payload.decode("utf-8", errors="replace") if isinstance(
+        payload,
+        bytes,
+    ) else payload
+    try:
+        records = json.loads(source)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(records, list):
+        return ()
+    links: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        raw_link = record.get("link")
+        if not isinstance(raw_link, str):
+            continue
+        try:
+            link = normalize_official_url(site_url, raw_link)
+        except UnsafeOfficialSiteUrl:
+            continue
+        if link in seen:
+            continue
+        seen.add(link)
+        links.append(link)
+        if len(links) >= limit:
+            break
+    return tuple(links)
+
+
 __all__ = [
     "ClassifiedWebPage",
     "FetchedResource",
@@ -671,6 +1028,10 @@ __all__ = [
     "WordPressSiteProbe",
     "classify_web_page",
     "discover_product_links",
+    "discover_category_pagination_links",
+    "discover_internal_page_links",
+    "product_links_from_wordpress_rest",
+    "sitemap_locations",
     "normalize_official_url",
     "normalize_site_url",
     "same_official_site",

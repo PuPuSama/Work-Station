@@ -94,6 +94,12 @@ class DocumentParserRouter:
             raise DocumentParseError("parser returned an inconsistent identity")
         return parsed
 
+    def close(self) -> None:
+        for parser in self._parsers:
+            close = getattr(parser, "close", None)
+            if callable(close):
+                close()
+
 
 class DocxDocumentParser:
     name = "docx-lightweight"

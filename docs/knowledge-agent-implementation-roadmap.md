@@ -334,8 +334,8 @@
 - Server Batch 页面和 Header 全局队列已按 Auth Status 与 Local 组件树分离，只消费
   Project-scoped `batches/jobs` 公共 DTO；Cancel/Retry 使用空 Body，Retry 由后端重放
   私有可信请求。Local Batch 页面与原 SQLite Queue 保持不变；
-- 已新增 PostgreSQL Project Prompt Snapshot 底座：Head、不可变 Version 与精确
-  Default 指针分表；编辑只追加新 Version，默认不会自动漂移；读取与写入分别要求
+- 已新增 PostgreSQL Project Prompt Snapshot 底座：Head、当前 Version 与精确
+  Default 指针分表；编辑直接更新当前 Version，删除会同时清理提示词及其默认指针；读取与写入分别要求
   `project.view/article.edit`，写操作重新锁定可撤权事实并与安全 Audit 同事务；
 - 已新增旧 SQLite Prompt 当前 Snapshot 的显式一次性导入：保留 Prompt ID、当前
   Version、Active/Archived 与 Default 精确版本，导入后在同一事务复核内容摘要并写

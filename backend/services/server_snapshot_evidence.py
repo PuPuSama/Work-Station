@@ -19,7 +19,10 @@ from services.access_control import (
 from services.object_store import ObjectStore, ObjectStoreError, ObjectTooLarge
 
 
-MAX_NORMALIZED_PREVIEW_BYTES = 512 * 1024
+# Normalized MinerU output can be moderately larger than the short text shown
+# to reviewers. Read a bounded 2 MiB artifact, then keep the existing 64 KiB
+# display truncation so catalog previews remain useful without unbounded reads.
+MAX_NORMALIZED_PREVIEW_BYTES = 2 * 1024 * 1024
 MAX_PREVIEW_CHARACTERS = 64 * 1024
 RAW_DOWNLOAD_EXPIRES_SECONDS = 60
 RAW_DOWNLOAD_CONTENT_TYPE = "application/octet-stream"
@@ -129,6 +132,38 @@ def _is_json_content_type(value: str) -> bool:
     return media_type == "application/json" or media_type.endswith("+json")
 
 
+def _preview_table(
+    table_id: str,
+    rows: list[tuple[tuple[str, ...], bool]],
+    headers: tuple[str, ...] = (),
+) -> str:
+    if not rows:
+        return ""
+    width = max(len(cells) for cells, _ in rows)
+
+    def padded(cells: tuple[str, ...]) -> tuple[str, ...]:
+        return cells + ("",) * (width - len(cells))
+
+    def line(cells: tuple[str, ...]) -> str:
+        escaped = tuple(value.replace("|", "\\|") for value in padded(cells))
+        return "| " + " | ".join(escaped) + " |"
+
+    header_rows = [cells for cells, is_header in rows if is_header]
+    header = header_rows[-1] if header_rows else headers or rows[0][0]
+    if header_rows:
+        data_rows = [cells for cells, is_header in rows if not is_header]
+    elif headers and tuple(rows[0][0]) != tuple(headers):
+        # The inferred headers describe a two-level matrix; retain the
+        # original grouping row so the preview still shows the source table.
+        data_rows = [cells for cells, _ in rows]
+    else:
+        data_rows = [cells for cells, _ in rows[1:]]
+    rendered = [f"[Table {table_id}]", line(header)]
+    rendered.append(line(tuple("---" for _ in range(width))))
+    rendered.extend(line(cells) for cells in data_rows)
+    return "\n".join(rendered)
+
+
 def _block_texts(payload: object) -> tuple[str, tuple[str, ...]]:
     if not isinstance(payload, dict):
         raise SnapshotEvidenceUnavailable(
@@ -150,12 +185,54 @@ def _block_texts(payload: object) -> tuple[str, tuple[str, ...]]:
         )
     title = title_value.strip() if isinstance(title_value, str) else ""
     texts: list[str] = []
+    table_id: str | None = None
+    table_rows: list[tuple[tuple[str, ...], bool]] = []
+    table_headers: tuple[str, ...] = ()
+
+    def flush_table() -> None:
+        nonlocal table_id, table_rows, table_headers
+        if table_id is not None:
+            rendered = _preview_table(table_id, table_rows, table_headers)
+            if rendered:
+                texts.append(rendered)
+        table_id = None
+        table_rows = []
+        table_headers = ()
+
     for block in blocks_value:
         if not isinstance(block, dict):
             continue
+        metadata = block.get("metadata")
+        cells = metadata.get("table_cells") if isinstance(metadata, dict) else None
+        if block.get("kind") == "table_row" and isinstance(cells, list):
+            current_table_id = (
+                str(metadata.get("table_id") or "table")
+                if isinstance(metadata, dict)
+                else "table"
+            )
+            if table_id != current_table_id:
+                flush_table()
+                table_id = current_table_id
+            if not table_headers and isinstance(metadata, dict):
+                raw_headers = metadata.get("table_headers")
+                if isinstance(raw_headers, list):
+                    table_headers = tuple(str(cell or "") for cell in raw_headers)
+            table_rows.append(
+                (
+                    tuple(str(cell or "") for cell in cells),
+                    bool(
+                        metadata.get("table_is_header")
+                        if isinstance(metadata, dict)
+                        else False
+                    ),
+                )
+            )
+            continue
+        flush_table()
         text = block.get("text")
         if isinstance(text, str) and text.strip():
             texts.append(text.strip())
+    flush_table()
     if not title and not texts:
         raise SnapshotEvidenceUnavailable(
             "Snapshot evidence preview is temporarily unavailable."

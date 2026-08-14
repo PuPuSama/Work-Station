@@ -29,7 +29,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { apiGet, apiPost } from "@/lib/api";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { apiGet, apiPost, apiUpload } from "@/lib/api";
+import { sameProjectId } from "@/lib/project-id";
 import type {
   AccessibleProject,
   ServerTaskIntakeResponse,
@@ -37,8 +46,31 @@ import type {
 
 type IntakeRow = {
   topic: string;
+  primary_keyword: string;
   competitor_keyword: string;
   competitor_blog: string;
+};
+
+type ImportField =
+  | "topic"
+  | "primary_keyword"
+  | "competitor_keyword"
+  | "competitor_blog";
+
+type WorkbookPreview = {
+  filename: string;
+  sheet_name: string;
+  headers: string[];
+  rows: string[][];
+  mapping: Record<ImportField, number | null>;
+  truncated: boolean;
+};
+
+const IMPORT_FIELD_LABELS: Record<ImportField, string> = {
+  topic: "文章话题（必选）",
+  primary_keyword: "目标关键词",
+  competitor_keyword: "竞对关键词",
+  competitor_blog: "竞对 Blog URL",
 };
 
 const EDIT_ROLES = new Set<AccessibleProject["effective_role"]>([
@@ -71,14 +103,18 @@ function parseRows(value: string): {
   for (const [index, rawLine] of value.split(/\r?\n/).entries()) {
     if (!rawLine.trim()) continue;
     const columns = rawLine.split("\t");
-    if (columns.length > 3) {
+    if (columns.length > 4) {
       return {
         rows: [],
-        error: `第 ${index + 1} 行超过 3 列，请使用 Tab 分隔。`,
+        error: `第 ${index + 1} 行超过 4 列，请使用 Tab 分隔。`,
       };
     }
-    const [topic = "", competitorKeyword = "", competitorBlog = ""] =
-      columns.map((column) => column.trim());
+    const [
+      topic = "",
+      primaryKeyword = "",
+      competitorKeyword = "",
+      competitorBlog = "",
+    ] = columns.map((column) => column.trim());
     if (!topic) {
       return {
         rows: [],
@@ -87,6 +123,7 @@ function parseRows(value: string): {
     }
     rows.push({
       topic,
+      primary_keyword: primaryKeyword,
       competitor_keyword: competitorKeyword,
       competitor_blog: competitorBlog,
     });
@@ -96,6 +133,38 @@ function parseRows(value: string): {
       rows: [],
       error: "一次最多导入 200 行。",
     };
+  }
+  return { rows, error: "" };
+}
+
+function rowsFromWorkbook(
+  preview: WorkbookPreview | null,
+  mapping: Record<ImportField, number | null>,
+): { rows: IntakeRow[]; error: string } {
+  if (!preview) return { rows: [], error: "" };
+  if (mapping.topic === null) {
+    return { rows: [], error: "请选择文章话题所在列。" };
+  }
+  const selected = Object.values(mapping).filter(
+    (index): index is number => index !== null,
+  );
+  if (new Set(selected).size !== selected.length) {
+    return { rows: [], error: "同一列不能映射到多个字段。" };
+  }
+  const valueAt = (row: string[], field: ImportField) => {
+    const index = mapping[field];
+    return index === null ? "" : (row[index] || "").trim();
+  };
+  const rows = preview.rows
+    .map((row) => ({
+      topic: valueAt(row, "topic"),
+      primary_keyword: valueAt(row, "primary_keyword"),
+      competitor_keyword: valueAt(row, "competitor_keyword"),
+      competitor_blog: valueAt(row, "competitor_blog"),
+    }))
+    .filter((row) => row.topic);
+  if (!rows.length) {
+    return { rows: [], error: "所选话题列没有可导入内容。" };
   }
   return { rows, error: "" };
 }
@@ -137,18 +206,31 @@ export function ServerTaskIntakePanel({
   const [role, setRole] =
     useState<AccessibleProject["effective_role"] | null>(null);
   const [roleError, setRoleError] = useState("");
-  const [pending, setPending] = useState<"manual" | "import" | null>(null);
+  const [pending, setPending] = useState<
+    "manual" | "preview" | "import" | null
+  >(null);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ServerTaskIntakeResponse | null>(null);
 
   const [topic, setTopic] = useState("");
-  const [keyword, setKeyword] = useState("");
+  const [primaryKeyword, setPrimaryKeyword] = useState("");
+  const [competitorKeyword, setCompetitorKeyword] = useState("");
   const [competitorUrl, setCompetitorUrl] = useState("");
   const [manualIntakeId, setManualIntakeId] = useState("");
 
   const [sourceName, setSourceName] = useState("");
   const [rowText, setRowText] = useState("");
   const [importIntakeId, setImportIntakeId] = useState("");
+  const [workbookPreview, setWorkbookPreview] =
+    useState<WorkbookPreview | null>(null);
+  const [columnMapping, setColumnMapping] = useState<
+    Record<ImportField, number | null>
+  >({
+    topic: null,
+    primary_keyword: null,
+    competitor_keyword: null,
+    competitor_blog: null,
+  });
 
   useEffect(() => {
     let active = true;
@@ -156,7 +238,7 @@ export function ServerTaskIntakePanel({
       .then((projects) => {
         if (!active) return;
         const current = projects.find(
-          (project) => project.project_id === customer,
+          (project) => sameProjectId(project.project_id, customer),
         );
         setRole(current?.effective_role ?? null);
         setRoleError(
@@ -173,7 +255,13 @@ export function ServerTaskIntakePanel({
     };
   }, [customer]);
 
-  const parsedImport = useMemo(() => parseRows(rowText), [rowText]);
+  const parsedImport = useMemo(
+    () =>
+      workbookPreview
+        ? rowsFromWorkbook(workbookPreview, columnMapping)
+        : parseRows(rowText),
+    [columnMapping, rowText, workbookPreview],
+  );
   const canEdit = role !== null && EDIT_ROLES.has(role);
 
   function resetFeedback() {
@@ -199,6 +287,37 @@ export function ServerTaskIntakePanel({
     resetFeedback();
   }
 
+  function changeImportText(value: string) {
+    setWorkbookPreview(null);
+    setRowText(value);
+    setImportIntakeId("");
+    resetFeedback();
+  }
+
+  async function previewWorkbook(file: File | null) {
+    if (!file || !canEdit || pending) return;
+    setPending("preview");
+    resetFeedback();
+    setWorkbookPreview(null);
+    setRowText("");
+    setSourceName(file.name);
+    setImportIntakeId("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const preview = await apiUpload<WorkbookPreview>(
+        `/api/projects/${encodeURIComponent(customer)}/task-imports/preview`,
+        form,
+      );
+      setWorkbookPreview(preview);
+      setColumnMapping(preview.mapping);
+    } catch (reason) {
+      setError(messageFrom(reason));
+    } finally {
+      setPending(null);
+    }
+  }
+
   async function submitManual(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!canEdit || !topic.trim() || pending) return;
@@ -212,7 +331,8 @@ export function ServerTaskIntakePanel({
         {
           intake_id: intakeId,
           topic: topic.trim(),
-          competitor_keyword: keyword.trim(),
+          primary_keyword: primaryKeyword.trim(),
+          competitor_keyword: competitorKeyword.trim(),
           competitor_blog: competitorUrl.trim(),
         },
       );
@@ -220,7 +340,8 @@ export function ServerTaskIntakePanel({
       await onCompleted();
       if (response.created) {
         setTopic("");
-        setKeyword("");
+        setPrimaryKeyword("");
+        setCompetitorKeyword("");
         setCompetitorUrl("");
         setManualIntakeId("");
       }
@@ -260,6 +381,7 @@ export function ServerTaskIntakePanel({
       if (response.created) {
         setSourceName("");
         setRowText("");
+        setWorkbookPreview(null);
         setImportIntakeId("");
       }
     } catch (reason) {
@@ -351,18 +473,32 @@ export function ServerTaskIntakePanel({
                       placeholder="例如：How to choose stainless steel bolt grades"
                     />
                   </div>
-                  <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="grid gap-4 lg:grid-cols-3">
                     <div className="grid gap-2">
                       <Label htmlFor="server-task-keyword">
-                        竞对关键词（可选）
+                        目标关键词（可选）
                       </Label>
                       <Input
                         id="server-task-keyword"
-                        value={keyword}
+                        value={primaryKeyword}
                         maxLength={500}
                         disabled={!canEdit || pending !== null}
                         onChange={(event) =>
-                          changeManual(setKeyword, event.target.value)
+                          changeManual(setPrimaryKeyword, event.target.value)
+                        }
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor="server-task-competitor-keyword">
+                        竞对关键词（可选）
+                      </Label>
+                      <Input
+                        id="server-task-competitor-keyword"
+                        value={competitorKeyword}
+                        maxLength={500}
+                        disabled={!canEdit || pending !== null}
+                        onChange={(event) =>
+                          changeManual(setCompetitorKeyword, event.target.value)
                         }
                       />
                     </div>
@@ -402,6 +538,30 @@ export function ServerTaskIntakePanel({
 
               <TabsContent value="import" className="pt-4">
                 <form className="grid gap-4" onSubmit={submitImport}>
+                  <div className="grid gap-2 rounded-xl border bg-muted/20 p-4">
+                    <Label htmlFor="server-task-workbook">Excel 文件</Label>
+                    <Input
+                      id="server-task-workbook"
+                      type="file"
+                      accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
+                      disabled={!canEdit || pending !== null}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0] ?? null;
+                        void previewWorkbook(file);
+                        event.target.value = "";
+                      }}
+                    />
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      支持 .xlsx/.xlsm，最大 10 MB、200 条数据。文件仅用于解析预览，服务端不保存原始 Excel。
+                    </p>
+                    {pending === "preview" && (
+                      <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Loader2 className="size-4 animate-spin" />
+                        正在识别工作表、表头和字段…
+                      </p>
+                    )}
+                  </div>
+
                   <div className="grid gap-2">
                     <Label htmlFor="server-task-source-name">来源名称</Label>
                     <Input
@@ -413,32 +573,119 @@ export function ServerTaskIntakePanel({
                       onChange={(event) =>
                         changeImport(setSourceName, event.target.value)
                       }
-                      placeholder="例如：2026-Q3-topic-rows.tsv"
+                      placeholder="例如：2026-Q3-topics.xlsx"
                     />
                     <p className="text-xs text-muted-foreground">
                       只记录来源标签、摘要和 Task ID，不上传或保存原始文件。
                     </p>
                   </div>
+
+                  {workbookPreview ? (
+                    <div className="grid gap-4 rounded-xl border p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="font-medium">Excel 列识别</p>
+                          <p className="text-xs text-muted-foreground">
+                            工作表：{workbookPreview.sheet_name} · 数据行：
+                            {workbookPreview.rows.length}
+                            {workbookPreview.truncated ? "（已截取前 200 行）" : ""}
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={pending !== null}
+                          onClick={() => {
+                            setWorkbookPreview(null);
+                            setSourceName("");
+                            setImportIntakeId("");
+                            resetFeedback();
+                          }}
+                        >
+                          改用粘贴
+                        </Button>
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        {(Object.entries(IMPORT_FIELD_LABELS) as Array<
+                          [ImportField, string]
+                        >).map(([field, label]) => (
+                          <div key={field} className="grid gap-2">
+                            <Label htmlFor={`workbook-column-${field}`}>
+                              {label}
+                            </Label>
+                            <select
+                              id={`workbook-column-${field}`}
+                              value={columnMapping[field] ?? ""}
+                              disabled={pending !== null}
+                              className="h-11 w-full rounded-lg border border-input bg-background px-3 text-sm"
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setColumnMapping((current) => ({
+                                  ...current,
+                                  [field]: value === "" ? null : Number(value),
+                                }));
+                                setImportIntakeId("");
+                                resetFeedback();
+                              }}
+                            >
+                              <option value="">不导入</option>
+                              {workbookPreview.headers.map((header, index) => (
+                                <option key={`${field}-${index}`} value={index}>
+                                  {header || `第 ${index + 1} 列`}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="max-h-80 overflow-auto rounded-lg border">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>话题</TableHead>
+                              <TableHead>目标关键词</TableHead>
+                              <TableHead>竞对关键词</TableHead>
+                              <TableHead>竞对 Blog URL</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {parsedImport.rows.slice(0, 8).map((row, index) => (
+                              <TableRow key={`${row.topic}-${index}`}>
+                                <TableCell className="min-w-64 whitespace-normal">
+                                  {row.topic}
+                                </TableCell>
+                                <TableCell>{row.primary_keyword || "-"}</TableCell>
+                                <TableCell>{row.competitor_keyword || "-"}</TableCell>
+                                <TableCell className="max-w-72 truncate font-mono text-xs">
+                                  {row.competitor_blog || "-"}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="grid gap-2">
                     <Label htmlFor="server-task-import-rows">
-                      话题行（最多 200 行）
+                      或粘贴话题行（最多 200 行）
                     </Label>
                     <Textarea
                       id="server-task-import-rows"
                       value={rowText}
                       rows={9}
                       disabled={!canEdit || pending !== null}
-                      onChange={(event) =>
-                        changeImport(setRowText, event.target.value)
-                      }
+                      onChange={(event) => changeImportText(event.target.value)}
                       placeholder={
-                        "话题<Tab>竞对关键词<Tab>https://竞对文章\n第二个话题"
+                        "话题<Tab>目标关键词<Tab>竞对关键词<Tab>https://竞对文章\n第二个话题"
                       }
                     />
                     <p className="text-xs text-muted-foreground">
-                      每行 1 个 Task；可用 Tab 依次分隔“话题、竞对关键词、HTTP(S)
-                      URL”。不支持逗号 CSV，避免含逗号话题被错误拆分。
+                      每行 1 个 Task；用 Tab 依次分隔“话题、目标关键词、竞对关键词、HTTP(S) URL”。
                     </p>
+                  </div>
+                  )}
+                  <div className="grid gap-2">
                     <p
                       className={
                         parsedImport.error

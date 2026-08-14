@@ -95,6 +95,7 @@ from .artifact_store import (
     LocalKnowledgeArtifactStore,
 )
 from .catalog import (
+    MANUAL_SPECIFICATION_TABLES_KEY,
     PRODUCT_ASSET_ROLES,
     PRODUCT_SOURCE_RELATIONS,
     PRODUCT_STATUSES,
@@ -107,6 +108,8 @@ from .catalog import (
     ProductCatalogRepositoryError,
     ProductConfirmationError,
     ProductSourceEvidence,
+    effective_product_specification_tables,
+    normalize_product_specification_tables,
 )
 from .library import (
     KnowledgeLibrarySummary,
@@ -126,6 +129,8 @@ from .publication import (
 from .web_ingestion import (
     MAX_PRODUCT_IMAGE_BYTES,
     MAX_PRODUCT_IMAGES_PER_PAGE,
+    OfficialSiteScanResult,
+    OfficialSiteSyncService,
     OfficialWebPageIngestionService,
     PreparedWebPageIngestion,
     WebPageIngestion,
@@ -145,10 +150,13 @@ from .wordpress import (
     WordPressProbeResult,
     WordPressSiteProbe,
     classify_web_page,
+    discover_category_pagination_links,
+    discover_internal_page_links,
     discover_product_links,
     normalize_official_url,
     normalize_site_url,
     same_official_site,
+    sitemap_locations,
 )
 from .research_graph import (
     BoundedResearchGraph,
@@ -328,6 +336,7 @@ __all__ = [
     "MinerUContentListAdapter",
     "M3ScopeEvidenceAdapter",
     "KnowledgeProduct",
+    "MANUAL_SPECIFICATION_TABLES_KEY",
     "KnowledgePublicationError",
     "KnowledgePublicationService",
     "MAX_PRODUCT_IMAGE_BYTES",
@@ -371,6 +380,8 @@ __all__ = [
     "ProductCatalogRepositoryError",
     "ProductConfirmationError",
     "ProductSourceEvidence",
+    "effective_product_specification_tables",
+    "normalize_product_specification_tables",
     "PublicationCandidate",
     "PublicationResult",
     "SafeOfficialSiteFetcher",
@@ -435,6 +446,8 @@ __all__ = [
     "WebPageIngestionResult",
     "WebPageIngestion",
     "WebPagePreparation",
+    "OfficialSiteScanResult",
+    "OfficialSiteSyncService",
     "WordPressCategorySyncResult",
     "WordPressIngestionError",
     "WordPressProbeResult",
@@ -445,7 +458,10 @@ __all__ = [
     "classify_web_page",
     "create_knowledge_engine",
     "create_knowledge_runtime",
+    "discover_category_pagination_links",
+    "discover_internal_page_links",
     "discover_product_links",
+    "sitemap_locations",
     "block_identity",
     "compare_parsers",
     "evaluate_retriever",

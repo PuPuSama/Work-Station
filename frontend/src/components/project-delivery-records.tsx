@@ -5,7 +5,6 @@
 import {
   AlertCircle,
   Download,
-  ExternalLink,
   FileText,
   ImageIcon,
   Loader2,
@@ -14,7 +13,6 @@ import {
   Search,
   ShieldCheck,
 } from "lucide-react";
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -23,14 +21,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { apiFileUrl, apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
+import { sameProjectId } from "@/lib/project-id";
 import { cn } from "@/lib/utils";
-import type {
-  AccessibleProject,
-  AuthStatus,
-  ProjectAssetDownload,
-  TaskRecord,
-} from "@/types";
+import type { AccessibleProject, ProjectAssetDownload, TaskRecord } from "@/types";
 
 type DeliveryFilter = "all" | "incomplete" | "ready" | "packaged";
 
@@ -52,21 +46,11 @@ function deliveryParts(task: TaskRecord) {
   return {
     article: Boolean(task.final_article || task.linked_article || task.humanized_article),
     links: Boolean(task.link_validation?.passed),
-    screenshot: Boolean(
-      task.final_ai_check?.screenshot_path ||
-        task.final_ai_check?.screenshot_asset_id,
-    ),
-    images: Boolean(
-      images.length &&
-        images.every(
-          (image) => image.prepared_path || image.prepared_asset_id,
-        ),
-    ),
+    screenshot: Boolean(task.final_ai_check?.screenshot_path || task.final_ai_check?.screenshot_asset_id),
+    images: Boolean(images.length && images.every((image) => image.prepared_path || image.prepared_asset_id)),
     word: Boolean(task.docx_path || task.docx_asset_id),
     tdk: Boolean(task.tdk_path || task.tdk_asset_id),
-    package: Boolean(
-      task.delivery_package_path || task.delivery_package_asset_id,
-    ),
+    package: Boolean(task.delivery_package_path || task.delivery_package_asset_id),
   };
 }
 
@@ -91,10 +75,7 @@ function formatUpdatedAt(value: string) {
 
 export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
-  const [mode, setMode] = useState<"loading" | "local" | "server">("loading");
-  const [effectiveRole, setEffectiveRole] = useState<
-    AccessibleProject["effective_role"] | null
-  >(null);
+  const [effectiveRole, setEffectiveRole] = useState<AccessibleProject["effective_role"] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -102,53 +83,39 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [filter, setFilter] = useState<DeliveryFilter>("all");
   const [pending, setPending] = useState<Record<string, string>>({});
 
+  const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
+
   const loadTasks = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const status = await apiGet<AuthStatus>("/api/auth/status");
-      const serverMode = status.data?.mode === "server";
-      if (serverMode) {
-        const projectPath = encodeURIComponent(customer);
-        const [nextTasks, projects] = await Promise.all([
-          apiGet<TaskRecord[]>(`/api/projects/${projectPath}/tasks`),
-          apiGet<AccessibleProject[]>("/api/projects"),
-        ]);
-        const project = projects.find(
-          (item) => item.project_id === customer,
-        );
-        setMode("server");
-        setEffectiveRole(project?.effective_role ?? null);
-        setTasks(nextTasks);
-      } else {
-        setMode("local");
-        setEffectiveRole(null);
-        setTasks(
-          await apiGet<TaskRecord[]>(
-            `/api/tasks?customer=${encodeURIComponent(customer)}`,
-          ),
-        );
-      }
+      const [nextTasks, projects] = await Promise.all([
+        apiGet<TaskRecord[]>(`${projectApi}/tasks`),
+        apiGet<AccessibleProject[]>("/api/projects"),
+      ]);
+      const project = projects.find((item) => sameProjectId(item.project_id, customer));
+      setEffectiveRole(project?.effective_role ?? null);
+      setTasks(nextTasks);
     } catch (loadError) {
       setError(errorMessage(loadError));
     } finally {
       setLoading(false);
     }
-  }, [customer]);
+  }, [customer, projectApi]);
 
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
 
   const counts = useMemo(() => {
-    const summarized = { all: tasks.length, incomplete: 0, ready: 0, packaged: 0 };
+    const result = { all: tasks.length, incomplete: 0, ready: 0, packaged: 0 };
     for (const task of tasks) {
       const parts = deliveryParts(task);
-      if (parts.package) summarized.packaged += 1;
-      else if (parts.article && parts.links && parts.screenshot && parts.images && parts.word && parts.tdk) summarized.ready += 1;
-      else summarized.incomplete += 1;
+      if (parts.package) result.packaged += 1;
+      else if (parts.article && parts.links && parts.screenshot && parts.images && parts.word && parts.tdk) result.ready += 1;
+      else result.incomplete += 1;
     }
-    return summarized;
+    return result;
   }, [tasks]);
 
   const filteredTasks = useMemo(() => {
@@ -182,19 +149,13 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
     }
   }
 
-  async function downloadServerArtifact(
-    task: TaskRecord,
-    label: string,
-    path: string,
-  ) {
+  async function downloadArtifact(task: TaskRecord, label: string, path: string) {
     setPending((current) => ({ ...current, [task.id]: label }));
     setError("");
     setMessage("");
     try {
       const download = await apiGet<ProjectAssetDownload>(path);
-      if (!download.url) {
-        throw new Error("服务器没有返回可用的短期下载地址。");
-      }
+      if (!download.url) throw new Error("服务器没有返回可用的短期下载地址。");
       window.location.assign(download.url);
     } catch (downloadError) {
       setError(errorMessage(downloadError));
@@ -207,10 +168,8 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
     }
   }
 
-  const projectPath = `/projects/${encodeURIComponent(customer)}`;
-  const serverProjectApi = `/api/projects/${encodeURIComponent(customer)}`;
-  const deliveryAllowed = mode !== "server" || canDeliver(effectiveRole);
-  const reviewAllowed = mode !== "server" || canReview(effectiveRole);
+  const deliveryAllowed = canDeliver(effectiveRole);
+  const reviewAllowed = canReview(effectiveRole);
   const filters: Array<{ value: DeliveryFilter; label: string }> = [
     { value: "all", label: "全部" },
     { value: "incomplete", label: "缺少交付项" },
@@ -225,17 +184,10 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
           <div className="px-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-semibold">交付记录</h1>
-              {mode === "server" && (
-                <Badge variant="outline">
-                  <ShieldCheck />
-                  Server 私有交付
-                </Badge>
-              )}
+              <Badge variant="outline"><ShieldCheck />Server 私有交付</Badge>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              集中检查 Word、D 文档、最终 AI 截图、图片和交付包。
-              {mode === "server" &&
-                " 下载时会重新授权并签发短期地址，不展示对象存储路径。"}
+              集中检查 Word、D 文档、最终 AI 截图、图片和交付包；下载时由服务器重新授权并签发短期地址。
             </p>
           </div>
         </div>
@@ -244,14 +196,12 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
       <div className="mx-auto grid max-w-[1480px] gap-4 px-5 py-5">
         {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
         {message && <Alert><AlertTitle>操作完成</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>}
-        {mode === "server" && !deliveryAllowed && !loading && (
+        {!deliveryAllowed && !loading && (
           <Alert>
             <ShieldCheck />
             <AlertTitle>当前角色为只读交付视图</AlertTitle>
             <AlertDescription>
-              你可以查看交付状态
-              {reviewAllowed ? "和终审截图" : ""}
-              ，但不能生成或下载 Word、TDK 与交付 ZIP。
+              你可以查看交付状态{reviewAllowed ? "和终审截图" : ""}，但不能生成或下载 Word、TDK 与交付 ZIP。
             </AlertDescription>
           </Alert>
         )}
@@ -268,11 +218,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
         <Card className="rounded-lg">
           <CardHeader className="border-b">
             <CardTitle>文章交付状态</CardTitle>
-            <CardDescription>
-              {mode === "server"
-                ? "Server 模式只显示已迁移产物；缺失项需由对应受限工作流补齐。"
-                : "缺失项可直接进入文章的交付阶段补齐。"}
-            </CardDescription>
+            <CardDescription>仅显示服务器中的项目任务；缺失项需要在对应工作流中补齐。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -285,120 +231,27 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
                 <TableBody>
                   {filteredTasks.map((task) => {
                     const parts = deliveryParts(task);
-                    const missing = Object.entries(parts)
-                      .filter(([key, done]) => key !== "package" && !done)
-                      .map(([key]) => DELIVERY_LABELS[key]);
+                    const missing = Object.entries(parts).filter(([key, done]) => key !== "package" && !done).map(([key]) => DELIVERY_LABELS[key]);
                     const taskPending = pending[task.id];
-                    const encodedTaskId = encodeURIComponent(task.id);
-                    return <TableRow key={task.id}>
-                      <TableCell className="font-mono text-xs">topic_{String(task.topic_index).padStart(3, "0")}</TableCell>
-                      <TableCell className="max-w-0 whitespace-normal"><div className="truncate font-medium">{task.selected_title || task.topic}</div><div className="mt-1 truncate text-xs text-muted-foreground">{task.topic}</div></TableCell>
-                      <TableCell><div className="flex flex-wrap gap-1">{parts.package ? <Badge>已打包</Badge> : missing.length ? missing.map((item) => <Badge key={item} variant="outline">缺 {item}</Badge>) : <Badge>可打包</Badge>}</div></TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{formatUpdatedAt(task.updated_at)}</TableCell>
-                      <TableCell><div className="flex flex-wrap justify-end gap-1">
-                        {mode === "server" && parts.word && deliveryAllowed && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={Boolean(taskPending)}
-                            aria-label={`下载 topic_${String(task.topic_index).padStart(3, "0")} 的 Word`}
-                            onClick={() =>
-                              void downloadServerArtifact(
-                                task,
-                                "下载 Word",
-                                `${serverProjectApi}/tasks/${encodedTaskId}/docx/download`,
-                              )
-                            }
-                          >
-                            {taskPending === "下载 Word" ? <Loader2 className="animate-spin" /> : <FileText />}
-                            Word
-                          </Button>
-                        )}
-                        {mode === "server" && parts.tdk && deliveryAllowed && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={Boolean(taskPending)}
-                            aria-label={`下载 topic_${String(task.topic_index).padStart(3, "0")} 的 D 文档`}
-                            onClick={() =>
-                              void downloadServerArtifact(
-                                task,
-                                "下载 D 文档",
-                                `${serverProjectApi}/tasks/${encodedTaskId}/tdk/download`,
-                              )
-                            }
-                          >
-                            {taskPending === "下载 D 文档" ? <Loader2 className="animate-spin" /> : <FileText />}
-                            D.docx
-                          </Button>
-                        )}
-                        {mode === "server" && parts.screenshot && reviewAllowed && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={Boolean(taskPending)}
-                            aria-label={`查看 topic_${String(task.topic_index).padStart(3, "0")} 的终审截图`}
-                            onClick={() =>
-                              void downloadServerArtifact(
-                                task,
-                                "打开终审截图",
-                                `${serverProjectApi}/tasks/${encodedTaskId}/checks/final-ai/screenshot/download`,
-                              )
-                            }
-                          >
-                            {taskPending === "打开终审截图" ? <Loader2 className="animate-spin" /> : <ImageIcon />}
-                            终审
-                          </Button>
-                        )}
-                        {!parts.package && !missing.length && deliveryAllowed && (
-                          <Button
-                            size="sm"
-                            disabled={Boolean(taskPending)}
-                            onClick={() =>
-                              void runTaskAction(
-                                task,
-                                "生成交付包",
-                                () =>
-                                  apiPost<TaskRecord>(
-                                    mode === "server"
-                                      ? `${serverProjectApi}/tasks/${encodedTaskId}/package-delivery`
-                                      : `/api/tasks/${encodedTaskId}/package-delivery`,
-                                    mode === "server"
-                                      ? { revision: task.revision ?? 0 }
-                                      : undefined,
-                                  ),
-                              )
-                            }
-                          >
-                            {taskPending === "生成交付包" ? <Loader2 className="animate-spin" /> : <Package />}
-                            打包
-                          </Button>
-                        )}
-                        {mode === "server" && parts.package && deliveryAllowed && (
-                          <Button
-                            size="sm"
-                            disabled={Boolean(taskPending)}
-                            aria-label={`下载 topic_${String(task.topic_index).padStart(3, "0")} 的交付 ZIP`}
-                            onClick={() =>
-                              void downloadServerArtifact(
-                                task,
-                                "下载交付 ZIP",
-                                `${serverProjectApi}/tasks/${encodedTaskId}/delivery-package/download`,
-                              )
-                            }
-                          >
-                            {taskPending === "下载交付 ZIP" ? <Loader2 className="animate-spin" /> : <Download />}
-                            ZIP
-                          </Button>
-                        )}
-                        {mode === "local" && parts.package && (
-                          <Button size="sm" variant="outline" nativeButton={false} render={<a href={apiFileUrl(`/api/tasks/${encodedTaskId}/delivery-package/download`)} />}><Download />下载</Button>
-                        )}
-                        {mode === "local" && (
-                          <Link href={`${projectPath}/articles/${encodedTaskId}?step=files`} className="inline-flex h-8 items-center gap-1 rounded-md px-2.5 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><ExternalLink className="size-4" />处理</Link>
-                        )}
-                      </div></TableCell>
-                    </TableRow>;
+                    const taskApi = `${projectApi}/tasks/${encodeURIComponent(task.id)}`;
+                    const topicNumber = String(task.topic_index).padStart(3, "0");
+                    return (
+                      <TableRow key={task.id}>
+                        <TableCell className="font-mono text-xs">topic_{topicNumber}</TableCell>
+                        <TableCell className="max-w-0 whitespace-normal"><div className="truncate font-medium">{task.selected_title || task.topic}</div><div className="mt-1 truncate text-xs text-muted-foreground">{task.topic}</div></TableCell>
+                        <TableCell><div className="flex flex-wrap gap-1">{parts.package ? <Badge>已打包</Badge> : missing.length ? missing.map((item) => <Badge key={item} variant="outline">缺 {item}</Badge>) : <Badge>可打包</Badge>}</div></TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{formatUpdatedAt(task.updated_at)}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap justify-end gap-1">
+                            {parts.word && deliveryAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending)} aria-label={`下载 topic_${topicNumber} 的 Word`} onClick={() => void downloadArtifact(task, "下载 Word", `${taskApi}/docx/download`)}>{taskPending === "下载 Word" ? <Loader2 className="animate-spin" /> : <FileText />}Word</Button>}
+                            {parts.tdk && deliveryAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending)} aria-label={`下载 topic_${topicNumber} 的 D 文档`} onClick={() => void downloadArtifact(task, "下载 D 文档", `${taskApi}/tdk/download`)}>{taskPending === "下载 D 文档" ? <Loader2 className="animate-spin" /> : <FileText />}D.docx</Button>}
+                            {parts.screenshot && reviewAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending)} aria-label={`查看 topic_${topicNumber} 的终审截图`} onClick={() => void downloadArtifact(task, "打开终审截图", `${taskApi}/checks/final-ai/screenshot/download`)}>{taskPending === "打开终审截图" ? <Loader2 className="animate-spin" /> : <ImageIcon />}终审</Button>}
+                            {!parts.package && !missing.length && deliveryAllowed && <Button size="sm" disabled={Boolean(taskPending)} onClick={() => void runTaskAction(task, "生成交付包", () => apiPost<TaskRecord>(`${taskApi}/package-delivery`, { revision: task.revision ?? 0 }))}>{taskPending === "生成交付包" ? <Loader2 className="animate-spin" /> : <Package />}打包</Button>}
+                            {parts.package && deliveryAllowed && <Button size="sm" disabled={Boolean(taskPending)} aria-label={`下载 topic_${topicNumber} 的交付 ZIP`} onClick={() => void downloadArtifact(task, "下载交付 ZIP", `${taskApi}/delivery-package/download`)}>{taskPending === "下载交付 ZIP" ? <Loader2 className="animate-spin" /> : <Download />}ZIP</Button>}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
                   })}
                   {loading && !filteredTasks.length && <TableRow><TableCell colSpan={5} className="h-36 text-center text-muted-foreground"><span className="inline-flex items-center gap-2" role="status" aria-live="polite"><Loader2 className="size-4 animate-spin" />正在读取交付记录…</span></TableCell></TableRow>}
                   {!loading && !filteredTasks.length && <TableRow><TableCell colSpan={5} className="h-36 text-center text-muted-foreground">没有符合当前条件的交付记录</TableCell></TableRow>}

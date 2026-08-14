@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 
 from .contracts import (
+    EVIDENCE_SOURCE_KINDS,
     EvidenceLink,
     EvidencePack,
     EvidencePackRequest,
@@ -70,7 +71,12 @@ class DefaultEvidencePackBuilder:
         request: EvidencePackRequest,
         hits: Sequence[RetrievalHit],
     ) -> EvidencePack:
-        ordered_hits = tuple(hits)
+        ordered_hits = tuple(
+            hit
+            for hit in hits
+            if hit.provenance is None
+            or hit.provenance.source_kind in EVIDENCE_SOURCE_KINDS
+        )
         if any(hit.project_id != request.project_id for hit in ordered_hits):
             raise ValueError("evidence hits must belong to the same project")
 

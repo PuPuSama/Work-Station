@@ -716,7 +716,7 @@ project_prompt_versions = sa.Table(
             "project_prompt_heads.kind",
         ],
         name="fk_project_prompt_versions_head",
-        ondelete="RESTRICT",
+        ondelete="CASCADE",
     ),
     sa.ForeignKeyConstraint(
         ["organization_id", "created_by_user_id"],

@@ -34,6 +34,7 @@ from models import (  # noqa: E402
 from workflow.state_machine import (  # noqa: E402
     ACTION_CLEAR_WORKFLOW_ERROR,
     ACTION_CONFIRM_INITIAL_AI,
+    ACTION_CONFIRM_FINAL_AI,
     ACTION_EXPORT_DOCX,
     ACTION_GENERATE_ARTICLE,
     ACTION_GENERATE_OUTLINE,
@@ -109,6 +110,16 @@ class TransitionTests(unittest.TestCase):
 
 
 class AllowedActionsTests(unittest.TestCase):
+    def test_final_ai_attachment_can_be_replaced_after_confirmation(self) -> None:
+        for status in (
+            STATUS_FINAL_AI_CHECKED,
+            STATUS_LINKS_VERIFIED,
+            STATUS_IMAGES_READY,
+            STATUS_DOCX_EXPORTED,
+        ):
+            with self.subTest(status=status):
+                self.assertIn(ACTION_CONFIRM_FINAL_AI, allowed_actions(task_at(status)))
+
     def test_external_humanized_article_can_skip_initial_check_and_model_rewrite(self) -> None:
         self.assertIn(ACTION_UPDATE_HUMANIZED, allowed_actions(task_at(STATUS_DRAFT_READY)))
         self.assertIn(

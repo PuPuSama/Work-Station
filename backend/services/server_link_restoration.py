@@ -386,7 +386,7 @@ class ServerLinkRestorationHandler:
         ):
             raise JobConflict("candidate article changed")
         if (
-            not task.final_ai_check.confirmed
+            not (task.final_ai_check.confirmed or task.final_ai_check.deferred)
             or task.final_ai_check.article_hash != candidate_hash
         ):
             raise JobConflict("final AI check identity changed")
@@ -611,7 +611,7 @@ class ServerLinkRestorationRegistry:
         ):
             raise JobConflict("candidate article identity is invalid")
         if (
-            not task.final_ai_check.confirmed
+            not (task.final_ai_check.confirmed or task.final_ai_check.deferred)
             or task.final_ai_check.article_hash != candidate_hash
         ):
             raise JobConflict("final AI check identity is invalid")

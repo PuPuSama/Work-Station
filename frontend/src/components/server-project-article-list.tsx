@@ -152,7 +152,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
             </div>
             <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
               任务读取和所有写操作均绑定当前 PostgreSQL Project；此页面不会调用
-              Local SQLite 文章接口。
+              已停用的旧文章接口。
             </p>
           </div>
           <div className="text-sm text-muted-foreground">
@@ -272,7 +272,10 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                           >
                             {task.workflow_error
                               ? "处理失败"
-                              : STATUS_LABELS[task.status]}
+                              : task.status === "title_selected" &&
+                                  task.products.length
+                                ? "产品已保存 · 待生成大纲"
+                                : STATUS_LABELS[task.status]}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">

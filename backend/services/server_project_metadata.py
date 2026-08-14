@@ -5,10 +5,11 @@ from dataclasses import dataclass
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from knowledge_agent.contracts import KnowledgeProject
 from knowledge_agent.schema import projects
+from server_schema import organizations, project_ownership, teams, workspace_users
 from services.access_control import (
     ActorIdentity,
     PostgresProjectAccessRepository,
@@ -21,6 +22,7 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
+from services.task_identity import normalized_customer
 
 
 class ServerProjectMetadataConflict(RuntimeError):
@@ -31,13 +33,18 @@ class ServerProjectMetadataUnavailable(RuntimeError):
     """Project metadata could not be read or committed safely."""
 
 
+class ServerProjectCreationConflict(RuntimeError):
+    """A new Project identity already exists or changed concurrently."""
+
+
 @dataclass(frozen=True, slots=True)
 class ServerProjectMetadata:
-    """Public, project-scoped identity metadata with optimistic Revision."""
+    """Project-scoped settings with optimistic Revision."""
 
     project_id: str
     customer_name: str
     official_domain: str
+    project_notes: str
     revision: int
 
 
@@ -59,6 +66,7 @@ def _validated_metadata(
     project_id: str,
     customer_name: str,
     official_domain: str,
+    project_notes: str,
     revision: int,
 ) -> ServerProjectMetadata:
     if isinstance(revision, bool) or not isinstance(revision, int):
@@ -71,21 +79,23 @@ def _validated_metadata(
         customer_name=normalized_name,
         official_domain=official_domain,
     )
+    normalized_notes = str(project_notes or "").replace("\r\n", "\n").strip()
+    if len(normalized_notes) > 30000:
+        raise ValueError("project_notes is too long")
     return ServerProjectMetadata(
         project_id=validated.project_id,
         customer_name=validated.customer_name,
         official_domain=validated.official_domain,
+        project_notes=normalized_notes,
         revision=revision,
     )
 
 
 class PostgresServerProjectMetadata:
-    """Read and update the shared Project identity without renaming its ID.
+    """Read and update shared Project settings without renaming its ID.
 
-    Free-form business facts are deliberately excluded: authoritative facts
-    belong in Published Knowledge and writing rules belong in immutable Prompt
-    Snapshots. Existing Tasks retain their captured brand/domain identity;
-    updates apply to future Task Intake and official-site operations.
+    Project notes are operator guidance, not authoritative business evidence.
+    New Tasks capture them during intake; existing Tasks retain their snapshot.
     """
 
     def __init__(
@@ -105,6 +115,7 @@ class PostgresServerProjectMetadata:
             project_id=str(row["project_id"]),
             customer_name=str(row["customer_name"]),
             official_domain=str(row["official_domain"]),
+            project_notes=str(row["project_notes"] or ""),
             revision=int(row["revision"]),
         )
 
@@ -122,6 +133,7 @@ class PostgresServerProjectMetadata:
                         projects.c.project_id,
                         projects.c.customer_name,
                         projects.c.official_domain,
+                        projects.c.project_notes,
                         projects.c.revision,
                     ).where(
                         projects.c.project_id == project_id,
@@ -138,6 +150,119 @@ class PostgresServerProjectMetadata:
             raise ProjectAccessDenied("project access denied")
         return self._from_row(row)
 
+    def create(
+        self,
+        *,
+        actor: ActorIdentity,
+        customer_name: str,
+        official_domain: str,
+        owning_team_id: str | None,
+        event_id: str,
+    ) -> ServerProjectMetadata:
+        """Provision one active Project and its Organization ownership atomically."""
+
+        identity = KnowledgeProject(
+            project_id=official_domain,
+            customer_name=_normalized_customer_name(customer_name),
+            official_domain=official_domain,
+        )
+        requested = ServerProjectMetadata(
+            project_id=normalized_customer(identity.official_domain),
+            customer_name=identity.customer_name,
+            official_domain=identity.official_domain,
+            project_notes="",
+            revision=0,
+        )
+        normalized_team_id = (
+            owning_team_id.strip() if owning_team_id is not None else None
+        )
+        if owning_team_id is not None and not normalized_team_id:
+            raise ValueError("owning_team_id must not be blank")
+        normalized_event_id = event_id.strip()
+        if not normalized_event_id:
+            raise ValueError("event_id is required")
+        try:
+            with self._engine.begin() as connection:
+                organization = connection.execute(
+                    sa.select(organizations.c.organization_id)
+                    .where(
+                        organizations.c.organization_id
+                        == actor.organization_id,
+                        organizations.c.status == "active",
+                    )
+                    .with_for_update()
+                ).scalar_one_or_none()
+                administrator = connection.execute(
+                    sa.select(workspace_users.c.user_id)
+                    .where(
+                        workspace_users.c.organization_id
+                        == actor.organization_id,
+                        workspace_users.c.user_id == actor.user_id,
+                        workspace_users.c.status == "active",
+                        workspace_users.c.organization_role == "org_admin",
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if organization is None or administrator is None:
+                    raise ProjectAccessDenied("project creation denied")
+                if normalized_team_id is not None:
+                    active_team = connection.execute(
+                        sa.select(teams.c.team_id)
+                        .where(
+                            teams.c.organization_id == actor.organization_id,
+                            teams.c.team_id == normalized_team_id,
+                            teams.c.status == "active",
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    if active_team is None:
+                        raise ValueError(
+                            "owning_team_id must reference an active team"
+                        )
+                connection.execute(
+                    projects.insert().values(
+                        project_id=requested.project_id,
+                        customer_name=requested.customer_name,
+                        official_domain=requested.official_domain,
+                        status="active",
+                        revision=0,
+                    )
+                )
+                connection.execute(
+                    project_ownership.insert().values(
+                        project_id=requested.project_id,
+                        organization_id=actor.organization_id,
+                        owning_team_id=normalized_team_id,
+                    )
+                )
+                self._audit.append(
+                    connection,
+                    AuditEvent(
+                        organization_id=actor.organization_id,
+                        event_id=normalized_event_id,
+                        actor_user_id=actor.user_id,
+                        project_id=requested.project_id,
+                        action="project.created",
+                        target_type="project",
+                        target_id=requested.project_id,
+                        details={
+                            "owning_team_id": normalized_team_id or "",
+                            "status": "active",
+                        },
+                    ),
+                )
+        except (ProjectAccessDenied, ValueError):
+            raise
+        except IntegrityError as exc:
+            raise ServerProjectCreationConflict(
+                "project already exists"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise ServerProjectMetadataUnavailable(
+                "project creation is unavailable"
+            ) from exc
+        return requested
+
     def update(
         self,
         *,
@@ -146,11 +271,13 @@ class PostgresServerProjectMetadata:
         expected_revision: int,
         customer_name: str,
         official_domain: str,
+        project_notes: str,
     ) -> ServerProjectMetadata:
         requested = _validated_metadata(
             project_id=project_id,
             customer_name=customer_name,
             official_domain=official_domain,
+            project_notes=project_notes,
             revision=expected_revision,
         )
         try:
@@ -172,6 +299,7 @@ class PostgresServerProjectMetadata:
                         projects.c.project_id,
                         projects.c.customer_name,
                         projects.c.official_domain,
+                        projects.c.project_notes,
                         projects.c.revision,
                     )
                     .where(
@@ -193,7 +321,16 @@ class PostgresServerProjectMetadata:
                 official_domain_changed = (
                     current.official_domain != requested.official_domain
                 )
-                if not customer_name_changed and not official_domain_changed:
+                project_notes_changed = (
+                    current.project_notes != requested.project_notes
+                )
+                if not any(
+                    (
+                        customer_name_changed,
+                        official_domain_changed,
+                        project_notes_changed,
+                    )
+                ):
                     return current
 
                 next_revision = expected_revision + 1
@@ -206,6 +343,7 @@ class PostgresServerProjectMetadata:
                     .values(
                         customer_name=requested.customer_name,
                         official_domain=requested.official_domain,
+                        project_notes=requested.project_notes,
                         revision=next_revision,
                         updated_at=sa.func.now(),
                     )
@@ -243,6 +381,7 @@ class PostgresServerProjectMetadata:
                             "official_domain_changed": (
                                 official_domain_changed
                             ),
+                            "project_notes_changed": project_notes_changed,
                         },
                     ),
                 )
@@ -250,6 +389,7 @@ class PostgresServerProjectMetadata:
                     project_id=project_id,
                     customer_name=requested.customer_name,
                     official_domain=requested.official_domain,
+                    project_notes=requested.project_notes,
                     revision=next_revision,
                 )
         except (
@@ -265,6 +405,7 @@ class PostgresServerProjectMetadata:
 
 
 __all__ = [
+    "ServerProjectCreationConflict",
     "PostgresServerProjectMetadata",
     "ServerProjectMetadata",
     "ServerProjectMetadataConflict",

@@ -14,6 +14,12 @@ projects = sa.Table(
     sa.Column("project_id", sa.Text(), primary_key=True),
     sa.Column("customer_name", sa.Text(), nullable=False),
     sa.Column("official_domain", sa.Text(), nullable=False),
+    sa.Column(
+        "project_notes",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("''"),
+    ),
     sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'active'")),
     sa.Column(
         "revision",

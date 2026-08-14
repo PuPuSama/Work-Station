@@ -119,7 +119,7 @@ M3 首版显式支持：
 ## 6. 关键不变量
 
 - 混合检索不能扩大 M1 的项目、发布状态、当前快照或 Embedding 模型边界；
-- Blog 可以作为参考资料命中，但产品事实 Scope 必须通过来源类型/产品证据过滤；
+- Blog 不得进入任何 Evidence Pack 或段落证据链接；它只能由正文生成链路单独检索为可引用的写作素材；
 - 排序解释必须和实际使用的分数一致；
 - reranker 永远不能把未通过 SQL 门禁的 Chunk 带入结果；
 - RetrievalPlan 和 Evidence Pack 必须绑定 `outline_version`；

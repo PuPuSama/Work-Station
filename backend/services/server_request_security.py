@@ -44,6 +44,7 @@ def knowledge_permission_for(
     if (
         normalized_path.endswith("/publish")
         or normalized_path.endswith("/confirm")
+        or normalized_path.endswith("/official-site/scan")
         or normalized_path.endswith("/research-runs")
         or normalized_path.endswith("/resume")
     ):
@@ -78,7 +79,7 @@ def server_knowledge_route_ready(method: str, route_path: str) -> bool:
         # These M3/M5 compatibility writes are not Server-ready. They are not
         # bound to a PostgreSQL Task revision and do not reauthorize or append
         # an Audit event in the commit transaction. Keep them available in
-        # Local mode only until dedicated Server commands replace them.
+        # Keep these unavailable until dedicated audited Server commands exist.
         return False
     return True
 
@@ -103,9 +104,9 @@ def server_http_route_available(method: str, path: str) -> bool:
         "/api/auth/invitations/prepare",
     }:
         return True
-    if normalized_method == "GET" and normalized_path.rstrip("/") == (
-        "/api/projects"
-    ):
+    if normalized_method in {"GET", "POST"} and normalized_path.rstrip(
+        "/"
+    ) == "/api/projects":
         return True
     parts = normalized_path.rstrip("/").split("/")
     if (
@@ -143,6 +144,15 @@ def server_http_route_available(method: str, path: str) -> bool:
         return True
     if (
         normalized_method == "PUT"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "prompt-snapshots"
+        and bool(parts[5])
+    ):
+        return True
+    if (
+        normalized_method == "DELETE"
         and len(parts) == 6
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])
@@ -235,6 +245,14 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])
         and parts[4] in {"tasks", "task-imports"}
+    ):
+        return True
+    if (
+        normalized_method == "POST"
+        and len(parts) == 6
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4:6] == ["task-imports", "preview"]
     ):
         return True
     if (

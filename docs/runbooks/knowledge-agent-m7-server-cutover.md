@@ -86,7 +86,7 @@ pg_restore --clean --if-exists --no-owner --no-acl `
 
 恢复后至少验证：
 
-- `alembic_version = 20260806_0019`；
+- `alembic_version = 20260812_0021`；
 - `vector` 扩展存在；
 - Organization、Project Ownership、Membership、Audit、Knowledge、
   External Identity、Task、Batch、Job 表均可读取；
@@ -223,10 +223,10 @@ Audit 故障同时回滚 External Identity 与 Invitation Accepted。
 `20260731_0015` 把 Server Prompt 拆成 `project_prompt_heads`、
 `project_prompt_versions` 和 `project_prompt_defaults`。发布前必须验证：
 
-- Version 表的 UPDATE/DELETE 被 Append-only Trigger 拒绝；
+- Version 表只允许通过受控提示词服务编辑或删除，应用写入必须经过项目权限与 Audit；
 - Head 的 Current Version 与 Default 的 Prompt ID + Version 都由复合 FK 固定在同一
   Organization/Project；
-- 创建 V2 后，已绑定 V1 的 Project Default 仍解析 V1；只有显式切换才采用 V2；
+- 编辑当前 Version 后，已绑定该提示词的 Project Default 读取更新后的内容；切换默认提示词仍需显式操作；
 - Viewer 可解析已授权项目 Prompt，但创建/更新/归档/默认切换要求 `article.edit`；
 - 写操作在事务内重新锁定权限，Audit 故障必须同时回滚 Head/Version/Default；
 - Audit 不含 Prompt 名称、正文或 Hash；
@@ -454,7 +454,7 @@ Source-scoped Server Writer。应用回滚时应关闭 Server Knowledge 写流�
 1. 备份与恢复演练；由独立 Reviewer 复核外部不可变证据包并签发绑定候选 Commit 的
    Recovery Evidence Envelope；
 2. 关闭外部流量，暂停 Server Knowledge Review/Publish 和 Worker Claim；
-3. `alembic upgrade head`，确认 Head 为 `20260806_0019` 并完成上述 Backfill 验证；
+3. `alembic upgrade head`，确认 Head 为 `20260812_0021` 并完成上述 Backfill 验证；
 4. 停止 SQLite 写入口和旧 Worker，完成其余一次性迁移；
 5. 对每个项目运行 `m7_cutover_report` 并保存 matched JSON；
 6. 只读 Preflight；
@@ -830,7 +830,7 @@ Outline 生成冒烟必须通过
   均返回 422；
 - Viewer 与跨 Project 请求返回 403，可信 Requester 在 Claim 前和 Handler 前都要求
   `article.edit`；
-- Project Default 在入队后切换到新 Version，已排队 Job 仍使用原不可变 Version；
+- Project Default 在入队后切换到另一份提示词，已排队 Job 仍按入队时的提示词身份校验；
 - Knowledge Context 只来自同 Project 的当前 Published Snapshot；任一固定 Chunk 被
   取消发布或切换 Snapshot 后，Job 在调用 Provider 前进入 Conflict；
 - Provider 未配置、空输出或异常只返回脱敏失败，不得回退 mock、本地 Customer

@@ -4,11 +4,12 @@ import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 
-from .contracts import RetrievalPlan, RetrievalScope
+from .contracts import EVIDENCE_SOURCE_KINDS, RetrievalPlan, RetrievalScope
 
 
 _H2_PATTERN = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _FAQ_MARKERS = ("faq", "frequently asked", "common questions", "questions")
+_EVIDENCE_FILTERS = {"source_kinds": sorted(EVIDENCE_SOURCE_KINDS)}
 
 
 def _slug(value: str, fallback: str) -> str:
@@ -67,6 +68,7 @@ def generate_retrieval_plan(
                     f"{topic} {title}",
                     title,
                 ),
+                filters=_EVIDENCE_FILTERS,
                 minimum_hits=2,
                 minimum_distinct_sources=1,
                 require_hard_fact=False,
@@ -81,7 +83,7 @@ def generate_retrieval_plan(
         ordinal = len(scopes)
         key = _slug(name, f"product-{ordinal + 1}")
         url = str(product.get("url") or "").strip()
-        filters: dict[str, object] = {}
+        filters: dict[str, object] = dict(_EVIDENCE_FILTERS)
         if url:
             filters["canonical_urls"] = [url]
         scopes.append(
@@ -116,6 +118,7 @@ def generate_retrieval_plan(
                 scope_key="introduction",
                 title="Introduction",
                 query_variants=_queries(topic, article_id),
+                filters=_EVIDENCE_FILTERS,
                 minimum_hits=2,
                 minimum_distinct_sources=1,
                 metadata={"generated_from": "outline_fallback"},

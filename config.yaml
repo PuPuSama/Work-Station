@@ -2,7 +2,6 @@ paths:
   topic_library: "workspace/topic-library"
   knowledge_base: "../Knowledge"
   output_root: "workspace/projects"
-  data_file: "data/tasks.json"
 
 article:
   language: "English"
@@ -29,7 +28,7 @@ llm:
   provider: "responses"
   base_url: "https://api.openai.com/v1"
   model: "gpt-5.6-sol"
-  reasoning_effort: "xhigh"
+  reasoning_effort: "medium"
   available_models:
     - "gpt-5.6-sol"
     - "gpt-5.6-terra"

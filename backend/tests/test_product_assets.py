@@ -236,6 +236,45 @@ class ProductAssetParsingTests(unittest.TestCase):
             ["https://shop.example.com/media/current-product.jpg"],
         )
 
+    def test_all_device_hidden_elementor_tables_are_not_product_facts(self) -> None:
+        html = f"""
+        <html><head><link rel="canonical" href="{PRODUCT_URL}"></head><body>
+          <main>
+            <h1>Sanitary Pump 900</h1>
+            <table><tr><th>Property</th><th>Value</th></tr>
+              <tr><td>Material</td><td>316L stainless steel</td></tr>
+            </table>
+            <div class="elementor-hidden-desktop">
+              <table><tr><td>Mobile detail</td><td>Still visible on mobile</td></tr></table>
+            </div>
+            <div class="elementor-hidden-widescreen elementor-hidden-desktop
+                        elementor-hidden-laptop elementor-hidden-tablet
+                        elementor-hidden-mobile">
+              <table><tr><td>Dimension stability</td><td>Hidden template claim</td></tr></table>
+            </div>
+            <div hidden>
+              <table><tr><td>Hidden attribute</td><td>Not evidence</td></tr></table>
+            </div>
+            <div aria-hidden="true">
+              <table><tr><td>ARIA hidden</td><td>Not evidence</td></tr></table>
+            </div>
+            <div style="display: none !important;">
+              <table><tr><td>CSS hidden</td><td>Not evidence</td></tr></table>
+            </div>
+          </main>
+        </body></html>
+        """
+
+        parsed = parse_product_page(PRODUCT_URL, html, "pump-900")
+
+        self.assertEqual(
+            [table["rows"] for table in parsed.specification_tables],
+            [
+                [["Material", "316L stainless steel"]],
+                [["Mobile detail", "Still visible on mobile"]],
+            ],
+        )
+
     def test_empty_main_falls_back_to_sibling_product_detail_with_lazy_images(self) -> None:
         html = """
         <html><head><link rel="canonical" href="/self-tapping-screw/"></head><body>

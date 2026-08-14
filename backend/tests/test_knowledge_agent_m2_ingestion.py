@@ -17,9 +17,13 @@ if str(BACKEND_DIR) not in sys.path:
 
 from knowledge_agent import (  # noqa: E402
     DocumentInput,
+    DocumentParserRouter,
     KnowledgeAsset,
     KnowledgeSource,
     LocalKnowledgeArtifactStore,
+    ParsedAsset,
+    ParsedBlock,
+    ParsedDocument,
     ParsedDocumentChunker,
     PrivateDocumentIngestionService,
     SnapshotAsset,
@@ -183,6 +187,74 @@ class LocalArtifactStoreTests(unittest.TestCase):
 
 
 class PrivateDocumentIngestionServiceTests(unittest.TestCase):
+    def test_prepare_deduplicates_repeated_asset_content_within_snapshot(
+        self,
+    ) -> None:
+        class RepeatedAssetParser:
+            name = "repeated-asset-fixture"
+            version = "1"
+
+            def supports(self, document: DocumentInput) -> bool:
+                return document.suffix == ".pdf"
+
+            def parse(self, document: DocumentInput) -> ParsedDocument:
+                repeated = image_bytes()
+                return ParsedDocument(
+                    filename=document.filename,
+                    content_type="application/pdf",
+                    content_hash=document.content_hash,
+                    parser_name=self.name,
+                    parser_version=self.version,
+                    blocks=(
+                        ParsedBlock(
+                            kind="paragraph",
+                            ordinal=0,
+                            text="Product catalog content",
+                        ),
+                    ),
+                    assets=(
+                        ParsedAsset(
+                            filename="logo-page-1.png",
+                            content=repeated,
+                            content_type="image/png",
+                            ordinal=0,
+                            locator={"page_number": 1},
+                        ),
+                        ParsedAsset(
+                            filename="logo-page-2.png",
+                            content=repeated,
+                            content_type="image/png",
+                            ordinal=1,
+                            locator={"page_number": 2},
+                        ),
+                    ),
+                    title="Catalog",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = PrivateDocumentIngestionService(
+                repository=FakeKnowledgeRepository(),  # type: ignore[arg-type]
+                asset_repository=FakeAssetRepository(),
+                artifact_store=LocalKnowledgeArtifactStore(Path(directory)),
+                parser_router=DocumentParserRouter((RepeatedAssetParser(),)),
+            )
+            result = service.prepare(
+                project_id="project-a",
+                source_id="catalog",
+                display_name="Catalog",
+                document_input=DocumentInput(
+                    filename="catalog.pdf",
+                    content=b"%PDF repeated image fixture",
+                    content_type="application/pdf",
+                ),
+            )
+
+        self.assertEqual(len(result.assets), 1)
+        self.assertEqual(len(result.snapshot_assets), 1)
+        self.assertEqual(result.snapshot_assets[0].ordinal, 0)
+        self.assertEqual(result.snapshot_assets[0].locator, {"page_number": 1})
+        self.assertEqual(result.snapshot.metadata["asset_count"], 1)
+
     def test_ingestion_is_stable_reviewable_and_persists_asset_evidence(self) -> None:
         knowledge_repository = FakeKnowledgeRepository()
         asset_repository = FakeAssetRepository()

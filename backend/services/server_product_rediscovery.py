@@ -5,7 +5,9 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -13,12 +15,22 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from knowledge_agent.assets import PostgresKnowledgeAssetRepository
 from knowledge_agent.catalog import PostgresProductCatalogRepository
+from knowledge_agent.embedding import EmbeddingProviderError
 from knowledge_agent.library import PostgresKnowledgeLibrary
 from knowledge_agent.object_storage import ScopedS3ArtifactStore
+from knowledge_agent.publication import KnowledgePublicationError
 from knowledge_agent.repository import PostgresKnowledgeRepository
-from knowledge_agent.schema import projects
+from knowledge_agent.schema import (
+    knowledge_products,
+    knowledge_sources,
+    projects,
+)
 from knowledge_agent.web_ingestion import (
+    OfficialSiteScanResult,
+    OfficialSiteSyncService,
     OfficialWebPageIngestionService,
+    WebPageIngestionConflict,
+    WordPressCategorySyncResult,
     WordPressProductSyncService,
 )
 from knowledge_agent.wordpress import (
@@ -56,9 +68,11 @@ from services.server_web_evidence_ingestion import (
     PostgresServerWebEvidenceIngestion,
     ServerWebEvidenceContext,
 )
+from services.server_knowledge_commands import PostgresServerKnowledgeCommands
 
 
 PRODUCT_REDISCOVERY_OPERATION = "product_rediscovery"
+PUBLICATION_RETRY_DELAYS_SECONDS = (1.0, 3.0)
 
 
 class ProductRediscoveryUnavailable(RuntimeError):
@@ -102,6 +116,18 @@ class ProductRediscoveryCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class OfficialSiteScanCommand:
+    start_url: str
+    max_pages: int
+
+    def __post_init__(self) -> None:
+        if len(self.start_url) > 4096:
+            raise ValueError("start_url is too long")
+        if not 1 <= self.max_pages <= 500:
+            raise ValueError("max_pages must be between 1 and 500")
+
+
+@dataclass(frozen=True, slots=True)
 class ProductRediscoveryStopReport:
     """Aggregate controlled-shutdown evidence for project runners."""
 
@@ -114,9 +140,25 @@ class ProductRediscoveryStopReport:
         return self.dispatcher_stopped and self.remaining_jobs == 0
 
 
+@dataclass(frozen=True, slots=True)
+class ManualProductScanStatus:
+    scan_id: str
+    project_id: str
+    status: str
+    started_at: str
+    finished_at: str | None = None
+    processed_pages: int = 0
+    skipped_pages: int = 0
+    processed_products: int = 0
+    skipped_products: int = 0
+    source_count: int = 0
+    product_count: int = 0
+    error: str = ""
+
+
 ProductSyncFactory = Callable[
     [ActorIdentity, str, str, Callable[[], bool]],
-    WordPressProductSyncService,
+    OfficialSiteSyncService,
 ]
 ProductRediscoveryJobHandler = Callable[
     [dict[str, Any], Callable[[], bool]],
@@ -132,9 +174,235 @@ class ServerProductRediscoveryHandler:
         engine: Engine,
         *,
         sync_factory: ProductSyncFactory,
+        commands: PostgresServerKnowledgeCommands | None = None,
     ) -> None:
         self._engine = engine
         self._sync_factory = sync_factory
+        self._commands = commands
+
+    def _publish(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        result: WordPressCategorySyncResult | OfficialSiteScanResult,
+    ) -> None:
+        if self._commands is None:
+            return
+        for page in result.pages:
+            self._publish_page(
+                actor=actor,
+                project_id=project_id,
+                page=page,
+            )
+
+    def _publish_page(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        page: object,
+    ) -> None:
+        if self._commands is None:
+            return
+        receipt_id = "review_" + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "\n".join(
+                    (
+                        project_id,
+                        page.source.source_id,
+                        page.snapshot.snapshot_id,
+                        "official_site_auto_publish_v1",
+                    )
+                ),
+            ).hex
+        try:
+            self._commands.review_snapshot(
+                    actor=actor,
+                    project_id=project_id,
+                    source_id=page.source.source_id,
+                    snapshot_id=page.snapshot.snapshot_id,
+                    receipt_id=receipt_id,
+                    source_kind=page.source.source_kind,
+                    trust_tier=page.source.trust_tier,
+                    decision="approve",
+                    reason="Official-site scan completed automatically.",
+                    reviewer_kind="automation",
+                    reviewer_id="official_site_scan_v1",
+            )
+        except KnowledgePublicationError:
+            # Publication is intentionally idempotent. A stale browser tab
+            # or another scan worker may have activated this same immutable
+            # snapshot after ingestion but before this review call.
+            if not self._snapshot_is_active(
+                project_id=project_id,
+                source_id=page.source.source_id,
+                snapshot_id=page.snapshot.snapshot_id,
+            ):
+                raise
+        else:
+            for attempt in range(len(PUBLICATION_RETRY_DELAYS_SECONDS) + 1):
+                try:
+                    self._commands.publish_source(
+                        actor=actor,
+                        project_id=project_id,
+                        source_id=page.source.source_id,
+                        snapshot_id=page.snapshot.snapshot_id,
+                    )
+                    break
+                except EmbeddingProviderError:
+                    if attempt >= len(PUBLICATION_RETRY_DELAYS_SECONDS):
+                        self._reject_unpublished_page(
+                            actor=actor,
+                            project_id=project_id,
+                            page=page,
+                        )
+                        raise WebPageIngestionConflict(
+                            "page publication skipped after embedding retries"
+                        )
+                    time.sleep(PUBLICATION_RETRY_DELAYS_SECONDS[attempt])
+                except KnowledgePublicationError:
+                    if not self._snapshot_is_active(
+                        project_id=project_id,
+                        source_id=page.source.source_id,
+                        snapshot_id=page.snapshot.snapshot_id,
+                    ):
+                        raise
+                    break
+            else:  # pragma: no cover - the bounded loop always breaks or raises.
+                raise RuntimeError("official-site publication retry exhausted")
+        if self._product_is_auto_confirmable(page):
+            self._commands.confirm_product(
+                actor=actor,
+                project_id=project_id,
+                product_id=page.product.product_id,
+            )
+
+    def _reject_unpublished_page(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        page: object,
+    ) -> None:
+        assert self._commands is not None
+        receipt_id = "review_" + uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "\n".join(
+                (
+                    project_id,
+                    page.source.source_id,
+                    page.snapshot.snapshot_id,
+                    "official_site_publication_failed_v1",
+                )
+            ),
+        ).hex
+        self._commands.review_snapshot(
+            actor=actor,
+            project_id=project_id,
+            source_id=page.source.source_id,
+            snapshot_id=page.snapshot.snapshot_id,
+            receipt_id=receipt_id,
+            source_kind=page.source.source_kind,
+            trust_tier=page.source.trust_tier,
+            decision="reject",
+            reason="Automatic publication exhausted transient embedding retries.",
+            reviewer_kind="automation",
+            reviewer_id="official_site_scan_v1",
+        )
+
+    @staticmethod
+    def _product_is_auto_confirmable(page: object) -> bool:
+        product = getattr(page, "product", None)
+        if product is None:
+            return False
+        classification = getattr(page, "classification", None)
+        if classification is None:
+            # Compatibility for older internal callers that predate classifier
+            # evidence on the result object.
+            return True
+        if getattr(classification, "page_type", "") != "product_detail":
+            return False
+        path = urlsplit(str(getattr(classification, "canonical_url", ""))).path
+        normalized_path = unquote(path).casefold().rstrip("/")
+        segments = [
+            unquote(segment).casefold()
+            for segment in path.split("/")
+            if segment
+        ]
+        if (
+            len(segments) >= 2
+            and len(segments[0]) in {2, 3, 5}
+            and segments[1]
+            in {
+                "product",
+                "products",
+                "produkt",
+                "produkte",
+                "produit",
+                "produits",
+                "producto",
+                "productos",
+                "prodotto",
+                "prodotti",
+            }
+        ):
+            return False
+        if normalized_path.startswith(("/product/", "/products/")):
+            return True
+        fixed_non_product_slugs = {
+            "home-2",
+            "home-3",
+            "homepage",
+            "oem-odm",
+            "politica-de-privacidad",
+            "politica-sulla-privacy",
+            "politique-de-confidentialite",
+            "privacy-policy",
+            "privacy-policy-2",
+            "datenschutz",
+            "datenschutzerklarung",
+            "thank-you",
+            "thanks",
+        }
+        if normalized_path.startswith("/product-category/") or (
+            segments and segments[-1] in fixed_non_product_slugs
+        ):
+            return False
+        # Root-level BJY mould pages do not expose specification tables or a
+        # conventional /product/ path. Keep them usable only when the
+        # conservative content detector supplied explicit classifier evidence;
+        # a generic Product schema alone is not enough for automatic approval.
+        reasons = tuple(
+            str(reason).casefold()
+            for reason in getattr(classification, "reasons", ())
+        )
+        return any("conservative b2b product-page detector" in reason for reason in reasons)
+
+    def _snapshot_is_active(
+        self,
+        *,
+        project_id: str,
+        source_id: str,
+        snapshot_id: str,
+    ) -> bool:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(
+                    knowledge_sources.c.status,
+                    knowledge_sources.c.current_snapshot_id,
+                    knowledge_sources.c.pending_snapshot_id,
+                ).where(
+                    knowledge_sources.c.project_id == project_id,
+                    knowledge_sources.c.source_id == source_id,
+                )
+            ).mappings().one_or_none()
+        return bool(
+            row is not None
+            and row["status"] == "published"
+            and row["current_snapshot_id"] == snapshot_id
+            and row["pending_snapshot_id"] is None
+        )
 
     def __call__(
         self,
@@ -177,6 +445,24 @@ class ServerProductRediscoveryHandler:
             source_revision
         ):
             raise JobConflict("source task revision changed")
+        self.scan(
+            actor=actor,
+            project_id=project_id,
+            scan_id=job_id,
+            command=command,
+            cancelled=cancelled,
+        )
+        return source_revision
+
+    def scan(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        scan_id: str,
+        command: ProductRediscoveryCommand | OfficialSiteScanCommand,
+        cancelled: Callable[[], bool],
+    ) -> WordPressCategorySyncResult | OfficialSiteScanResult:
         with self._engine.connect() as connection:
             domain = connection.execute(
                 sa.select(projects.c.official_domain).where(
@@ -190,14 +476,35 @@ class ServerProductRediscoveryHandler:
             raise JobCancelled(
                 "Product rediscovery cancelled before official-site fetch."
             )
-        sync = self._sync_factory(actor, project_id, job_id, cancelled)
-        try:
-            sync.sync_category(
-                project_id=project_id,
-                site_url=f"https://{domain}",
-                category_url=command.category_url,
-                max_products=command.max_products,
+        sync = self._sync_factory(actor, project_id, scan_id, cancelled)
+        incremental_publish = self._commands is not None and hasattr(
+            sync,
+            "set_page_ingested_callback",
+        )
+        if incremental_publish:
+            sync.set_page_ingested_callback(
+                lambda page: self._publish_page(
+                    actor=actor,
+                    project_id=project_id,
+                    page=page,
+                )
             )
+        try:
+            if isinstance(command, OfficialSiteScanCommand):
+                result = sync.sync_site(
+                    project_id=project_id,
+                    site_url=f"https://{domain}",
+                    start_url=(command.start_url or f"https://{domain}/"),
+                    max_pages=command.max_pages,
+                    known_urls=self._known_official_urls(project_id),
+                )
+            else:
+                result = sync.sync_category(
+                    project_id=project_id,
+                    site_url=f"https://{domain}",
+                    category_url=command.category_url,
+                    max_products=command.max_products,
+                )
         except OfficialSiteFetchError as exc:
             if "could not be fetched" in str(exc).casefold():
                 raise RuntimeError(
@@ -205,12 +512,27 @@ class ServerProductRediscoveryHandler:
                 ) from exc
             raise
         if cancelled():
-            # Immutable Inbox evidence already written before a late cancel is
-            # retained; it is not published and never replaces Task products.
             raise JobCancelled(
                 "Product rediscovery cancelled after evidence ingestion."
             )
-        return source_revision
+        if not incremental_publish:
+            self._publish(
+                actor=actor,
+                project_id=project_id,
+                result=result,
+            )
+        return result
+
+    def _known_official_urls(self, project_id: str) -> tuple[str, ...]:
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(knowledge_sources.c.canonical_url).where(
+                    knowledge_sources.c.project_id == project_id,
+                    knowledge_sources.c.public_source.is_(True),
+                    knowledge_sources.c.canonical_url.is_not(None),
+                )
+            ).scalars()
+            return tuple(str(url) for url in rows if url)
 
 
 def create_product_sync_factory(
@@ -316,6 +638,7 @@ class ServerProductRediscoveryRegistry:
         self._lock = threading.Lock()
         self._closed = False
         self._projects: dict[tuple[str, str], _ProjectRunner] = {}
+        self._manual_scans: dict[tuple[str, str], ManualProductScanStatus] = {}
         self._stop_report: ProductRediscoveryStopReport | None = None
 
     def _ensure_project(
@@ -513,6 +836,140 @@ class ServerProductRediscoveryRegistry:
         project.runner.wake()
         return self._public_job(job)
 
+    def begin_manual_scan(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+    ) -> ManualProductScanStatus:
+        self.require_scan(actor=actor, project_id=project_id)
+        scope = (actor.organization_id, project_id)
+        with self._lock:
+            current = self._manual_scans.get(scope)
+            if current is not None and current.status == "running":
+                raise ActiveJobError(f"knowledge-scan:{project_id}")
+            status = ManualProductScanStatus(
+                scan_id=f"manual_{uuid.uuid4().hex}",
+                project_id=project_id,
+                status="running",
+                started_at=datetime.now(timezone.utc).isoformat(),
+                product_count=self._confirmed_product_count(project_id),
+            )
+            self._manual_scans[scope] = status
+            return status
+
+    def run_manual_scan(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        scan_id: str,
+        command: OfficialSiteScanCommand,
+    ) -> ManualProductScanStatus:
+        handler = self._handler
+        assert isinstance(handler, ServerProductRediscoveryHandler)
+        scope = (actor.organization_id, project_id)
+        try:
+            result = handler.scan(
+                actor=actor,
+                project_id=project_id,
+                scan_id=scan_id,
+                command=command,
+                cancelled=lambda: False,
+            )
+            finished = ManualProductScanStatus(
+                scan_id=scan_id,
+                project_id=project_id,
+                status="succeeded",
+                started_at=self._scan_started_at(scope, scan_id),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                processed_pages=len(result.pages),
+                skipped_pages=len(result.skipped_urls),
+                processed_products=len(result.products),
+                skipped_products=sum(
+                    1
+                    for url in result.skipped_urls
+                    if "/product" in url.casefold()
+                ),
+                source_count=self._published_source_count(project_id),
+                product_count=self._confirmed_product_count(project_id),
+            )
+        except Exception as exc:
+            finished = ManualProductScanStatus(
+                scan_id=scan_id,
+                project_id=project_id,
+                status="failed",
+                started_at=self._scan_started_at(scope, scan_id),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                source_count=self._published_source_count(project_id),
+                product_count=self._confirmed_product_count(project_id),
+                error=str(exc)[:500],
+            )
+            with self._lock:
+                self._manual_scans[scope] = finished
+            raise
+        with self._lock:
+            self._manual_scans[scope] = finished
+        return finished
+
+    def manual_scan_status(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+    ) -> ManualProductScanStatus | None:
+        self._access.require(actor, project_id, "project.view")
+        with self._lock:
+            return self._manual_scans.get((actor.organization_id, project_id))
+
+    def _scan_started_at(self, scope: tuple[str, str], scan_id: str) -> str:
+        with self._lock:
+            current = self._manual_scans.get(scope)
+            if current is not None and current.scan_id == scan_id:
+                return current.started_at
+        return datetime.now(timezone.utc).isoformat()
+
+    def _confirmed_product_count(self, project_id: str) -> int:
+        with self._engine.connect() as connection:
+            return int(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(knowledge_products)
+                    .where(
+                        knowledge_products.c.project_id == project_id,
+                        knowledge_products.c.status == "confirmed",
+                    )
+                ).scalar_one()
+            )
+
+    def _published_source_count(self, project_id: str) -> int:
+        with self._engine.connect() as connection:
+            return int(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(knowledge_sources)
+                    .where(
+                        knowledge_sources.c.project_id == project_id,
+                        knowledge_sources.c.status == "published",
+                    )
+                ).scalar_one()
+            )
+
+    def require_scan(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+    ) -> None:
+        self._access.require(actor, project_id, "knowledge.publish")
+        if self._closed or not isinstance(
+            self._handler,
+            ServerProductRediscoveryHandler,
+        ):
+            raise ProductRediscoveryUnavailable(
+                "product rediscovery runner is not configured"
+            )
+
     def get_job(
         self,
         *,
@@ -608,7 +1065,9 @@ class ServerProductRediscoveryRegistry:
 
 __all__ = [
     "PRODUCT_REDISCOVERY_OPERATION",
+    "OfficialSiteScanCommand",
     "ProductRediscoveryCommand",
+    "ManualProductScanStatus",
     "ProductRediscoveryStopReport",
     "ProductRediscoveryUnavailable",
     "ServerProductRediscoveryHandler",

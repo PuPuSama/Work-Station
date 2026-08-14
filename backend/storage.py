@@ -9,7 +9,6 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterable, Mapping
 
-from config import AppConfig
 from models import (
     SCHEMA_VERSION,
     STATUS_DOCX_EXPORTED,
@@ -19,7 +18,7 @@ from models import (
     TaskRecord,
 )
 from services.task_identity import article_source_key, normalized_customer
-from services.task_repository import SQLiteTaskRepository, TaskRecordRepository
+from services.task_repository import TaskRecordRepository
 
 
 _TASK_STORE_LOCK = RLock()
@@ -261,62 +260,20 @@ class TaskStore:
 
     def __init__(
         self,
-        config: AppConfig,
         *,
-        repository: TaskRecordRepository | None = None,
-        legacy_import_enabled: bool = True,
+        repository: TaskRecordRepository,
     ):
-        self.path = config.data_file
-        if repository is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        local_repository = (
-            SQLiteTaskRepository(self.path) if repository is None else None
-        )
-        self.repository: TaskRecordRepository = repository or local_repository
-        self.database_path = (
-            local_repository.database_path
-            if local_repository is not None
-            else None
-        )
-        self.legacy_import_enabled = legacy_import_enabled and repository is None
-        self.migration_backup_path = self.path.with_name(
-            f"{self.path.stem}.v1.backup{self.path.suffix}"
-        )
-        self.monolith_backup_path = self.path.with_name(
-            f"{self.path.stem}.monolith.backup{self.path.suffix}"
-        )
-        self.weekly_backup_path = self.path.with_name(
-            f"{self.path.stem}.weekly.backup{self.path.suffix}"
-        )
+        self.repository = repository
 
     def _write_records(self, tasks: Iterable[TaskRecord]) -> None:
         records = [task.model_dump(mode="json") for task in tasks]
         self.repository.replace_all(records)
 
-    def _archive_monolith(self, original: str) -> None:
-        if not self.monolith_backup_path.exists():
-            self.monolith_backup_path.write_text(original, encoding="utf-8")
-        if self.path.exists():
-            self.path.unlink()
-
-    def _backup_v1(self, original: str) -> None:
-        if not self.migration_backup_path.exists():
-            self.migration_backup_path.write_text(original, encoding="utf-8")
-
     def load(self) -> list[TaskRecord]:
         with _TASK_STORE_LOCK:
-            original = ""
-            imported_monolith = False
-            if self.repository.is_initialized():
-                raw = self.repository.load_all()
-            elif self.legacy_import_enabled and self.path.exists():
-                original = self.path.read_text(encoding="utf-8")
-                raw = json.loads(original)
-                if not isinstance(raw, list):
-                    raise ValueError("Task data file must contain a JSON array.")
-                imported_monolith = True
-            else:
+            if not self.repository.is_initialized():
                 return []
+            raw = self.repository.load_all()
 
             migrated_any = False
             tasks: list[TaskRecord] = []
@@ -325,25 +282,13 @@ class TaskStore:
                 tasks.append(TaskRecord.model_validate(migrated))
                 migrated_any = migrated_any or changed
 
-            if migrated_any and original:
-                self._backup_v1(original)
-            if migrated_any or imported_monolith:
+            if migrated_any:
                 self._write_records(tasks)
-            if imported_monolith:
-                # Archive only after the SQLite transaction has committed.
-                self._archive_monolith(original)
             return tasks
 
     def save(self, tasks: Iterable[TaskRecord]) -> None:
         with _TASK_STORE_LOCK:
-            original = (
-                self.path.read_text(encoding="utf-8")
-                if self.legacy_import_enabled and self.path.exists()
-                else ""
-            )
             self._write_records(tasks)
-            if original:
-                self._archive_monolith(original)
 
     def get(self, task_id: str) -> TaskRecord:
         with _TASK_STORE_LOCK:
@@ -676,19 +621,6 @@ class TaskStore:
                 )
 
             scope = incoming[0].week_folder
-            if self.legacy_import_enabled and any(
-                task.week_folder != scope for task in loaded
-            ):
-                if not self.weekly_backup_path.exists():
-                    self.weekly_backup_path.write_text(
-                        json.dumps(
-                            [task.model_dump(mode="json") for task in loaded],
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                        encoding="utf-8",
-                    )
-
             existing = {
                 task.id: task for task in loaded if task.week_folder == scope
             }

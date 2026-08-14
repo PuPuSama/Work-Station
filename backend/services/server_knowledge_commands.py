@@ -8,6 +8,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from knowledge_agent.catalog import (
+    KnowledgeProduct,
     PostgresProductCatalogRepository,
     ProductConfirmationError,
     ProductCatalogRepositoryError,
@@ -35,6 +36,7 @@ from knowledge_agent.schema import (
 from knowledge_agent.snapshot_reviews import (
     PostgresSnapshotReviewRepository,
     ReviewDecision,
+    ReviewerKind,
     SnapshotReviewConflict,
     SnapshotReviewReceipt,
     SnapshotReviewRepositoryError,
@@ -181,6 +183,8 @@ class PostgresServerKnowledgeCommands:
         trust_tier: TrustTier,
         decision: ReviewDecision,
         reason: str,
+        reviewer_kind: ReviewerKind = "user",
+        reviewer_id: str | None = None,
     ) -> SnapshotReviewReceipt:
         normalized_project_id = _required_text(project_id, "project_id")
         normalized_source_id = _required_text(source_id, "source_id")
@@ -231,8 +235,10 @@ class PostgresServerKnowledgeCommands:
                     source_kind=source_kind,
                     trust_tier=trust_tier,
                     reason=normalized_reason,
-                    reviewer_kind="user",
-                    reviewer_id=actor.user_id,
+                    reviewer_kind=reviewer_kind,
+                    reviewer_id=(
+                        actor.user_id if reviewer_id is None else reviewer_id
+                    ),
                 )
                 if not appended.created:
                     return appended.receipt
@@ -568,6 +574,79 @@ class PostgresServerKnowledgeCommands:
             chunk_count=candidate.chunk_count,
         )
 
+    def withdraw_source(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        source_id: str,
+        reason: str = "operator withdrew source from active retrieval",
+    ) -> str:
+        """Hide a source from retrieval while retaining immutable evidence."""
+
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_source_id = _required_text(source_id, "source_id")
+        normalized_reason = _required_text(reason, "reason", max_length=500)
+        try:
+            with self._engine.begin() as connection:
+                self._lock_access(
+                    connection,
+                    actor,
+                    normalized_project_id,
+                    "knowledge.delete",
+                )
+                source = connection.execute(
+                    sa.select(
+                        knowledge_sources.c.status,
+                        knowledge_sources.c.current_snapshot_id,
+                        knowledge_sources.c.pending_snapshot_id,
+                    )
+                    .where(
+                        knowledge_sources.c.project_id == normalized_project_id,
+                        knowledge_sources.c.source_id == normalized_source_id,
+                    )
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if source is None:
+                    raise KnowledgeRecordNotFound(
+                        "knowledge source was not found in the requested project"
+                    )
+                already_withdrawn = (
+                    source["status"] == "rejected"
+                    and source["current_snapshot_id"] is None
+                    and source["pending_snapshot_id"] is None
+                )
+                if not already_withdrawn:
+                    connection.execute(
+                        knowledge_sources.update()
+                        .where(
+                            knowledge_sources.c.project_id == normalized_project_id,
+                            knowledge_sources.c.source_id == normalized_source_id,
+                        )
+                        .values(
+                            status="rejected",
+                            current_snapshot_id=None,
+                            pending_snapshot_id=None,
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                    self._append_audit(
+                        connection,
+                        actor=actor,
+                        project_id=normalized_project_id,
+                        action="knowledge.source.withdrawn",
+                        target_type="source",
+                        target_id=normalized_source_id,
+                        details={"reason": normalized_reason},
+                    )
+                return "rejected"
+        except (KnowledgeRecordNotFound, ProjectAccessDenied, ValueError):
+            raise
+        except (RuntimeError, SQLAlchemyError) as exc:
+            raise ServerKnowledgeCommandUnavailable(
+                "knowledge source withdrawal is unavailable"
+            ) from exc
+
     def confirm_product(
         self,
         *,
@@ -641,6 +720,71 @@ class PostgresServerKnowledgeCommands:
         except (RuntimeError, SQLAlchemyError) as exc:
             raise ServerKnowledgeCommandUnavailable(
                 "knowledge product confirmation could not be committed"
+            ) from exc
+
+    def update_product_specifications(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        product_id: str,
+        specification_tables: object,
+    ) -> KnowledgeProduct:
+        """Apply a manual product-specification override atomically."""
+
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_product_id = _required_text(product_id, "product_id")
+        try:
+            with self._engine.begin() as connection:
+                self._lock_access(
+                    connection,
+                    actor,
+                    normalized_project_id,
+                    "knowledge.edit",
+                )
+                product, changed = (
+                    self._catalog.update_product_specifications_in_transaction(
+                        connection,
+                        normalized_project_id,
+                        normalized_product_id,
+                        specification_tables,
+                    )
+                )
+                if changed:
+                    tables = product.metadata.get(
+                        "manual_specification_tables",
+                        [],
+                    )
+                    row_count = sum(
+                        len(table.get("rows", []))
+                        for table in tables
+                        if isinstance(table, Mapping)
+                        and isinstance(table.get("rows"), list)
+                    )
+                    self._append_audit(
+                        connection,
+                        actor=actor,
+                        project_id=normalized_project_id,
+                        action="knowledge.product.specifications.updated",
+                        target_type="knowledge_product",
+                        target_id=normalized_product_id,
+                        details={
+                            "table_count": (
+                                len(tables) if isinstance(tables, list) else 0
+                            ),
+                            "row_count": row_count,
+                        },
+                    )
+                return product
+        except (
+            ProductCatalogRepositoryError,
+            ProjectAccessDenied,
+            ValueError,
+        ):
+            raise
+        except (RuntimeError, SQLAlchemyError) as exc:
+            raise ServerKnowledgeCommandUnavailable(
+                "knowledge product specifications could not be committed"
             ) from exc
 
 

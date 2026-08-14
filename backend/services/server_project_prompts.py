@@ -111,7 +111,7 @@ def _validate_content_contract(
 
 
 class PostgresProjectPromptService:
-    """Project-scoped immutable prompt versions and explicit default pointers."""
+    """Project-scoped prompts with explicit default pointers."""
 
     def __init__(
         self,
@@ -430,6 +430,7 @@ class PostgresProjectPromptService:
         prompt_id: str,
         expected_version: int,
         name: str,
+        kind: PromptKind | None = None,
         content: str,
     ) -> PromptSnapshot:
         normalized_id = _required_text(
@@ -447,6 +448,7 @@ class PostgresProjectPromptService:
             raise ServerProjectPromptError(
                 "expected_version must be positive"
             )
+        requested_kind = _validate_kind(kind) if kind is not None else None
         try:
             with self._engine.begin() as connection:
                 self._lock_write_access(connection, actor)
@@ -465,24 +467,90 @@ class PostgresProjectPromptService:
                     raise ServerProjectPromptConflict(
                         "project prompt version conflict"
                     )
-                _validate_content_contract(
-                    _validate_kind(str(current["kind"])),
-                    cleaned_content,
-                )
-                next_version = expected_version + 1
+                current_kind = _validate_kind(str(current["kind"]))
+                target_kind = requested_kind or current_kind
+                _validate_content_contract(target_kind, cleaned_content)
+                if target_kind != current_kind:
+                    replacement_id = uuid.uuid4().hex
+                    connection.execute(
+                        project_prompt_heads.insert().values(
+                            organization_id=self.organization_id,
+                            project_id=self.project_id,
+                            prompt_id=replacement_id,
+                            kind=target_kind,
+                            current_version=1,
+                        )
+                    )
+                    connection.execute(
+                        project_prompt_versions.insert().values(
+                            organization_id=self.organization_id,
+                            project_id=self.project_id,
+                            prompt_id=replacement_id,
+                            kind=target_kind,
+                            version=1,
+                            name=cleaned_name,
+                            content=cleaned_content,
+                            content_hash=sha256(
+                                cleaned_content.encode("utf-8")
+                            ).hexdigest(),
+                            created_by_user_id=actor.user_id,
+                        )
+                    )
+                    connection.execute(
+                        project_prompt_heads.update()
+                        .where(
+                            project_prompt_heads.c.organization_id
+                            == self.organization_id,
+                            project_prompt_heads.c.project_id
+                            == self.project_id,
+                            project_prompt_heads.c.prompt_id == normalized_id,
+                        )
+                        .values(status="archived", updated_at=sa.func.now())
+                    )
+                    connection.execute(
+                        project_prompt_defaults.delete().where(
+                            project_prompt_defaults.c.organization_id
+                            == self.organization_id,
+                            project_prompt_defaults.c.project_id
+                            == self.project_id,
+                            project_prompt_defaults.c.prompt_id == normalized_id,
+                        )
+                    )
+                    self._append_audit(
+                        connection,
+                        actor=actor,
+                        prompt_id=replacement_id,
+                        action="project_prompt.reclassified",
+                        details={
+                            "from_kind": current_kind,
+                            "from_prompt_id": normalized_id,
+                            "to_kind": target_kind,
+                        },
+                    )
+                    replacement = self._current_row(
+                        connection,
+                        replacement_id,
+                    )
+                    assert replacement is not None
+                    return self._snapshot(replacement, source="library")
+                current_version = int(current["current_version"])
                 connection.execute(
-                    project_prompt_versions.insert().values(
-                        organization_id=self.organization_id,
-                        project_id=self.project_id,
-                        prompt_id=normalized_id,
-                        kind=str(current["kind"]),
-                        version=next_version,
+                    project_prompt_versions.update()
+                    .where(
+                        project_prompt_versions.c.organization_id
+                        == self.organization_id,
+                        project_prompt_versions.c.project_id
+                        == self.project_id,
+                        project_prompt_versions.c.prompt_id == normalized_id,
+                        project_prompt_versions.c.kind == str(current["kind"]),
+                        project_prompt_versions.c.version == current_version,
+                    )
+                    .values(
                         name=cleaned_name,
                         content=cleaned_content,
                         content_hash=sha256(
                             cleaned_content.encode("utf-8")
                         ).hexdigest(),
-                        created_by_user_id=actor.user_id,
                     )
                 )
                 connection.execute(
@@ -494,26 +562,86 @@ class PostgresProjectPromptService:
                         == self.project_id,
                         project_prompt_heads.c.prompt_id == normalized_id,
                     )
-                    .values(
-                        current_version=next_version,
-                        updated_at=sa.func.now(),
+                    .values(updated_at=sa.func.now())
+                )
+                self._append_audit(
+                    connection,
+                    actor=actor,
+                    prompt_id=normalized_id,
+                    action="project_prompt.updated",
+                    details={
+                        "content_characters": len(cleaned_content),
+                        "version": current_version,
+                        "kind": str(current["kind"]),
+                    },
+                )
+                row = self._current_row(connection, normalized_id)
+                assert row is not None
+                return self._snapshot(row, source="library")
+        except (
+            KeyError,
+            ProjectAccessDenied,
+            ServerProjectPromptConflict,
+            ServerProjectPromptError,
+        ):
+            raise
+        except (SQLAlchemyError, RuntimeError) as exc:
+            raise ServerProjectPromptUnavailable(
+                "project prompt command is temporarily unavailable"
+            ) from exc
+
+    def delete(
+        self,
+        actor: ActorIdentity,
+        *,
+        prompt_id: str,
+    ) -> None:
+        normalized_id = _required_text(
+            prompt_id,
+            "prompt_id",
+            max_length=255,
+        )
+        try:
+            with self._engine.begin() as connection:
+                self._lock_write_access(connection, actor)
+                current = self._current_row(
+                    connection,
+                    normalized_id,
+                    lock=True,
+                )
+                if current is None:
+                    raise KeyError(normalized_id)
+
+                connection.execute(
+                    project_prompt_defaults.delete().where(
+                        project_prompt_defaults.c.organization_id
+                        == self.organization_id,
+                        project_prompt_defaults.c.project_id
+                        == self.project_id,
+                        project_prompt_defaults.c.prompt_id == normalized_id,
+                    )
+                )
+                # The prompt head owns its version rows. The delete cascade
+                # removes the current and historical rows in one transaction.
+                connection.execute(
+                    project_prompt_heads.delete().where(
+                        project_prompt_heads.c.organization_id
+                        == self.organization_id,
+                        project_prompt_heads.c.project_id
+                        == self.project_id,
+                        project_prompt_heads.c.prompt_id == normalized_id,
                     )
                 )
                 self._append_audit(
                     connection,
                     actor=actor,
                     prompt_id=normalized_id,
-                    action="project_prompt.version.created",
+                    action="project_prompt.deleted",
                     details={
-                        "content_characters": len(cleaned_content),
-                        "from_version": expected_version,
                         "kind": str(current["kind"]),
-                        "to_version": next_version,
+                        "version": int(current["current_version"]),
                     },
                 )
-                row = self._current_row(connection, normalized_id)
-                assert row is not None
-                return self._snapshot(row, source="library")
         except (
             KeyError,
             ProjectAccessDenied,

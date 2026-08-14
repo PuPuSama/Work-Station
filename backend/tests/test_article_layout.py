@@ -38,8 +38,38 @@ A: Request one before approval when fit must be confirmed.
 A: Compare capability, quality control, delivery, and support.
 """
 
+MODERN_ARTICLE = """# Buyer Guide
+
+This opening prepares the reader for the comparison.
+
+## Main Section
+
+Body copy.
+
+## FAQ
+
+### What should a buyer check first?
+
+Check the application requirements first.
+
+### When should a buyer request a sample?
+
+Request one before approval when fit must be confirmed.
+
+### Why should a buyer compare suppliers?
+
+Compare capability, quality control, delivery, and support.
+"""
+
 
 class ArticleLayoutTests(unittest.TestCase):
+    def test_accepts_h3_questions_without_q_a_labels_in_strict_mode(self) -> None:
+        validate_article_layout(MODERN_ARTICLE, allow_legacy_faq=False)
+
+    def test_strict_mode_rejects_legacy_q_a_pairs(self) -> None:
+        with self.assertRaisesRegex(ArticleStructureError, "level-3 Markdown heading"):
+            validate_article_layout(VALID_ARTICLE, allow_legacy_faq=False)
+
     def test_accepts_one_final_h2_faq_with_three_bold_questions(self) -> None:
         validate_article_layout(VALID_ARTICLE)
 

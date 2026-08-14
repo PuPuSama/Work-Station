@@ -186,6 +186,12 @@ class _Context:
         )
 
 
+class _OfficialLinks:
+    def select(self, *, project_id: str, customer: str) -> tuple[object, ...]:
+        del project_id, customer
+        return ()
+
+
 def _service(task: TaskRecord) -> PostgresServerTaskWritingSettingsService:
     service = object.__new__(PostgresServerTaskWritingSettingsService)
     service._engine = _Engine()
@@ -195,6 +201,7 @@ def _service(task: TaskRecord) -> PostgresServerTaskWritingSettingsService:
     service._prompts = _Prompts()
     service._writer = _Writer()
     service._context = _Context()
+    service._official_links = _OfficialLinks()
     service.organization_id = "org-a"
     service.project_id = "project-a"
     return service

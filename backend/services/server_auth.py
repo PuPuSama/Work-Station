@@ -23,17 +23,10 @@ class ServerActorSessionError(ValueError):
 
 
 def server_mode_enabled(environment: Mapping[str, str] | None = None) -> bool:
-    source = os.environ if environment is None else environment
-    raw = source.get("ARTICLE_AGENT_SERVER_MODE", "").strip().lower()
-    if not raw:
-        return False
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    raise ServerActorSessionError(
-        "ARTICLE_AGENT_SERVER_MODE must be a boolean value"
-    )
+    """Server-only builds no longer expose a Local/SQLite runtime mode."""
+
+    del environment
+    return True
 
 
 def _base64url_encode(value: bytes) -> str:
