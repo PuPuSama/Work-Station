@@ -80,6 +80,7 @@ class ResponsesStreamTests(unittest.TestCase):
         self.assertNotIn("temperature", payload)
         self.assertIs(payload["stream"], True)
         self.assertEqual(sent_request.get_header("Accept"), "text/event-stream")
+        self.assertIn("Mozilla/5.0", sent_request.get_header("User-agent"))
 
     def test_saved_runtime_selection_overrides_environment_model(self) -> None:
         response = FakeStreamingResponse(
