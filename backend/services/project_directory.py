@@ -9,7 +9,6 @@ from sqlalchemy.engine import Engine
 from knowledge_agent.schema import projects
 from server_schema import (
     organizations,
-    project_memberships,
     project_ownership,
     team_memberships,
     teams,
@@ -37,6 +36,10 @@ class AccessibleProject:
     official_domain: str
     revision: int
     effective_role: EffectiveRole
+    owning_team_id: str | None = None
+    owner_user_id: str | None = None
+    is_project_owner: bool = False
+    assignment_status: str = "assigned"
 
 
 class PostgresProjectDirectory:
@@ -52,9 +55,6 @@ class PostgresProjectDirectory:
         active_team = teams.alias("directory_active_owning_team")
         owning_team_membership = team_memberships.alias(
             "directory_owning_team_membership"
-        )
-        explicit_project_membership = project_memberships.alias(
-            "directory_explicit_project_membership"
         )
         with self._engine.connect() as connection:
             actor_role = connection.execute(
@@ -83,10 +83,13 @@ class PostgresProjectDirectory:
                     projects.c.customer_name,
                     projects.c.official_domain,
                     projects.c.revision,
+                    project_ownership.c.owning_team_id,
+                    project_ownership.c.owner_user_id,
+                    (
+                        project_ownership.c.owner_user_id == actor.user_id
+                    ).label("is_project_owner"),
                     owning_team_membership.c.role.label("team_role"),
-                    explicit_project_membership.c.role.label(
-                        "project_role"
-                    ),
+                    sa.null().label("project_role"),
                 )
                 .select_from(
                     project_ownership.join(
@@ -115,17 +118,6 @@ class PostgresProjectDirectory:
                             == actor.user_id,
                         ),
                     )
-                    .outerjoin(
-                        explicit_project_membership,
-                        sa.and_(
-                            explicit_project_membership.c.organization_id
-                            == project_ownership.c.organization_id,
-                            explicit_project_membership.c.project_id
-                            == project_ownership.c.project_id,
-                            explicit_project_membership.c.user_id
-                            == actor.user_id,
-                        ),
-                    )
                 )
                 .where(
                     project_ownership.c.organization_id
@@ -134,7 +126,7 @@ class PostgresProjectDirectory:
                     sa.or_(
                         actor_role == "org_admin",
                         owning_team_membership.c.role == "team_lead",
-                        explicit_project_membership.c.role.is_not(None),
+                        project_ownership.c.owner_user_id == actor.user_id,
                     ),
                 )
                 .order_by(
@@ -157,6 +149,12 @@ class PostgresProjectDirectory:
                         ProjectRole | None,
                         row["project_role"],
                     ),
+                    owner_user_id=(
+                        str(row["owner_user_id"])
+                        if row["owner_user_id"] is not None
+                        else None
+                    ),
+                    is_project_owner=bool(row["is_project_owner"]),
                 )
                 role = effective_role_for(facts)
                 if role is None:
@@ -170,6 +168,22 @@ class PostgresProjectDirectory:
                         official_domain=str(row["official_domain"]),
                         revision=int(row["revision"]),
                         effective_role=role,
+                        owning_team_id=(
+                            str(row["owning_team_id"])
+                            if row["owning_team_id"] is not None
+                            else None
+                        ),
+                        owner_user_id=(
+                            str(row["owner_user_id"])
+                            if row["owner_user_id"] is not None
+                            else None
+                        ),
+                        is_project_owner=bool(row["is_project_owner"]),
+                        assignment_status=(
+                            "assigned"
+                            if row["owner_user_id"] is not None
+                            else "pending"
+                        ),
                     )
                 )
         return tuple(result)

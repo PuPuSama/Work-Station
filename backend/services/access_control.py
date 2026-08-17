@@ -121,6 +121,12 @@ class ProjectAccessFacts:
     organization_role: OrganizationRole
     team_role: TeamRole | None = None
     project_role: ProjectRole | None = None
+    owner_user_id: str | None = None
+    is_project_owner: bool = False
+    # This is populated by the Server resolver for a new project whose owner
+    # is intentionally pending.  Keep the default false for legacy policy
+    # fixtures that do not carry the ownership assignment state.
+    is_project_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,8 @@ def effective_role_for(facts: ProjectAccessFacts) -> EffectiveRole | None:
         return "org_admin"
     if facts.team_role == "team_lead":
         return "team_lead"
+    if facts.is_project_owner:
+        return "editor"
     if facts.project_role is not None:
         return facts.project_role
     return None
@@ -158,8 +166,29 @@ def decide_project_permission(
     permission: ProjectPermission,
 ) -> AuthorizationDecision:
     role = effective_role_for(facts) if facts is not None else None
+    allowed = role is not None and permission in ROLE_PERMISSIONS[role]
+    if facts is not None and role == "team_lead":
+        # New projects have one explicit owner. A Team Lead can supervise,
+        # assign, and delete that project's record, but cannot edit or run
+        # the article workflow unless they are the owner. Legacy projects
+        # without owner_user_id retain the pre-existing inherited matrix.
+        if (
+            facts.owner_user_id is not None and not facts.is_project_owner
+        ) or facts.is_project_pending:
+            allowed = permission in {
+                "project.view",
+                "project.members.manage",
+                "project.delete",
+            }
+        elif facts.is_project_owner and permission == "project.delete":
+            allowed = True
+    elif facts is not None and facts.is_project_owner:
+        # A member-created project is owned by one editor. Ownership also
+        # permits deleting that project, but never grants membership admin.
+        if permission == "project.delete":
+            allowed = True
     return AuthorizationDecision(
-        allowed=role is not None and permission in ROLE_PERMISSIONS[role],
+        allowed=allowed,
         permission=permission,
         effective_role=role,
     )
@@ -223,15 +252,18 @@ class PostgresProjectAccessRepository:
         owning_team_membership = team_memberships.alias(
             "owning_team_membership"
         )
-        explicit_project_membership = project_memberships.alias(
-            "explicit_project_membership"
-        )
-
         statement = (
             sa.select(
                 workspace_users.c.organization_role,
                 owning_team_membership.c.role.label("team_role"),
-                explicit_project_membership.c.role.label("project_role"),
+                sa.null().label("project_role"),
+                project_ownership.c.owner_user_id,
+                (
+                    project_ownership.c.owner_user_id == actor.user_id
+                ).label("is_project_owner"),
+                project_ownership.c.owner_user_id.is_(None).label(
+                    "is_project_pending"
+                ),
             )
             .select_from(
                 project_ownership.join(
@@ -272,16 +304,6 @@ class PostgresProjectAccessRepository:
                         owning_team_membership.c.user_id == actor.user_id,
                     ),
                 )
-                .outerjoin(
-                    explicit_project_membership,
-                    sa.and_(
-                        explicit_project_membership.c.organization_id
-                        == project_ownership.c.organization_id,
-                        explicit_project_membership.c.project_id
-                        == project_ownership.c.project_id,
-                        explicit_project_membership.c.user_id == actor.user_id,
-                    ),
-                )
             )
             .where(
                 project_ownership.c.project_id == normalized_project_id,
@@ -299,6 +321,13 @@ class PostgresProjectAccessRepository:
             organization_role=cast(OrganizationRole, row["organization_role"]),
             team_role=cast(TeamRole | None, row["team_role"]),
             project_role=cast(ProjectRole | None, row["project_role"]),
+            owner_user_id=(
+                str(row["owner_user_id"])
+                if row["owner_user_id"] is not None
+                else None
+            ),
+            is_project_owner=bool(row["is_project_owner"]),
+            is_project_pending=bool(row["is_project_pending"]),
         )
 
     def lock_project_access_in_connection(
@@ -315,7 +344,10 @@ class PostgresProjectAccessRepository:
             )
         normalized_project_id = _required_text(project_id, "project_id")
         base = connection.execute(
-            sa.select(project_ownership.c.owning_team_id)
+            sa.select(
+                project_ownership.c.owning_team_id,
+                project_ownership.c.owner_user_id,
+            )
             .select_from(
                 project_ownership.join(
                     projects,
@@ -376,6 +408,17 @@ class PostgresProjectAccessRepository:
                 )
                 .with_for_update(read=True)
             ).all()
+        if base.owner_user_id is not None:
+            connection.execute(
+                sa.select(workspace_users.c.user_id)
+                .where(
+                    workspace_users.c.organization_id
+                    == actor.organization_id,
+                    workspace_users.c.user_id == base.owner_user_id,
+                )
+                .with_for_update(read=True)
+            ).all()
+        if owning_team_id is not None:
             connection.execute(
                 sa.select(team_memberships.c.user_id)
                 .where(

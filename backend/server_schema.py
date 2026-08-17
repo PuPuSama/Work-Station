@@ -188,7 +188,10 @@ workspace_invitations = sa.Table(
     metadata,
     sa.Column("organization_id", sa.Text(), nullable=False),
     sa.Column("invitation_id", sa.Text(), nullable=False),
-    sa.Column("user_id", sa.Text(), nullable=False),
+    # Legacy invitations may target a pre-provisioned user. New invitations
+    # leave this nullable and provision the workspace user at redemption.
+    sa.Column("user_id", sa.Text(), nullable=True),
+    sa.Column("team_id", sa.Text(), nullable=True),
     sa.Column("issuer", sa.Text(), nullable=False),
     sa.Column("token_hash", sa.Text(), nullable=False),
     sa.Column(
@@ -213,7 +216,9 @@ workspace_invitations = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.CheckConstraint(
-        "btrim(invitation_id) <> '' AND btrim(user_id) <> '' "
+        "btrim(invitation_id) <> '' "
+        "AND (user_id IS NULL OR btrim(user_id) <> '') "
+        "AND (team_id IS NULL OR btrim(team_id) <> '') "
         "AND btrim(issuer) <> '' AND btrim(created_by_user_id) <> ''",
         name="ck_workspace_invitations_identity_nonempty",
     ),
@@ -240,6 +245,12 @@ workspace_invitations = sa.Table(
             "workspace_users.user_id",
         ],
         name="fk_workspace_invitations_target",
+        ondelete="RESTRICT",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "team_id"],
+        ["teams.organization_id", "teams.team_id"],
+        name="fk_workspace_invitations_team",
         ondelete="RESTRICT",
     ),
     sa.ForeignKeyConstraint(
@@ -412,6 +423,7 @@ project_ownership = sa.Table(
     sa.Column("project_id", sa.Text(), primary_key=True),
     sa.Column("organization_id", sa.Text(), nullable=False),
     sa.Column("owning_team_id", sa.Text(), nullable=True),
+    sa.Column("owner_user_id", sa.Text(), nullable=True),
     sa.Column(
         "created_at",
         sa.DateTime(timezone=True),
@@ -427,6 +439,10 @@ project_ownership = sa.Table(
     sa.CheckConstraint(
         "owning_team_id IS NULL OR btrim(owning_team_id) <> ''",
         name="ck_project_ownership_team_nonempty",
+    ),
+    sa.CheckConstraint(
+        "owner_user_id IS NULL OR btrim(owner_user_id) <> ''",
+        name="ck_project_ownership_owner_nonempty",
     ),
     sa.ForeignKeyConstraint(
         ["project_id"],
@@ -444,6 +460,12 @@ project_ownership = sa.Table(
         ["organization_id", "owning_team_id"],
         ["teams.organization_id", "teams.team_id"],
         name="fk_project_ownership_team",
+        ondelete="RESTRICT",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "owner_user_id"],
+        ["workspace_users.organization_id", "workspace_users.user_id"],
+        name="fk_project_ownership_owner",
         ondelete="RESTRICT",
     ),
     sa.UniqueConstraint(

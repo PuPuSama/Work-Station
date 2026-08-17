@@ -44,9 +44,11 @@ function message(error: unknown) {
 export function ServerProjectJobCenter({
   customer,
   role,
+  isProjectOwner = false,
 }: {
   customer: string;
   role: AccessibleProject["effective_role"] | null;
+  isProjectOwner?: boolean;
 }) {
   const [page, setPage] = useState<ServerBatchPage>({
     items: [],
@@ -174,7 +176,11 @@ export function ServerProjectJobCenter({
             {visibleJobs.map((job) => {
               const active = SERVER_ACTIVE_JOB_STATUSES.has(job.status);
               const retryable = SERVER_RETRYABLE_JOB_STATUSES.has(job.status);
-              const controllable = canControlServerJob(role, job.operation);
+              const controllable = canControlServerJob(
+                role,
+                job.operation,
+                isProjectOwner,
+              );
               const href = serverJobHref(
                 customer,
                 job.task_id,

@@ -11,7 +11,10 @@ from server_schema import (
     external_identities,
     organizations,
     project_memberships,
+    project_ownership,
     team_memberships,
+    teams,
+    workspace_invitations,
     workspace_users,
 )
 from services.access_control import ActorIdentity
@@ -24,6 +27,7 @@ from services.audit_log import (
 
 WorkspaceUserStatus = Literal["active", "disabled"]
 WorkspaceOrganizationRole = Literal["org_admin", "member"]
+TeamMembershipRole = Literal["team_lead", "member"]
 
 
 class WorkspaceUserError(RuntimeError):
@@ -71,6 +75,13 @@ def _organization_role(value: str) -> WorkspaceOrganizationRole:
     return cast(WorkspaceOrganizationRole, normalized)
 
 
+def _team_role(value: str) -> TeamMembershipRole:
+    normalized = _required_text(value, "team_role")
+    if normalized not in {"team_lead", "member"}:
+        raise ValueError("team_role must be team_lead or member")
+    return cast(TeamMembershipRole, normalized)
+
+
 @dataclass(frozen=True)
 class WorkspaceUserRecord:
     user_id: str
@@ -80,6 +91,8 @@ class WorkspaceUserRecord:
     team_membership_count: int
     project_membership_count: int
     login_linked: bool
+    team_id: str | None = None
+    team_role: TeamMembershipRole | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +174,8 @@ class PostgresWorkspaceUserService:
         display_name: str,
         organization_role: str,
         event_id: str,
+        team_id: str | None = None,
+        team_role: str | None = None,
     ) -> WorkspaceUserRecord:
         try:
             with self._engine.begin() as connection:
@@ -171,6 +186,8 @@ class PostgresWorkspaceUserService:
                     user_id=user_id,
                     display_name=display_name,
                     organization_role=organization_role,
+                    team_id=team_id,
+                    team_role=team_role,
                     event_id=event_id,
                 )
         except WorkspaceUserDenied:
@@ -196,6 +213,8 @@ class PostgresWorkspaceUserService:
         display_name: str,
         organization_role: str,
         event_id: str,
+        team_id: str | None = None,
+        team_role: str | None = None,
     ) -> WorkspaceUserRecord:
         if not connection.in_transaction():
             raise ValueError(
@@ -211,6 +230,16 @@ class PostgresWorkspaceUserService:
             "display_name",
         )
         normalized_role = _organization_role(organization_role)
+        normalized_team_id = (
+            _required_text(team_id, "team_id") if team_id is not None else None
+        )
+        normalized_team_role = (
+            _team_role(team_role) if team_role is not None else "member"
+        )
+        if team_role is not None and normalized_team_id is None:
+            raise ValueError("team_id is required when team_role is provided")
+        if normalized_role == "org_admin" and normalized_team_id is not None:
+            raise ValueError("organization administrators cannot belong to a team")
         normalized_event_id = _required_text(event_id, "event_id")
 
         self._lock_active_admin(
@@ -228,6 +257,54 @@ class PostgresWorkspaceUserService:
                 organization_role=normalized_role,
             )
         )
+        if normalized_team_id is not None:
+            target_team = connection.execute(
+                sa.select(teams.c.team_id)
+                .where(
+                    teams.c.organization_id == normalized_organization_id,
+                    teams.c.team_id == normalized_team_id,
+                    teams.c.status == "active",
+                )
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if target_team is None:
+                raise WorkspaceUserNotFound("workspace user is unavailable")
+            if normalized_team_role == "team_lead":
+                existing_lead = connection.execute(
+                    sa.select(team_memberships.c.user_id)
+                    .where(
+                        team_memberships.c.organization_id
+                        == normalized_organization_id,
+                        team_memberships.c.team_id == normalized_team_id,
+                        team_memberships.c.role == "team_lead",
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if existing_lead is not None:
+                    raise WorkspaceUserConflict(
+                        "a team can have only one active lead"
+                    )
+            connection.execute(
+                team_memberships.insert().values(
+                    organization_id=normalized_organization_id,
+                    team_id=normalized_team_id,
+                    user_id=normalized_user_id,
+                    role=normalized_team_role,
+                    granted_by_user_id=actor.user_id,
+                )
+            )
+            if normalized_team_role == "team_lead":
+                connection.execute(
+                    teams.update()
+                    .where(
+                        teams.c.organization_id == normalized_organization_id,
+                        teams.c.team_id == normalized_team_id,
+                    )
+                    .values(
+                        manager_user_id=normalized_user_id,
+                        updated_at=sa.func.now(),
+                    )
+                )
         self._append_audit(
             connection,
             AuditEvent(
@@ -240,6 +317,10 @@ class PostgresWorkspaceUserService:
                 details={
                     "status": "active",
                     "organization_role": normalized_role,
+                    "team_id": normalized_team_id,
+                    "team_role": normalized_team_role
+                    if normalized_team_id is not None
+                    else None,
                 },
             ),
         )
@@ -248,9 +329,15 @@ class PostgresWorkspaceUserService:
             display_name=normalized_display_name,
             status="active",
             organization_role=normalized_role,
-            team_membership_count=0,
+            team_membership_count=1 if normalized_team_id is not None else 0,
             project_membership_count=0,
             login_linked=False,
+            team_id=normalized_team_id,
+            team_role=(
+                cast(TeamMembershipRole, normalized_team_role)
+                if normalized_team_id is not None
+                else None
+            ),
         )
 
     def update_user(
@@ -263,6 +350,9 @@ class PostgresWorkspaceUserService:
         display_name: str | None = None,
         status: str | None = None,
         organization_role: str | None = None,
+        team_id: str | None = None,
+        team_id_set: bool = False,
+        team_role: str | None = None,
     ) -> WorkspaceUserRecord:
         try:
             with self._engine.begin() as connection:
@@ -275,6 +365,9 @@ class PostgresWorkspaceUserService:
                     display_name=display_name,
                     status=status,
                     organization_role=organization_role,
+                    team_id=team_id,
+                    team_id_set=team_id_set,
+                    team_role=team_role,
                 )
         except (
             WorkspaceUserDenied,
@@ -304,6 +397,9 @@ class PostgresWorkspaceUserService:
         display_name: str | None = None,
         status: str | None = None,
         organization_role: str | None = None,
+        team_id: str | None = None,
+        team_id_set: bool = False,
+        team_role: str | None = None,
     ) -> WorkspaceUserRecord:
         if not connection.in_transaction():
             raise ValueError(
@@ -326,10 +422,21 @@ class PostgresWorkspaceUserService:
             if organization_role is not None
             else None
         )
+        normalized_team_id = (
+            _required_text(team_id, "team_id") if team_id is not None else None
+        )
+        normalized_team_role = (
+            _team_role(team_role) if team_role is not None else "member"
+        )
+        if team_role is not None and team_id_set and normalized_team_id is None:
+            raise ValueError("team_id is required when team_role is provided")
         if (
             normalized_display_name is None
             and normalized_status is None
             and normalized_role is None
+            and normalized_team_id is None
+            and not team_id_set
+            and team_role is None
         ):
             raise ValueError("at least one workspace user field is required")
 
@@ -379,10 +486,41 @@ class PostgresWorkspaceUserService:
             WorkspaceOrganizationRole,
             current["organization_role"],
         )
+        current_memberships = connection.execute(
+            sa.select(
+                team_memberships.c.team_id,
+                team_memberships.c.role,
+            )
+            .where(
+                team_memberships.c.organization_id
+                == normalized_organization_id,
+                team_memberships.c.user_id == normalized_user_id,
+            )
+            .with_for_update()
+        ).mappings().all()
+        if team_role is not None and normalized_team_id is None:
+            if len(current_memberships) != 1:
+                raise ValueError("team_id is required when team_role is provided")
+            normalized_team_id = str(current_memberships[0]["team_id"])
+        if normalized_team_id is not None and team_role is None:
+            existing_target_membership = next(
+                (
+                    membership
+                    for membership in current_memberships
+                    if membership["team_id"] == normalized_team_id
+                ),
+                None,
+            )
+            if existing_target_membership is not None:
+                normalized_team_role = cast(
+                    TeamMembershipRole,
+                    existing_target_membership["role"],
+                )
         changed = {
             "display_name": next_display_name != current["display_name"],
             "status": next_status != current_status,
             "organization_role": next_role != current_role,
+            "team": team_id_set or team_role is not None,
         }
         if not any(changed.values()):
             return self._read_user(
@@ -410,6 +548,192 @@ class PostgresWorkspaceUserService:
             if len(active_admin_ids) <= 1:
                 raise WorkspaceUserLastAdmin(
                     "the last active organization administrator is protected"
+                )
+
+        if next_role == "org_admin" and normalized_team_id is not None:
+            raise ValueError("organization administrators cannot belong to a team")
+
+        if next_role == "member" and current_role == "org_admin":
+            if not team_id_set or normalized_team_id is None:
+                raise ValueError("team_id is required when demoting an administrator")
+
+        if normalized_team_id is not None:
+            target_team = connection.execute(
+                sa.select(teams.c.team_id)
+                .where(
+                    teams.c.organization_id == normalized_organization_id,
+                    teams.c.team_id == normalized_team_id,
+                    teams.c.status == "active",
+                )
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if target_team is None:
+                raise WorkspaceUserNotFound("workspace user is unavailable")
+            other_lead = connection.execute(
+                sa.select(team_memberships.c.user_id)
+                .where(
+                    team_memberships.c.organization_id
+                    == normalized_organization_id,
+                    team_memberships.c.team_id == normalized_team_id,
+                    team_memberships.c.role == "team_lead",
+                    team_memberships.c.user_id != normalized_user_id,
+                )
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if normalized_team_role == "team_lead" and other_lead is not None:
+                raise WorkspaceUserConflict("a team can have only one active lead")
+
+        # Membership is single-valued. Only moving out of the current team,
+        # disabling the account, or promoting it to org_admin unassigns owned
+        # projects. Re-saving the same team/role must not orphan projects.
+        current_team_ids = {str(item["team_id"]) for item in current_memberships}
+        team_assignment_changed = team_id_set and (
+            normalized_team_id is None
+            or len(current_team_ids) != 1
+            or normalized_team_id not in current_team_ids
+        )
+        projects_unassigned = (
+            next_role == "org_admin"
+            or next_status == "disabled"
+            or team_assignment_changed
+        )
+        membership_replaced = (
+            team_id_set
+            or team_role is not None
+            or next_role == "org_admin"
+            or next_status == "disabled"
+        )
+        if membership_replaced and current_memberships:
+            for membership in current_memberships:
+                if membership["role"] != "team_lead":
+                    continue
+                current_team_status = connection.execute(
+                    sa.select(teams.c.status)
+                    .where(
+                        teams.c.organization_id == normalized_organization_id,
+                        teams.c.team_id == membership["team_id"],
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if current_team_status != "active":
+                    continue
+                keeps_lead = (
+                    normalized_team_id == membership["team_id"]
+                    and normalized_team_role == "team_lead"
+                    and next_role == "member"
+                    and next_status == "active"
+                )
+                if keeps_lead:
+                    continue
+                other_lead = connection.execute(
+                    sa.select(team_memberships.c.user_id)
+                    .where(
+                        team_memberships.c.organization_id
+                        == normalized_organization_id,
+                        team_memberships.c.team_id == membership["team_id"],
+                        team_memberships.c.role == "team_lead",
+                        team_memberships.c.user_id != normalized_user_id,
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if other_lead is None:
+                    raise WorkspaceUserConflict(
+                        "an active team must have one lead"
+                    )
+        if membership_replaced and current_memberships:
+            if projects_unassigned:
+                connection.execute(
+                    project_ownership.update()
+                    .where(
+                        project_ownership.c.organization_id
+                        == normalized_organization_id,
+                        project_ownership.c.owner_user_id == normalized_user_id,
+                    )
+                    .values(owner_user_id=None, updated_at=sa.func.now())
+                )
+                connection.execute(
+                    project_memberships.delete().where(
+                        project_memberships.c.organization_id
+                        == normalized_organization_id,
+                        project_memberships.c.user_id == normalized_user_id,
+                    )
+                )
+            for membership in current_memberships:
+                demoting_same_team_lead = (
+                    membership["role"] == "team_lead"
+                    and normalized_team_id == membership["team_id"]
+                    and normalized_team_role != "team_lead"
+                    and next_role == "member"
+                    and next_status == "active"
+                )
+                if membership["role"] == "team_lead" and (
+                    projects_unassigned or demoting_same_team_lead
+                ):
+                    replacement_lead = connection.execute(
+                        sa.select(team_memberships.c.user_id)
+                        .where(
+                            team_memberships.c.organization_id
+                            == normalized_organization_id,
+                            team_memberships.c.team_id == membership["team_id"],
+                            team_memberships.c.role == "team_lead",
+                            team_memberships.c.user_id != normalized_user_id,
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    connection.execute(
+                        teams.update()
+                        .where(
+                            teams.c.organization_id
+                            == normalized_organization_id,
+                            teams.c.team_id == membership["team_id"],
+                        )
+                        .values(
+                            manager_user_id=replacement_lead,
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                    connection.execute(
+                        workspace_invitations.update()
+                        .where(
+                            workspace_invitations.c.organization_id
+                            == normalized_organization_id,
+                            workspace_invitations.c.team_id
+                            == membership["team_id"],
+                            workspace_invitations.c.status == "pending",
+                        )
+                        .values(
+                            status="revoked",
+                            updated_at=sa.func.now(),
+                        )
+                    )
+            connection.execute(
+                team_memberships.delete().where(
+                    team_memberships.c.organization_id
+                    == normalized_organization_id,
+                    team_memberships.c.user_id == normalized_user_id,
+                )
+            )
+        if normalized_team_id is not None and next_role == "member" and next_status == "active":
+            connection.execute(
+                team_memberships.insert().values(
+                    organization_id=normalized_organization_id,
+                    team_id=normalized_team_id,
+                    user_id=normalized_user_id,
+                    role=normalized_team_role,
+                    granted_by_user_id=actor.user_id,
+                )
+            )
+            if normalized_team_role == "team_lead":
+                connection.execute(
+                    teams.update()
+                    .where(
+                        teams.c.organization_id == normalized_organization_id,
+                        teams.c.team_id == normalized_team_id,
+                    )
+                    .values(
+                        manager_user_id=normalized_user_id,
+                        updated_at=sa.func.now(),
+                    )
                 )
 
         values: dict[str, object] = {
@@ -445,6 +769,15 @@ class PostgresWorkspaceUserService:
                 {
                     "previous_organization_role": current_role,
                     "organization_role": next_role,
+                }
+            )
+        if team_id_set or team_role is not None:
+            details.update(
+                {
+                    "team_id": normalized_team_id,
+                    "team_role": normalized_team_role if normalized_team_id is not None else None,
+                    "team_unassigned": normalized_team_id is None,
+                    "projects_unassigned": projects_unassigned,
                 }
             )
         self._append_audit(
@@ -536,6 +869,30 @@ class PostgresWorkspaceUserService:
             )
             .subquery()
         )
+        team_id_subquery = (
+            sa.select(team_memberships.c.team_id)
+            .where(
+                team_memberships.c.organization_id
+                == workspace_users.c.organization_id,
+                team_memberships.c.user_id == workspace_users.c.user_id,
+            )
+            .order_by(team_memberships.c.team_id)
+            .limit(1)
+            .correlate(workspace_users)
+            .scalar_subquery()
+        )
+        team_role_subquery = (
+            sa.select(team_memberships.c.role)
+            .where(
+                team_memberships.c.organization_id
+                == workspace_users.c.organization_id,
+                team_memberships.c.user_id == workspace_users.c.user_id,
+            )
+            .order_by(team_memberships.c.team_id)
+            .limit(1)
+            .correlate(workspace_users)
+            .scalar_subquery()
+        )
         project_counts = (
             sa.select(
                 project_memberships.c.organization_id,
@@ -588,6 +945,8 @@ class PostgresWorkspaceUserService:
                     )
                     > 0
                 ).label("login_linked"),
+                team_id_subquery.label("team_id"),
+                team_role_subquery.label("team_role"),
             )
             .select_from(
                 workspace_users.outerjoin(
@@ -654,6 +1013,14 @@ class PostgresWorkspaceUserService:
                 row["project_membership_count"]
             ),
             login_linked=bool(row["login_linked"]),
+            team_id=(
+                str(row["team_id"]) if row["team_id"] is not None else None
+            ),
+            team_role=(
+                cast(TeamMembershipRole, row["team_role"])
+                if row["team_role"] is not None
+                else None
+            ),
         )
 
     def _append_audit(

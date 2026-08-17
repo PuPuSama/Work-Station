@@ -9,7 +9,14 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from knowledge_agent.contracts import KnowledgeProject
 from knowledge_agent.schema import projects
-from server_schema import organizations, project_ownership, teams, workspace_users
+from server_schema import (
+    organizations,
+    project_memberships,
+    project_ownership,
+    team_memberships,
+    teams,
+    workspace_users,
+)
 from services.access_control import (
     ActorIdentity,
     PostgresProjectAccessRepository,
@@ -46,6 +53,8 @@ class ServerProjectMetadata:
     official_domain: str
     project_notes: str
     revision: int
+    owning_team_id: str | None = None
+    owner_user_id: str | None = None
 
 
 def _normalized_customer_name(value: str) -> str:
@@ -117,6 +126,16 @@ class PostgresServerProjectMetadata:
             official_domain=str(row["official_domain"]),
             project_notes=str(row["project_notes"] or ""),
             revision=int(row["revision"]),
+            owning_team_id=(
+                str(row["owning_team_id"])
+                if row.get("owning_team_id") is not None
+                else None
+            ),
+            owner_user_id=(
+                str(row["owner_user_id"])
+                if row.get("owner_user_id") is not None
+                else None
+            ),
         )
 
     def get(
@@ -135,7 +154,17 @@ class PostgresServerProjectMetadata:
                         projects.c.official_domain,
                         projects.c.project_notes,
                         projects.c.revision,
-                    ).where(
+                        project_ownership.c.owning_team_id,
+                        project_ownership.c.owner_user_id,
+                    )
+                    .select_from(
+                        projects.join(
+                            project_ownership,
+                            project_ownership.c.project_id
+                            == projects.c.project_id,
+                        )
+                    )
+                    .where(
                         projects.c.project_id == project_id,
                         projects.c.status == "active",
                     )
@@ -158,6 +187,7 @@ class PostgresServerProjectMetadata:
         official_domain: str,
         owning_team_id: str | None,
         event_id: str,
+        owner_user_id: str | None = None,
     ) -> ServerProjectMetadata:
         """Provision one active Project and its Organization ownership atomically."""
 
@@ -172,12 +202,19 @@ class PostgresServerProjectMetadata:
             official_domain=identity.official_domain,
             project_notes="",
             revision=0,
+            owning_team_id=None,
+            owner_user_id=None,
         )
         normalized_team_id = (
             owning_team_id.strip() if owning_team_id is not None else None
         )
         if owning_team_id is not None and not normalized_team_id:
             raise ValueError("owning_team_id must not be blank")
+        normalized_owner_user_id = (
+            owner_user_id.strip() if owner_user_id is not None else None
+        )
+        if owner_user_id is not None and not normalized_owner_user_id:
+            raise ValueError("owner_user_id must not be blank")
         normalized_event_id = event_id.strip()
         if not normalized_event_id:
             raise ValueError("event_id is required")
@@ -192,33 +229,116 @@ class PostgresServerProjectMetadata:
                     )
                     .with_for_update()
                 ).scalar_one_or_none()
-                administrator = connection.execute(
+                actor_row = connection.execute(
                     sa.select(workspace_users.c.user_id)
                     .where(
                         workspace_users.c.organization_id
                         == actor.organization_id,
                         workspace_users.c.user_id == actor.user_id,
                         workspace_users.c.status == "active",
-                        workspace_users.c.organization_role == "org_admin",
                     )
                     .with_for_update(read=True)
                 ).scalar_one_or_none()
-                if organization is None or administrator is None:
+                actor_role = connection.execute(
+                    sa.select(workspace_users.c.organization_role)
+                    .where(
+                        workspace_users.c.organization_id
+                        == actor.organization_id,
+                        workspace_users.c.user_id == actor.user_id,
+                        workspace_users.c.status == "active",
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if organization is None or actor_row is None:
                     raise ProjectAccessDenied("project creation denied")
-                if normalized_team_id is not None:
-                    active_team = connection.execute(
-                        sa.select(teams.c.team_id)
+                is_admin = actor_role == "org_admin"
+                actor_membership = connection.execute(
+                    sa.select(
+                        team_memberships.c.team_id,
+                        team_memberships.c.role,
+                    )
+                    .select_from(
+                        team_memberships.join(
+                            teams,
+                            sa.and_(
+                                teams.c.organization_id
+                                == team_memberships.c.organization_id,
+                                teams.c.team_id == team_memberships.c.team_id,
+                            ),
+                        )
+                    )
+                    .where(
+                        team_memberships.c.organization_id
+                        == actor.organization_id,
+                        team_memberships.c.user_id == actor.user_id,
+                        teams.c.status == "active",
+                    )
+                    .with_for_update(read=True)
+                ).mappings().one_or_none()
+                if normalized_team_id is None and not is_admin:
+                    if actor_membership is None:
+                        raise ProjectAccessDenied("project creation denied")
+                    normalized_team_id = str(actor_membership["team_id"])
+                if normalized_team_id is None:
+                    raise ValueError("owning_team_id is required")
+                active_team = connection.execute(
+                    sa.select(teams.c.team_id)
+                    .where(
+                        teams.c.organization_id == actor.organization_id,
+                        teams.c.team_id == normalized_team_id,
+                        teams.c.status == "active",
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if active_team is None:
+                    raise ValueError(
+                        "owning_team_id must reference an active team"
+                    )
+                if not is_admin:
+                    if (
+                        actor_membership is None
+                        or actor_membership["team_id"] != normalized_team_id
+                    ):
+                        raise ProjectAccessDenied("project creation denied")
+                actor_is_lead = (
+                    actor_membership is not None
+                    and actor_membership["team_id"] == normalized_team_id
+                    and actor_membership["role"] == "team_lead"
+                )
+                if normalized_owner_user_id is None and not is_admin:
+                    if not actor_is_lead:
+                        normalized_owner_user_id = actor.user_id
+                if normalized_owner_user_id is not None:
+                    target_membership = connection.execute(
+                        sa.select(team_memberships.c.role)
                         .where(
-                            teams.c.organization_id == actor.organization_id,
-                            teams.c.team_id == normalized_team_id,
-                            teams.c.status == "active",
+                            team_memberships.c.organization_id
+                            == actor.organization_id,
+                            team_memberships.c.team_id == normalized_team_id,
+                            team_memberships.c.user_id
+                            == normalized_owner_user_id,
+                            team_memberships.c.role.in_(("member", "team_lead")),
                         )
                         .with_for_update(read=True)
                     ).scalar_one_or_none()
-                    if active_team is None:
+                    if target_membership is None:
                         raise ValueError(
-                            "owning_team_id must reference an active team"
+                            "owner_user_id must belong to the owning team"
                         )
+                    if not is_admin and not actor_is_lead:
+                        if normalized_owner_user_id != actor.user_id:
+                            raise ProjectAccessDenied(
+                                "project creation denied"
+                            )
+                requested = ServerProjectMetadata(
+                    project_id=requested.project_id,
+                    customer_name=requested.customer_name,
+                    official_domain=requested.official_domain,
+                    project_notes=requested.project_notes,
+                    revision=requested.revision,
+                    owning_team_id=normalized_team_id,
+                    owner_user_id=normalized_owner_user_id,
+                )
                 connection.execute(
                     projects.insert().values(
                         project_id=requested.project_id,
@@ -233,8 +353,19 @@ class PostgresServerProjectMetadata:
                         project_id=requested.project_id,
                         organization_id=actor.organization_id,
                         owning_team_id=normalized_team_id,
+                        owner_user_id=normalized_owner_user_id,
                     )
                 )
+                if normalized_owner_user_id is not None:
+                    connection.execute(
+                        project_memberships.insert().values(
+                            organization_id=actor.organization_id,
+                            project_id=requested.project_id,
+                            user_id=normalized_owner_user_id,
+                            role="editor",
+                            granted_by_user_id=actor.user_id,
+                        )
+                    )
                 self._audit.append(
                     connection,
                     AuditEvent(
@@ -247,6 +378,7 @@ class PostgresServerProjectMetadata:
                         target_id=requested.project_id,
                         details={
                             "owning_team_id": normalized_team_id or "",
+                            "owner_user_id": normalized_owner_user_id or "",
                             "status": "active",
                         },
                     ),
@@ -291,7 +423,7 @@ class PostgresServerProjectMetadata:
                 )
                 if not decide_project_permission(
                     facts,
-                    "project.members.manage",
+                    "article.edit",
                 ).allowed:
                     raise ProjectAccessDenied("project access denied")
                 row = connection.execute(
@@ -301,6 +433,15 @@ class PostgresServerProjectMetadata:
                         projects.c.official_domain,
                         projects.c.project_notes,
                         projects.c.revision,
+                        project_ownership.c.owning_team_id,
+                        project_ownership.c.owner_user_id,
+                    )
+                    .select_from(
+                        projects.join(
+                            project_ownership,
+                            project_ownership.c.project_id
+                            == projects.c.project_id,
+                        )
                     )
                     .where(
                         projects.c.project_id == project_id,
@@ -391,6 +532,8 @@ class PostgresServerProjectMetadata:
                     official_domain=requested.official_domain,
                     project_notes=requested.project_notes,
                     revision=next_revision,
+                    owning_team_id=current.owning_team_id,
+                    owner_user_id=current.owner_user_id,
                 )
         except (
             ProjectAccessDenied,

@@ -61,6 +61,7 @@ export function ProjectShell({
   children: React.ReactNode;
 }) {
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(null);
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
@@ -73,10 +74,9 @@ export function ProjectShell({
     void apiGet<AccessibleProject[]>("/api/projects")
       .then((projects) => {
         if (!active) return;
-        setRole(
-          projects.find((project) => sameProjectId(project.project_id, customer))
-            ?.effective_role ?? null,
-        );
+        const project = projects.find((item) => sameProjectId(item.project_id, customer));
+        setRole(project?.effective_role ?? null);
+        setIsProjectOwner(project?.is_project_owner === true);
       })
       .catch(() => {
         if (active) setRole(null);
@@ -92,7 +92,10 @@ export function ProjectShell({
     ["批量处理", "批量生成与队列", "batches", Layers3],
     ["交付记录", "成品与导出历史", "deliveries", PackageCheck],
   ] as const;
-  const canManageSettings = role === "org_admin" || role === "team_lead";
+  const canManageSettings =
+    role === "org_admin" ||
+    role === "team_lead" ||
+    (role === "editor" && isProjectOwner);
   const sectionLabel = section ? sectionNames[section] : customer;
 
   return (
@@ -182,7 +185,11 @@ export function ProjectShell({
               {isDetail && <><BreadcrumbSeparator /><BreadcrumbItem><BreadcrumbPage>{section === "articles" ? "文章工作台" : "批次详情"}</BreadcrumbPage></BreadcrumbItem></>}
             </BreadcrumbList>
           </Breadcrumb>
-          <ServerProjectJobCenter customer={customer} role={role} />
+          <ServerProjectJobCenter
+            customer={customer}
+            role={role}
+            isProjectOwner={isProjectOwner}
+          />
           <LogoutButton iconOnly />
         </header>
         <div className="min-w-0 flex-1">{children}</div>

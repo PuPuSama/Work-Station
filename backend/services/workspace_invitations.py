@@ -15,6 +15,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from server_schema import (
     external_identities,
     organizations,
+    team_memberships,
+    teams,
     workspace_invitations,
     workspace_users,
 )
@@ -54,8 +56,9 @@ class WorkspaceInvitationUnavailable(RuntimeError):
 class WorkspaceInvitationRecord:
     organization_id: str
     invitation_id: str
-    user_id: str
-    user_display_name: str
+    user_id: str | None
+    user_display_name: str | None
+    team_id: str | None
     issuer: str
     status: InvitationStatus
     expires_at: datetime
@@ -112,42 +115,100 @@ class PostgresWorkspaceInvitationService:
         self._audit = audit or PostgresAuditEventWriter()
 
     @staticmethod
-    def _require_org_admin(
+    def _require_invitation_actor(
         connection: Connection,
         actor: ActorIdentity,
         *,
+        organization_id: str,
+        team_id: str | None = None,
         write: bool,
-    ) -> None:
+    ) -> str:
+        if organization_id != actor.organization_id:
+            raise WorkspaceInvitationDenied(
+                "workspace invitation denied"
+            )
         organization = connection.execute(
             sa.select(organizations.c.organization_id)
             .where(
-                organizations.c.organization_id == actor.organization_id,
+                organizations.c.organization_id == organization_id,
                 organizations.c.status == "active",
             )
             .with_for_update(read=not write)
         ).scalar_one_or_none()
-        admin = connection.execute(
-            sa.select(workspace_users.c.user_id)
+        actor_row = connection.execute(
+            sa.select(
+                workspace_users.c.user_id,
+                workspace_users.c.organization_role,
+            )
             .where(
-                workspace_users.c.organization_id
-                == actor.organization_id,
+                workspace_users.c.organization_id == organization_id,
                 workspace_users.c.user_id == actor.user_id,
                 workspace_users.c.status == "active",
-                workspace_users.c.organization_role == "org_admin",
             )
             .with_for_update(read=True)
-        ).scalar_one_or_none()
-        if organization is None or admin is None:
+        ).mappings().one_or_none()
+        if organization is None or actor_row is None:
             raise WorkspaceInvitationDenied(
                 "workspace invitation denied"
             )
+        if actor_row["organization_role"] == "org_admin":
+            return "org_admin"
+        if team_id is not None:
+            lead = connection.execute(
+                sa.select(team_memberships.c.user_id)
+                .select_from(
+                    team_memberships.join(
+                        teams,
+                        sa.and_(
+                            teams.c.organization_id
+                            == team_memberships.c.organization_id,
+                            teams.c.team_id == team_memberships.c.team_id,
+                        ),
+                    )
+                )
+                .where(
+                    team_memberships.c.organization_id == organization_id,
+                    team_memberships.c.team_id == team_id,
+                    team_memberships.c.user_id == actor.user_id,
+                    team_memberships.c.role == "team_lead",
+                    teams.c.status == "active",
+                )
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if lead is not None:
+                return "team_lead"
+        else:
+            any_lead = connection.execute(
+                sa.select(team_memberships.c.team_id)
+                .select_from(
+                    team_memberships.join(
+                        teams,
+                        sa.and_(
+                            teams.c.organization_id
+                            == team_memberships.c.organization_id,
+                            teams.c.team_id == team_memberships.c.team_id,
+                        ),
+                    )
+                )
+                .where(
+                    team_memberships.c.organization_id == organization_id,
+                    team_memberships.c.user_id == actor.user_id,
+                    team_memberships.c.role == "team_lead",
+                    teams.c.status == "active",
+                )
+                .limit(1)
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if any_lead is not None:
+                return "team_lead"
+        raise WorkspaceInvitationDenied("workspace invitation denied")
 
     @staticmethod
     def _require_active_target(
         connection: Connection,
         *,
         organization_id: str,
-        user_id: str,
+        user_id: str | None,
     ) -> RowMapping:
         target = connection.execute(
             sa.select(
@@ -194,10 +255,26 @@ class PostgresWorkspaceInvitationService:
         )
         try:
             with self._engine.begin() as connection:
-                self._require_org_admin(connection, actor, write=False)
+                actor_role = self._require_invitation_actor(
+                    connection,
+                    actor,
+                    organization_id=normalized_organization_id,
+                    write=False,
+                )
                 statement = self._directory_select(
                     normalized_organization_id
                 )
+                if actor_role == "team_lead":
+                    statement = statement.where(
+                        workspace_invitations.c.team_id.in_(
+                            sa.select(team_memberships.c.team_id).where(
+                                team_memberships.c.organization_id
+                                == actor.organization_id,
+                                team_memberships.c.user_id == actor.user_id,
+                                team_memberships.c.role == "team_lead",
+                            )
+                        )
+                    )
                 if normalized_after is not None:
                     statement = statement.where(
                         workspace_invitations.c.invitation_id
@@ -234,10 +311,11 @@ class PostgresWorkspaceInvitationService:
         *,
         actor: ActorIdentity,
         organization_id: str,
-        user_id: str,
+        user_id: str | None,
         issuer: str,
         expires_in_hours: int,
         event_id: str,
+        team_id: str | None = None,
     ) -> IssuedWorkspaceInvitation:
         normalized_organization_id = _required_text(
             organization_id,
@@ -247,7 +325,16 @@ class PostgresWorkspaceInvitationService:
             raise WorkspaceInvitationDenied(
                 "workspace invitation denied"
             )
-        normalized_user_id = _required_text(user_id, "user_id")
+        normalized_user_id = (
+            _required_text(user_id, "user_id") if user_id is not None else None
+        )
+        if normalized_user_id is not None:
+            raise ValueError(
+                "workspace invitations can only create new accounts"
+            )
+        normalized_team_id = (
+            _required_text(team_id, "team_id") if team_id is not None else None
+        )
         normalized_issuer = normalize_external_issuer(issuer)
         normalized_hours = int(expires_in_hours)
         if not 1 <= normalized_hours <= 168:
@@ -260,18 +347,72 @@ class PostgresWorkspaceInvitationService:
         )
         try:
             with self._engine.begin() as connection:
-                self._require_org_admin(connection, actor, write=True)
-                self._require_active_target(
+                actor_role = self._require_invitation_actor(
                     connection,
+                    actor,
                     organization_id=normalized_organization_id,
-                    user_id=normalized_user_id,
+                    team_id=normalized_team_id,
+                    write=True,
                 )
+                if actor_role == "team_lead" and normalized_team_id is None:
+                    normalized_team_id = connection.execute(
+                        sa.select(team_memberships.c.team_id)
+                        .select_from(
+                            team_memberships.join(
+                                teams,
+                                sa.and_(
+                                    teams.c.organization_id
+                                    == team_memberships.c.organization_id,
+                                    teams.c.team_id
+                                    == team_memberships.c.team_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            team_memberships.c.organization_id
+                            == actor.organization_id,
+                            team_memberships.c.user_id == actor.user_id,
+                            team_memberships.c.role == "team_lead",
+                            teams.c.status == "active",
+                        )
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if normalized_team_id is None:
+                        raise WorkspaceInvitationDenied(
+                            "workspace invitation denied"
+                        )
+                if actor_role == "org_admin" and normalized_team_id is not None:
+                    raise ValueError(
+                        "organization administrator invitations must remain unassigned"
+                    )
+                if normalized_team_id is not None:
+                    active_team = connection.execute(
+                        sa.select(teams.c.team_id)
+                        .where(
+                            teams.c.organization_id
+                            == normalized_organization_id,
+                            teams.c.team_id == normalized_team_id,
+                            teams.c.status == "active",
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    if active_team is None:
+                        raise WorkspaceInvitationDenied(
+                            "workspace invitation denied"
+                        )
+                if normalized_user_id is not None:
+                    self._require_active_target(
+                        connection,
+                        organization_id=normalized_organization_id,
+                        user_id=normalized_user_id,
+                    )
                 try:
                     connection.execute(
                         workspace_invitations.insert().values(
                             organization_id=normalized_organization_id,
                             invitation_id=invitation_id,
                             user_id=normalized_user_id,
+                            team_id=normalized_team_id,
                             issuer=normalized_issuer,
                             token_hash=_token_hash(raw_token),
                             expires_at=expires_at,
@@ -294,6 +435,7 @@ class PostgresWorkspaceInvitationService:
                         details={
                             "issuer": normalized_issuer,
                             "user_id": normalized_user_id,
+                            "team_id": normalized_team_id,
                             "expires_in_hours": normalized_hours,
                         },
                     ),
@@ -345,7 +487,34 @@ class PostgresWorkspaceInvitationService:
             )
         try:
             with self._engine.begin() as connection:
-                self._require_org_admin(connection, actor, write=True)
+                invitation = connection.execute(
+                    sa.select(
+                        workspace_invitations.c.team_id,
+                        workspace_invitations.c.status,
+                    )
+                    .where(
+                        workspace_invitations.c.organization_id
+                        == normalized_organization_id,
+                        workspace_invitations.c.invitation_id
+                        == normalized_invitation_id,
+                    )
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if invitation is None:
+                    raise WorkspaceInvitationNotFound(
+                        "workspace invitation is unavailable"
+                    )
+                self._require_invitation_actor(
+                    connection,
+                    actor,
+                    organization_id=normalized_organization_id,
+                    team_id=(
+                        str(invitation["team_id"])
+                        if invitation["team_id"] is not None
+                        else None
+                    ),
+                    write=True,
+                )
                 result = connection.execute(
                     workspace_invitations.update()
                     .where(
@@ -413,7 +582,9 @@ class PostgresWorkspaceInvitationService:
                         workspace_invitations.c.organization_id,
                         workspace_invitations.c.invitation_id,
                         workspace_invitations.c.user_id,
+                        workspace_invitations.c.team_id,
                         workspace_invitations.c.issuer,
+                        workspace_invitations.c.created_by_user_id,
                     )
                     .select_from(
                         workspace_invitations.join(
@@ -440,12 +611,88 @@ class PostgresWorkspaceInvitationService:
                 organization_id = str(
                     invitation["organization_id"]
                 )
-                user_id = str(invitation["user_id"])
-                target = self._require_active_target(
-                    connection,
-                    organization_id=organization_id,
-                    user_id=user_id,
-                )
+                existing_user_id = invitation["user_id"]
+                existing_identity = connection.execute(
+                    sa.select(external_identities.c.user_id)
+                    .where(
+                        external_identities.c.issuer == identity.issuer,
+                        external_identities.c.subject == identity.subject,
+                    )
+                    .with_for_update()
+                ).scalar_one_or_none()
+                if existing_identity is not None:
+                    raise WorkspaceInvitationDenied(
+                        "workspace invitation denied"
+                    )
+                if existing_user_id is not None:
+                    # The controlled first-administrator bootstrap predates
+                    # new-account invitations and intentionally targets the
+                    # pre-provisioned org_admin. Ordinary invitations never
+                    # attach an existing account.
+                    target = self._require_active_target(
+                        connection,
+                        organization_id=organization_id,
+                        user_id=str(existing_user_id),
+                    )
+                    target_role = connection.execute(
+                        sa.select(workspace_users.c.organization_role)
+                        .where(
+                            workspace_users.c.organization_id
+                            == organization_id,
+                            workspace_users.c.user_id
+                            == str(existing_user_id),
+                        )
+                    ).scalar_one_or_none()
+                    if not (
+                        target_role == "org_admin"
+                        and str(existing_user_id)
+                        == str(invitation["created_by_user_id"])
+                        and invitation["team_id"] is None
+                    ):
+                        raise WorkspaceInvitationDenied(
+                            "workspace invitation denied"
+                        )
+                    user_id = str(existing_user_id)
+                else:
+                    # New-account invitations cannot attach an already-linked
+                    # identity to a second workspace.
+                    user_id = f"usr_{hashlib.sha256((identity.issuer + '\\n' + identity.subject).encode('utf-8')).hexdigest()[:32]}"
+                    display_name = identity.subject[:200] or user_id
+                    try:
+                        connection.execute(
+                            workspace_users.insert().values(
+                                organization_id=organization_id,
+                                user_id=user_id,
+                                display_name=display_name,
+                                status="active",
+                                organization_role="member",
+                            )
+                        )
+                    except IntegrityError as exc:
+                        raise WorkspaceInvitationDenied(
+                            "workspace invitation denied"
+                        ) from exc
+                    team_id = invitation["team_id"]
+                    if team_id is not None:
+                        try:
+                            connection.execute(
+                                team_memberships.insert().values(
+                                    organization_id=organization_id,
+                                    team_id=str(team_id),
+                                    user_id=user_id,
+                                    role="member",
+                                    granted_by_user_id=invitation[
+                                        "created_by_user_id"
+                                    ],
+                                )
+                            )
+                        except IntegrityError as exc:
+                            raise WorkspaceInvitationDenied(
+                                "workspace invitation denied"
+                            ) from exc
+                    target = {
+                        "session_version": 1,
+                    }
                 self._link_redeemed_identity(
                     connection,
                     organization_id=organization_id,
@@ -462,6 +709,7 @@ class PostgresWorkspaceInvitationService:
                         workspace_invitations.c.status == "pending",
                     )
                     .values(
+                        user_id=user_id,
                         status="accepted",
                         accepted_at=sa.func.now(),
                         updated_at=sa.func.now(),
@@ -482,6 +730,11 @@ class PostgresWorkspaceInvitationService:
                         target_id=str(invitation["invitation_id"]),
                         details={
                             "issuer": identity.issuer,
+                            "team_id": (
+                                str(invitation["team_id"])
+                                if invitation["team_id"] is not None
+                                else None
+                            ),
                             "mapping_id": hashlib.sha256(
                                 (
                                     f"{identity.issuer}\n"
@@ -584,6 +837,7 @@ class PostgresWorkspaceInvitationService:
                 workspace_invitations.c.organization_id,
                 workspace_invitations.c.invitation_id,
                 workspace_invitations.c.user_id,
+                workspace_invitations.c.team_id,
                 workspace_users.c.display_name.label(
                     "user_display_name"
                 ),
@@ -594,7 +848,7 @@ class PostgresWorkspaceInvitationService:
                 workspace_invitations.c.created_at,
             )
             .select_from(
-                workspace_invitations.join(
+                workspace_invitations.outerjoin(
                     workspace_users,
                     sa.and_(
                         workspace_users.c.organization_id
@@ -615,8 +869,17 @@ class PostgresWorkspaceInvitationService:
         return WorkspaceInvitationRecord(
             organization_id=str(row["organization_id"]),
             invitation_id=str(row["invitation_id"]),
-            user_id=str(row["user_id"]),
-            user_display_name=str(row["user_display_name"]),
+            user_id=(
+                str(row["user_id"]) if row["user_id"] is not None else None
+            ),
+            user_display_name=(
+                str(row["user_display_name"])
+                if row["user_display_name"] is not None
+                else None
+            ),
+            team_id=(
+                str(row["team_id"]) if row["team_id"] is not None else None
+            ),
             issuer=str(row["issuer"]),
             status=cast(
                 InvitationStatus,

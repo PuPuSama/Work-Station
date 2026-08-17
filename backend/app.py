@@ -60,6 +60,7 @@ from services.oidc_login import (
 )
 from services.project_directory import PostgresProjectDirectory
 from services.project_memberships import PostgresProjectMembershipService
+from services.project_deletion import PostgresProjectDeletionService
 from services.server_project_metadata import PostgresServerProjectMetadata
 from services.server_private_document_ingestion import (
     PostgresServerPrivateDocumentIngestion,
@@ -206,6 +207,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_memberships",
         None,
     )
+    previous_server_project_deletion = getattr(
+        application.state,
+        "server_project_deletion",
+        None,
+    )
     previous_server_project_object_service = getattr(
         application.state,
         "server_project_object_service",
@@ -330,6 +336,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_project_directory = None
     application.state.server_project_metadata = None
     application.state.server_project_memberships = None
+    application.state.server_project_deletion = None
     application.state.server_project_object_service = None
     application.state.server_private_document_ingestion = None
     application.state.server_snapshot_evidence = None
@@ -419,6 +426,9 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_memberships = (
             PostgresProjectMembershipService(server_engine)
+        )
+        application.state.server_project_deletion = (
+            PostgresProjectDeletionService(server_engine)
         )
         application.state.server_confirmed_product_selection = (
             PostgresConfirmedProductSelection(server_engine)
@@ -783,6 +793,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_memberships = (
                 previous_server_project_memberships
+            )
+            application.state.server_project_deletion = (
+                previous_server_project_deletion
             )
             application.state.server_project_object_service = (
                 previous_server_project_object_service

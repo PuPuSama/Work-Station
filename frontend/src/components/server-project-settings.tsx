@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -28,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, apiGet, apiPut } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiPut } from "@/lib/api";
 import type { ServerProjectMetadata } from "@/types";
 
 type ServerProjectSettingsProps = {
@@ -412,6 +413,21 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
 export function ServerProjectSettings({
   projectId,
 }: ServerProjectSettingsProps) {
+  const [deleting, setDeleting] = useState(false);
+
+  async function deleteProject() {
+    if (deleting || !window.confirm("删除项目后，项目数据和可访问入口都会被移除，是否继续？")) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      await apiDelete(`/api/projects/${encodeURIComponent(projectId)}`);
+      window.location.assign("/");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <ServerProjectMembers
       projectId={projectId}
@@ -420,6 +436,28 @@ export function ServerProjectSettings({
         <>
           <ProjectMetadataCard projectId={projectId} />
           <ServerProjectPromptLibrary projectId={projectId} />
+          <Card className="border-destructive/40">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-destructive">
+                <Trash2 className="size-4" />删除项目
+              </CardTitle>
+              <CardDescription>
+                删除前会取消排队或运行中的项目任务，并保留必要的审计记录。此操作不可撤销。
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button
+                type="button"
+                variant="destructive"
+                className="min-h-11"
+                disabled={deleting}
+                onClick={() => void deleteProject()}
+              >
+                {deleting ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                直接删除项目
+              </Button>
+            </CardContent>
+          </Card>
         </>
       }
     />

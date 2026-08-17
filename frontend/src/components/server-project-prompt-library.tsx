@@ -351,15 +351,15 @@ export function ServerProjectPromptLibrary({
             </Alert>
           ) : null}
 
-          <div className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-5 rounded-lg border p-5 md:grid-cols-2">
             {KINDS.map((promptKind) => (
-              <div className="grid gap-2" key={promptKind}>
+              <div className="grid min-w-0 gap-2" key={promptKind}>
                 <Label htmlFor={`server-default-${promptKind}`}>
                   默认{kindLabel(promptKind)}提示词
                 </Label>
                 <select
                   id={`server-default-${promptKind}`}
-                  className="min-h-11 rounded-md border bg-background px-3 text-sm"
+                  className="min-h-11 w-full min-w-0 rounded-md border bg-background px-3 text-sm"
                   value={defaultSelections[promptKind]}
                   disabled={loading || Boolean(busy)}
                   onChange={(event) =>
@@ -380,7 +380,7 @@ export function ServerProjectPromptLibrary({
                 </select>
               </div>
             ))}
-            <div className="flex items-end sm:col-span-2 xl:col-span-4">
+            <div className="flex items-end md:col-span-2">
               <Button
                 type="button"
                 onClick={() => void saveDefaults()}

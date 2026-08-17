@@ -70,8 +70,13 @@ function errorMessage(error: unknown) {
 
 function canEditKnowledge(
   role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
 ) {
-  return role === "org_admin" || role === "team_lead" || role === "editor";
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    (role === "team_lead" && isProjectOwner)
+  );
 }
 
 function canDeleteKnowledge(
@@ -491,6 +496,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(
     null,
   );
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
@@ -504,7 +510,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
   const [includeLocalSources, setIncludeLocalSources] = useState(true);
   const [includeWebsiteSources, setIncludeWebsiteSources] = useState(true);
   const projectPath = `/api/knowledge/${encodeURIComponent(customer)}`;
-  const editable = canEditKnowledge(role);
+  const editable = canEditKnowledge(role, isProjectOwner);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -520,6 +526,7 @@ export function ServerKnowledgeInbox({ customer }: { customer: string }) {
           ?.effective_role ?? null,
       );
       const project = projects.find((item) => sameProjectId(item.project_id, customer));
+      setIsProjectOwner(project?.is_project_owner === true);
       setStartUrl((current) => current || (project ? `https://${project.official_domain}/` : ""));
     } catch (reason) {
       setError(errorMessage(reason));

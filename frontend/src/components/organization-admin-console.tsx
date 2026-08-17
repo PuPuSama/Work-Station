@@ -121,7 +121,7 @@ export function OrganizationAdminConsole({
     setLoading(true);
     setLoadError("");
     try {
-      const [userPage, teamPage] = await Promise.all([
+      const [userResult, teamResult] = await Promise.allSettled([
         apiGet<WorkspaceUserPage>(
           `/api/organizations/${encodedOrg}/users?limit=50`,
         ),
@@ -129,10 +129,23 @@ export function OrganizationAdminConsole({
           `/api/organizations/${encodedOrg}/teams?limit=50`,
         ),
       ]);
-      setUsers(userPage.items);
-      setUserCursor(userPage.next_after_user_id);
-      setTeams(teamPage.items);
-      setTeamCursor(teamPage.next_after_team_id);
+      if (userResult.status === "fulfilled") {
+        setUsers(userResult.value.items);
+        setUserCursor(userResult.value.next_after_user_id);
+      } else {
+        setUsers([]);
+        setUserCursor(null);
+      }
+      if (teamResult.status === "fulfilled") {
+        setTeams(teamResult.value.items);
+        setTeamCursor(teamResult.value.next_after_team_id);
+      } else {
+        setTeams([]);
+        setTeamCursor(null);
+      }
+      if (userResult.status === "rejected" && teamResult.status === "rejected") {
+        throw teamResult.reason;
+      }
     } catch (error) {
       setLoadError(message(error, "组织账号与团队目录加载失败。"));
     } finally {
@@ -252,6 +265,7 @@ export function OrganizationAdminConsole({
               <WorkspaceUsersPanel
                 organizationId={organizationId}
                 users={users}
+                teams={teams}
                 pending={pending}
                 setPending={setPending}
                 setFeedback={setFeedback}
@@ -292,7 +306,7 @@ export function OrganizationAdminConsole({
             <TabsContent value="invitations">
               <OrganizationInvitations
                 organizationId={organizationId}
-                users={users}
+                teams={teams}
               />
             </TabsContent>
           </Tabs>
@@ -330,22 +344,27 @@ type SharedPanelProps = {
 function WorkspaceUsersPanel({
   organizationId,
   users,
+  teams,
   pending,
   setPending,
   setFeedback,
   setConfirmAction,
   refresh,
-}: SharedPanelProps & { users: WorkspaceUser[] }) {
+}: SharedPanelProps & { users: WorkspaceUser[]; teams: WorkspaceTeam[] }) {
   const encodedOrg = encodeURIComponent(organizationId);
-  const [newUser, setNewUser] = useState({ user_id: "", display_name: "", organization_role: "member" as WorkspaceOrganizationRole });
-  const [drafts, setDrafts] = useState<Record<string, { display_name: string; organization_role: WorkspaceOrganizationRole }>>({});
+  const [newUser, setNewUser] = useState({ user_id: "", display_name: "", organization_role: "member" as WorkspaceOrganizationRole, team_id: "", team_role: "member" as TeamMembershipRole });
+  const [drafts, setDrafts] = useState<Record<string, { display_name: string; organization_role: WorkspaceOrganizationRole; team_id: string; team_role: TeamMembershipRole }>>({});
 
   async function createUser() {
     setPending("user-create");
     setFeedback(null);
     try {
-      await apiPost(`/api/organizations/${encodedOrg}/users`, newUser);
-      setNewUser({ user_id: "", display_name: "", organization_role: "member" });
+      await apiPost(`/api/organizations/${encodedOrg}/users`, {
+        ...newUser,
+        team_id: newUser.organization_role === "org_admin" ? null : newUser.team_id || null,
+        team_role: newUser.organization_role === "org_admin" || !newUser.team_id ? null : newUser.team_role,
+      });
+      setNewUser({ user_id: "", display_name: "", organization_role: "member", team_id: "", team_role: "member" });
       await refresh();
       setFeedback({ kind: "success", message: "本地账号已创建。登录关联仍需单独配置。" });
     } catch (error) {
@@ -356,10 +375,14 @@ function WorkspaceUsersPanel({
   }
 
   async function saveUser(user: WorkspaceUser) {
-    const draft = drafts[user.user_id] ?? { display_name: user.display_name, organization_role: user.organization_role };
+    const draft = drafts[user.user_id] ?? { display_name: user.display_name, organization_role: user.organization_role, team_id: user.team_id ?? "", team_role: user.team_role ?? "member" };
     setPending(`user-${user.user_id}`);
     try {
-      await apiPatch(`/api/organizations/${encodedOrg}/users/${encodeURIComponent(user.user_id)}`, draft);
+      await apiPatch(`/api/organizations/${encodedOrg}/users/${encodeURIComponent(user.user_id)}`, {
+        ...draft,
+        team_id: draft.organization_role === "org_admin" ? null : draft.team_id || null,
+        team_role: draft.organization_role === "org_admin" || !draft.team_id ? null : draft.team_role,
+      });
       await refresh();
       setFeedback({ kind: "success", message: `${draft.display_name} 的账号资料已更新。` });
     } catch (error) {
@@ -423,10 +446,12 @@ function WorkspaceUsersPanel({
           <CardTitle>创建本地账号</CardTitle>
           <CardDescription>这里只建立 Workspace User，不发送邀请，也不自动关联 OIDC。</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_180px_auto] md:items-end">
+        <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_180px_180px_150px_auto] md:items-end">
           <div className="grid gap-1.5"><Label htmlFor="new-user-id">User ID</Label><Input id="new-user-id" className="h-11" value={newUser.user_id} onChange={(event) => setNewUser((current) => ({ ...current, user_id: event.target.value }))} /></div>
           <div className="grid gap-1.5"><Label htmlFor="new-user-name">显示名</Label><Input id="new-user-name" className="h-11" value={newUser.display_name} onChange={(event) => setNewUser((current) => ({ ...current, display_name: event.target.value }))} /></div>
           <div className="grid gap-1.5"><Label htmlFor="new-user-role">组织角色</Label><select id="new-user-role" className={selectClass} value={newUser.organization_role} onChange={(event) => setNewUser((current) => ({ ...current, organization_role: event.target.value as WorkspaceOrganizationRole }))}><option value="member">普通成员</option><option value="org_admin">组织管理员</option></select></div>
+          <div className="grid gap-1.5"><Label htmlFor="new-user-team">团队</Label><select id="new-user-team" className={selectClass} value={newUser.team_id} disabled={newUser.organization_role === "org_admin"} onChange={(event) => setNewUser((current) => ({ ...current, team_id: event.target.value }))}><option value="">待分配</option>{teams.filter((team) => team.status === "active").map((team) => <option key={team.team_id} value={team.team_id}>{team.name}</option>)}</select></div>
+          <div className="grid gap-1.5"><Label htmlFor="new-user-team-role">团队角色</Label><select id="new-user-team-role" className={selectClass} value={newUser.team_role} disabled={newUser.organization_role === "org_admin" || !newUser.team_id} onChange={(event) => setNewUser((current) => ({ ...current, team_role: event.target.value as TeamMembershipRole }))}><option value="member">成员</option><option value="team_lead">Team Lead</option></select></div>
           <Button type="button" className="min-h-11" disabled={Boolean(pending) || !newUser.user_id.trim() || !newUser.display_name.trim()} onClick={() => void createUser()}>{pending === "user-create" ? <Loader2 className="animate-spin" /> : <Plus />}创建</Button>
         </CardContent>
       </Card>
@@ -434,9 +459,13 @@ function WorkspaceUsersPanel({
         <CardHeader className="border-b"><CardTitle>账号目录</CardTitle><CardDescription>登录是否关联只公开为布尔状态；内部 Session Version 不会返回。</CardDescription></CardHeader>
         <CardContent className="grid gap-3 pt-4">
           {users.map((user) => {
-            const draft = drafts[user.user_id] ?? { display_name: user.display_name, organization_role: user.organization_role };
+            const draft = drafts[user.user_id] ?? { display_name: user.display_name, organization_role: user.organization_role, team_id: user.team_id ?? "", team_role: user.team_role ?? "member" };
             return (
               <div key={user.user_id} className="grid gap-3 rounded-lg border p-3 lg:grid-cols-[minmax(180px,1fr)_minmax(160px,1fr)_180px_auto] lg:items-end">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="grid gap-1.5"><Label htmlFor={`team-${user.user_id}`}>团队</Label><select id={`team-${user.user_id}`} className={selectClass} value={draft.team_id} disabled={Boolean(pending) || draft.organization_role === "org_admin"} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, team_id: event.target.value } }))}><option value="">待分配</option>{teams.filter((team) => team.status === "active").map((team) => <option key={team.team_id} value={team.team_id}>{team.name}</option>)}</select></div>
+                  <div className="grid gap-1.5"><Label htmlFor={`team-role-${user.user_id}`}>团队角色</Label><select id={`team-role-${user.user_id}`} className={selectClass} value={draft.team_role} disabled={Boolean(pending) || draft.organization_role === "org_admin" || !draft.team_id} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, team_role: event.target.value as TeamMembershipRole } }))}><option value="member">成员</option><option value="team_lead">Team Lead</option></select></div>
+                </div>
                 <div className="min-w-0"><div className="flex flex-wrap gap-2"><span className="font-medium">{user.display_name}</span><Badge variant={user.status === "active" ? "outline" : "secondary"}>{user.status === "active" ? "Active" : "Disabled"}</Badge><Badge variant="outline">{user.login_linked ? "已关联登录" : "未关联登录"}</Badge></div><p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={user.user_id}>{user.user_id}</p><p className="mt-1 text-xs text-muted-foreground">Team {user.team_membership_count} · Project {user.project_membership_count}</p></div>
                 <div className="grid gap-1.5"><Label htmlFor={`name-${user.user_id}`}>显示名</Label><Input id={`name-${user.user_id}`} className="h-11" value={draft.display_name} disabled={Boolean(pending)} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, display_name: event.target.value } }))} /></div>
                 <div className="grid gap-1.5"><Label htmlFor={`role-${user.user_id}`}>组织角色</Label><select id={`role-${user.user_id}`} className={selectClass} value={draft.organization_role} disabled={Boolean(pending)} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, organization_role: event.target.value as WorkspaceOrganizationRole } }))}><option value="member">普通成员</option><option value="org_admin">组织管理员</option></select></div>
@@ -465,7 +494,16 @@ function WorkspaceTeamsPanel({
   refresh,
 }: SharedPanelProps & { users: WorkspaceUser[]; teams: WorkspaceTeam[] }) {
   const encodedOrg = encodeURIComponent(organizationId);
-  const activeUsers = useMemo(() => users.filter((user) => user.status === "active"), [users]);
+  const activeUsers = useMemo(
+    () =>
+      users.filter(
+        (user) =>
+          user.status === "active" &&
+          user.organization_role === "member" &&
+          !user.team_id,
+      ),
+    [users],
+  );
   const [newTeam, setNewTeam] = useState({ team_id: "", name: "", manager_user_id: "" });
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [members, setMembers] = useState<WorkspaceTeamMember[]>([]);
@@ -475,6 +513,10 @@ function WorkspaceTeamsPanel({
   const selectedTeam = teams.find((team) => team.team_id === selectedTeamId) ?? null;
 
   async function createTeam() {
+    if (!newTeam.manager_user_id) {
+      setFeedback({ kind: "error", message: "请选择 Team Lead。" });
+      return;
+    }
     setPending("team-create");
     try {
       await apiPost(`/api/organizations/${encodedOrg}/teams`, { team_id: newTeam.team_id, name: newTeam.name, manager_user_id: newTeam.manager_user_id || null });
@@ -563,8 +605,8 @@ function WorkspaceTeamsPanel({
         <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">
           <div className="grid gap-1.5"><Label htmlFor="new-team-id">Team ID</Label><Input id="new-team-id" className="h-11" value={newTeam.team_id} onChange={(event) => setNewTeam((current) => ({ ...current, team_id: event.target.value }))} /></div>
           <div className="grid gap-1.5"><Label htmlFor="new-team-name">团队名称</Label><Input id="new-team-name" className="h-11" value={newTeam.name} onChange={(event) => setNewTeam((current) => ({ ...current, name: event.target.value }))} /></div>
-          <div className="grid gap-1.5"><Label htmlFor="new-team-manager">Manager（可选）</Label><select id="new-team-manager" className={selectClass} value={newTeam.manager_user_id} onChange={(event) => setNewTeam((current) => ({ ...current, manager_user_id: event.target.value }))}><option value="">未指定</option>{activeUsers.map((user) => <option key={user.user_id} value={user.user_id}>{user.display_name}</option>)}</select></div>
-          <Button type="button" className="min-h-11" disabled={Boolean(pending) || !newTeam.team_id.trim() || !newTeam.name.trim()} onClick={() => void createTeam()}><Plus />创建</Button>
+          <div className="grid gap-1.5"><Label htmlFor="new-team-manager">Manager（必选）</Label><select id="new-team-manager" className={selectClass} value={newTeam.manager_user_id} onChange={(event) => setNewTeam((current) => ({ ...current, manager_user_id: event.target.value }))}><option value="">选择 Team Lead</option>{activeUsers.map((user) => <option key={user.user_id} value={user.user_id}>{user.display_name}</option>)}</select></div>
+          <Button type="button" className="min-h-11" disabled={Boolean(pending) || !newTeam.team_id.trim() || !newTeam.name.trim() || !newTeam.manager_user_id} onClick={() => void createTeam()}><Plus />创建</Button>
         </CardContent>
       </Card>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">

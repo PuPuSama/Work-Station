@@ -49,10 +49,14 @@ class WorkspaceUserCreateRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=200)
     display_name: str = Field(min_length=1, max_length=200)
     organization_role: Literal["org_admin", "member"]
+    team_id: str | None = Field(default=None, min_length=1, max_length=200)
+    team_role: Literal["team_lead", "member"] | None = None
 
-    @field_validator("user_id", "display_name")
+    @field_validator("user_id", "display_name", "team_id")
     @classmethod
-    def validate_required_text(cls, value: str) -> str:
+    def validate_required_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized:
             raise ValueError("value must not be blank")
@@ -71,8 +75,10 @@ class WorkspaceUserUpdateRequest(BaseModel):
     )
     status: Literal["active", "disabled"] | None = None
     organization_role: Literal["org_admin", "member"] | None = None
+    team_id: str | None = Field(default=None, min_length=1, max_length=200)
+    team_role: Literal["team_lead", "member"] | None = None
 
-    @field_validator("display_name")
+    @field_validator("display_name", "team_id")
     @classmethod
     def validate_display_name(cls, value: str | None) -> str | None:
         if value is None:
@@ -88,6 +94,9 @@ class WorkspaceUserUpdateRequest(BaseModel):
             self.display_name is None
             and self.status is None
             and self.organization_role is None
+            and self.team_id is None
+            and self.team_role is None
+            and "team_id" not in self.model_fields_set
         ):
             raise ValueError("at least one workspace user field is required")
         return self
@@ -101,6 +110,8 @@ class WorkspaceUserResponse(BaseModel):
     team_membership_count: int
     project_membership_count: int
     login_linked: bool
+    team_id: str | None = None
+    team_role: Literal["team_lead", "member"] | None = None
 
 
 class WorkspaceUserListResponse(BaseModel):
@@ -147,6 +158,8 @@ def _workspace_user_response(
         team_membership_count=record.team_membership_count,
         project_membership_count=record.project_membership_count,
         login_linked=record.login_linked,
+        team_id=record.team_id,
+        team_role=record.team_role,
     )
 
 
@@ -240,6 +253,8 @@ def create_workspace_user(
             user_id=payload.user_id,
             display_name=payload.display_name,
             organization_role=payload.organization_role,
+            team_id=payload.team_id,
+            team_role=payload.team_role,
             event_id=f"workspace_user_create_{uuid.uuid4().hex}",
         )
     except (
@@ -275,6 +290,9 @@ def update_workspace_user(
             display_name=payload.display_name,
             status=payload.status,
             organization_role=payload.organization_role,
+            team_id=payload.team_id,
+            team_id_set=("team_id" in payload.model_fields_set),
+            team_role=payload.team_role,
         )
     except (
         WorkspaceUserConflict,

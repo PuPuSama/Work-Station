@@ -133,12 +133,27 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请重试。";
 }
 
-function canEdit(role: AccessibleProject["effective_role"] | null) {
-  return role === "org_admin" || role === "team_lead" || role === "editor";
+function canEdit(
+  role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
+) {
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    (role === "team_lead" && isProjectOwner)
+  );
 }
 
-function canReview(role: AccessibleProject["effective_role"] | null) {
-  return role !== null && role !== "viewer";
+function canReview(
+  role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
+) {
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    role === "reviewer" ||
+    (role === "team_lead" && isProjectOwner)
+  );
 }
 
 function roleLabel(role: AccessibleProject["effective_role"] | null) {
@@ -189,6 +204,7 @@ export function ServerArticleWorkbench({
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(
     null,
   );
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [step, setStep] = useState<WorkbenchStep>(
     isWorkbenchStep(initialStep) ? initialStep : "setup",
   );
@@ -277,6 +293,7 @@ export function ServerArticleWorkbench({
       );
       setTask(nextTask);
       setRole(project?.effective_role ?? null);
+      setIsProjectOwner(project?.is_project_owner === true);
       setCatalog(nextCatalog);
     } catch (reason) {
       if (
@@ -298,6 +315,7 @@ export function ServerArticleWorkbench({
 
   useEffect(() => {
     setTask(null);
+    setIsProjectOwner(false);
     setFinalScreenshot(null);
     setSelectedProductIds([]);
     productDraftIdsRef.current = [];
@@ -594,8 +612,8 @@ export function ServerArticleWorkbench({
   }
 
   const allowed = new Set(task?.allowed_actions || []);
-  const editAllowed = canEdit(role);
-  const reviewAllowed = canReview(role);
+  const editAllowed = canEdit(role, isProjectOwner);
+  const reviewAllowed = canReview(role, isProjectOwner);
   const hasArticleDraft = Boolean(
     (
       task?.initial_article ||

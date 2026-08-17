@@ -75,7 +75,6 @@ const IMPORT_FIELD_LABELS: Record<ImportField, string> = {
 
 const EDIT_ROLES = new Set<AccessibleProject["effective_role"]>([
   "org_admin",
-  "team_lead",
   "editor",
 ]);
 
@@ -205,6 +204,7 @@ export function ServerTaskIntakePanel({
   const [open, setOpen] = useState(false);
   const [role, setRole] =
     useState<AccessibleProject["effective_role"] | null>(null);
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [roleError, setRoleError] = useState("");
   const [pending, setPending] = useState<
     "manual" | "preview" | "import" | null
@@ -241,6 +241,7 @@ export function ServerTaskIntakePanel({
           (project) => sameProjectId(project.project_id, customer),
         );
         setRole(current?.effective_role ?? null);
+        setIsProjectOwner(current?.is_project_owner === true);
         setRoleError(
           current ? "" : "当前 Server Directory 中没有这个 Project。",
         );
@@ -262,7 +263,9 @@ export function ServerTaskIntakePanel({
         : parseRows(rowText),
     [columnMapping, rowText, workbookPreview],
   );
-  const canEdit = role !== null && EDIT_ROLES.has(role);
+  const canEdit =
+    role !== null &&
+    (EDIT_ROLES.has(role) || (role === "team_lead" && isProjectOwner));
 
   function resetFeedback() {
     setError("");

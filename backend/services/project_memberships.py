@@ -45,6 +45,14 @@ class ProjectMembershipUnavailable(ProjectMembershipError):
     """A dependency failed without exposing its private error."""
 
 
+@dataclass(frozen=True)
+class ProjectOwnerRecord:
+    organization_id: str
+    project_id: str
+    owning_team_id: str | None
+    owner_user_id: str | None
+
+
 def _required_text(value: str, field_name: str) -> str:
     normalized = value.strip()
     if not normalized:
@@ -54,8 +62,8 @@ def _required_text(value: str, field_name: str) -> str:
 
 def _project_role(value: str) -> ProjectRole:
     normalized = _required_text(value, "role")
-    if normalized not in {"editor", "reviewer", "viewer"}:
-        raise ValueError("role must be editor, reviewer, or viewer")
+    if normalized != "editor":
+        raise ValueError("project membership roles are no longer configurable; use the project owner")
     return cast(ProjectRole, normalized)
 
 
@@ -161,6 +169,16 @@ class PostgresProjectMembershipService:
                                 workspace_users.c.user_id
                                 == project_memberships.c.user_id,
                             ),
+                        ).join(
+                            project_ownership,
+                            sa.and_(
+                                project_ownership.c.organization_id
+                                == project_memberships.c.organization_id,
+                                project_ownership.c.project_id
+                                == project_memberships.c.project_id,
+                                project_ownership.c.owner_user_id
+                                == project_memberships.c.user_id,
+                            ),
                         )
                     )
                     .where(
@@ -245,64 +263,51 @@ class PostgresProjectMembershipService:
                         == normalized_project_id,
                     )
                 ).scalar_one()
-                explicit_membership_exists = sa.exists(
-                    sa.select(project_memberships.c.user_id).where(
-                        project_memberships.c.organization_id
-                        == workspace_users.c.organization_id,
-                        project_memberships.c.project_id
-                        == normalized_project_id,
-                        project_memberships.c.user_id
-                        == workspace_users.c.user_id,
-                    )
-                )
-                inherited_team_lead_exists = (
-                    sa.false()
-                    if owning_team_id is None
-                    else sa.exists(
-                        sa.select(team_memberships.c.user_id)
+                if owning_team_id is None:
+                    rows = []
+                else:
+                    statement = (
+                        sa.select(
+                            workspace_users.c.user_id,
+                            workspace_users.c.display_name,
+                        )
                         .select_from(
-                            team_memberships.join(
+                            workspace_users.join(
+                                team_memberships,
+                                sa.and_(
+                                    team_memberships.c.organization_id
+                                    == workspace_users.c.organization_id,
+                                    team_memberships.c.user_id
+                                    == workspace_users.c.user_id,
+                                ),
+                            ).join(
                                 teams,
                                 sa.and_(
                                     teams.c.organization_id
                                     == team_memberships.c.organization_id,
-                                    teams.c.team_id
-                                    == team_memberships.c.team_id,
+                                    teams.c.team_id == team_memberships.c.team_id,
                                 ),
                             )
                         )
                         .where(
-                            team_memberships.c.organization_id
-                            == workspace_users.c.organization_id,
+                            workspace_users.c.organization_id
+                            == actor.organization_id,
+                            workspace_users.c.status == "active",
+                            workspace_users.c.organization_role == "member",
                             team_memberships.c.team_id == owning_team_id,
-                            team_memberships.c.user_id
-                            == workspace_users.c.user_id,
-                            team_memberships.c.role == "team_lead",
+                            team_memberships.c.role.in_(("member", "team_lead")),
                             teams.c.status == "active",
+                            workspace_users.c.user_id
+                            != (facts.owner_user_id if facts is not None else ""),
                         )
+                        .order_by(workspace_users.c.user_id)
+                        .limit(normalized_limit + 1)
                     )
-                )
-                statement = (
-                    sa.select(
-                        workspace_users.c.user_id,
-                        workspace_users.c.display_name,
-                    )
-                    .where(
-                        workspace_users.c.organization_id
-                        == actor.organization_id,
-                        workspace_users.c.status == "active",
-                        workspace_users.c.organization_role == "member",
-                        ~explicit_membership_exists,
-                        ~inherited_team_lead_exists,
-                    )
-                    .order_by(workspace_users.c.user_id)
-                    .limit(normalized_limit + 1)
-                )
-                if normalized_after is not None:
-                    statement = statement.where(
-                        workspace_users.c.user_id > normalized_after
-                    )
-                rows = connection.execute(statement).mappings().all()
+                    if normalized_after is not None:
+                        statement = statement.where(
+                            workspace_users.c.user_id > normalized_after
+                        )
+                    rows = connection.execute(statement).mappings().all()
         except ProjectAccessDenied:
             raise
         except SQLAlchemyError as exc:
@@ -383,6 +388,18 @@ class PostgresProjectMembershipService:
         )
         if not decision.allowed:
             raise ProjectAccessDenied("project access denied")
+        current_owner = connection.execute(
+            sa.select(project_ownership.c.owner_user_id)
+            .where(
+                project_ownership.c.organization_id == actor.organization_id,
+                project_ownership.c.project_id == normalized_project_id,
+            )
+            .with_for_update(read=True)
+        ).scalar_one_or_none()
+        if current_owner is None or current_owner != normalized_target:
+            raise ProjectMembershipConflict(
+                "a project can have only one owner; use the owner assignment endpoint"
+            )
         target_exists = connection.execute(
             sa.select(workspace_users.c.user_id).where(
                 workspace_users.c.organization_id == actor.organization_id,
@@ -492,6 +509,17 @@ class PostgresProjectMembershipService:
         )
         if not decision.allowed:
             raise ProjectAccessDenied("project access denied")
+        owner_user_id = connection.execute(
+            sa.select(project_ownership.c.owner_user_id)
+            .where(
+                project_ownership.c.organization_id == actor.organization_id,
+                project_ownership.c.project_id == normalized_project_id,
+            )
+        ).scalar_one_or_none()
+        if owner_user_id == normalized_target:
+            raise ProjectMembershipConflict(
+                "the project owner can only be changed through owner assignment"
+            )
         existing_role = connection.execute(
             sa.select(project_memberships.c.role).where(
                 project_memberships.c.organization_id
@@ -539,9 +567,172 @@ class PostgresProjectMembershipService:
                 "project membership change is unavailable"
             ) from exc
 
+    def assign_owner(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        owner_user_id: str | None,
+        event_id: str,
+    ) -> ProjectOwnerRecord:
+        normalized_project_id = _required_text(project_id, "project_id")
+        normalized_owner = (
+            _required_text(owner_user_id, "owner_user_id")
+            if owner_user_id is not None
+            else None
+        )
+        normalized_event_id = _required_text(event_id, "event_id")
+        try:
+            with self._engine.begin() as connection:
+                facts = self._access.lock_project_access_in_connection(
+                    connection,
+                    actor,
+                    normalized_project_id,
+                )
+                if not decide_project_permission(
+                    facts,
+                    "project.members.manage",
+                ).allowed:
+                    raise ProjectAccessDenied("project access denied")
+                row = connection.execute(
+                    sa.select(
+                        project_ownership.c.owning_team_id,
+                        project_ownership.c.owner_user_id,
+                    )
+                    .where(
+                        project_ownership.c.organization_id
+                        == actor.organization_id,
+                        project_ownership.c.project_id
+                        == normalized_project_id,
+                    )
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if row is None:
+                    raise ProjectAccessDenied("project access denied")
+                owning_team_id = row["owning_team_id"]
+                if normalized_owner is not None:
+                    if owning_team_id is None:
+                        raise ProjectMembershipTargetUnavailable(
+                            "project owner target unavailable"
+                        )
+                    target = connection.execute(
+                        sa.select(team_memberships.c.user_id)
+                        .select_from(
+                            team_memberships.join(
+                                workspace_users,
+                                sa.and_(
+                                    workspace_users.c.organization_id
+                                    == team_memberships.c.organization_id,
+                                    workspace_users.c.user_id
+                                    == team_memberships.c.user_id,
+                                ),
+                            ).join(
+                                teams,
+                                sa.and_(
+                                    teams.c.organization_id
+                                    == team_memberships.c.organization_id,
+                                    teams.c.team_id
+                                    == team_memberships.c.team_id,
+                                ),
+                            )
+                        )
+                        .where(
+                            team_memberships.c.organization_id
+                            == actor.organization_id,
+                            team_memberships.c.team_id == owning_team_id,
+                            team_memberships.c.user_id == normalized_owner,
+                            workspace_users.c.status == "active",
+                            workspace_users.c.organization_role == "member",
+                            teams.c.status == "active",
+                            team_memberships.c.role.in_(("member", "team_lead")),
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    if target is None:
+                        raise ProjectMembershipTargetUnavailable(
+                            "project owner target unavailable"
+                        )
+                connection.execute(
+                    project_ownership.update()
+                    .where(
+                        project_ownership.c.organization_id
+                        == actor.organization_id,
+                        project_ownership.c.project_id
+                        == normalized_project_id,
+                    )
+                    .values(
+                        owner_user_id=normalized_owner,
+                        updated_at=sa.func.now(),
+                    )
+                )
+                # A new project has one responsible member. Clear legacy
+                # collaborative rows when it enters the single-owner model.
+                connection.execute(
+                    project_memberships.delete().where(
+                        project_memberships.c.organization_id
+                        == actor.organization_id,
+                        project_memberships.c.project_id
+                        == normalized_project_id,
+                    )
+                )
+                if normalized_owner is not None:
+                    connection.execute(
+                        project_memberships.insert().values(
+                            organization_id=actor.organization_id,
+                            project_id=normalized_project_id,
+                            user_id=normalized_owner,
+                            role="editor",
+                            granted_by_user_id=actor.user_id,
+                        )
+                    )
+                self._append_audit(
+                    connection,
+                    AuditEvent(
+                        organization_id=actor.organization_id,
+                        event_id=normalized_event_id,
+                        actor_user_id=actor.user_id,
+                        project_id=normalized_project_id,
+                        action="project.owner.assigned",
+                        target_type="project",
+                        target_id=normalized_project_id,
+                        details={
+                            "previous_owner_user_id": (
+                                str(row["owner_user_id"])
+                                if row["owner_user_id"] is not None
+                                else None
+                            ),
+                            "owner_user_id": normalized_owner,
+                        },
+                    ),
+                )
+                return ProjectOwnerRecord(
+                    organization_id=actor.organization_id,
+                    project_id=normalized_project_id,
+                    owning_team_id=(
+                        str(owning_team_id)
+                        if owning_team_id is not None
+                        else None
+                    ),
+                    owner_user_id=normalized_owner,
+                )
+        except (
+            ProjectAccessDenied,
+            ProjectMembershipTargetUnavailable,
+        ):
+            raise
+        except IntegrityError as exc:
+            raise ProjectMembershipConflict(
+                "project owner change conflicted"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise ProjectMembershipUnavailable(
+                "project owner change is unavailable"
+            ) from exc
+
 
 __all__ = [
     "PostgresProjectMembershipService",
+    "ProjectOwnerRecord",
     "ProjectMembershipConflict",
     "ProjectMembershipCandidate",
     "ProjectMembershipCandidatePage",

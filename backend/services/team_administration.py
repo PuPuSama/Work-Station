@@ -10,9 +10,11 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from knowledge_agent.schema import projects
 from server_schema import (
     organizations,
+    project_memberships,
     project_ownership,
     team_memberships,
     teams,
+    workspace_invitations,
     workspace_users,
 )
 from services.access_control import ActorIdentity
@@ -137,11 +139,12 @@ class PostgresTeamAdministrationService:
         )
         try:
             with self._engine.begin() as connection:
-                self._lock_active_admin(
+                actor_role = self._lock_active_admin(
                     connection,
                     actor=actor,
                     organization_id=normalized_organization_id,
                     write=False,
+                    allow_any_team_lead=True,
                 )
                 statement = self._team_select(
                     organization_id=normalized_organization_id
@@ -149,6 +152,17 @@ class PostgresTeamAdministrationService:
                 if normalized_after is not None:
                     statement = statement.where(
                         teams.c.team_id > normalized_after
+                    )
+                if actor_role != "org_admin":
+                    statement = statement.where(
+                        teams.c.team_id.in_(
+                            sa.select(team_memberships.c.team_id).where(
+                                team_memberships.c.organization_id
+                                == normalized_organization_id,
+                                team_memberships.c.user_id == actor.user_id,
+                                team_memberships.c.role == "team_lead",
+                            )
+                        )
                     )
                 rows = (
                     connection.execute(
@@ -195,6 +209,8 @@ class PostgresTeamAdministrationService:
             if manager_user_id is not None
             else None
         )
+        if normalized_manager is None:
+            raise ValueError("manager_user_id is required")
         normalized_event_id = _required_text(event_id, "event_id")
         try:
             with self._engine.begin() as connection:
@@ -204,11 +220,15 @@ class PostgresTeamAdministrationService:
                     organization_id=normalized_organization_id,
                     write=True,
                 )
-                self._require_active_user(
+                manager = self._require_active_user(
                     connection,
                     organization_id=normalized_organization_id,
                     user_id=normalized_manager,
                 )
+                if manager is not None and manager["organization_role"] == "org_admin":
+                    raise TeamAdministrationConflict(
+                        "organization administrators are outside team membership"
+                    )
                 connection.execute(
                     teams.insert().values(
                         organization_id=normalized_organization_id,
@@ -218,6 +238,16 @@ class PostgresTeamAdministrationService:
                         status="active",
                     )
                 )
+                if normalized_manager is not None:
+                    connection.execute(
+                        team_memberships.insert().values(
+                            organization_id=normalized_organization_id,
+                            team_id=normalized_team_id,
+                            user_id=normalized_manager,
+                            role="team_lead",
+                            granted_by_user_id=actor.user_id,
+                        )
+                    )
                 self._append_audit(
                     connection,
                     AuditEvent(
@@ -300,11 +330,15 @@ class PostgresTeamAdministrationService:
                     team_id=normalized_team_id,
                 )
                 if manager_user_id_set:
-                    self._require_active_user(
+                    manager = self._require_active_user(
                         connection,
                         organization_id=normalized_organization_id,
                         user_id=normalized_manager,
                     )
+                    if manager is not None and manager["organization_role"] == "org_admin":
+                        raise TeamAdministrationConflict(
+                            "organization administrators are outside team membership"
+                        )
                 next_name = (
                     normalized_name
                     if normalized_name is not None
@@ -324,16 +358,110 @@ class PostgresTeamAdministrationService:
                         else None
                     )
                 )
+                if next_status == "active" and next_manager is None:
+                    raise TeamAdministrationConflict(
+                        "an active team must have one lead"
+                    )
+                membership_changed = False
+                if manager_user_id_set:
+                    if next_manager is not None:
+                        existing_team = connection.execute(
+                            sa.select(team_memberships.c.team_id)
+                            .where(
+                                team_memberships.c.organization_id
+                                == normalized_organization_id,
+                                team_memberships.c.user_id == next_manager,
+                                team_memberships.c.team_id != normalized_team_id,
+                            )
+                            .with_for_update(read=True)
+                        ).scalar_one_or_none()
+                        if existing_team is not None:
+                            raise TeamAdministrationConflict(
+                                "a user can belong to only one team"
+                            )
+                    connection.execute(
+                        team_memberships.update()
+                        .where(
+                            team_memberships.c.organization_id
+                            == normalized_organization_id,
+                            team_memberships.c.team_id == normalized_team_id,
+                            team_memberships.c.role == "team_lead",
+                        )
+                        .values(
+                            role="member",
+                            granted_by_user_id=actor.user_id,
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                    if next_manager is not None:
+                        current_target = connection.execute(
+                            sa.select(team_memberships.c.user_id)
+                            .where(
+                                team_memberships.c.organization_id
+                                == normalized_organization_id,
+                                team_memberships.c.team_id == normalized_team_id,
+                                team_memberships.c.user_id == next_manager,
+                            )
+                            .with_for_update()
+                        ).scalar_one_or_none()
+                        if current_target is None:
+                            connection.execute(
+                                team_memberships.insert().values(
+                                    organization_id=normalized_organization_id,
+                                    team_id=normalized_team_id,
+                                    user_id=next_manager,
+                                    role="team_lead",
+                                    granted_by_user_id=actor.user_id,
+                                )
+                            )
+                        else:
+                            connection.execute(
+                                team_memberships.update()
+                                .where(
+                                    team_memberships.c.organization_id
+                                    == normalized_organization_id,
+                                    team_memberships.c.team_id
+                                    == normalized_team_id,
+                                    team_memberships.c.user_id == next_manager,
+                                )
+                                .values(
+                                    role="team_lead",
+                                    granted_by_user_id=actor.user_id,
+                                    updated_at=sa.func.now(),
+                                )
+                            )
+                    membership_changed = True
                 changed = {
                     "name": next_name != current["name"],
                     "status": next_status != current["status"],
                     "manager": next_manager != current["manager_user_id"],
                 }
-                if not any(changed.values()):
+                if not any(changed.values()) and not membership_changed:
                     return self._read_team(
                         connection,
                         organization_id=normalized_organization_id,
                         team_id=normalized_team_id,
+                    )
+                revoked_invitation_count = 0
+                if changed["manager"] or (
+                    changed["status"] and next_status == "archived"
+                ):
+                    revoked_invitation_count = int(
+                        connection.execute(
+                            workspace_invitations.update()
+                            .where(
+                                workspace_invitations.c.organization_id
+                                == normalized_organization_id,
+                                workspace_invitations.c.team_id
+                                == normalized_team_id,
+                                workspace_invitations.c.status == "pending",
+                            )
+                            .values(
+                                status="revoked",
+                                updated_at=sa.func.now(),
+                            )
+                        ).rowcount
+                        or 0
                     )
                 connection.execute(
                     teams.update()
@@ -352,6 +480,7 @@ class PostgresTeamAdministrationService:
                 details: dict[str, object] = {
                     "name_changed": changed["name"],
                     "manager_changed": changed["manager"],
+                    "pending_invitations_revoked": revoked_invitation_count,
                 }
                 if changed["status"]:
                     details.update(
@@ -422,6 +551,7 @@ class PostgresTeamAdministrationService:
                     connection,
                     actor=actor,
                     organization_id=normalized_organization_id,
+                    team_id=normalized_team_id,
                     write=False,
                 )
                 self._lock_team(
@@ -515,6 +645,7 @@ class PostgresTeamAdministrationService:
                     connection,
                     actor=actor,
                     organization_id=normalized_organization_id,
+                    team_id=normalized_team_id,
                     write=True,
                 )
                 team = self._lock_team(
@@ -531,6 +662,10 @@ class PostgresTeamAdministrationService:
                     organization_id=normalized_organization_id,
                     user_id=normalized_user_id,
                 )
+                if user["organization_role"] == "org_admin":
+                    raise TeamAdministrationConflict(
+                        "organization administrators are outside team membership"
+                    )
                 current_role = connection.execute(
                     sa.select(team_memberships.c.role)
                     .where(
@@ -548,6 +683,53 @@ class PostgresTeamAdministrationService:
                         user_status="active",
                         role=normalized_role,
                     )
+                existing_team = connection.execute(
+                    sa.select(team_memberships.c.team_id)
+                    .where(
+                        team_memberships.c.organization_id
+                        == normalized_organization_id,
+                        team_memberships.c.user_id == normalized_user_id,
+                        team_memberships.c.team_id != normalized_team_id,
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if existing_team is not None:
+                    raise TeamAdministrationConflict(
+                        "a user can belong to only one team"
+                    )
+                if normalized_role == "team_lead":
+                    other_lead = connection.execute(
+                        sa.select(team_memberships.c.user_id)
+                        .where(
+                            team_memberships.c.organization_id
+                            == normalized_organization_id,
+                            team_memberships.c.team_id == normalized_team_id,
+                            team_memberships.c.role == "team_lead",
+                            team_memberships.c.user_id
+                            != normalized_user_id,
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    if other_lead is not None:
+                        raise TeamAdministrationConflict(
+                            "a team can have only one active lead"
+                        )
+                if current_role == "team_lead" and normalized_role != "team_lead":
+                    other_lead = connection.execute(
+                        sa.select(team_memberships.c.user_id)
+                        .where(
+                            team_memberships.c.organization_id
+                            == normalized_organization_id,
+                            team_memberships.c.team_id == normalized_team_id,
+                            team_memberships.c.role == "team_lead",
+                            team_memberships.c.user_id != normalized_user_id,
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    if other_lead is None:
+                        raise TeamAdministrationConflict(
+                            "an active team must have one lead"
+                        )
                 if current_role is None:
                     connection.execute(
                         team_memberships.insert().values(
@@ -585,6 +767,48 @@ class PostgresTeamAdministrationService:
                         "previous_role": current_role,
                         "role": normalized_role,
                     }
+                if normalized_role == "team_lead":
+                    next_manager = normalized_user_id
+                elif current_role == "team_lead":
+                    next_manager = connection.execute(
+                        sa.select(team_memberships.c.user_id)
+                        .where(
+                            team_memberships.c.organization_id
+                            == normalized_organization_id,
+                            team_memberships.c.team_id == normalized_team_id,
+                            team_memberships.c.role == "team_lead",
+                            team_memberships.c.user_id != normalized_user_id,
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                else:
+                    next_manager = team["manager_user_id"]
+                connection.execute(
+                    teams.update()
+                    .where(
+                        teams.c.organization_id == normalized_organization_id,
+                        teams.c.team_id == normalized_team_id,
+                    )
+                    .values(
+                        manager_user_id=next_manager,
+                        updated_at=sa.func.now(),
+                    )
+                )
+                if current_role == "team_lead" and normalized_role != "team_lead":
+                    connection.execute(
+                        workspace_invitations.update()
+                        .where(
+                            workspace_invitations.c.organization_id
+                            == normalized_organization_id,
+                            workspace_invitations.c.team_id
+                            == normalized_team_id,
+                            workspace_invitations.c.status == "pending",
+                        )
+                        .values(
+                            status="revoked",
+                            updated_at=sa.func.now(),
+                        )
+                    )
                 self._append_audit(
                     connection,
                     AuditEvent(
@@ -643,9 +867,10 @@ class PostgresTeamAdministrationService:
                     connection,
                     actor=actor,
                     organization_id=normalized_organization_id,
+                    team_id=normalized_team_id,
                     write=True,
                 )
-                self._lock_team(
+                team = self._lock_team(
                     connection,
                     organization_id=normalized_organization_id,
                     team_id=normalized_team_id,
@@ -662,6 +887,39 @@ class PostgresTeamAdministrationService:
                 ).scalar_one_or_none()
                 if membership is None:
                     return False
+                replacement_lead: str | None = None
+                if membership == "team_lead" and team["status"] == "active":
+                    replacement_lead = connection.execute(
+                        sa.select(team_memberships.c.user_id)
+                        .where(
+                            team_memberships.c.organization_id
+                            == normalized_organization_id,
+                            team_memberships.c.team_id == normalized_team_id,
+                            team_memberships.c.role == "team_lead",
+                            team_memberships.c.user_id != normalized_user_id,
+                        )
+                        .with_for_update(read=True)
+                    ).scalar_one_or_none()
+                    if replacement_lead is None:
+                        raise TeamAdministrationConflict(
+                            "an active team must have one lead"
+                        )
+                connection.execute(
+                    project_ownership.update()
+                    .where(
+                        project_ownership.c.organization_id
+                        == normalized_organization_id,
+                        project_ownership.c.owner_user_id == normalized_user_id,
+                    )
+                    .values(owner_user_id=None, updated_at=sa.func.now())
+                )
+                connection.execute(
+                    project_memberships.delete().where(
+                        project_memberships.c.organization_id
+                        == normalized_organization_id,
+                        project_memberships.c.user_id == normalized_user_id,
+                    )
+                )
                 connection.execute(
                     team_memberships.delete().where(
                         team_memberships.c.organization_id
@@ -670,6 +928,33 @@ class PostgresTeamAdministrationService:
                         team_memberships.c.user_id == normalized_user_id,
                     )
                 )
+                if membership == "team_lead":
+                    connection.execute(
+                        teams.update()
+                        .where(
+                            teams.c.organization_id
+                            == normalized_organization_id,
+                            teams.c.team_id == normalized_team_id,
+                        )
+                        .values(
+                            manager_user_id=replacement_lead,
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                    connection.execute(
+                        workspace_invitations.update()
+                        .where(
+                            workspace_invitations.c.organization_id
+                            == normalized_organization_id,
+                            workspace_invitations.c.team_id
+                            == normalized_team_id,
+                            workspace_invitations.c.status == "pending",
+                        )
+                        .values(
+                            status="revoked",
+                            updated_at=sa.func.now(),
+                        )
+                    )
                 self._append_audit(
                     connection,
                     AuditEvent(
@@ -705,8 +990,10 @@ class PostgresTeamAdministrationService:
         *,
         actor: ActorIdentity,
         organization_id: str,
+        team_id: str | None = None,
         write: bool,
-    ) -> None:
+        allow_any_team_lead: bool = False,
+    ) -> Literal["org_admin", "team_lead"]:
         if actor.organization_id != organization_id:
             raise TeamAdministrationDenied("team administration denied")
         organization_exists = connection.execute(
@@ -720,17 +1007,70 @@ class PostgresTeamAdministrationService:
         if organization_exists is None:
             raise TeamAdministrationDenied("team administration denied")
         actor_exists = connection.execute(
-            sa.select(workspace_users.c.user_id)
+            sa.select(
+                workspace_users.c.user_id,
+                workspace_users.c.organization_role,
+            )
             .where(
                 workspace_users.c.organization_id == organization_id,
                 workspace_users.c.user_id == actor.user_id,
                 workspace_users.c.status == "active",
-                workspace_users.c.organization_role == "org_admin",
             )
             .with_for_update(read=True)
-        ).scalar_one_or_none()
+        ).mappings().one_or_none()
         if actor_exists is None:
             raise TeamAdministrationDenied("team administration denied")
+        if actor_exists["organization_role"] == "org_admin":
+            return "org_admin"
+        if team_id is not None:
+            lead_exists = connection.execute(
+                sa.select(team_memberships.c.user_id)
+                .select_from(
+                    team_memberships.join(
+                        teams,
+                        sa.and_(
+                            teams.c.organization_id
+                            == team_memberships.c.organization_id,
+                            teams.c.team_id == team_memberships.c.team_id,
+                        ),
+                    )
+                )
+                .where(
+                    team_memberships.c.organization_id == organization_id,
+                    team_memberships.c.team_id == team_id,
+                    team_memberships.c.user_id == actor.user_id,
+                    team_memberships.c.role == "team_lead",
+                    teams.c.status == "active",
+                )
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if lead_exists is not None:
+                return "team_lead"
+        elif allow_any_team_lead:
+            lead_exists = connection.execute(
+                sa.select(team_memberships.c.team_id)
+                .select_from(
+                    team_memberships.join(
+                        teams,
+                        sa.and_(
+                            teams.c.organization_id
+                            == team_memberships.c.organization_id,
+                            teams.c.team_id == team_memberships.c.team_id,
+                        ),
+                    )
+                )
+                .where(
+                    team_memberships.c.organization_id == organization_id,
+                    team_memberships.c.user_id == actor.user_id,
+                    team_memberships.c.role == "team_lead",
+                    teams.c.status == "active",
+                )
+                .limit(1)
+                .with_for_update(read=True)
+            ).scalar_one_or_none()
+            if lead_exists is not None:
+                return "team_lead"
+        raise TeamAdministrationDenied("team administration denied")
 
     @staticmethod
     def _lock_team(
@@ -769,6 +1109,7 @@ class PostgresTeamAdministrationService:
             sa.select(
                 workspace_users.c.user_id,
                 workspace_users.c.display_name,
+                workspace_users.c.organization_role,
             )
             .where(
                 workspace_users.c.organization_id == organization_id,

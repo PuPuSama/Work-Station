@@ -67,6 +67,7 @@ export function ServerProjectBatchDetail({
   const [role, setRole] = useState<
     AccessibleProject["effective_role"] | null
   >(null);
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pending, setPending] = useState<Record<string, string>>({});
@@ -82,10 +83,9 @@ export function ServerProjectBatchDetail({
         apiGet<AccessibleProject[]>("/api/projects"),
       ]);
       setBatch(nextBatch);
-      setRole(
-        projects.find((project) => sameProjectId(project.project_id, customer))
-          ?.effective_role ?? null,
-      );
+      const project = projects.find((item) => sameProjectId(item.project_id, customer));
+      setRole(project?.effective_role ?? null);
+      setIsProjectOwner(project?.is_project_owner === true);
       setError("");
     } catch (reason) {
       setError(message(reason));
@@ -167,7 +167,7 @@ export function ServerProjectBatchDetail({
     batch?.jobs.some((job) => SERVER_ACTIVE_JOB_STATUSES.has(job.status)),
   );
   const batchControllable = Boolean(
-    batch && canControlServerJob(role, batch.operation),
+    batch && canControlServerJob(role, batch.operation, isProjectOwner),
   );
   const batchPendingKey = batch ? `batch:${batch.batch_id}` : "";
 
@@ -283,7 +283,11 @@ export function ServerProjectBatchDetail({
               {batch.jobs.map((job) => {
                 const active = SERVER_ACTIVE_JOB_STATUSES.has(job.status);
                 const retryable = SERVER_RETRYABLE_JOB_STATUSES.has(job.status);
-                const controllable = canControlServerJob(role, job.operation);
+                const controllable = canControlServerJob(
+                  role,
+                  job.operation,
+                  isProjectOwner,
+                );
                 return (
                   <div
                     key={job.job_id}

@@ -70,8 +70,13 @@ function errorMessage(error: unknown) {
 
 function canPublishKnowledge(
   role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
 ) {
-  return role === "org_admin" || role === "team_lead" || role === "editor";
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    (role === "team_lead" && isProjectOwner)
+  );
 }
 
 function taskLabel(task: TaskRecord) {
@@ -96,6 +101,7 @@ export function ServerResearchWorkspace({
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(
     null,
   );
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [selectedPlanId, setSelectedPlanId] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState(taskId);
   const [selectedThreadId, setSelectedThreadId] = useState(
@@ -148,6 +154,10 @@ export function ServerResearchWorkspace({
       setRole(
         projects.find((project) => sameProjectId(project.project_id, customer))
           ?.effective_role ?? null,
+      );
+      setIsProjectOwner(
+        projects.find((project) => sameProjectId(project.project_id, customer))
+          ?.is_project_owner === true,
       );
       setSelectedPlanId((current) =>
         visiblePlans.some((plan) => plan.retrieval_plan_id === current)
@@ -313,7 +323,7 @@ export function ServerResearchWorkspace({
       ),
     [tasks],
   );
-  const canRun = canPublishKnowledge(role);
+  const canRun = canPublishKnowledge(role, isProjectOwner);
 
   async function generatePlan() {
     if (!selectedTaskId) return;

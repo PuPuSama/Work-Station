@@ -23,13 +23,16 @@ from services.workspace_invitations import (
 class WorkspaceInvitationCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str = Field(min_length=1, max_length=200)
+    user_id: str | None = Field(default=None, min_length=1, max_length=200)
+    team_id: str | None = Field(default=None, min_length=1, max_length=200)
     issuer: str = Field(min_length=1, max_length=2048)
-    expires_in_hours: int = Field(default=24, ge=1, le=168)
+    expires_in_hours: int = Field(default=168, ge=1, le=168)
 
-    @field_validator("user_id", "issuer")
+    @field_validator("user_id", "team_id", "issuer")
     @classmethod
-    def validate_text(cls, value: str) -> str:
+    def validate_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized:
             raise ValueError("value must not be blank")
@@ -39,8 +42,9 @@ class WorkspaceInvitationCreateRequest(BaseModel):
 class WorkspaceInvitationResponse(BaseModel):
     organization_id: str
     invitation_id: str
-    user_id: str
-    user_display_name: str
+    user_id: str | None
+    user_display_name: str | None
+    team_id: str | None
     issuer: str
     status: Literal["pending", "expired", "accepted", "revoked"]
     expires_at: datetime
@@ -81,6 +85,7 @@ def _response(
         invitation_id=record.invitation_id,
         user_id=record.user_id,
         user_display_name=record.user_display_name,
+        team_id=record.team_id,
         issuer=record.issuer,
         status=record.status,
         expires_at=record.expires_at,
@@ -185,6 +190,7 @@ def issue_workspace_invitation(
             issuer=payload.issuer,
             expires_in_hours=payload.expires_in_hours,
             event_id=f"workspace_invitation_issue_{uuid.uuid4().hex}",
+            team_id=payload.team_id,
         )
     except _INVITATION_ERRORS as exc:
         _raise_http_error(exc)

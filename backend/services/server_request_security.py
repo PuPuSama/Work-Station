@@ -108,6 +108,13 @@ def server_http_route_available(method: str, path: str) -> bool:
         "/"
     ) == "/api/projects":
         return True
+    if (
+        normalized_method == "DELETE"
+        and len(parts := normalized_path.rstrip("/").split("/")) == 4
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+    ):
+        return True
     parts = normalized_path.rstrip("/").split("/")
     if (
         normalized_method in {"GET", "PUT"}
@@ -140,6 +147,14 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])
         and parts[4] == "prompt-snapshots"
+    ):
+        return True
+    if (
+        normalized_method == "PUT"
+        and len(parts) == 5
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "owner"
     ):
         return True
     if (

@@ -69,12 +69,27 @@ export function ServerProjectSelector() {
   const [owningTeamId, setOwningTeamId] = useState("");
   const [teams, setTeams] = useState<WorkspaceTeam[]>([]);
   const [organizationId, setOrganizationId] = useState("");
+  const [canOpenOrganization, setCanOpenOrganization] = useState(false);
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       setProjects(await apiGet<AccessibleProject[]>("/api/projects"));
+      try {
+        const status = await apiGet<AuthStatus>("/api/auth/status");
+        const currentOrganizationId = status.data?.organization_id || "";
+        if (!currentOrganizationId) {
+          setCanOpenOrganization(false);
+        } else {
+          await apiGet<WorkspaceTeamPage>(
+            `/api/organizations/${encodeURIComponent(currentOrganizationId)}/teams?limit=1`,
+          );
+          setCanOpenOrganization(true);
+        }
+      } catch {
+        setCanOpenOrganization(false);
+      }
     } catch (nextError) {
       setError(errorMessage(nextError));
     } finally {
@@ -87,11 +102,12 @@ export function ServerProjectSelector() {
   }, [loadProjects]);
   const canManageOrganization = projects.some(
     (project) => project.effective_role === "org_admin",
-  );
+  ) || canOpenOrganization;
 
   async function openCreateProject() {
     setCreateOpen(true);
     setCreateError("");
+    setOwningTeamId("");
     try {
       const status = await apiGet<AuthStatus>("/api/auth/status");
       const nextOrganizationId = status.data?.organization_id || "";
@@ -99,10 +115,16 @@ export function ServerProjectSelector() {
         throw new Error("当前组织身份不可用，请重新登录。");
       }
       setOrganizationId(nextOrganizationId);
-      const page = await apiGet<WorkspaceTeamPage>(
-        `/api/organizations/${encodeURIComponent(nextOrganizationId)}/teams?limit=100`,
-      );
-      setTeams(page.items.filter((team) => team.status === "active"));
+      try {
+        const page = await apiGet<WorkspaceTeamPage>(
+          `/api/organizations/${encodeURIComponent(nextOrganizationId)}/teams?limit=100`,
+        );
+        setTeams(page.items.filter((team) => team.status === "active"));
+      } catch {
+        // Members and Team Leads do not need the organization-wide team
+        // directory; the server derives their single team from membership.
+        setTeams([]);
+      }
     } catch (nextError) {
       setCreateError(errorMessage(nextError));
     }
@@ -146,8 +168,7 @@ export function ServerProjectSelector() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {canManageOrganization && (
-              <>
+            <>
                 <Button
                   type="button"
                   onClick={() => void openCreateProject()}
@@ -155,16 +176,15 @@ export function ServerProjectSelector() {
                   <Plus />
                   新建项目
                 </Button>
-                <Button
+                {canManageOrganization && <Button
                   nativeButton={false}
                   variant="outline"
                   render={<Link href="/organization" />}
                 >
                   <Building2 />
                   组织管理
-                </Button>
-              </>
-            )}
+                </Button>}
+            </>
             <Button
               type="button"
               variant="outline"
@@ -335,6 +355,7 @@ export function ServerProjectSelector() {
                 createPending ||
                 !customerName.trim() ||
                 !officialDomain.trim() ||
+                (teams.length > 0 && !owningTeamId.trim()) ||
                 Boolean(createError && !organizationId)
               }
               onClick={() => void createProject()}

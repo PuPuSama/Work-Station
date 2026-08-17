@@ -72,13 +72,18 @@ export function serverJobHref(
 export function canControlServerJob(
   role: AccessibleProject["effective_role"] | null,
   operation: string,
+  isProjectOwner = false,
 ) {
   if (operation === "knowledge_research") {
     // Research Resume is a domain command. Generic Job cancel/retry remains
     // fail-closed until Run/Checkpoint cancellation semantics are implemented.
     return false;
   }
-  if (role === "org_admin" || role === "team_lead" || role === "editor") {
+  if (
+    role === "org_admin" ||
+    role === "editor" ||
+    (role === "team_lead" && isProjectOwner)
+  ) {
     return true;
   }
   return role === "reviewer" && operation === "seo_review";

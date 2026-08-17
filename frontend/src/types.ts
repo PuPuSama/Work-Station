@@ -420,6 +420,10 @@ export type AccessibleProject = {
   official_domain: string;
   revision: number;
   effective_role: "org_admin" | "team_lead" | "editor" | "reviewer" | "viewer";
+  owning_team_id?: string | null;
+  owner_user_id?: string | null;
+  is_project_owner?: boolean;
+  assignment_status?: "assigned" | "pending";
 };
 
 export type ServerProjectMetadata = {
@@ -428,6 +432,8 @@ export type ServerProjectMetadata = {
   official_domain: string;
   project_notes: string;
   revision: number;
+  owning_team_id?: string | null;
+  owner_user_id?: string | null;
 };
 
 export type ServerTaskIntakeItem = {
@@ -450,7 +456,7 @@ export type ServerTaskIntakeResponse = {
   tasks: ServerTaskIntakeItem[];
 };
 
-export type ProjectMembershipRole = "editor" | "reviewer" | "viewer";
+export type ProjectMembershipRole = "editor";
 
 export type ProjectMembership = {
   user_id: string;
@@ -485,6 +491,8 @@ export type WorkspaceUser = {
   team_membership_count: number;
   project_membership_count: number;
   login_linked: boolean;
+  team_id?: string | null;
+  team_role?: TeamMembershipRole | null;
 };
 
 export type WorkspaceUserPage = {
@@ -547,8 +555,9 @@ export type WorkspaceInvitationStatus =
 export type WorkspaceInvitation = {
   organization_id: string;
   invitation_id: string;
-  user_id: string;
-  user_display_name: string;
+  user_id: string | null;
+  user_display_name: string | null;
+  team_id: string | null;
   issuer: string;
   status: WorkspaceInvitationStatus;
   expires_at: string;

@@ -61,6 +61,7 @@ export function ServerProjectBatchCenter({
   const [role, setRole] = useState<
     AccessibleProject["effective_role"] | null
   >(null);
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -75,10 +76,9 @@ export function ServerProjectBatchCenter({
         apiGet<AccessibleProject[]>("/api/projects"),
       ]);
       setPage(next);
-      setRole(
-        projects.find((project) => sameProjectId(project.project_id, customer))
-          ?.effective_role ?? null,
-      );
+      const project = projects.find((item) => sameProjectId(item.project_id, customer));
+      setRole(project?.effective_role ?? null);
+      setIsProjectOwner(project?.is_project_owner === true);
       setError("");
     } catch (reason) {
       setError(message(reason));
@@ -214,7 +214,7 @@ export function ServerProjectBatchCenter({
             const active = batch.jobs.some((job) =>
               SERVER_ACTIVE_JOB_STATUSES.has(job.status),
             );
-            const controllable = canControlServerJob(role, batch.operation);
+            const controllable = canControlServerJob(role, batch.operation, isProjectOwner);
             const batchKey = `batch:${batch.batch_id}`;
             return (
               <Card key={batch.batch_id}>
@@ -251,6 +251,7 @@ export function ServerProjectBatchCenter({
                       const jobControllable = canControlServerJob(
                         role,
                         job.operation,
+                        isProjectOwner,
                       );
                       return (
                         <div

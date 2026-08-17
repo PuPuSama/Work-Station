@@ -54,12 +54,27 @@ function deliveryParts(task: TaskRecord) {
   };
 }
 
-function canDeliver(role: AccessibleProject["effective_role"] | null) {
-  return role === "org_admin" || role === "team_lead" || role === "editor";
+function canDeliver(
+  role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
+) {
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    (role === "team_lead" && isProjectOwner)
+  );
 }
 
-function canReview(role: AccessibleProject["effective_role"] | null) {
-  return role !== null && role !== "viewer";
+function canReview(
+  role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
+) {
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    role === "reviewer" ||
+    (role === "team_lead" && isProjectOwner)
+  );
 }
 
 function formatUpdatedAt(value: string) {
@@ -76,6 +91,7 @@ function formatUpdatedAt(value: string) {
 export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [effectiveRole, setEffectiveRole] = useState<AccessibleProject["effective_role"] | null>(null);
+  const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -95,6 +111,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
       ]);
       const project = projects.find((item) => sameProjectId(item.project_id, customer));
       setEffectiveRole(project?.effective_role ?? null);
+      setIsProjectOwner(project?.is_project_owner === true);
       setTasks(nextTasks);
     } catch (loadError) {
       setError(errorMessage(loadError));
@@ -168,8 +185,8 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
     }
   }
 
-  const deliveryAllowed = canDeliver(effectiveRole);
-  const reviewAllowed = canReview(effectiveRole);
+  const deliveryAllowed = canDeliver(effectiveRole, isProjectOwner);
+  const reviewAllowed = canReview(effectiveRole, isProjectOwner);
   const filters: Array<{ value: DeliveryFilter; label: string }> = [
     { value: "all", label: "全部" },
     { value: "incomplete", label: "缺少交付项" },

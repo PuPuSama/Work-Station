@@ -48,6 +48,14 @@ from services.project_memberships import (
     ProjectMembershipConflict,
     ProjectMembershipTargetUnavailable,
     ProjectMembershipUnavailable,
+    ProjectOwnerRecord,
+)
+from services.project_deletion import (
+    DeletedProject,
+    PostgresProjectDeletionService,
+    ProjectDeletionConflict,
+    ProjectDeletionDenied,
+    ProjectDeletionUnavailable,
 )
 from services.server_auth import SERVER_AUTH_COOKIE_NAME
 from services.server_article_images import (
@@ -251,6 +259,11 @@ class ProjectCreateRequest(BaseModel):
         min_length=1,
         max_length=200,
     )
+    owner_user_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
 
 
 class ConfirmedProductsUpdateRequest(BaseModel):
@@ -369,6 +382,8 @@ class ProjectMetadataResponse(BaseModel):
     official_domain: str
     project_notes: str
     revision: int
+    owning_team_id: str | None = None
+    owner_user_id: str | None = None
 
 
 class ProjectMetadataUpdateRequest(BaseModel):
@@ -394,6 +409,8 @@ def _project_metadata_response(
         official_domain=metadata.official_domain,
         project_notes=metadata.project_notes,
         revision=metadata.revision,
+        owning_team_id=metadata.owning_team_id,
+        owner_user_id=metadata.owner_user_id,
     )
 
 
@@ -530,11 +547,23 @@ class ProjectOutlineVersionRestoreRequest(BaseModel):
 
 
 class ProjectMembershipUpdateRequest(BaseModel):
-    """Accept one explicit project role, never an effective permission set."""
+    """Legacy compatibility body; projects now have one owner only."""
 
     model_config = ConfigDict(extra="forbid")
 
-    role: Literal["editor", "reviewer", "viewer"]
+    role: Literal["editor"]
+
+
+class ProjectOwnerUpdateRequest(BaseModel):
+    """Assign one active member or leave the project pending assignment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner_user_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
 
 
 class ProjectMembershipResponse(BaseModel):
@@ -567,6 +596,31 @@ class ProjectMembershipCandidateResponse(BaseModel):
 class ProjectMembershipCandidateListResponse(BaseModel):
     items: list[ProjectMembershipCandidateResponse]
     next_after_user_id: str | None = None
+
+
+class ProjectOwnerResponse(BaseModel):
+    project_id: str
+    owning_team_id: str | None
+    owner_user_id: str | None
+    assignment_status: Literal["assigned", "pending"]
+
+
+class ProjectDeletionResponse(BaseModel):
+    project_id: str
+    deleted: bool
+    cancelled_job_count: int
+    deleted_row_count: int
+
+
+def _project_owner_response(record: ProjectOwnerRecord) -> ProjectOwnerResponse:
+    return ProjectOwnerResponse(
+        project_id=record.project_id,
+        owning_team_id=record.owning_team_id,
+        owner_user_id=record.owner_user_id,
+        assignment_status=(
+            "assigned" if record.owner_user_id is not None else "pending"
+        ),
+    )
 
 
 class FinalAiCheckUpdateRequest(BaseModel):
@@ -850,6 +904,22 @@ def _project_membership_service(
         raise HTTPException(
             status_code=503,
             detail="Project membership management is not available.",
+        )
+    return service
+
+
+def _project_deletion_service(
+    request: Request,
+) -> PostgresProjectDeletionService:
+    service = getattr(
+        request.app.state,
+        "server_project_deletion",
+        None,
+    )
+    if not isinstance(service, PostgresProjectDeletionService):
+        raise HTTPException(
+            status_code=503,
+            detail="Project deletion is not available.",
         )
     return service
 
@@ -1272,12 +1342,13 @@ def create_project(
             customer_name=payload.customer_name,
             official_domain=payload.official_domain,
             owning_team_id=payload.owning_team_id,
+            owner_user_id=payload.owner_user_id,
             event_id=f"project_create_{uuid.uuid4().hex}",
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
             status_code=403,
-            detail="Only an organization administrator can create projects.",
+            detail="Project creation is not allowed for this account.",
         ) from exc
     except ServerProjectCreationConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1288,12 +1359,68 @@ def create_project(
             status_code=503,
             detail="Project creation is temporarily unavailable.",
         ) from exc
-    return AccessibleProject(
-        project_id=metadata.project_id,
-        customer_name=metadata.customer_name,
-        official_domain=metadata.official_domain,
-        revision=metadata.revision,
-        effective_role="org_admin",
+    try:
+        created = next(
+            item
+            for item in _project_directory(request).list_for_actor(actor)
+            if item.project_id == metadata.project_id
+        )
+        return created
+    except (ProjectDirectoryDenied, StopIteration, HTTPException):
+        # Keep the creation response useful in focused service tests where
+        # only the metadata dependency is installed.
+        return AccessibleProject(
+            project_id=metadata.project_id,
+            customer_name=metadata.customer_name,
+            official_domain=metadata.official_domain,
+            revision=metadata.revision,
+            effective_role="editor",
+            owning_team_id=metadata.owning_team_id,
+            owner_user_id=metadata.owner_user_id,
+            is_project_owner=metadata.owner_user_id == actor.user_id,
+            assignment_status=(
+                "assigned" if metadata.owner_user_id is not None else "pending"
+            ),
+        )
+
+
+@router.delete(
+    "/{project}",
+    response_model=ProjectDeletionResponse,
+)
+def delete_project(
+    project: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectDeletionResponse:
+    del project
+    try:
+        deleted = _project_deletion_service(request).delete(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            event_id=f"project_delete_{uuid.uuid4().hex}",
+        )
+    except ProjectDeletionDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project deletion denied",
+        ) from exc
+    except ProjectDeletionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ProjectDeletionUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project deletion is temporarily unavailable.",
+        ) from exc
+    return ProjectDeletionResponse(
+        project_id=deleted.project_id,
+        deleted=True,
+        cancelled_job_count=deleted.cancelled_job_count,
+        deleted_row_count=deleted.deleted_row_count,
     )
 
 
@@ -1343,7 +1470,7 @@ def update_project_metadata(
     _require_project_permission(
         request,
         authorized,
-        "project.members.manage",
+        "article.edit",
     )
     try:
         metadata = _project_metadata_service(request).update(
@@ -1657,6 +1784,49 @@ def preview_project_task_workbook(
         mapping=preview.mapping,
         truncated=preview.truncated,
     )
+
+
+@router.put(
+    "/{project}/owner",
+    response_model=ProjectOwnerResponse,
+)
+def assign_project_owner(
+    project: str,
+    payload: ProjectOwnerUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectOwnerResponse:
+    del project
+    try:
+        record = _project_membership_service(request).assign_owner(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            owner_user_id=payload.owner_user_id,
+            event_id=f"project_owner_{uuid.uuid4().hex}",
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ProjectMembershipTargetUnavailable as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Project owner target is unavailable.",
+        ) from exc
+    except ProjectMembershipConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Project owner change conflicted.",
+        ) from exc
+    except ProjectMembershipUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project owner change is temporarily unavailable.",
+        ) from exc
+    return _project_owner_response(record)
 
 
 @router.post(
