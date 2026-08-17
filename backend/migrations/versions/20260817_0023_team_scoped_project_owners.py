@@ -73,9 +73,103 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
 
-    # New users belong to at most one team and each team has at most one
-    # active lead. Existing rows are left intact and are still readable as
-    # legacy access data; the unique indexes enforce the new write boundary.
+    # Normalize historical rows before adding the new write-boundary indexes.
+    # Older deployments allowed multiple leads per team and memberships in
+    # multiple teams, so creating the indexes directly would make a real
+    # production upgrade fail. Prefer the recorded team manager, then the
+    # stable user id, and keep the result deterministic and repeatable.
+    op.execute(
+        """
+        WITH ranked_leads AS (
+            SELECT
+                membership.ctid AS row_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY membership.organization_id,
+                                 membership.team_id
+                    ORDER BY
+                        (membership.user_id = team.manager_user_id) DESC,
+                        membership.user_id
+                ) AS row_number
+            FROM team_memberships AS membership
+            JOIN teams AS team
+              ON team.organization_id = membership.organization_id
+             AND team.team_id = membership.team_id
+            WHERE membership.role = 'team_lead'
+        )
+        UPDATE team_memberships AS membership
+           SET role = 'member', updated_at = CURRENT_TIMESTAMP
+          FROM ranked_leads
+         WHERE membership.ctid = ranked_leads.row_id
+           AND ranked_leads.row_number > 1
+        """
+    )
+    op.execute(
+        """
+        WITH retained_leads AS (
+            SELECT DISTINCT ON (membership.organization_id,
+                                membership.team_id)
+                   membership.organization_id,
+                   membership.team_id,
+                   membership.user_id
+              FROM team_memberships AS membership
+              JOIN teams AS team
+                ON team.organization_id = membership.organization_id
+               AND team.team_id = membership.team_id
+             WHERE membership.role = 'team_lead'
+             ORDER BY membership.organization_id,
+                      membership.team_id,
+                      (membership.user_id = team.manager_user_id) DESC,
+                      membership.user_id
+        )
+        UPDATE teams AS team
+           SET manager_user_id = retained.user_id,
+               updated_at = CURRENT_TIMESTAMP
+          FROM retained_leads AS retained
+         WHERE team.organization_id = retained.organization_id
+           AND team.team_id = retained.team_id
+           AND team.status = 'active'
+           AND team.manager_user_id IS DISTINCT FROM retained.user_id
+        """
+    )
+    op.execute(
+        """
+        WITH ranked_memberships AS (
+            SELECT
+                membership.ctid AS row_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY membership.organization_id,
+                                 membership.user_id
+                    ORDER BY
+                        EXISTS (
+                            SELECT 1
+                              FROM project_ownership AS ownership
+                             WHERE ownership.organization_id
+                                   = membership.organization_id
+                               AND ownership.owning_team_id
+                                   = membership.team_id
+                               AND ownership.owner_user_id
+                                   = membership.user_id
+                        ) DESC,
+                        EXISTS (
+                            SELECT 1
+                              FROM teams AS team
+                             WHERE team.organization_id
+                                   = membership.organization_id
+                               AND team.team_id = membership.team_id
+                               AND team.manager_user_id
+                                   = membership.user_id
+                        ) DESC,
+                        (membership.role = 'team_lead') DESC,
+                        membership.team_id
+                ) AS row_number
+            FROM team_memberships AS membership
+        )
+        DELETE FROM team_memberships AS membership
+              USING ranked_memberships
+             WHERE membership.ctid = ranked_memberships.row_id
+               AND ranked_memberships.row_number > 1
+        """
+    )
     op.create_index(
         "uq_team_memberships_one_team_per_user",
         "team_memberships",
