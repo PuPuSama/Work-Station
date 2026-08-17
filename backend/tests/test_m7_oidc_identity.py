@@ -808,6 +808,7 @@ class OidcLoginHttpTests(unittest.TestCase):
             self.assertTrue(
                 status.json()["data"]["login_available"]
             )
+            self.assertEqual(status.json()["data"]["issuer"], ISSUER)
             invalid_destination = client.get(
                 "/api/auth/oidc/start",
                 params={"next": "https://evil.example.test/"},
@@ -932,6 +933,7 @@ class OidcLoginHttpTests(unittest.TestCase):
                 self.assertTrue(
                     status.json()["data"]["login_available"]
                 )
+                self.assertEqual(status.json()["data"]["issuer"], ISSUER)
                 # Discovery/JWKS are deliberately lazy; startup and status
                 # must not depend on a live external provider.
 
