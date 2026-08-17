@@ -60,10 +60,22 @@ def _required_text(value: str, field_name: str) -> str:
     return normalized
 
 
-def _project_role(value: str) -> ProjectRole:
+def _project_role(
+    value: str,
+    *,
+    allow_legacy_roles: bool = True,
+) -> ProjectRole:
     normalized = _required_text(value, "role")
-    if normalized != "editor":
-        raise ValueError("project membership roles are no longer configurable; use the project owner")
+    allowed = (
+        {"editor", "reviewer", "viewer"}
+        if allow_legacy_roles
+        else {"editor"}
+    )
+    if normalized not in allowed:
+        raise ValueError(
+            "project membership roles are no longer configurable; "
+            "use the project owner"
+        )
     return cast(ProjectRole, normalized)
 
 
@@ -176,8 +188,11 @@ class PostgresProjectMembershipService:
                                 == project_memberships.c.organization_id,
                                 project_ownership.c.project_id
                                 == project_memberships.c.project_id,
-                                project_ownership.c.owner_user_id
-                                == project_memberships.c.user_id,
+                                sa.or_(
+                                    project_ownership.c.owner_user_id.is_(None),
+                                    project_ownership.c.owner_user_id
+                                    == project_memberships.c.user_id,
+                                ),
                             ),
                         )
                     )
@@ -255,15 +270,93 @@ class PostgresProjectMembershipService:
                 if not decision.allowed:
                     raise ProjectAccessDenied("project access denied")
 
-                owning_team_id = connection.execute(
-                    sa.select(project_ownership.c.owning_team_id).where(
+                ownership = connection.execute(
+                    sa.select(
+                        project_ownership.c.owning_team_id,
+                        project_ownership.c.owner_user_id,
+                    ).where(
                         project_ownership.c.organization_id
                         == actor.organization_id,
                         project_ownership.c.project_id
                         == normalized_project_id,
                     )
+                ).mappings().one()
+                owning_team_id = ownership["owning_team_id"]
+                legacy_membership_exists = connection.execute(
+                    sa.select(
+                        sa.exists(
+                            sa.select(project_memberships.c.user_id).where(
+                                project_memberships.c.organization_id
+                                == actor.organization_id,
+                                project_memberships.c.project_id
+                                == normalized_project_id,
+                            )
+                        )
+                    )
                 ).scalar_one()
-                if owning_team_id is None:
+                if (
+                    legacy_membership_exists
+                    and ownership["owner_user_id"] is None
+                ):
+                    explicit_membership_exists = sa.exists(
+                        sa.select(project_memberships.c.user_id).where(
+                            project_memberships.c.organization_id
+                            == workspace_users.c.organization_id,
+                            project_memberships.c.project_id
+                            == normalized_project_id,
+                            project_memberships.c.user_id
+                            == workspace_users.c.user_id,
+                        )
+                    )
+                    inherited_team_lead_exists = (
+                        sa.false()
+                        if owning_team_id is None
+                        else sa.exists(
+                            sa.select(team_memberships.c.user_id)
+                            .select_from(
+                                team_memberships.join(
+                                    teams,
+                                    sa.and_(
+                                        teams.c.organization_id
+                                        == team_memberships.c.organization_id,
+                                        teams.c.team_id
+                                        == team_memberships.c.team_id,
+                                    ),
+                                )
+                            )
+                            .where(
+                                team_memberships.c.organization_id
+                                == workspace_users.c.organization_id,
+                                team_memberships.c.team_id == owning_team_id,
+                                team_memberships.c.user_id
+                                == workspace_users.c.user_id,
+                                team_memberships.c.role == "team_lead",
+                                teams.c.status == "active",
+                            )
+                        )
+                    )
+                    statement = (
+                        sa.select(
+                            workspace_users.c.user_id,
+                            workspace_users.c.display_name,
+                        )
+                        .where(
+                            workspace_users.c.organization_id
+                            == actor.organization_id,
+                            workspace_users.c.status == "active",
+                            workspace_users.c.organization_role == "member",
+                            ~explicit_membership_exists,
+                            ~inherited_team_lead_exists,
+                        )
+                        .order_by(workspace_users.c.user_id)
+                        .limit(normalized_limit + 1)
+                    )
+                    if normalized_after is not None:
+                        statement = statement.where(
+                            workspace_users.c.user_id > normalized_after
+                        )
+                    rows = connection.execute(statement).mappings().all()
+                elif owning_team_id is None:
                     rows = []
                 else:
                     statement = (
@@ -375,7 +468,6 @@ class PostgresProjectMembershipService:
         normalized_project_id = _required_text(project_id, "project_id")
         normalized_target = _required_text(target_user_id, "target_user_id")
         normalized_event_id = _required_text(event_id, "event_id")
-        normalized_role = _project_role(role)
 
         facts = self._access.lock_project_access_in_connection(
             connection,
@@ -396,9 +488,34 @@ class PostgresProjectMembershipService:
             )
             .with_for_update(read=True)
         ).scalar_one_or_none()
-        if current_owner is None or current_owner != normalized_target:
-            raise ProjectMembershipConflict(
-                "a project can have only one owner; use the owner assignment endpoint"
+        legacy_membership_exists = connection.execute(
+            sa.select(
+                sa.exists(
+                    sa.select(project_memberships.c.user_id).where(
+                        project_memberships.c.organization_id
+                        == actor.organization_id,
+                        project_memberships.c.project_id
+                        == normalized_project_id,
+                    )
+                )
+            )
+        ).scalar_one()
+        if current_owner is None:
+            if not legacy_membership_exists:
+                raise ProjectMembershipConflict(
+                    "a project can only have one owner; "
+                    "use the owner assignment endpoint"
+                )
+            normalized_role = _project_role(role, allow_legacy_roles=True)
+        else:
+            if current_owner != normalized_target:
+                raise ProjectMembershipConflict(
+                    "a project can only have one owner; "
+                    "use the owner assignment endpoint"
+                )
+            normalized_role = _project_role(
+                role,
+                allow_legacy_roles=False,
             )
         target_exists = connection.execute(
             sa.select(workspace_users.c.user_id).where(

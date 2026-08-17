@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import hashlib
 import os
 import sys
 import unittest
@@ -32,7 +33,6 @@ from services.external_identity import (  # noqa: E402
 )
 from services.workspace_invitations import (  # noqa: E402
     PostgresWorkspaceInvitationService,
-    WorkspaceInvitationConflict,
     WorkspaceInvitationDenied,
     WorkspaceInvitationUnavailable,
 )
@@ -160,7 +160,7 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
         return (service or self.service).issue(
             actor=self.actor,
             organization_id=self.org_a,
-            user_id=user_id or self.target_a,
+            user_id=user_id,
             issuer=issuer or self.issuer,
             expires_in_hours=24,
             event_id=f"issue-{uuid.uuid4().hex}",
@@ -211,7 +211,7 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
             session_version=1,
         )
 
-    def test_issue_lists_without_token_hash_and_requires_revoke_to_reissue(
+    def test_issue_lists_without_token_hash_and_uses_one_time_tokens(
         self,
     ) -> None:
         issued = self._issue()
@@ -224,8 +224,11 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
         self.assertEqual(page.items[0].status, "pending")
         self.assertFalse(hasattr(page.items[0], "token_hash"))
         self.assertFalse(hasattr(page.items[0], "invitation_token"))
-        with self.assertRaises(WorkspaceInvitationConflict):
-            self._issue()
+        second = self._issue()
+        self.assertNotEqual(
+            second.invitation.invitation_id,
+            issued.invitation.invitation_id,
+        )
         revoked = self.service.revoke(
             actor=self.actor,
             organization_id=self.org_a,
@@ -250,7 +253,16 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
             identity=identity,
             event_id=f"accept-{uuid.uuid4().hex}",
         )
-        self.assertEqual(resolved.actor, ActorIdentity(self.org_a, self.target_a))
+        expected_user_id = (
+            "usr_"
+            + hashlib.sha256(
+                f"{identity.issuer}\n{identity.subject}".encode("utf-8")
+            ).hexdigest()[:32]
+        )
+        self.assertEqual(
+            resolved.actor,
+            ActorIdentity(self.org_a, expected_user_id),
+        )
         with self.assertRaises(WorkspaceInvitationDenied):
             self.service.redeem(
                 invitation_token=issued.invitation_token,
@@ -286,7 +298,7 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
                 )
             ).scalar_one()
         self.assertEqual(invitation_status, "accepted")
-        self.assertEqual(mapping, (self.org_a, self.target_a))
+        self.assertEqual(mapping, (self.org_a, expected_user_id))
         self.assertEqual(accepted_audits, 1)
 
     def test_wrong_issuer_expired_or_disabled_target_is_denied(self) -> None:
@@ -333,7 +345,7 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
                 ),
                 event_id=f"expired-{uuid.uuid4().hex}",
             )
-        with self.assertRaises(WorkspaceInvitationDenied):
+        with self.assertRaises(ValueError):
             self._issue(user_id=self.disabled_a)
 
     def test_non_admin_cross_org_and_existing_mapping_fail_closed(self) -> None:
@@ -451,7 +463,6 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
             created = client.post(
                 path,
                 json={
-                    "user_id": self.target_a,
                     "issuer": self.issuer,
                     "expires_in_hours": 24,
                 },
@@ -483,7 +494,6 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
         )
         path = f"/api/organizations/{self.org_a}/invitations"
         payload = {
-            "user_id": self.target_a,
             "issuer": self.issuer,
             "expires_in_hours": 24,
         }

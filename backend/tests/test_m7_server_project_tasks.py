@@ -1106,6 +1106,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                             "official_domain": self.project_a,
                             "revision": 0,
                             "effective_role": "viewer",
+                            "owning_team_id": None,
+                            "owner_user_id": None,
+                            "is_project_owner": False,
+                            "assignment_status": "pending",
                         }
                     ],
                 )

@@ -252,11 +252,18 @@ class PostgresProjectAccessRepository:
         owning_team_membership = team_memberships.alias(
             "owning_team_membership"
         )
+        # Keep legacy projects (those that have not received an explicit
+        # owner yet) readable through their historical membership rows. New
+        # owner-assigned projects deliberately ignore those rows so access is
+        # derived from the single owner/team model.
+        explicit_project_membership = project_memberships.alias(
+            "explicit_project_membership"
+        )
         statement = (
             sa.select(
                 workspace_users.c.organization_role,
                 owning_team_membership.c.role.label("team_role"),
-                sa.null().label("project_role"),
+                explicit_project_membership.c.role.label("project_role"),
                 project_ownership.c.owner_user_id,
                 (
                     project_ownership.c.owner_user_id == actor.user_id
@@ -302,6 +309,17 @@ class PostgresProjectAccessRepository:
                         owning_team_membership.c.team_id
                         == active_team.c.team_id,
                         owning_team_membership.c.user_id == actor.user_id,
+                    ),
+                )
+                .outerjoin(
+                    explicit_project_membership,
+                    sa.and_(
+                        explicit_project_membership.c.organization_id
+                        == project_ownership.c.organization_id,
+                        explicit_project_membership.c.project_id
+                        == project_ownership.c.project_id,
+                        explicit_project_membership.c.user_id == actor.user_id,
+                        project_ownership.c.owner_user_id.is_(None),
                     ),
                 )
             )
