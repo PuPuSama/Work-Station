@@ -39,6 +39,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
 import type {
+  AuthStatus,
   IssuedWorkspaceInvitation,
   WorkspaceInvitation,
   WorkspaceInvitationPage,
@@ -95,6 +96,24 @@ export function OrganizationInvitations({
     useState<WorkspaceInvitation | null>(null);
   const [form, setForm] = useState({ issuer: "", expires_in_hours: "168" });
 
+  useEffect(() => {
+    let active = true;
+    void apiGet<AuthStatus>("/api/auth/status")
+      .then((result) => {
+        const issuer = result.data?.issuer?.trim();
+        if (!active || !issuer) return;
+        setForm((current) =>
+          current.issuer.trim() ? current : { ...current, issuer },
+        );
+      })
+      .catch(() => {
+        // The field remains editable when the provider configuration is unavailable.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const loadInvitations = useCallback(async () => {
     setLoading(true);
     try {
@@ -131,7 +150,6 @@ export function OrganizationInvitations({
         },
       );
       setIssued(result);
-      setForm((current) => ({ ...current, issuer: "" }));
       await loadInvitations();
       setFeedback({ kind: "success", message: "一次性邀请已签发，请立即复制 Token。" });
     } catch (error) {

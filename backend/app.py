@@ -932,6 +932,8 @@ def auth_cookie_secure(request: Request) -> bool:
 @app.get("/api/auth/status", response_model=ApiMessage)
 def auth_status(request: Request) -> ApiMessage:
     security = getattr(request.app.state, "server_request_security", None)
+    oidc_login = getattr(request.app.state, "server_oidc_login", None)
+    oidc_enabled = isinstance(oidc_login, OidcLoginService)
     authenticated = False
     actor = None
     if isinstance(security, ServerRequestSecurity):
@@ -948,10 +950,8 @@ def auth_status(request: Request) -> ApiMessage:
             "enabled": True,
             "authenticated": authenticated,
             "mode": "server",
-            "login_available": isinstance(
-                getattr(request.app.state, "server_oidc_login", None),
-                OidcLoginService,
-            ),
+            "login_available": oidc_enabled,
+            "issuer": oidc_login.settings.issuer if oidc_enabled else None,
             "organization_id": actor.organization_id if actor is not None else None,
             "user_id": actor.user_id if actor is not None else None,
         },
