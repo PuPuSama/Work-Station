@@ -343,14 +343,14 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                 422,
             )
 
-            granted = client.put(path, json={"role": "viewer"})
+            granted = client.put(path, json={"role": "editor"})
             self.assertEqual(granted.status_code, 200, granted.text)
             self.assertEqual(
                 granted.json(),
-                {"user_id": self.target_a, "role": "viewer"},
+                {"user_id": self.target_a, "role": "editor"},
             )
-            self.assertEqual(self._role(self.target_a), "viewer")
-            self.assertEqual(audit.events[-1].details, {"role": "viewer"})
+            self.assertEqual(self._role(self.target_a), "editor")
+            self.assertEqual(audit.events[-1].details, {"role": "editor"})
 
             client.cookies.set(
                 SERVER_AUTH_COOKIE_NAME,
@@ -360,7 +360,7 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                 client.put(path, json={"role": "editor"}).status_code,
                 403,
             )
-            self.assertEqual(self._role(self.target_a), "viewer")
+            self.assertEqual(self._role(self.target_a), "editor")
 
             client.cookies.set(
                 SERVER_AUTH_COOKIE_NAME,
@@ -371,7 +371,7 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                     f"/api/projects/{self.project_b}/members/"
                     f"{self.admin_b}"
                 ),
-                json={"role": "viewer"},
+                json={"role": "editor"},
             )
             self.assertEqual(cross_project.status_code, 403)
             unavailable_target = client.put(
@@ -379,7 +379,7 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/members/"
                     f"{self.admin_b}"
                 ),
-                json={"role": "viewer"},
+                json={"role": "editor"},
             )
             self.assertEqual(unavailable_target.status_code, 404)
 
@@ -500,7 +500,7 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/members/"
                     f"{self.target_a}"
                 ),
-                json={"role": "viewer"},
+                json={"role": "editor"},
             )
             self.assertEqual(granted.status_code, 200, granted.text)
             refreshed = client.get(path)
@@ -731,7 +731,7 @@ class ProjectMembershipHttpTests(unittest.TestCase):
                     f"/api/projects/{self.project_a}/members/"
                     f"{self.target_a}"
                 ),
-                json={"role": "reviewer"},
+                json={"role": "editor"},
             )
             self.assertEqual(response.status_code, 503)
             self.assertNotIn(PRIVATE_AUDIT_ERROR, response.text)

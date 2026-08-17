@@ -323,17 +323,21 @@ class TeamAdministrationHttpTests(unittest.TestCase):
                     json={
                         "team_id": new_team_id,
                         "name": "Duplicate",
+                        "manager_user_id": self.member_a,
                     },
                 ).status_code,
                 409,
             )
             updated = client.patch(
                 f"{path}/{new_team_id}",
-                json={"name": "Renamed Team", "manager_user_id": None},
+                json={"name": "Renamed Team"},
             )
             self.assertEqual(updated.status_code, 200, updated.text)
             self.assertEqual(updated.json()["name"], "Renamed Team")
-            self.assertIsNone(updated.json()["manager_user_id"])
+            self.assertEqual(
+                updated.json()["manager_user_id"],
+                self.member_a,
+            )
             self.assertEqual(
                 [event.action for event in audit.events],
                 ["team.created", "team.updated"],
@@ -396,17 +400,21 @@ class TeamAdministrationHttpTests(unittest.TestCase):
                 404,
             )
 
-            granted = client.put(
-                f"{base}/{self.member_a}",
-                json={"role": "team_lead"},
+            transferred = client.patch(
+                f"/api/organizations/{self.org_a}/teams/{self.team_a}",
+                json={"manager_user_id": self.member_a},
             )
-            self.assertEqual(granted.status_code, 200, granted.text)
+            self.assertEqual(transferred.status_code, 200, transferred.text)
             self.assertEqual(self._member_role(self.member_a), "team_lead")
-            changed = client.put(
-                f"{base}/{self.member_a}",
-                json={"role": "member"},
+            transferred_back = client.patch(
+                f"/api/organizations/{self.org_a}/teams/{self.team_a}",
+                json={"manager_user_id": self.lead_a},
             )
-            self.assertEqual(changed.status_code, 200, changed.text)
+            self.assertEqual(
+                transferred_back.status_code,
+                200,
+                transferred_back.text,
+            )
             self.assertEqual(self._member_role(self.member_a), "member")
 
             archived = client.patch(
@@ -429,8 +437,8 @@ class TeamAdministrationHttpTests(unittest.TestCase):
             self.assertEqual(
                 [event.action for event in audit.events],
                 [
-                    "team.membership.granted",
-                    "team.membership.updated",
+                    "team.updated",
+                    "team.updated",
                     "team.updated",
                     "team.membership.revoked",
                 ],
@@ -469,6 +477,16 @@ class TeamAdministrationHttpTests(unittest.TestCase):
             )
 
     def test_audit_failure_rolls_back_team_and_membership(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(
+                team_memberships.update()
+                .where(
+                    team_memberships.c.organization_id == self.org_a,
+                    team_memberships.c.team_id == self.team_a,
+                    team_memberships.c.user_id == self.lead_a,
+                )
+                .values(role="member")
+            )
         client, previous = self._client(
             PostgresTeamAdministrationService(
                 self.engine,

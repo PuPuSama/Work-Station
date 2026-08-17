@@ -255,7 +255,7 @@ class ServerProjectMetadataTests(unittest.TestCase):
                 actor=self.admin,
                 customer_name="Duplicate",
                 official_domain=self.new_project_id,
-                owning_team_id=None,
+                owning_team_id=self.team_id,
                 event_id=f"duplicate-{uuid.uuid4().hex}",
             )
         with self.assertRaises(ProjectAccessDenied):
@@ -382,10 +382,10 @@ class ServerProjectMetadataTests(unittest.TestCase):
         with self.assertRaises(ProjectAccessDenied):
             self.service.update(
                 actor=self.editor,
-                project_id=self.project_id,
+                project_id=self.other_project_id,
                 expected_revision=0,
                 customer_name="Forbidden",
-                official_domain=self.project_id,
+                official_domain=self.other_project_id,
                 project_notes="",
             )
         with self.assertRaises(ProjectAccessDenied):

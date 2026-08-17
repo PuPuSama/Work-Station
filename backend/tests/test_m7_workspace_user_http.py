@@ -398,7 +398,10 @@ class WorkspaceUserHttpTests(unittest.TestCase):
             )
             demoted = client.patch(
                 f"{base}/{self.admin_a}",
-                json={"organization_role": "member"},
+                json={
+                    "organization_role": "member",
+                    "team_id": self.team_a,
+                },
             )
             self.assertEqual(demoted.status_code, 200, demoted.text)
             client.cookies.set(

@@ -1369,12 +1369,17 @@ def create_project(
     except (ProjectDirectoryDenied, StopIteration, HTTPException):
         # Keep the creation response useful in focused service tests where
         # only the metadata dependency is installed.
+        fallback_role = (
+            "editor"
+            if metadata.owner_user_id == actor.user_id
+            else "org_admin"
+        )
         return AccessibleProject(
             project_id=metadata.project_id,
             customer_name=metadata.customer_name,
             official_domain=metadata.official_domain,
             revision=metadata.revision,
-            effective_role="editor",
+            effective_role=fallback_role,
             owning_team_id=metadata.owning_team_id,
             owner_user_id=metadata.owner_user_id,
             is_project_owner=metadata.owner_user_id == actor.user_id,

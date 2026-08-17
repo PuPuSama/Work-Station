@@ -656,7 +656,7 @@ class PostgresWorkspaceInvitationService:
                 else:
                     # New-account invitations cannot attach an already-linked
                     # identity to a second workspace.
-                    user_id = f"usr_{hashlib.sha256((identity.issuer + '\\n' + identity.subject).encode('utf-8')).hexdigest()[:32]}"
+                    user_id = f"usr_{hashlib.sha256((identity.issuer + '\n' + identity.subject).encode('utf-8')).hexdigest()[:32]}"
                     display_name = identity.subject[:200] or user_id
                     try:
                         connection.execute(

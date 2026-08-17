@@ -9,6 +9,7 @@ from sqlalchemy.engine import Engine
 from knowledge_agent.schema import projects
 from server_schema import (
     organizations,
+    project_memberships,
     project_ownership,
     team_memberships,
     teams,
@@ -56,6 +57,9 @@ class PostgresProjectDirectory:
         owning_team_membership = team_memberships.alias(
             "directory_owning_team_membership"
         )
+        explicit_project_membership = project_memberships.alias(
+            "directory_explicit_project_membership"
+        )
         with self._engine.connect() as connection:
             actor_role = connection.execute(
                 sa.select(workspace_users.c.organization_role)
@@ -89,7 +93,7 @@ class PostgresProjectDirectory:
                         project_ownership.c.owner_user_id == actor.user_id
                     ).label("is_project_owner"),
                     owning_team_membership.c.role.label("team_role"),
-                    sa.null().label("project_role"),
+                    explicit_project_membership.c.role.label("project_role"),
                 )
                 .select_from(
                     project_ownership.join(
@@ -118,6 +122,18 @@ class PostgresProjectDirectory:
                             == actor.user_id,
                         ),
                     )
+                    .outerjoin(
+                        explicit_project_membership,
+                        sa.and_(
+                            explicit_project_membership.c.organization_id
+                            == project_ownership.c.organization_id,
+                            explicit_project_membership.c.project_id
+                            == project_ownership.c.project_id,
+                            explicit_project_membership.c.user_id
+                            == actor.user_id,
+                            project_ownership.c.owner_user_id.is_(None),
+                        ),
+                    )
                 )
                 .where(
                     project_ownership.c.organization_id
@@ -127,6 +143,7 @@ class PostgresProjectDirectory:
                         actor_role == "org_admin",
                         owning_team_membership.c.role == "team_lead",
                         project_ownership.c.owner_user_id == actor.user_id,
+                        explicit_project_membership.c.role.is_not(None),
                     ),
                 )
                 .order_by(
