@@ -780,6 +780,20 @@ class PromptTemplateTests(unittest.TestCase):
             prompt,
         )
 
+    def test_outline_and_article_prompts_require_every_confirmed_product(self):
+        for prompt_name in (
+            "outline",
+            "outline_custom",
+            "article",
+            "article_custom",
+        ):
+            with self.subTest(prompt_name=prompt_name):
+                prompt = load_prompt_template(prompt_name)
+                self.assertIn("every confirmed product", prompt)
+                self.assertIn("not merely a subset", prompt)
+                self.assertIn("Do not omit any confirmed product", prompt)
+                self.assertIn("official URL at least once", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
