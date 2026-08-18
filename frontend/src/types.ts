@@ -376,6 +376,7 @@ export type TaskRecord = {
   source_links?: ArticleLink[];
   link_validation?: LinkValidation;
   product_candidate_ids?: string[];
+  product_candidate_reasons?: Record<string, string>;
   products: Product[];
   hero_image?: string;
   images?: ArticleImage[];

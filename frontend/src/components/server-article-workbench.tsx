@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -186,10 +187,6 @@ function taskProductIds(task: TaskRecord) {
   );
 }
 
-function productSelectionKey(productIds: string[]) {
-  return JSON.stringify([...productIds].sort());
-}
-
 export function ServerArticleWorkbench({
   customer,
   taskId,
@@ -199,6 +196,7 @@ export function ServerArticleWorkbench({
   taskId: string;
   initialStep?: string;
 }) {
+  const router = useRouter();
   const [task, setTask] = useState<TaskRecord | null>(null);
   const [catalog, setCatalog] = useState<ServerProjectCatalog | null>(null);
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(
@@ -212,9 +210,6 @@ export function ServerArticleWorkbench({
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
-  const [productSelectionConflict, setProductSelectionConflict] =
-    useState(false);
   const [outlineDraft, setOutlineDraft] = useState("");
   const [humanizedDraft, setHumanizedDraft] = useState("");
   const [initialScore, setInitialScore] = useState("");
@@ -238,12 +233,11 @@ export function ServerArticleWorkbench({
   const preserveDraftsForRevisionRef = useRef<number | null>(null);
   const recommendedTaskIdRef = useRef("");
   const loadRequestRef = useRef(0);
-  const productBaselineRef = useRef<string | null>(null);
-  const productDraftIdsRef = useRef<string[]>([]);
   const finalScreenshotInputRef = useRef<HTMLInputElement>(null);
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
   const taskApi = `${projectApi}/tasks/${encodeURIComponent(taskId)}`;
+  const productSelectionHref = `/projects/${encodeURIComponent(customer)}/articles/${encodeURIComponent(taskId)}/products`;
   const workbenchScope = `${customer}\n${taskId}`;
   const activeWorkbenchScopeRef = useRef("");
 
@@ -280,7 +274,7 @@ export function ServerArticleWorkbench({
       ]);
       const imageProductIds = taskProductIds(nextTask).join(",");
       const nextCatalog = await apiGet<ServerProjectCatalog>(
-        `${projectApi}/catalog?image_limit=100&image_product_ids=${encodeURIComponent(imageProductIds)}`,
+        `${projectApi}/catalog?product_limit=200&image_limit=100&image_product_ids=${encodeURIComponent(imageProductIds)}`,
       );
       if (
         activeWorkbenchScopeRef.current !== requestScope ||
@@ -317,10 +311,6 @@ export function ServerArticleWorkbench({
     setTask(null);
     setIsProjectOwner(false);
     setFinalScreenshot(null);
-    setSelectedProductIds([]);
-    productDraftIdsRef.current = [];
-    productBaselineRef.current = null;
-    setProductSelectionConflict(false);
     setPending("");
     setMessage("");
     setWritingSettingsDirty(false);
@@ -336,25 +326,6 @@ export function ServerArticleWorkbench({
     const preserveDrafts =
       preserveDraftsForRevisionRef.current === (task.revision ?? 0);
     preserveDraftsForRevisionRef.current = null;
-    const officialProductIds = taskProductIds(task);
-    const nextProductBaseline = productSelectionKey(officialProductIds);
-    const previousProductBaseline = productBaselineRef.current;
-    const currentProductDraft = productDraftIdsRef.current;
-    const currentProductDraftKey = productSelectionKey(currentProductDraft);
-    const productDraftWasDirty =
-      previousProductBaseline !== null &&
-      currentProductDraftKey !== previousProductBaseline;
-    if (
-      !productDraftWasDirty ||
-      currentProductDraftKey === nextProductBaseline
-    ) {
-      productDraftIdsRef.current = officialProductIds;
-      setSelectedProductIds(officialProductIds);
-      setProductSelectionConflict(false);
-    } else if (previousProductBaseline !== nextProductBaseline) {
-      setProductSelectionConflict(true);
-    }
-    productBaselineRef.current = nextProductBaseline;
     if (!preserveDrafts) {
       setOutlineDraft(task.outline_draft || task.outline || "");
       setHumanizedDraft(task.humanized_article || task.initial_article || "");
@@ -473,8 +444,8 @@ export function ServerArticleWorkbench({
     endpoint: string,
     payload: Record<string, unknown> = {},
     successMessage = `${label}完成，已读取最新 Task Revision。`,
-  ) {
-    if (!task) return;
+  ): Promise<boolean> {
+    if (!task) return false;
     const jobScope = workbenchScope;
     if (
       (writingSettingsDirty || writingSettingsPromptBlocked) &&
@@ -488,9 +459,9 @@ export function ServerArticleWorkbench({
           ? "写作要求有未保存修改，请先在“内容准备”中保存，再开始生成。"
           : "写作要求中的 Prompt 尚未通过可用性检查，请先返回“内容准备”处理。",
       );
-      return;
+      return false;
     }
-    await runAction(
+    return runAction(
       label,
       async () => {
         const queued = await apiPost<ServerProjectJob>(`${taskApi}/${endpoint}`, {
@@ -518,6 +489,16 @@ export function ServerArticleWorkbench({
       },
       successMessage,
     );
+  }
+
+  async function recommendProducts() {
+    const completed = await runJob(
+      "推荐产品",
+      "products",
+      {},
+      "产品推荐已完成，正在打开选择页。",
+    );
+    if (completed) router.push(productSelectionHref);
   }
 
   async function uploadScreenshot(kind: "initial" | "final", file: File) {
@@ -577,39 +558,16 @@ export function ServerArticleWorkbench({
       ),
     );
   }, [confirmedProducts, task?.product_candidate_ids]);
-  const productSelectionDirty =
-    task !== null &&
-    productSelectionKey(selectedProductIds) !==
-    productSelectionKey(taskProductIds(task));
+  const recommendedProducts = useMemo(
+    () =>
+      confirmedProducts.filter((product) =>
+        recommendedProductIds.has(product.product_id),
+      ),
+    [confirmedProducts, recommendedProductIds],
+  );
   const humanizedDirty = Boolean(
     task && humanizedDraft.trim() !== (task.humanized_article || "").trim(),
   );
-
-  function resetProductDraftToServer() {
-    if (!task) return;
-    const officialProductIds = taskProductIds(task);
-    productDraftIdsRef.current = officialProductIds;
-    productBaselineRef.current = productSelectionKey(officialProductIds);
-    setSelectedProductIds(officialProductIds);
-    setProductSelectionConflict(false);
-  }
-
-  async function saveProductSelection(payload: {
-    revision: number;
-    product_ids: string[];
-  }) {
-    const updated = await apiPut<TaskRecord>(
-      `${taskApi}/products`,
-      payload,
-    );
-    const officialProductIds = taskProductIds(updated);
-    productDraftIdsRef.current = officialProductIds;
-    productBaselineRef.current = productSelectionKey(officialProductIds);
-    setSelectedProductIds(officialProductIds);
-    setProductSelectionConflict(false);
-    setTask(updated);
-    return updated;
-  }
 
   const allowed = new Set(task?.allowed_actions || []);
   const editAllowed = canEdit(role, isProjectOwner);
@@ -857,148 +815,82 @@ export function ServerArticleWorkbench({
 
             <Card>
               <CardHeader className="border-b">
-                <CardTitle>正式产品选择</CardTitle>
+                <CardTitle>产品推荐与选择</CardTitle>
                 <CardDescription>
-                  只列出 Server Knowledge Library 中 confirmed 产品；保存时只提交最多
-                  3 个 Product ID。
+                  AI 从全部 confirmed 产品中推荐最多 3 个；手动调整在独立页面完成。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-3">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="min-h-11"
-                  disabled={
-                    Boolean(pending) ||
-                    !editAllowed ||
-                    !allowed.has("generate_products") ||
-                    !confirmedProducts.length ||
-                    productSelectionDirty ||
-                    productSelectionConflict
-                  }
-                  onClick={() => void runJob("生成产品候选", "products")}
-                >
-                  {pending === "生成产品候选" ? (
-                    <Loader2 className="animate-spin" />
-                  ) : (
-                    <Sparkles />
-                  )}
-                  {recommendedProductIds.size
-                    ? "重新生成产品候选"
-                    : "生成产品候选"}
-                </Button>
-                {recommendedProductIds.size > 0 && (
-                  <p className="text-sm text-muted-foreground">
-                    已生成 {recommendedProductIds.size}
-                    个当前目录内的推荐；点击勾选只修改本地草稿，仍需显式保存。
-                  </p>
-                )}
-                {productSelectionConflict && (
-                  <Alert variant="destructive">
-                    <AlertCircle />
-                    <AlertTitle>服务器产品选择已变化</AlertTitle>
-                    <AlertDescription className="grid gap-3">
-                      <span>
-                        本地未保存选择未被覆盖。请先载入最新服务器选择，再重新勾选并保存。
-                      </span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="w-fit"
-                        disabled={Boolean(pending)}
-                        onClick={resetProductDraftToServer}
-                      >
-                        载入服务器选择
-                      </Button>
-                    </AlertDescription>
-                  </Alert>
-                )}
-                {!productSelectionConflict && productSelectionDirty && (
-                  <Alert>
-                    <AlertCircle />
-                    <AlertTitle>产品选择尚未保存</AlertTitle>
-                    <AlertDescription>
-                      生成新候选已暂停；保存或还原当前选择后可继续。
-                    </AlertDescription>
-                  </Alert>
-                )}
-                {confirmedProducts.length ? (
-                  confirmedProducts.map((product) => {
-                    const checked = selectedProductIds.includes(
-                      product.product_id,
-                    );
-                    const recommended = recommendedProductIds.has(
-                      product.product_id,
-                    );
-                    return (
-                      <label
+              <CardContent className="grid gap-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="min-h-11"
+                    disabled={
+                      Boolean(pending) ||
+                      !editAllowed ||
+                      !allowed.has("generate_products") ||
+                      !confirmedProducts.length
+                    }
+                    onClick={() => void recommendProducts()}
+                  >
+                    {pending === "推荐产品" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Sparkles />
+                    )}
+                    {recommendedProductIds.size ? "重新推荐产品" : "推荐产品"}
+                  </Button>
+                  <Button
+                    nativeButton={false}
+                    variant="outline"
+                    className="min-h-11"
+                    render={<Link href={productSelectionHref} />}
+                  >
+                    <FileCheck2 />
+                    手动选择产品
+                  </Button>
+                </div>
+
+                {recommendedProducts.length ? (
+                  <div className="grid gap-2">
+                    <p className="text-sm font-medium">
+                      已推荐 {recommendedProducts.length} 个产品
+                    </p>
+                    {recommendedProducts.map((product) => (
+                      <div
                         key={product.product_id}
-                        className="flex min-h-14 cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 transition-colors hover:bg-accent/40"
+                        className="rounded-lg border bg-accent/25 px-3 py-3"
                       >
-                        <input
-                          type="checkbox"
-                          className="mt-1 size-4"
-                          checked={checked}
-                          disabled={
-                            Boolean(pending) ||
-                            !editAllowed ||
-                            productSelectionConflict ||
-                            (!checked && selectedProductIds.length >= 3)
-                          }
-                          onChange={() =>
-                            setSelectedProductIds((current) => {
-                              const next = checked
-                                ? current.filter(
-                                    (value) => value !== product.product_id,
-                                  )
-                                : [...current, product.product_id];
-                              productDraftIdsRef.current = next;
-                              return next;
-                            })
-                          }
-                        />
-                        <span className="min-w-0">
-                          <span className="flex flex-wrap items-center gap-2 font-medium">
-                            {product.name}
-                            {recommended && (
-                              <Badge variant="secondary">AI 推荐</Badge>
-                            )}
-                          </span>
-                          <span className="mt-1 block break-all font-mono text-xs text-muted-foreground">
-                            {product.product_id}
-                          </span>
-                        </span>
-                      </label>
-                    );
-                  })
+                        <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                          {product.name}
+                          <Badge variant="secondary">AI 推荐</Badge>
+                        </div>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                          {task.product_candidate_reasons?.[product.product_id] ||
+                            "该候选来自旧版推荐，请重新推荐以生成具体理由。"}
+                        </p>
+                      </div>
+                    ))}
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      推荐结果已自动带入选择页并勾选；进入后可调整并显式保存。
+                    </p>
+                  </div>
+                ) : confirmedProducts.length ? (
+                  <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+                    尚未生成推荐。也可以直接进入手动选择页。
+                  </p>
                 ) : (
                   <p className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
                     当前知识库没有已确认产品。请先在正式知识库完成产品确认。
                   </p>
                 )}
-                <Button
-                  type="button"
-                  className="min-h-11"
-                  disabled={
-                    Boolean(pending) ||
-                    !editAllowed ||
-                    !allowed.has("update_products") ||
-                    productSelectionConflict ||
-                    selectedProductIds.length < 1
-                  }
-                  onClick={() =>
-                    void runAction("保存产品选择", () =>
-                      saveProductSelection({
-                        revision: task.revision ?? 0,
-                        product_ids: selectedProductIds,
-                      }),
-                    )
-                  }
-                >
-                  <FileCheck2 />
-                  保存 {selectedProductIds.length} 个产品
-                </Button>
+
+                {task.products.length > 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    当前已保存 {task.products.length} 个产品；重新推荐不会直接覆盖它们。
+                  </p>
+                )}
               </CardContent>
             </Card>
 
