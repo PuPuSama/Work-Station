@@ -68,8 +68,6 @@ from workflow.state_machine import (
 
 PRODUCT_GENERATION_OPERATION = "products"
 MAX_PRODUCT_CANDIDATES = 3
-MAX_PRODUCT_POOL = 100
-MAX_PRODUCT_CONTEXT_CHARACTERS = 60_000
 
 
 class ProductGenerationUnavailable(RuntimeError):
@@ -141,7 +139,7 @@ class ProductEvidenceBinding:
 
 @dataclass(frozen=True, slots=True)
 class ProductGenerationProduct:
-    """Bounded published projection supplied to the selection provider."""
+    """Published product data retained for selection and ID validation."""
 
     binding: ProductEvidenceBinding
     name: str
@@ -149,14 +147,43 @@ class ProductGenerationProduct:
     category_path: tuple[str, ...]
     reference_facts: tuple[str, ...]
 
-    def prompt_values(self) -> dict[str, object]:
-        return {
+    def recommendation_values(
+        self,
+        *,
+        summary_maximum: int,
+        category_maximum: int,
+        fact_count: int,
+        fact_maximum: int,
+    ) -> dict[str, object]:
+        """Return a compact catalog row without evidence/source identities."""
+
+        values: dict[str, object] = {
             "product_id": self.binding.product_id,
-            "name": self.name,
-            "description": self.description,
-            "category_path": list(self.category_path),
-            "reference_facts": list(self.reference_facts),
+            "name": _display_text(self.name, maximum=160),
         }
+        category = _display_text(
+            " > ".join(self.category_path),
+            maximum=category_maximum,
+        )
+        if category:
+            values["category"] = category
+        summary = _display_text(
+            self.description,
+            maximum=summary_maximum,
+        )
+        if summary:
+            values["summary"] = summary
+        key_facts = [
+            text
+            for text in (
+                _display_text(value, maximum=fact_maximum)
+                for value in self.reference_facts[:fact_count]
+            )
+            if text
+        ]
+        if key_facts:
+            values["key_facts"] = key_facts
+        return values
 
 
 def _display_text(value: object, *, maximum: int) -> str:
@@ -319,10 +346,6 @@ class PostgresProductGenerationContext:
                 category_path=category_path,
                 reference_facts=_reference_facts(projection),
             )
-            if len(selected) > MAX_PRODUCT_POOL:
-                raise ProductGenerationUnavailable(
-                    "product candidate pool exceeds the safe limit"
-                )
         if not selected:
             raise ProductGenerationUnavailable(
                 "no selectable published products are available"
@@ -466,28 +489,49 @@ def build_server_product_prompt(
     *,
     products: Sequence[ProductGenerationProduct],
 ) -> str:
-    """Render only bounded Server Task data and published product context."""
+    """Render every eligible product as a compact catalog for one LLM call."""
+
+    if not products:
+        raise ProductGenerationUnavailable(
+            "no selectable published products are available"
+        )
+    product_ids = [product.binding.product_id for product in products]
+    if (
+        any(not product_id for product_id in product_ids)
+        or len(set(product_ids)) != len(product_ids)
+    ):
+        raise ProductGenerationUnavailable("product catalog identity is invalid")
 
     context_json = json.dumps(
-        [product.prompt_values() for product in products],
+        [
+            product.recommendation_values(
+                summary_maximum=320,
+                category_maximum=240,
+                fact_count=3,
+                fact_maximum=160,
+            )
+            for product in products
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    if len(context_json) > MAX_PRODUCT_CONTEXT_CHARACTERS:
-        raise ProductGenerationUnavailable(
-            "product candidate context exceeds the safe limit"
+
+    try:
+        return render_prompt(
+            "products",
+            TOPIC=task.topic,
+            SELECTED_TITLE=task.selected_title,
+            PRIMARY_KEYWORD=primary_keyword(task),
+            PROJECT_NOTES=generation_context_value(
+                task.project_notes,
+                task.include_project_notes,
+            ),
+            PRODUCT_CONTEXT=context_json,
         )
-    return render_prompt(
-        "products",
-        TOPIC=task.topic,
-        SELECTED_TITLE=task.selected_title,
-        PRIMARY_KEYWORD=primary_keyword(task),
-        PROJECT_NOTES=generation_context_value(
-            task.project_notes,
-            task.include_project_notes,
-        ),
-        PRODUCT_CONTEXT=context_json,
-    )
+    except Exception as exc:
+        raise ProductGenerationUnavailable(
+            "product recommendation prompt is unavailable"
+        ) from exc
 
 
 def _parse_provider_product_ids(raw: str) -> tuple[str, ...]:
@@ -565,8 +609,8 @@ class LlmServerProductProvider:
             raise ProductGenerationUnavailable(
                 "product provider is not configured"
             )
+        prompt = build_server_product_prompt(task, products=products)
         try:
-            prompt = build_server_product_prompt(task, products=products)
             raw = self._llm.chat(
                 [
                     {
@@ -664,9 +708,7 @@ class ServerProductGenerationHandler:
             for value in raw_bindings
         )
         if (
-            len(bindings) > MAX_PRODUCT_POOL
-            or len({binding.product_id for binding in bindings})
-            != len(bindings)
+            len({binding.product_id for binding in bindings}) != len(bindings)
         ):
             raise JobConflict("product evidence identity is invalid")
         if cancelled():
@@ -1100,7 +1142,6 @@ class ServerProductGenerationRegistry:
 __all__ = [
     "LlmServerProductProvider",
     "MAX_PRODUCT_CANDIDATES",
-    "MAX_PRODUCT_POOL",
     "PRODUCT_GENERATION_OPERATION",
     "PostgresProductGenerationContext",
     "ProductEvidenceBinding",
