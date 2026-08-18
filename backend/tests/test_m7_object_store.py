@@ -6,6 +6,7 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from botocore.exceptions import ClientError
 
@@ -262,6 +263,38 @@ class ObjectStoreTests(unittest.TestCase):
                 access_key_id="only-access-key",
             )
 
+    def test_internal_endpoint_separates_data_and_download_clients(self) -> None:
+        data_client = FakeS3Client()
+        download_client = FakeS3Client()
+        settings = S3ObjectStoreSettings(
+            bucket="article-agent-private",
+            endpoint_url="https://objects.example.test",
+            internal_endpoint_url="http://object-store:9000",
+            access_key_id="test-access",
+            secret_access_key="test-secret",
+        )
+
+        with patch(
+            "services.object_store.boto3.client",
+            side_effect=(data_client, download_client),
+        ) as client_factory:
+            store = S3ObjectStore(settings)
+
+        self.assertEqual(
+            [call.kwargs["endpoint_url"] for call in client_factory.call_args_list],
+            ["http://object-store:9000", "https://objects.example.test"],
+        )
+        store.head("scope/private-object")
+        signed = store.create_download_url(
+            "scope/private-object",
+            expires_seconds=300,
+        )
+
+        self.assertEqual(len(data_client.head_calls), 1)
+        self.assertEqual(data_client.presign_calls, [])
+        self.assertEqual(len(download_client.presign_calls), 1)
+        self.assertTrue(signed.startswith("https://signed.example.test/"))
+
     def test_download_url_supports_safe_response_header_overrides(self) -> None:
         url = self.store.create_download_url(
             "private-key",
@@ -359,6 +392,10 @@ class ObjectStoreTests(unittest.TestCase):
     def test_settings_hide_secrets_and_do_not_reuse_other_keys(self) -> None:
         environment = {
             "ARTICLE_AGENT_OBJECT_STORE_BUCKET": "private-bucket",
+            "ARTICLE_AGENT_OBJECT_STORE_ENDPOINT": "https://objects.example.test",
+            "ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT": (
+                "http://object-store:9000"
+            ),
             "ARTICLE_AGENT_OBJECT_STORE_ACCESS_KEY": "object-access",
             "ARTICLE_AGENT_OBJECT_STORE_SECRET_KEY": "unique-object-secret",
             "LLM_API_KEY": "llm-secret",
@@ -368,6 +405,10 @@ class ObjectStoreTests(unittest.TestCase):
 
         self.assertEqual(settings.access_key_id, "object-access")
         self.assertEqual(settings.secret_access_key, "unique-object-secret")
+        self.assertEqual(
+            settings.internal_endpoint_url,
+            "http://object-store:9000",
+        )
         self.assertNotIn("unique-object-secret", repr(settings))
         self.assertNotIn("object-access", repr(settings))
         self.assertEqual(
@@ -397,6 +438,11 @@ class ObjectStoreTests(unittest.TestCase):
                         bucket="private-bucket",
                         endpoint_url=endpoint,
                     )
+        with self.assertRaisesRegex(ValueError, "endpoint_url is required"):
+            S3ObjectStoreSettings(
+                bucket="private-bucket",
+                internal_endpoint_url="http://object-store:9000",
+            )
 
     def test_metadata_rejects_non_ascii_provider_headers(self) -> None:
         with self.assertRaisesRegex(ValueError, "ASCII"):
