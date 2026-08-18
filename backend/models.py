@@ -391,6 +391,7 @@ class TaskRecord(WorkflowModel):
     final_article_hash: str = ""
 
     product_candidate_ids: list[str] = Field(default_factory=list)
+    product_candidate_reasons: dict[str, str] = Field(default_factory=dict)
     products: list[Product] = Field(default_factory=list)
     official_links: list[OfficialLink] = Field(default_factory=list)
     hero_image: str = ""

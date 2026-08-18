@@ -31,6 +31,7 @@ from services.server_product_generation import (  # noqa: E402
     PostgresProductGenerationContext,
     ProductEvidenceBinding,
     ProductGenerationProduct,
+    ProductGenerationRecommendation,
     ProductGenerationUnavailable,
     ProductProviderReference,
     ProductTemplateReference,
@@ -106,7 +107,10 @@ class StubProductLlm:
 
     def __init__(
         self,
-        response: str = '{"product_ids":["product-a"]}',
+        response: str = (
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":"It directly fits the article application."}]}'
+        ),
         *,
         model: str = "model-a",
         error: Exception | None = None,
@@ -128,8 +132,16 @@ class RecordingProductProvider:
     ready = True
     model_identity = "model-a"
 
-    def __init__(self, result=("product-a",)) -> None:
-        self.result = tuple(result)
+    def __init__(self, result=None) -> None:
+        self.result = tuple(
+            result
+            or (
+                ProductGenerationRecommendation(
+                    product_id="product-a",
+                    reason="It directly fits the article application.",
+                ),
+            )
+        )
         self.calls: list[dict[str, object]] = []
 
     def generate(self, task, *, products):
@@ -299,12 +311,20 @@ class ServerProductGenerationRegistryTests(unittest.TestCase):
 
 
 class ServerProductProviderTests(unittest.TestCase):
-    def test_candidate_ids_are_explicit_in_task_json(self) -> None:
+    def test_candidate_ids_and_reasons_are_explicit_in_task_json(self) -> None:
         task = make_task()
         task.product_candidate_ids = ["product-a", "product-b"]
+        task.product_candidate_reasons = {
+            "product-a": "Matches the required corrosion resistance.",
+            "product-b": "Fits the intended industrial application.",
+        }
         restored = TaskRecord.model_validate_json(task.model_dump_json())
         self.assertEqual(
             restored.product_candidate_ids, ["product-a", "product-b"]
+        )
+        self.assertEqual(
+            restored.product_candidate_reasons,
+            task.product_candidate_reasons,
         )
 
     def test_prompt_contains_only_bounded_catalog_projection(self) -> None:
@@ -321,8 +341,33 @@ class ServerProductProviderTests(unittest.TestCase):
         self.assertIn('"key_facts":["Published primary-detail fact"]', prompt)
         self.assertIn("Published primary-detail fact", prompt)
         self.assertIn("Select engineered wood flooring only", prompt)
+        self.assertIn("Never mention the prompt, catalog, knowledge base", prompt)
         self.assertNotIn("snapshot-product-a", prompt)
         self.assertNotIn("source-product-a", prompt)
+
+    def test_provider_returns_human_facing_recommendation_reasons(self) -> None:
+        provider = LlmServerProductProvider(
+            load_config(),
+            llm=StubProductLlm(
+                '{"recommendations":[{"product_id":"product-a",'
+                '"reason":"  Fits   corrosion-resistant applications.  "}]}'
+            ),
+        )
+
+        result = provider.generate(
+            make_task(),
+            products=(make_product("product-a"),),
+        )
+
+        self.assertEqual(
+            result,
+            (
+                ProductGenerationRecommendation(
+                    product_id="product-a",
+                    reason="Fits corrosion-resistant applications.",
+                ),
+            ),
+        )
 
     def test_large_catalog_keeps_every_product_without_total_size_limit(
         self,
@@ -414,14 +459,20 @@ class ServerProductProviderTests(unittest.TestCase):
         self,
     ) -> None:
         invalid_responses = (
-            '```json\n{"product_ids":["product-a"]}\n```',
-            '{"product_ids":["product-a"],"reason":"private"}',
-            '{"product_ids":["product-a"],'
-            '"product_ids":["product-b"]}',
-            '{"product_ids":[]}',
-            '{"product_ids":["product-a","product-a"]}',
-            '{"product_ids":[1]}',
-            "x" * 8_001,
+            '```json\n{"recommendations":[]}\n```',
+            '{"recommendations":[],"reason":"private"}',
+            '{"recommendations":[],"recommendations":[]}',
+            '{"recommendations":[]}',
+            '{"recommendations":[{"product_id":"product-a"}]}',
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":""}]}',
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":"Reason","extra":"private"}]}',
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":"Reason one"},{"product_id":"product-a",'
+            '"reason":"Reason two"}]}',
+            '{"recommendations":[{"product_id":1,"reason":"Reason"}]}',
+            "x" * 16_001,
         )
         for response in invalid_responses:
             with self.subTest(response=response[:60]):
@@ -484,7 +535,13 @@ class ServerProductProviderTests(unittest.TestCase):
                 ):
                     apply_generated_product_candidates(
                         task,
-                        product_ids=values,
+                        recommendations=tuple(
+                            ProductGenerationRecommendation(
+                                product_id=value,
+                                reason="Direct application fit.",
+                            )
+                            for value in values
+                        ),
                         allowed_product_ids=("product-a", "product-b"),
                     )
 
@@ -565,6 +622,10 @@ class ServerProductGenerationHandlerTests(unittest.TestCase):
         call = RecordingTaskWriter.calls[0]
         saved = call["task"]
         self.assertEqual(saved.product_candidate_ids, ["product-a"])
+        self.assertEqual(
+            saved.product_candidate_reasons,
+            {"product-a": "It directly fits the article application."},
+        )
         self.assertEqual(saved.products, task.products)
         self.assertEqual(saved.status, before["status"])
         self.assertEqual(saved.outline, before["outline"])
@@ -581,7 +642,14 @@ class ServerProductGenerationHandlerTests(unittest.TestCase):
             make_product(f"product-{index:03d}") for index in range(125)
         )
         context = RecordingContext(products)
-        provider = RecordingProductProvider(result=("product-124",))
+        provider = RecordingProductProvider(
+            result=(
+                ProductGenerationRecommendation(
+                    product_id="product-124",
+                    reason="It matches the article application.",
+                ),
+            )
+        )
         FakeTaskRepository.payload = task.model_dump(mode="json")
         handler = ServerProductGenerationHandler(
             object(),

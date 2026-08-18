@@ -2783,6 +2783,34 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     422,
                 )
 
+                recommendation_reason = (
+                    "Matches the article's corrosion-resistant fastening "
+                    "application."
+                )
+                with self.engine.begin() as connection:
+                    task_payload = dict(
+                        connection.execute(
+                            sa.select(article_tasks.c.payload).where(
+                                article_tasks.c.organization_id == self.org_a,
+                                article_tasks.c.project_id == self.project_a,
+                                article_tasks.c.task_id == self.task_a,
+                            )
+                        ).scalar_one()
+                    )
+                    task_payload["product_candidate_ids"] = [self.product_a]
+                    task_payload["product_candidate_reasons"] = {
+                        self.product_a: recommendation_reason
+                    }
+                    connection.execute(
+                        article_tasks.update()
+                        .where(
+                            article_tasks.c.organization_id == self.org_a,
+                            article_tasks.c.project_id == self.project_a,
+                            article_tasks.c.task_id == self.task_a,
+                        )
+                        .values(payload=task_payload)
+                    )
+
                 response = client.put(
                     path,
                     json={
@@ -2802,6 +2830,9 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     [self.product_a],
                 )
                 product = saved["products"][0]
+                self.assertEqual(product["selection_reason"], recommendation_reason)
+                self.assertEqual(saved["product_candidate_ids"], [])
+                self.assertEqual(saved["product_candidate_reasons"], {})
                 self.assertEqual(
                     product["name"],
                     f"Product {self.product_a}",
