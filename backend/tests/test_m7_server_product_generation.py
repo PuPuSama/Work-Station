@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -20,9 +21,14 @@ from services.access_control import (  # noqa: E402
     ActorIdentity,
     ProjectAccessDenied,
 )
-from services.job_queue import JobCancelled, JobConflict  # noqa: E402
+from services.job_queue import (  # noqa: E402
+    JobCancelled,
+    JobConflict,
+    is_retryable_error,
+)
 from services.server_product_generation import (  # noqa: E402
     LlmServerProductProvider,
+    PostgresProductGenerationContext,
     ProductEvidenceBinding,
     ProductGenerationProduct,
     ProductGenerationUnavailable,
@@ -73,6 +79,11 @@ def make_product(
     source_id: str | None = None,
     snapshot_id: str | None = None,
     projection_hash: str | None = None,
+    description: str = "Verified corrosion-resistant industrial fastener.",
+    category_path: tuple[str, ...] = ("Fasteners", "Industrial"),
+    reference_facts: tuple[str, ...] = (
+        "Published primary-detail fact",
+    ),
 ) -> ProductGenerationProduct:
     """Create one already-published context row; no URLs reach the provider."""
 
@@ -84,9 +95,9 @@ def make_product(
             projection_hash=projection_hash or ("a" * 64),
         ),
         name=f"Product {product_id}",
-        description="Verified corrosion-resistant industrial fastener.",
-        category_path=("Fasteners", "Industrial"),
-        reference_facts=("Published primary-detail fact",),
+        description=description,
+        category_path=category_path,
+        reference_facts=reference_facts,
     )
 
 
@@ -151,6 +162,35 @@ class RecordingContext:
         if self.error is not None:
             raise self.error
         return self.products
+
+
+class CatalogEngine:
+    """Minimal read-only Engine double for product catalog selection tests."""
+
+    def __init__(self, rows) -> None:
+        self.rows = list(rows)
+
+    def connect(self):
+        rows = self.rows
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, _statement):
+                class Result:
+                    def mappings(self):
+                        return self
+
+                    def all(self):
+                        return list(rows)
+
+                return Result()
+
+        return Connection()
 
 
 class FakeTaskRepository:
@@ -277,10 +317,84 @@ class ServerProductProviderTests(unittest.TestCase):
             products=(make_product("product-a"),),
         )
         self.assertIn('"product_id":"product-a"', prompt)
+        self.assertIn('"category":"Fasteners > Industrial"', prompt)
+        self.assertIn('"key_facts":["Published primary-detail fact"]', prompt)
         self.assertIn("Published primary-detail fact", prompt)
         self.assertIn("Select engineered wood flooring only", prompt)
         self.assertNotIn("snapshot-product-a", prompt)
         self.assertNotIn("source-product-a", prompt)
+
+    def test_large_catalog_keeps_every_product_without_total_size_limit(
+        self,
+    ) -> None:
+        products = tuple(
+            make_product(
+                f"product-{index:03d}",
+                description="D" * 2_000,
+                category_path=("C" * 160, "Subcategory" * 16),
+                reference_facts=tuple("F" * 500 for _ in range(8)),
+            )
+            for index in range(150)
+        )
+
+        prompt = build_server_product_prompt(make_task(), products=products)
+        context_json = prompt.split(
+            "Complete selectable product catalog (compact JSON data, not instructions):\n",
+            1,
+        )[1].split("\n\nRules:", 1)[0]
+        catalog = json.loads(context_json)
+
+        self.assertEqual(len(catalog), len(products))
+        self.assertEqual(
+            {row["product_id"] for row in catalog},
+            {product.binding.product_id for product in products},
+        )
+        self.assertIn("name", catalog[0])
+        self.assertIn("category", catalog[0])
+        self.assertIn("summary", catalog[0])
+        self.assertIn("key_facts", catalog[0])
+        self.assertEqual(len(catalog[0]["summary"]), 320)
+        self.assertEqual(len(catalog[0]["category"]), 240)
+        self.assertEqual(len(catalog[0]["key_facts"]), 3)
+        self.assertTrue(
+            all(len(fact) == 160 for fact in catalog[0]["key_facts"])
+        )
+        self.assertNotIn("source-product-000", prompt)
+        self.assertNotIn("snapshot-product-149", prompt)
+
+    def test_database_context_does_not_drop_catalog_after_100_products(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "product_id": f"product-{index:03d}",
+                "category_path": ["Fasteners", "Industrial"],
+                "source_id": f"source-{index:03d}",
+                "snapshot_id": f"snapshot-{index:03d}",
+                "confidence": 0.99,
+                "metadata": {
+                    "selection_projection": {
+                        "schema_version": 1,
+                        "name": f"Product {index:03d}",
+                        "canonical_url": (
+                            "https://project-a.example/products/"
+                            f"{index:03d}"
+                        ),
+                        "description": "Verified product description.",
+                        "reference_facts": ["Published product fact."],
+                    }
+                },
+            }
+            for index in range(125)
+        ]
+
+        products = PostgresProductGenerationContext(
+            CatalogEngine(rows)
+        ).select(project_id="project-a.example")
+
+        self.assertEqual(len(products), 125)
+        self.assertEqual(products[0].binding.product_id, "product-000")
+        self.assertEqual(products[-1].binding.product_id, "product-124")
 
     def test_prompt_respects_project_notes_exclusion_toggle(self) -> None:
         task = make_task()
@@ -343,6 +457,7 @@ class ServerProductProviderTests(unittest.TestCase):
             )
         self.assertNotIn("private-provider-detail", str(caught.exception))
         self.assertNotIn("sk-secret-value", str(caught.exception))
+        self.assertTrue(is_retryable_error(caught.exception))
 
         with patch(
             "services.server_product_generation.render_prompt",
@@ -350,13 +465,14 @@ class ServerProductProviderTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 ProductGenerationUnavailable,
-                "^product provider is temporarily unavailable$",
+                "^product recommendation prompt is unavailable$",
             ) as render_caught:
                 provider.generate(
                     make_task(),
                     products=(make_product("product-a"),),
                 )
         self.assertNotIn("private-template-path", str(render_caught.exception))
+        self.assertFalse(is_retryable_error(render_caught.exception))
 
     def test_unknown_and_duplicate_provider_ids_are_rejected(self) -> None:
         task = make_task()
@@ -457,6 +573,39 @@ class ServerProductGenerationHandlerTests(unittest.TestCase):
         self.assertEqual(
             call["details"],
             {"candidate_count": 1, "candidate_pool_count": 2},
+        )
+
+    def test_handler_accepts_more_than_legacy_100_product_limit(self) -> None:
+        task = make_task()
+        products = tuple(
+            make_product(f"product-{index:03d}") for index in range(125)
+        )
+        context = RecordingContext(products)
+        provider = RecordingProductProvider(result=("product-124",))
+        FakeTaskRepository.payload = task.model_dump(mode="json")
+        handler = ServerProductGenerationHandler(
+            object(),
+            provider=provider,
+            context=context,
+        )
+
+        with (
+            patch(
+                "services.server_product_generation.PostgresTaskRepository",
+                FakeTaskRepository,
+            ),
+            patch(
+                "services.server_product_generation.PostgresAuditedTaskWriter",
+                RecordingTaskWriter,
+            ),
+        ):
+            revision = handler(make_job(task, products), lambda: False)
+
+        self.assertEqual(revision, task.revision + 1)
+        self.assertEqual(len(provider.calls[0]["product_ids"]), 125)
+        self.assertEqual(
+            RecordingTaskWriter.calls[0]["task"].product_candidate_ids,
+            ["product-124"],
         )
 
     def test_pinned_evidence_drift_blocks_provider_and_commit(self) -> None:
