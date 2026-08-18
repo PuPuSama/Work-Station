@@ -406,6 +406,8 @@ EMBEDDING_DIMENSIONS=1536
 TAVILY_API_KEY
 ARTICLE_AGENT_OBJECT_STORE_BUCKET
 ARTICLE_AGENT_OBJECT_STORE_REGION
+ARTICLE_AGENT_OBJECT_STORE_ENDPOINT # browser-reachable HTTPS endpoint
+ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT # optional backend-only S3 API endpoint
 ARTICLE_AGENT_OBJECT_STORE_ACCESS_KEY
 ARTICLE_AGENT_OBJECT_STORE_SECRET_KEY
 ```
@@ -423,6 +425,14 @@ cd backend
 
 重复执行必须安全。Schema 未准备时 Research Job 应失败并输出脱敏终态，不能临时回退
 内存 Checkpointer 或 SQLite Queue。
+
+For reverse-proxied MinIO, keep `ARTICLE_AGENT_OBJECT_STORE_ENDPOINT` on the
+browser-reachable HTTPS origin and set
+`ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT` to the private service origin,
+for example `http://article-object-store:9000`. Backend object API operations
+use the internal endpoint; presigned browser downloads continue to use the
+public endpoint. Omitting the internal override preserves the legacy
+single-endpoint behavior.
 
 ### Snapshot Review Receipt Cutover
 
