@@ -180,7 +180,10 @@ class PostgresServerLlmSettings:
                 fallback_reasoning_effort,
                 "fallback_reasoning_effort",
             ),
-            can_edit=role == "org_admin",
+            # Every active workspace member may change the shared setting.
+            # The organization membership check above remains the boundary;
+            # this is not exposed to unauthenticated or inactive users.
+            can_edit=True,
         )
 
     def update(
@@ -212,7 +215,7 @@ class PostgresServerLlmSettings:
                     actor.organization_id,
                     actor.user_id,
                 )
-                if role != "org_admin":
+                if role is None:
                     raise ServerLlmSettingsDenied(
                         "organization model settings update denied"
                     )

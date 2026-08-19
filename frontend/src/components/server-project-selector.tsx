@@ -484,7 +484,7 @@ export function ServerProjectSelector() {
               <Alert>
                 <AlertTitle>仅供查看</AlertTitle>
                 <AlertDescription>
-                  只有组织管理员可以修改全局模型设置。
+                  当前账号没有有效的组织成员身份，因此不能修改全局模型设置。
                 </AlertDescription>
               </Alert>
             )}
