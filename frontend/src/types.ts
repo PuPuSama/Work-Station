@@ -376,6 +376,7 @@ export type TaskRecord = {
   source_links?: ArticleLink[];
   link_validation?: LinkValidation;
   product_candidate_ids?: string[];
+  product_candidate_reasons?: Record<string, string>;
   products: Product[];
   hero_image?: string;
   images?: ArticleImage[];
@@ -413,6 +414,16 @@ export type AuthStatus = {
     organization_id?: string | null;
     user_id?: string | null;
   };
+};
+
+export type ServerLlmSettings = {
+  model: string;
+  reasoning_effort: string;
+  available_models: string[];
+  available_reasoning_efforts: string[];
+  revision: number;
+  updated_at?: string | null;
+  can_edit: boolean;
 };
 
 export type AccessibleProject = {

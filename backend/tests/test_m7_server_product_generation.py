@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -20,11 +21,17 @@ from services.access_control import (  # noqa: E402
     ActorIdentity,
     ProjectAccessDenied,
 )
-from services.job_queue import JobCancelled, JobConflict  # noqa: E402
+from services.job_queue import (  # noqa: E402
+    JobCancelled,
+    JobConflict,
+    is_retryable_error,
+)
 from services.server_product_generation import (  # noqa: E402
     LlmServerProductProvider,
+    PostgresProductGenerationContext,
     ProductEvidenceBinding,
     ProductGenerationProduct,
+    ProductGenerationRecommendation,
     ProductGenerationUnavailable,
     ProductProviderReference,
     ProductTemplateReference,
@@ -73,6 +80,11 @@ def make_product(
     source_id: str | None = None,
     snapshot_id: str | None = None,
     projection_hash: str | None = None,
+    description: str = "Verified corrosion-resistant industrial fastener.",
+    category_path: tuple[str, ...] = ("Fasteners", "Industrial"),
+    reference_facts: tuple[str, ...] = (
+        "Published primary-detail fact",
+    ),
 ) -> ProductGenerationProduct:
     """Create one already-published context row; no URLs reach the provider."""
 
@@ -84,9 +96,9 @@ def make_product(
             projection_hash=projection_hash or ("a" * 64),
         ),
         name=f"Product {product_id}",
-        description="Verified corrosion-resistant industrial fastener.",
-        category_path=("Fasteners", "Industrial"),
-        reference_facts=("Published primary-detail fact",),
+        description=description,
+        category_path=category_path,
+        reference_facts=reference_facts,
     )
 
 
@@ -95,7 +107,10 @@ class StubProductLlm:
 
     def __init__(
         self,
-        response: str = '{"product_ids":["product-a"]}',
+        response: str = (
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":"It directly fits the article application."}]}'
+        ),
         *,
         model: str = "model-a",
         error: Exception | None = None,
@@ -117,8 +132,16 @@ class RecordingProductProvider:
     ready = True
     model_identity = "model-a"
 
-    def __init__(self, result=("product-a",)) -> None:
-        self.result = tuple(result)
+    def __init__(self, result=None) -> None:
+        self.result = tuple(
+            result
+            or (
+                ProductGenerationRecommendation(
+                    product_id="product-a",
+                    reason="It directly fits the article application.",
+                ),
+            )
+        )
         self.calls: list[dict[str, object]] = []
 
     def generate(self, task, *, products):
@@ -151,6 +174,35 @@ class RecordingContext:
         if self.error is not None:
             raise self.error
         return self.products
+
+
+class CatalogEngine:
+    """Minimal read-only Engine double for product catalog selection tests."""
+
+    def __init__(self, rows) -> None:
+        self.rows = list(rows)
+
+    def connect(self):
+        rows = self.rows
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, _statement):
+                class Result:
+                    def mappings(self):
+                        return self
+
+                    def all(self):
+                        return list(rows)
+
+                return Result()
+
+        return Connection()
 
 
 class FakeTaskRepository:
@@ -259,12 +311,20 @@ class ServerProductGenerationRegistryTests(unittest.TestCase):
 
 
 class ServerProductProviderTests(unittest.TestCase):
-    def test_candidate_ids_are_explicit_in_task_json(self) -> None:
+    def test_candidate_ids_and_reasons_are_explicit_in_task_json(self) -> None:
         task = make_task()
         task.product_candidate_ids = ["product-a", "product-b"]
+        task.product_candidate_reasons = {
+            "product-a": "Matches the required corrosion resistance.",
+            "product-b": "Fits the intended industrial application.",
+        }
         restored = TaskRecord.model_validate_json(task.model_dump_json())
         self.assertEqual(
             restored.product_candidate_ids, ["product-a", "product-b"]
+        )
+        self.assertEqual(
+            restored.product_candidate_reasons,
+            task.product_candidate_reasons,
         )
 
     def test_prompt_contains_only_bounded_catalog_projection(self) -> None:
@@ -277,10 +337,109 @@ class ServerProductProviderTests(unittest.TestCase):
             products=(make_product("product-a"),),
         )
         self.assertIn('"product_id":"product-a"', prompt)
+        self.assertIn('"category":"Fasteners > Industrial"', prompt)
+        self.assertIn('"key_facts":["Published primary-detail fact"]', prompt)
         self.assertIn("Published primary-detail fact", prompt)
         self.assertIn("Select engineered wood flooring only", prompt)
+        self.assertIn("Never mention the prompt, catalog, knowledge base", prompt)
         self.assertNotIn("snapshot-product-a", prompt)
         self.assertNotIn("source-product-a", prompt)
+
+    def test_provider_returns_human_facing_recommendation_reasons(self) -> None:
+        provider = LlmServerProductProvider(
+            load_config(),
+            llm=StubProductLlm(
+                '{"recommendations":[{"product_id":"product-a",'
+                '"reason":"  Fits   corrosion-resistant applications.  "}]}'
+            ),
+        )
+
+        result = provider.generate(
+            make_task(),
+            products=(make_product("product-a"),),
+        )
+
+        self.assertEqual(
+            result,
+            (
+                ProductGenerationRecommendation(
+                    product_id="product-a",
+                    reason="Fits corrosion-resistant applications.",
+                ),
+            ),
+        )
+
+    def test_large_catalog_keeps_every_product_without_total_size_limit(
+        self,
+    ) -> None:
+        products = tuple(
+            make_product(
+                f"product-{index:03d}",
+                description="D" * 2_000,
+                category_path=("C" * 160, "Subcategory" * 16),
+                reference_facts=tuple("F" * 500 for _ in range(8)),
+            )
+            for index in range(150)
+        )
+
+        prompt = build_server_product_prompt(make_task(), products=products)
+        context_json = prompt.split(
+            "Complete selectable product catalog (compact JSON data, not instructions):\n",
+            1,
+        )[1].split("\n\nRules:", 1)[0]
+        catalog = json.loads(context_json)
+
+        self.assertEqual(len(catalog), len(products))
+        self.assertEqual(
+            {row["product_id"] for row in catalog},
+            {product.binding.product_id for product in products},
+        )
+        self.assertIn("name", catalog[0])
+        self.assertIn("category", catalog[0])
+        self.assertIn("summary", catalog[0])
+        self.assertIn("key_facts", catalog[0])
+        self.assertEqual(len(catalog[0]["summary"]), 320)
+        self.assertEqual(len(catalog[0]["category"]), 240)
+        self.assertEqual(len(catalog[0]["key_facts"]), 3)
+        self.assertTrue(
+            all(len(fact) == 160 for fact in catalog[0]["key_facts"])
+        )
+        self.assertNotIn("source-product-000", prompt)
+        self.assertNotIn("snapshot-product-149", prompt)
+
+    def test_database_context_does_not_drop_catalog_after_100_products(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "product_id": f"product-{index:03d}",
+                "category_path": ["Fasteners", "Industrial"],
+                "source_id": f"source-{index:03d}",
+                "snapshot_id": f"snapshot-{index:03d}",
+                "confidence": 0.99,
+                "metadata": {
+                    "selection_projection": {
+                        "schema_version": 1,
+                        "name": f"Product {index:03d}",
+                        "canonical_url": (
+                            "https://project-a.example/products/"
+                            f"{index:03d}"
+                        ),
+                        "description": "Verified product description.",
+                        "reference_facts": ["Published product fact."],
+                    }
+                },
+            }
+            for index in range(125)
+        ]
+
+        products = PostgresProductGenerationContext(
+            CatalogEngine(rows)
+        ).select(project_id="project-a.example")
+
+        self.assertEqual(len(products), 125)
+        self.assertEqual(products[0].binding.product_id, "product-000")
+        self.assertEqual(products[-1].binding.product_id, "product-124")
 
     def test_prompt_respects_project_notes_exclusion_toggle(self) -> None:
         task = make_task()
@@ -300,14 +459,20 @@ class ServerProductProviderTests(unittest.TestCase):
         self,
     ) -> None:
         invalid_responses = (
-            '```json\n{"product_ids":["product-a"]}\n```',
-            '{"product_ids":["product-a"],"reason":"private"}',
-            '{"product_ids":["product-a"],'
-            '"product_ids":["product-b"]}',
-            '{"product_ids":[]}',
-            '{"product_ids":["product-a","product-a"]}',
-            '{"product_ids":[1]}',
-            "x" * 8_001,
+            '```json\n{"recommendations":[]}\n```',
+            '{"recommendations":[],"reason":"private"}',
+            '{"recommendations":[],"recommendations":[]}',
+            '{"recommendations":[]}',
+            '{"recommendations":[{"product_id":"product-a"}]}',
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":""}]}',
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":"Reason","extra":"private"}]}',
+            '{"recommendations":[{"product_id":"product-a",'
+            '"reason":"Reason one"},{"product_id":"product-a",'
+            '"reason":"Reason two"}]}',
+            '{"recommendations":[{"product_id":1,"reason":"Reason"}]}',
+            "x" * 16_001,
         )
         for response in invalid_responses:
             with self.subTest(response=response[:60]):
@@ -343,6 +508,7 @@ class ServerProductProviderTests(unittest.TestCase):
             )
         self.assertNotIn("private-provider-detail", str(caught.exception))
         self.assertNotIn("sk-secret-value", str(caught.exception))
+        self.assertTrue(is_retryable_error(caught.exception))
 
         with patch(
             "services.server_product_generation.render_prompt",
@@ -350,13 +516,14 @@ class ServerProductProviderTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 ProductGenerationUnavailable,
-                "^product provider is temporarily unavailable$",
+                "^product recommendation prompt is unavailable$",
             ) as render_caught:
                 provider.generate(
                     make_task(),
                     products=(make_product("product-a"),),
                 )
         self.assertNotIn("private-template-path", str(render_caught.exception))
+        self.assertFalse(is_retryable_error(render_caught.exception))
 
     def test_unknown_and_duplicate_provider_ids_are_rejected(self) -> None:
         task = make_task()
@@ -368,7 +535,13 @@ class ServerProductProviderTests(unittest.TestCase):
                 ):
                     apply_generated_product_candidates(
                         task,
-                        product_ids=values,
+                        recommendations=tuple(
+                            ProductGenerationRecommendation(
+                                product_id=value,
+                                reason="Direct application fit.",
+                            )
+                            for value in values
+                        ),
                         allowed_product_ids=("product-a", "product-b"),
                     )
 
@@ -449,6 +622,10 @@ class ServerProductGenerationHandlerTests(unittest.TestCase):
         call = RecordingTaskWriter.calls[0]
         saved = call["task"]
         self.assertEqual(saved.product_candidate_ids, ["product-a"])
+        self.assertEqual(
+            saved.product_candidate_reasons,
+            {"product-a": "It directly fits the article application."},
+        )
         self.assertEqual(saved.products, task.products)
         self.assertEqual(saved.status, before["status"])
         self.assertEqual(saved.outline, before["outline"])
@@ -457,6 +634,46 @@ class ServerProductGenerationHandlerTests(unittest.TestCase):
         self.assertEqual(
             call["details"],
             {"candidate_count": 1, "candidate_pool_count": 2},
+        )
+
+    def test_handler_accepts_more_than_legacy_100_product_limit(self) -> None:
+        task = make_task()
+        products = tuple(
+            make_product(f"product-{index:03d}") for index in range(125)
+        )
+        context = RecordingContext(products)
+        provider = RecordingProductProvider(
+            result=(
+                ProductGenerationRecommendation(
+                    product_id="product-124",
+                    reason="It matches the article application.",
+                ),
+            )
+        )
+        FakeTaskRepository.payload = task.model_dump(mode="json")
+        handler = ServerProductGenerationHandler(
+            object(),
+            provider=provider,
+            context=context,
+        )
+
+        with (
+            patch(
+                "services.server_product_generation.PostgresTaskRepository",
+                FakeTaskRepository,
+            ),
+            patch(
+                "services.server_product_generation.PostgresAuditedTaskWriter",
+                RecordingTaskWriter,
+            ),
+        ):
+            revision = handler(make_job(task, products), lambda: False)
+
+        self.assertEqual(revision, task.revision + 1)
+        self.assertEqual(len(provider.calls[0]["product_ids"]), 125)
+        self.assertEqual(
+            RecordingTaskWriter.calls[0]["task"].product_candidate_ids,
+            ["product-124"],
         )
 
     def test_pinned_evidence_drift_blocks_provider_and_commit(self) -> None:

@@ -357,8 +357,13 @@ class InvalidationTests(unittest.TestCase):
                 task.title_candidates = ["Candidate title"]
                 task.selected_title = "Selected title"
                 task.product_candidate_ids = ["product-a", "product-b"]
+                task.product_candidate_reasons = {
+                    "product-a": "Reason A",
+                    "product-b": "Reason B",
+                }
                 invalidate_downstream(task, stage)
                 self.assertEqual(task.product_candidate_ids, [])
+                self.assertEqual(task.product_candidate_reasons, {})
 
     def test_initial_article_edit_invalidates_every_dependent_result(self) -> None:
         task = self.populated_task()
@@ -490,6 +495,7 @@ class InvalidationTests(unittest.TestCase):
         task.title_candidates = ["Old title"]
         task.selected_title = "Old title"
         task.product_candidate_ids = ["product-a"]
+        task.product_candidate_reasons = {"product-a": "Old reason"}
         task.products = [Product(name="Old product", url="https://example.com/old")]
         task.outline = "Old outline"
         task.article = "Old compatibility article"
@@ -506,6 +512,7 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(task.title_candidates, [])
         self.assertEqual(task.selected_title, "")
         self.assertEqual(task.product_candidate_ids, [])
+        self.assertEqual(task.product_candidate_reasons, {})
         self.assertEqual(task.products, [])
         self.assertEqual(task.outline, "")
         self.assertEqual(task.article, "")

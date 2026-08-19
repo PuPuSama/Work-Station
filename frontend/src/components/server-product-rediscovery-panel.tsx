@@ -24,7 +24,7 @@ type ServerProductRediscoveryPanelProps = {
     label: string,
     endpoint: string,
     payload?: Record<string, unknown>,
-  ) => Promise<void>;
+  ) => Promise<unknown>;
 };
 
 export function ServerProductRediscoveryPanel({

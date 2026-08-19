@@ -50,6 +50,47 @@ organizations = sa.Table(
 )
 
 
+workspace_user_llm_settings = sa.Table(
+    "workspace_user_llm_settings",
+    metadata,
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("user_id", sa.Text(), nullable=False),
+    sa.Column("model", sa.Text(), nullable=False),
+    sa.Column("reasoning_effort", sa.Text(), nullable=False),
+    sa.Column(
+        "revision",
+        sa.Integer(),
+        nullable=False,
+        server_default=sa.text("0"),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.CheckConstraint(
+        "btrim(model) <> '' AND btrim(reasoning_effort) <> ''",
+        name="ck_workspace_user_llm_settings_values_nonempty",
+    ),
+    sa.CheckConstraint(
+        "revision >= 0",
+        name="ck_workspace_user_llm_settings_revision_nonnegative",
+    ),
+    sa.ForeignKeyConstraint(
+        ["organization_id", "user_id"],
+        ["workspace_users.organization_id", "workspace_users.user_id"],
+        name="fk_workspace_user_llm_settings_user",
+        ondelete="CASCADE",
+    ),
+    sa.PrimaryKeyConstraint(
+        "organization_id",
+        "user_id",
+        name="pk_workspace_user_llm_settings",
+    ),
+)
+
+
 workspace_users = sa.Table(
     "workspace_users",
     metadata,
@@ -1300,6 +1341,7 @@ __all__ = [
     "external_identities",
     "job_batches",
     "organizations",
+    "workspace_user_llm_settings",
     "object_orphan_observations",
     "project_memberships",
     "project_ownership",

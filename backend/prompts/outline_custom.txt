@@ -44,4 +44,4 @@ Topic-specific notes:
 - Use no more than five main content H2 sections; conclusion, service, contact, and next-step sections do not count toward this limit.
 - End with exactly `## FAQ` as the final H2. Under it, list exactly three FAQ questions as H3 headings without `Q:`/`A:` labels or answer paragraphs. Do not put any later section under or after it.
 - Treat the article topic as an editorial brief, not as an exact keyword. Do not copy a title-like topic phrase verbatim into H2/H3 headings; derive natural headings from the shorter core subject.
-- Preserve confirmed product names, technical facts, numbers, and URLs exactly.
+- Include every confirmed product in the outline, not merely a subset. Do not omit any confirmed product; a lower-priority instruction that permits using only a subset does not override this rule. Place each one naturally under the closest relevant non-FAQ H2/H3 and include its exact supplied name and official URL at least once. Preserve product names, models, technical facts, numbers, and URLs exactly.

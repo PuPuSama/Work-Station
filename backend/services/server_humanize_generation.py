@@ -61,6 +61,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.server_llm_settings import ServerLlmClientFactory
 from services.zerogpt import ZeroGPTDetectionResult
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
@@ -152,12 +153,40 @@ class LlmServerHumanizeProvider:
         config: AppConfig,
         *,
         llm: HumanizeLlmClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
+        self._llm_factory = llm_factory
         self._llm = llm or LLMClient(config)
 
     @property
     def ready(self) -> bool:
         return self._llm.ready
+
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> HumanizeLlmClient:
+        if self._llm_factory is not None:
+            return self._llm_factory.client(organization_id, user_id)
+        return self._llm
+
+    def generate_for_organization(
+        self,
+        task: TaskRecord,
+        *,
+        organization_id: str,
+        user_id: str,
+        source_article: str,
+        prompt_snapshot: PromptSnapshot,
+    ) -> str:
+        return self.generate(
+            task,
+            source_article=source_article,
+            prompt_snapshot=prompt_snapshot,
+            organization_id=organization_id,
+            user_id=user_id,
+        )
 
     def generate(
         self,
@@ -165,14 +194,17 @@ class LlmServerHumanizeProvider:
         *,
         source_article: str,
         prompt_snapshot: PromptSnapshot,
+        organization_id: str = "",
+        user_id: str = "",
     ) -> str:
-        if not self.ready:
+        client = self._client_for(organization_id, user_id)
+        if not client.ready:
             raise HumanizeGenerationUnavailable(
                 "humanize provider is not configured"
             )
         _validate_prompt(prompt_snapshot)
         try:
-            result = self._llm.chat(
+            result = client.chat(
                 [
                     {
                         "role": "system",
@@ -342,11 +374,25 @@ class ServerHumanizeGenerationHandler:
         _validate_prompt(prompt)
         if cancelled():
             raise JobCancelled("humanize cancelled before provider call")
-        candidate = self._provider.generate(
-            task,
-            source_article=source_article,
-            prompt_snapshot=prompt,
+        generate_for_organization = getattr(
+            self._provider,
+            "generate_for_organization",
+            None,
         )
+        if callable(generate_for_organization):
+            candidate = generate_for_organization(
+                task,
+                organization_id=organization_id,
+                user_id=requester,
+                source_article=source_article,
+                prompt_snapshot=prompt,
+            )
+        else:
+            candidate = self._provider.generate(
+                task,
+                source_article=source_article,
+                prompt_snapshot=prompt,
+            )
         if cancelled():
             raise JobCancelled("humanize cancelled before result commit")
         rehumanizing = apply_generated_humanized_article(

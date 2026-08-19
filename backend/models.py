@@ -391,6 +391,7 @@ class TaskRecord(WorkflowModel):
     final_article_hash: str = ""
 
     product_candidate_ids: list[str] = Field(default_factory=list)
+    product_candidate_reasons: dict[str, str] = Field(default_factory=dict)
     products: list[Product] = Field(default_factory=list)
     official_links: list[OfficialLink] = Field(default_factory=list)
     hero_image: str = ""
@@ -502,6 +503,7 @@ class ProjectContextUpdateRequest(WorkflowModel):
 class LlmSettingsUpdateRequest(WorkflowModel):
     model: str = Field(min_length=1, max_length=120)
     reasoning_effort: Literal["low", "medium", "high", "xhigh"]
+    revision: int = Field(default=0, ge=0)
 
 
 class WritingSettingsUpdateRequest(RevisionedRequest):

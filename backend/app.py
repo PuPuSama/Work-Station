@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import replace
 import os
 from pathlib import Path
 
@@ -21,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import (
     ROOT_DIR,
-    load_config,
+    load_runtime_config,
 )
 from models import (
     ApiMessage,
@@ -138,6 +137,10 @@ from services.server_humanize_generation import (
     ServerHumanizeGenerationHandler,
     ServerHumanizeGenerationRegistry,
 )
+from services.server_llm_settings import (
+    PostgresServerLlmSettings,
+    ServerLlmClientFactory,
+)
 from services.zerogpt import ZeroGPTClient
 from services.server_job_control import PostgresServerJobControlService
 from knowledge_agent.assets import PostgresKnowledgeAssetRepository
@@ -157,6 +160,7 @@ from server_identity_http import router as server_identity_router
 from server_invitation_http import router as server_invitation_router
 from server_job_http import router as server_job_router
 from server_prompt_http import router as server_prompt_router
+from server_llm_settings_http import router as server_llm_settings_router
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -317,6 +321,16 @@ async def app_lifespan(application: FastAPI):
         "server_workspace_invitations",
         None,
     )
+    previous_server_llm_settings = getattr(
+        application.state,
+        "server_llm_settings",
+        None,
+    )
+    previous_server_llm_client_factory = getattr(
+        application.state,
+        "server_llm_client_factory",
+        None,
+    )
     server_product_rediscovery = None
     server_product_generation = None
     server_knowledge_research = None
@@ -358,6 +372,8 @@ async def app_lifespan(application: FastAPI):
     application.state.server_team_administration = None
     application.state.server_external_identity_provisioning = None
     application.state.server_workspace_invitations = None
+    application.state.server_llm_settings = None
+    application.state.server_llm_client_factory = None
     if server_mode:
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
@@ -393,6 +409,13 @@ async def app_lifespan(application: FastAPI):
         application.state.server_workspace_invitations = (
             PostgresWorkspaceInvitationService(server_engine)
         )
+        server_llm_settings = PostgresServerLlmSettings(server_engine)
+        server_llm_client_factory = ServerLlmClientFactory(
+            cfg,
+            server_llm_settings,
+        )
+        application.state.server_llm_settings = server_llm_settings
+        application.state.server_llm_client_factory = server_llm_client_factory
         application.state.server_request_security = ServerRequestSecurity(
             codec=codec,
             access=server_access,
@@ -482,7 +505,10 @@ async def app_lifespan(application: FastAPI):
                 store=server_object_store,
                 bucket=object_settings.bucket,
             )
-        product_provider = LlmServerProductProvider(cfg)
+        product_provider = LlmServerProductProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         product_handler = (
             ServerProductGenerationHandler(
                 server_engine,
@@ -501,7 +527,10 @@ async def app_lifespan(application: FastAPI):
         application.state.server_product_generation = (
             server_product_generation
         )
-        outline_provider = LlmServerOutlineProvider(cfg)
+        outline_provider = LlmServerOutlineProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         outline_handler = (
             ServerOutlineGenerationHandler(
                 server_engine,
@@ -519,7 +548,10 @@ async def app_lifespan(application: FastAPI):
         application.state.server_outline_generation = (
             server_outline_generation
         )
-        title_provider = LlmServerTitleProvider(cfg)
+        title_provider = LlmServerTitleProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         title_handler = (
             ServerTitleGenerationHandler(
                 server_engine,
@@ -538,7 +570,10 @@ async def app_lifespan(application: FastAPI):
         application.state.server_title_generation = (
             server_title_generation
         )
-        article_provider = LlmServerArticleProvider(cfg)
+        article_provider = LlmServerArticleProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         zerogpt_client = ZeroGPTClient()
         article_handler = (
             ServerArticleGenerationHandler(
@@ -559,7 +594,10 @@ async def app_lifespan(application: FastAPI):
         application.state.server_article_generation = (
             server_article_generation
         )
-        link_provider = LlmServerLinkRestorationProvider(cfg)
+        link_provider = LlmServerLinkRestorationProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         link_handler = (
             ServerLinkRestorationHandler(
                 server_engine,
@@ -577,7 +615,10 @@ async def app_lifespan(application: FastAPI):
         application.state.server_link_restoration = (
             server_link_restoration
         )
-        seo_review_provider = LlmServerSeoReviewProvider(cfg)
+        seo_review_provider = LlmServerSeoReviewProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         seo_review_handler = (
             ServerSeoReviewGenerationHandler(
                 server_engine,
@@ -597,7 +638,10 @@ async def app_lifespan(application: FastAPI):
         application.state.server_seo_review_generation = (
             server_seo_review_generation
         )
-        humanize_provider = LlmServerHumanizeProvider(cfg)
+        humanize_provider = LlmServerHumanizeProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
         humanize_handler = (
             ServerHumanizeGenerationHandler(
                 server_engine,
@@ -858,6 +902,10 @@ async def app_lifespan(application: FastAPI):
             application.state.server_workspace_invitations = (
                 previous_server_workspace_invitations
             )
+            application.state.server_llm_settings = previous_server_llm_settings
+            application.state.server_llm_client_factory = (
+                previous_server_llm_client_factory
+            )
             if shutdown_error is not None:
                 raise shutdown_error
         return
@@ -875,6 +923,7 @@ app.include_router(server_identity_router)
 app.include_router(server_invitation_router)
 app.include_router(server_job_router)
 app.include_router(server_prompt_router)
+app.include_router(server_llm_settings_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -1145,41 +1194,8 @@ def auth_logout() -> JSONResponse:
     response.delete_cookie(WORKSPACE_INVITATION_COOKIE_NAME, path="/api/auth/oidc")
     return response
 
-def available_with_current(
-    current: str,
-    configured: tuple[str, ...],
-) -> tuple[str, ...]:
-    if not current or current in configured:
-        return configured
-    return (current, *configured)
-
-
 def config():
-    base = load_config()
-    environment_model = os.environ.get("LLM_MODEL", "").strip()
-    environment_reasoning_effort = os.environ.get(
-        "LLM_REASONING_EFFORT",
-        "",
-    ).strip()
-    environment_base_url = os.environ.get("LLM_BASE_URL", "").strip()
-    if environment_model or environment_reasoning_effort or environment_base_url:
-        base = replace(
-            base,
-            llm_model=environment_model or base.llm_model,
-            llm_reasoning_effort=(
-                environment_reasoning_effort or base.llm_reasoning_effort
-            ),
-            llm_base_url=(environment_base_url or base.llm_base_url).rstrip("/"),
-            llm_available_models=available_with_current(
-                environment_model or base.llm_model,
-                base.llm_available_models,
-            ),
-            llm_available_reasoning_efforts=available_with_current(
-                environment_reasoning_effort or base.llm_reasoning_effort,
-                base.llm_available_reasoning_efforts,
-            ),
-        )
-    return base
+    return load_runtime_config()
 
 
 

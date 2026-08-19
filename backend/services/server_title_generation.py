@@ -57,6 +57,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.server_llm_settings import ServerLlmClientFactory
 from storage import RevisionConflictError
 from workflow.state_machine import (
     ACTION_GENERATE_TITLES,
@@ -193,12 +194,44 @@ class LlmServerTitleProvider:
         config: AppConfig,
         *,
         llm: TitleLlmClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
+        self._llm_factory = llm_factory
         self._llm = llm or LLMClient(title_generation_config(config))
 
     @property
     def ready(self) -> bool:
         return self._llm.ready
+
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> TitleLlmClient:
+        if self._llm_factory is not None:
+            return self._llm_factory.client(
+                organization_id,
+                user_id,
+                title=True,
+            )
+        return self._llm
+
+    def generate_for_organization(
+        self,
+        task: TaskRecord,
+        *,
+        organization_id: str,
+        user_id: str,
+        title_count: int,
+        context_chunks: Sequence[PublishedOutlineContextChunk],
+    ) -> tuple[str, ...]:
+        return self.generate(
+            task,
+            title_count=title_count,
+            context_chunks=context_chunks,
+            organization_id=organization_id,
+            user_id=user_id,
+        )
 
     def generate(
         self,
@@ -206,8 +239,11 @@ class LlmServerTitleProvider:
         *,
         title_count: int,
         context_chunks: Sequence[PublishedOutlineContextChunk],
+        organization_id: str = "",
+        user_id: str = "",
     ) -> tuple[str, ...]:
-        if not self.ready:
+        client = self._client_for(organization_id, user_id)
+        if not client.ready:
             raise TitleGenerationUnavailable(
                 "title provider is not configured"
             )
@@ -217,7 +253,7 @@ class LlmServerTitleProvider:
             context_chunks=context_chunks,
         )
         try:
-            result = self._llm.chat(
+            result = client.chat(
                 [
                     {
                         "role": "system",
@@ -355,11 +391,25 @@ class ServerTitleGenerationHandler:
             raise JobCancelled(
                 "Title generation cancelled before provider call."
             )
-        candidates = self._provider.generate(
-            task,
-            title_count=title_count,
-            context_chunks=context_chunks,
+        generate_for_organization = getattr(
+            self._provider,
+            "generate_for_organization",
+            None,
         )
+        if callable(generate_for_organization):
+            candidates = generate_for_organization(
+                task,
+                organization_id=organization_id,
+                user_id=requester,
+                title_count=title_count,
+                context_chunks=context_chunks,
+            )
+        else:
+            candidates = self._provider.generate(
+                task,
+                title_count=title_count,
+                context_chunks=context_chunks,
+            )
         apply_generated_title_candidates(
             task,
             candidates=candidates,

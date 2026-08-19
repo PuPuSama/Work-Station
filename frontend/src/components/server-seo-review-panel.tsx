@@ -51,7 +51,7 @@ type ServerSeoReviewPanelProps = {
     action: () => Promise<unknown>,
     successMessage?: string,
   ) => Promise<unknown>;
-  runJob: (label: string, endpoint: string) => Promise<void>;
+  runJob: (label: string, endpoint: string) => Promise<unknown>;
 };
 
 function messageFor(error: unknown) {

@@ -241,6 +241,68 @@ class DeploymentReadinessTests(unittest.TestCase):
         self.assertFalse(report.ready)
         self.assertFalse(transport.passed)
 
+    def test_single_label_internal_object_endpoint_is_allowed(self) -> None:
+        report = run_deployment_preflight(
+            environment={
+                **COMPLETE_ENVIRONMENT,
+                "ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT": (
+                    "http://article-object-store:9000"
+                ),
+            },
+            database_probe=lambda: DatabaseReadiness(
+                revision="20260817_0024",
+                vector_extension="0.8.1",
+            ),
+            object_store_factory=lambda settings: FakeReadyStore(),
+            identity_provider_probe=lambda settings: None,
+            capabilities=ServerCutoverCapabilities(
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+            ),
+        )
+
+        transport = next(
+            check
+            for check in report.checks
+            if check.check_id == "object_store_transport"
+        )
+        self.assertTrue(transport.passed)
+
+    def test_remote_plain_http_internal_object_endpoint_is_rejected(self) -> None:
+        report = run_deployment_preflight(
+            environment={
+                **COMPLETE_ENVIRONMENT,
+                "ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT": (
+                    "http://objects.internal.test"
+                ),
+            },
+            database_probe=lambda: DatabaseReadiness(
+                revision="20260817_0024",
+                vector_extension="0.8.1",
+            ),
+            object_store_factory=lambda settings: FakeReadyStore(),
+            identity_provider_probe=lambda settings: None,
+            capabilities=ServerCutoverCapabilities(
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+            ),
+        )
+
+        transport = next(
+            check
+            for check in report.checks
+            if check.check_id == "object_store_transport"
+        )
+        self.assertFalse(transport.passed)
+
     @unittest.skipUnless(
         os.environ.get("ARTICLE_AGENT_DATABASE_URL"),
         "ARTICLE_AGENT_DATABASE_URL is required for the PostgreSQL probe",
@@ -254,7 +316,7 @@ class DeploymentReadinessTests(unittest.TestCase):
             readiness = postgres_database_probe(engine)
         finally:
             engine.dispose()
-        self.assertEqual(readiness.revision, "20260817_0024")
+        self.assertEqual(readiness.revision, "20260819_0027")
         self.assertTrue(readiness.vector_extension)
 
 

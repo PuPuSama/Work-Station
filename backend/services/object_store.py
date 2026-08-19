@@ -216,6 +216,7 @@ class S3ObjectStoreSettings:
     bucket: str
     region: str = "us-east-1"
     endpoint_url: str = ""
+    internal_endpoint_url: str = ""
     access_key_id: str = field(default="", repr=False)
     secret_access_key: str = field(default="", repr=False)
     force_path_style: bool = True
@@ -230,6 +231,15 @@ class S3ObjectStoreSettings:
             "endpoint_url",
             _endpoint_url(self.endpoint_url),
         )
+        object.__setattr__(
+            self,
+            "internal_endpoint_url",
+            _endpoint_url(self.internal_endpoint_url),
+        )
+        if self.internal_endpoint_url and not self.endpoint_url:
+            raise ValueError(
+                "endpoint_url is required when internal_endpoint_url is configured"
+            )
         if bool(self.access_key_id) != bool(self.secret_access_key):
             raise ValueError(
                 "object store access key and secret must be configured together"
@@ -261,6 +271,10 @@ class S3ObjectStoreSettings:
             ),
             endpoint_url=source.get(
                 "ARTICLE_AGENT_OBJECT_STORE_ENDPOINT",
+                "",
+            ).strip(),
+            internal_endpoint_url=source.get(
+                "ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT",
                 "",
             ).strip(),
             access_key_id=source.get(
@@ -337,19 +351,34 @@ class S3ObjectStore:
         settings: S3ObjectStoreSettings,
         *,
         client: BaseClient | None = None,
+        download_client: BaseClient | None = None,
     ) -> None:
         self.settings = settings
-        self._client = client or boto3.client(
+        self._client = client or self._create_client(
+            settings.internal_endpoint_url or settings.endpoint_url
+        )
+        if download_client is not None:
+            self._download_client = download_client
+        elif (
+            not settings.internal_endpoint_url
+            or settings.internal_endpoint_url == settings.endpoint_url
+        ):
+            self._download_client = self._client
+        else:
+            self._download_client = self._create_client(settings.endpoint_url)
+
+    def _create_client(self, endpoint_url: str) -> BaseClient:
+        return boto3.client(
             "s3",
-            region_name=settings.region,
-            endpoint_url=settings.endpoint_url or None,
-            aws_access_key_id=settings.access_key_id or None,
-            aws_secret_access_key=settings.secret_access_key or None,
+            region_name=self.settings.region,
+            endpoint_url=endpoint_url or None,
+            aws_access_key_id=self.settings.access_key_id or None,
+            aws_secret_access_key=self.settings.secret_access_key or None,
             config=Config(
                 signature_version="s3v4",
                 s3={
                     "addressing_style": (
-                        "path" if settings.force_path_style else "auto"
+                        "path" if self.settings.force_path_style else "auto"
                     )
                 },
             ),
@@ -482,7 +511,7 @@ class S3ObjectStore:
             )
         try:
             return str(
-                self._client.generate_presigned_url(
+                self._download_client.generate_presigned_url(
                     "get_object",
                     Params=params,
                     ExpiresIn=int(expires_seconds),

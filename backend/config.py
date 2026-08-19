@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +165,49 @@ def load_config() -> AppConfig:
         knowledge_agent_enabled=_environment_bool(
             "KNOWLEDGE_AGENT_ENABLED",
             bool(features.get("knowledge_agent_enabled", False)),
+        ),
+    )
+
+
+def available_with_current(
+    current: str,
+    configured: tuple[str, ...],
+) -> tuple[str, ...]:
+    if not current or current in configured:
+        return configured
+    return (current, *configured)
+
+
+def load_runtime_config() -> AppConfig:
+    """Load static configuration plus process-level environment overrides."""
+
+    base = load_config()
+    environment_model = os.environ.get("LLM_MODEL", "").strip()
+    environment_reasoning_effort = os.environ.get(
+        "LLM_REASONING_EFFORT",
+        "",
+    ).strip()
+    environment_base_url = os.environ.get("LLM_BASE_URL", "").strip()
+    if not (
+        environment_model
+        or environment_reasoning_effort
+        or environment_base_url
+    ):
+        return base
+    return replace(
+        base,
+        llm_model=environment_model or base.llm_model,
+        llm_reasoning_effort=(
+            environment_reasoning_effort or base.llm_reasoning_effort
+        ),
+        llm_base_url=(environment_base_url or base.llm_base_url).rstrip("/"),
+        llm_available_models=available_with_current(
+            environment_model or base.llm_model,
+            base.llm_available_models,
+        ),
+        llm_available_reasoning_efforts=available_with_current(
+            environment_reasoning_effort or base.llm_reasoning_effort,
+            base.llm_available_reasoning_efforts,
         ),
     )
 

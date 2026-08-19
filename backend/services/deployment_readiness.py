@@ -31,7 +31,7 @@ from services.server_auth import (
 )
 
 
-EXPECTED_ALEMBIC_HEAD = "20260817_0024"
+EXPECTED_ALEMBIC_HEAD = "20260819_0027"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,18 +223,34 @@ def _configuration_checks(
             )
         )
         endpoint = urlsplit(object_settings.endpoint_url)
-        secure_transport = (
+        public_transport = (
             not object_settings.endpoint_url
             or endpoint.scheme == "https"
             or endpoint.hostname in {"localhost", "127.0.0.1", "::1"}
         )
+        internal_endpoint = urlsplit(object_settings.internal_endpoint_url)
+        internal_hostname = internal_endpoint.hostname or ""
+        internal_transport = (
+            not object_settings.internal_endpoint_url
+            or internal_endpoint.scheme == "https"
+            or internal_hostname in {"localhost", "127.0.0.1", "::1"}
+            or (
+                internal_endpoint.scheme == "http"
+                and "." not in internal_hostname
+                and ":" not in internal_hostname
+            )
+        )
+        secure_transport = public_transport and internal_transport
         checks.append(
             PreflightCheck(
                 "object_store_transport",
                 secure_transport,
-                "secure or loopback transport"
+                "secure public and private internal transport"
                 if secure_transport
-                else "remote endpoint must use HTTPS",
+                else (
+                    "public endpoints must use HTTPS; internal HTTP endpoints "
+                    "must use a loopback or single-label service hostname"
+                ),
             )
         )
     except ValueError:

@@ -3302,7 +3302,12 @@ def replace_project_task_products(
     except ConfirmedProductSelectionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    recommendation_reasons = dict(task.product_candidate_reasons)
     task.products = list(products)
+    for product in task.products:
+        reason = recommendation_reasons.get(product.product_id, "").strip()
+        if reason:
+            product.selection_reason = reason
     invalidate_downstream(task, "products")
     return _save_audited_task(
         request,
@@ -4317,6 +4322,11 @@ def generate_project_task_tdk(
         ServerTdkDocxExport(
             config=_server_app_config(request),
             objects=_knowledge_object_service(request),
+            llm_factory=getattr(
+                request.app.state,
+                "server_llm_client_factory",
+                None,
+            ),
         ).generate(
             actor=authorized.actor,
             project_id=authorized.project_id,
