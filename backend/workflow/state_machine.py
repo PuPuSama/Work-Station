@@ -86,7 +86,7 @@ LEGAL_TRANSITIONS: dict[str, frozenset[str]] = {
 
 
 _ACTIONS_BY_STATUS: dict[str, tuple[str, ...]] = {
-    STATUS_NEW: (ACTION_GENERATE_TITLES,),
+    STATUS_NEW: (ACTION_GENERATE_TITLES, ACTION_SELECT_TITLE),
     STATUS_TITLES_READY: (ACTION_GENERATE_TITLES, ACTION_SELECT_TITLE),
     STATUS_TITLE_SELECTED: (
         ACTION_SELECT_TITLE,
@@ -370,6 +370,9 @@ def reset_for_full_rewrite(task: TaskRecord) -> TaskRecord:
 
     task.title_candidates = []
     task.selected_title = ""
+    task.manual_completed = False
+    task.manual_completed_at = ""
+    task.manual_completed_by = ""
     task.product_candidate_ids = []
     task.product_candidate_reasons = {}
     task.products = []

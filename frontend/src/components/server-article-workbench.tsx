@@ -210,6 +210,7 @@ export function ServerArticleWorkbench({
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [customTitleDraft, setCustomTitleDraft] = useState("");
   const [outlineDraft, setOutlineDraft] = useState("");
   const [humanizedDraft, setHumanizedDraft] = useState("");
   const [initialScore, setInitialScore] = useState("");
@@ -327,6 +328,7 @@ export function ServerArticleWorkbench({
       preserveDraftsForRevisionRef.current === (task.revision ?? 0);
     preserveDraftsForRevisionRef.current = null;
     if (!preserveDrafts) {
+      setCustomTitleDraft(task.selected_title || "");
       setOutlineDraft(task.outline_draft || task.outline || "");
       setHumanizedDraft(task.humanized_article || task.initial_article || "");
       setInitialScore(
@@ -652,10 +654,30 @@ export function ServerArticleWorkbench({
                   {roleLabel(role)}
                 </Badge>
                 <Badge>
-                  {task.status === "title_selected" && task.products.length
+                  {task.manual_completed
+                    ? "已完成"
+                    : task.status === "title_selected" && task.products.length
                     ? "产品已保存 · 待生成大纲"
                     : STATUS_LABELS[task.status]}
                 </Badge>
+                <label className="inline-flex min-h-9 items-center gap-2 rounded-md border px-3 text-sm">
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-primary"
+                    checked={task.manual_completed === true}
+                    disabled={loading || Boolean(pending) || !editAllowed}
+                    onChange={(event) =>
+                      void runAction("更新完成标记", () =>
+                        apiPut<TaskRecord>(`${taskApi}/manual-completion`, {
+                          revision: task.revision ?? 0,
+                          completed: event.target.checked,
+                        }),
+                      )
+                    }
+                    aria-label="手动标记文章任务为已完成"
+                  />
+                  <span>已完成</span>
+                </label>
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 topic_{String(task.topic_index).padStart(3, "0")} · Revision{" "}
@@ -810,6 +832,48 @@ export function ServerArticleWorkbench({
                     {titleGenerationBlockedReason}
                   </p>
                 ) : null}
+                <div className="grid gap-2 border-t pt-4">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <Label htmlFor={`custom-title-${task.id}`}>
+                      自定义标题
+                    </Label>
+                    <span className="text-xs text-muted-foreground">
+                      可跳过 AI 推荐
+                    </span>
+                  </div>
+                  <Input
+                    id={`custom-title-${task.id}`}
+                    value={customTitleDraft}
+                    onChange={(event) => setCustomTitleDraft(event.target.value)}
+                    placeholder={task.topic || "输入文章标题"}
+                    maxLength={300}
+                    disabled={Boolean(pending) || !editAllowed}
+                  />
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    直接输入最终标题并确认后，即可进入产品选择，不必先生成标题候选。
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="min-h-11"
+                    disabled={
+                      Boolean(pending) ||
+                      !editAllowed ||
+                      !allowed.has("select_title") ||
+                      !customTitleDraft.trim()
+                    }
+                    onClick={() =>
+                      void runAction("保存自定义标题", () =>
+                        apiPut<TaskRecord>(`${taskApi}/selected-title`, {
+                          revision: task.revision ?? 0,
+                          title: customTitleDraft.trim(),
+                        }),
+                      )
+                    }
+                  >
+                    使用自定义标题
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 

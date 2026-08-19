@@ -45,6 +45,7 @@ from workflow.state_machine import (  # noqa: E402
     ACTION_PREPARE_IMAGES,
     ACTION_RESTORE_LINKS,
     ACTION_REWRITE_FROM_SCRATCH,
+    ACTION_SELECT_TITLE,
     ACTION_UPDATE_ARTICLE,
     ACTION_UPDATE_HUMANIZED,
     ACTION_UPDATE_IMAGES,
@@ -77,6 +78,9 @@ def task_at(status: str) -> TaskRecord:
 
 
 class TransitionTests(unittest.TestCase):
+    def test_new_tasks_can_use_a_custom_title_without_generating_candidates(self) -> None:
+        self.assertIn(ACTION_SELECT_TITLE, allowed_actions(task_at(STATUS_NEW)))
+
     def test_only_adjacent_forward_transitions_are_legal(self) -> None:
         ordered = [
             STATUS_NEW,
