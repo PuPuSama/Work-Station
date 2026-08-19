@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
+  Settings2,
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -37,10 +38,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost, apiPut } from "@/lib/api";
 import type {
   AccessibleProject,
   AuthStatus,
+  ServerLlmSettings,
   WorkspaceTeam,
   WorkspaceTeamPage,
 } from "@/types";
@@ -70,6 +72,12 @@ export function ServerProjectSelector() {
   const [teams, setTeams] = useState<WorkspaceTeam[]>([]);
   const [organizationId, setOrganizationId] = useState("");
   const [canOpenOrganization, setCanOpenOrganization] = useState(false);
+  const [llmSettings, setLlmSettings] = useState<ServerLlmSettings | null>(null);
+  const [llmSettingsOpen, setLlmSettingsOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState("");
+  const [llmSettingsPending, setLlmSettingsPending] = useState(false);
+  const [llmSettingsError, setLlmSettingsError] = useState("");
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
@@ -100,9 +108,50 @@ export function ServerProjectSelector() {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
+
+  const loadLlmSettings = useCallback(async () => {
+    try {
+      setLlmSettings(await apiGet<ServerLlmSettings>("/api/settings/llm"));
+    } catch (nextError) {
+      setLlmSettings(null);
+      setLlmSettingsError(errorMessage(nextError));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadLlmSettings();
+  }, [loadLlmSettings]);
+
   const canManageOrganization = projects.some(
     (project) => project.effective_role === "org_admin",
   ) || canOpenOrganization;
+
+  function openLlmSettings() {
+    if (!llmSettings) return;
+    setSelectedModel(llmSettings.model);
+    setSelectedReasoningEffort(llmSettings.reasoning_effort);
+    setLlmSettingsError("");
+    setLlmSettingsOpen(true);
+  }
+
+  async function saveLlmSettings() {
+    if (!llmSettings || !selectedModel || !selectedReasoningEffort) return;
+    setLlmSettingsPending(true);
+    setLlmSettingsError("");
+    try {
+      const next = await apiPut<ServerLlmSettings>("/api/settings/llm", {
+        model: selectedModel,
+        reasoning_effort: selectedReasoningEffort,
+        revision: llmSettings.revision,
+      });
+      setLlmSettings(next);
+      setLlmSettingsOpen(false);
+    } catch (nextError) {
+      setLlmSettingsError(errorMessage(nextError));
+    } finally {
+      setLlmSettingsPending(false);
+    }
+  }
 
   async function openCreateProject() {
     setCreateOpen(true);
@@ -169,6 +218,20 @@ export function ServerProjectSelector() {
           </div>
           <div className="flex items-center gap-2">
             <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={openLlmSettings}
+                  disabled={!llmSettings || llmSettingsPending}
+                >
+                  <Settings2 />
+                  模型设置
+                  {llmSettings && (
+                    <span className="hidden text-xs text-muted-foreground sm:inline">
+                      {llmSettings.model} · {llmSettings.reasoning_effort}
+                    </span>
+                  )}
+                </Button>
                 <Button
                   type="button"
                   onClick={() => void openCreateProject()}
@@ -363,6 +426,91 @@ export function ServerProjectSelector() {
               {createPending ? <Loader2 className="animate-spin" /> : <Plus />}
               创建并进入项目
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={llmSettingsOpen} onOpenChange={setLlmSettingsOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>全局模型设置</DialogTitle>
+            <DialogDescription>
+              当前组织的标题、产品分析、大纲、正文、复检和交付相关模型请求会使用这里的配置。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-5 py-2">
+            {llmSettingsError && (
+              <Alert variant="destructive">
+                <AlertCircle />
+                <AlertTitle>模型设置保存失败</AlertTitle>
+                <AlertDescription>{llmSettingsError}</AlertDescription>
+              </Alert>
+            )}
+            <div className="grid gap-2">
+              <Label htmlFor="global-llm-model">模型</Label>
+              <select
+                id="global-llm-model"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={selectedModel}
+                disabled={!llmSettings?.can_edit || llmSettingsPending}
+                onChange={(event) => setSelectedModel(event.target.value)}
+              >
+                {(llmSettings?.available_models || []).map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="global-reasoning-effort">模型推理程度</Label>
+              <select
+                id="global-reasoning-effort"
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={selectedReasoningEffort}
+                disabled={!llmSettings?.can_edit || llmSettingsPending}
+                onChange={(event) => setSelectedReasoningEffort(event.target.value)}
+              >
+                {(llmSettings?.available_reasoning_efforts || []).map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs leading-5 text-muted-foreground">
+                程度越高通常越适合复杂任务，但响应时间和用量也可能增加。标题生成仍保持系统设定的低推理档位。
+              </p>
+            </div>
+            {!llmSettings?.can_edit && (
+              <Alert>
+                <AlertTitle>仅供查看</AlertTitle>
+                <AlertDescription>
+                  只有组织管理员可以修改全局模型设置。
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+          <DialogFooter>
+            <DialogClose
+              render={
+                <Button type="button" variant="outline" disabled={llmSettingsPending} />
+              }
+            >
+              关闭
+            </DialogClose>
+            {llmSettings?.can_edit && (
+              <Button
+                type="button"
+                onClick={() => void saveLlmSettings()}
+                disabled={!selectedModel || !selectedReasoningEffort || llmSettingsPending}
+              >
+                {llmSettingsPending ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Settings2 />
+                )}
+                保存模型设置
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -57,6 +57,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.server_llm_settings import ServerLlmClientFactory
 from services.task_identity import normalized_customer
 from storage import RevisionConflictError
 from workflow.state_machine import (
@@ -385,6 +386,8 @@ class ProductGenerationProvider(Protocol):
     @property
     def model_identity(self) -> str: ...
 
+    def model_identity_for(self, organization_id: str) -> str: ...
+
     def generate(
         self,
         task: TaskRecord,
@@ -463,8 +466,14 @@ class ProductProviderReference:
     def current(
         cls,
         provider: ProductGenerationProvider,
+        organization_id: str = "",
     ) -> ProductProviderReference:
-        identity = str(provider.model_identity).strip()
+        resolver = getattr(provider, "model_identity_for", None)
+        identity = str(
+            resolver(organization_id)
+            if callable(resolver)
+            else provider.model_identity
+        ).strip()
         if not identity or len(identity) > 240:
             raise ProductGenerationUnavailable(
                 "product provider model is not configured safely"
@@ -481,9 +490,13 @@ class ProductProviderReference:
             raise JobConflict("product provider identity is invalid")
         return cls(model_identity=identity)
 
-    def verify_current(self, provider: ProductGenerationProvider) -> None:
+    def verify_current(
+        self,
+        provider: ProductGenerationProvider,
+        organization_id: str = "",
+    ) -> None:
         try:
-            current = self.current(provider)
+            current = self.current(provider, organization_id)
         except ProductGenerationUnavailable as exc:
             raise JobConflict("pinned product provider changed") from exc
         if self != current:
@@ -625,7 +638,9 @@ class LlmServerProductProvider:
         config: AppConfig,
         *,
         llm: ProductLlmClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
+        self._llm_factory = llm_factory
         self._llm = llm or LLMClient(config)
 
     @property
@@ -636,19 +651,42 @@ class LlmServerProductProvider:
     def model_identity(self) -> str:
         return str(self._llm.model).strip()
 
+    def _client_for(self, organization_id: str) -> ProductLlmClient:
+        if self._llm_factory is not None:
+            return self._llm_factory.client(organization_id)
+        return self._llm
+
+    def model_identity_for(self, organization_id: str) -> str:
+        return str(self._client_for(organization_id).model).strip()
+
+    def generate_for_organization(
+        self,
+        task: TaskRecord,
+        *,
+        organization_id: str,
+        products: Sequence[ProductGenerationProduct],
+    ) -> tuple[ProductGenerationRecommendation, ...]:
+        return self.generate(
+            task,
+            products=products,
+            organization_id=organization_id,
+        )
+
     def generate(
         self,
         task: TaskRecord,
         *,
         products: Sequence[ProductGenerationProduct],
+        organization_id: str = "",
     ) -> tuple[ProductGenerationRecommendation, ...]:
-        if not self.ready:
+        client = self._client_for(organization_id)
+        if not client.ready:
             raise ProductGenerationUnavailable(
                 "product provider is not configured"
             )
-        prompt = build_server_product_prompt(task, products=products)
         try:
-            raw = self._llm.chat(
+            prompt = build_server_product_prompt(task, products=products)
+            raw = client.chat(
                 [
                     {
                         "role": "system",
@@ -665,6 +703,8 @@ class LlmServerProductProvider:
                 temperature=0.1,
                 max_tokens=700,
             )
+        except ProductGenerationUnavailable:
+            raise
         except Exception as exc:
             raise ProductGenerationUnavailable(
                 "product provider is temporarily unavailable"
@@ -746,7 +786,7 @@ class ServerProductGenerationHandler:
         template = ProductTemplateReference.from_mapping(request)
         template.verify_current()
         provider_reference = ProductProviderReference.from_mapping(request)
-        provider_reference.verify_current(self._provider)
+        provider_reference.verify_current(self._provider, organization_id)
         raw_bindings = request.get("product_bindings") or []
         if (
             isinstance(raw_bindings, (str, bytes))
@@ -792,7 +832,19 @@ class ServerProductGenerationHandler:
             raise JobCancelled(
                 "Product generation cancelled before provider call."
             )
-        proposed = self._provider.generate(task, products=products)
+        generate_for_organization = getattr(
+            self._provider,
+            "generate_for_organization",
+            None,
+        )
+        if callable(generate_for_organization):
+            proposed = generate_for_organization(
+                task,
+                organization_id=organization_id,
+                products=products,
+            )
+        else:
+            proposed = self._provider.generate(task, products=products)
         candidates = apply_generated_product_candidates(
             task,
             recommendations=proposed,
@@ -987,7 +1039,10 @@ class ServerProductGenerationRegistry:
                 "product generation is not allowed"
             ) from exc
         template = ProductTemplateReference.current()
-        provider_reference = ProductProviderReference.current(self._provider)
+        provider_reference = ProductProviderReference.current(
+            self._provider,
+            actor.organization_id,
+        )
         products = self._context.select(project_id=project_id)
         project = self._ensure_project(
             actor.organization_id,

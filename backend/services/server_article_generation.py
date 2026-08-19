@@ -96,6 +96,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.server_llm_settings import ServerLlmClientFactory
 from services.zerogpt import ZeroGPTDetectionResult
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
@@ -482,12 +483,36 @@ class LlmServerArticleProvider:
         config: AppConfig,
         *,
         llm: ArticleLlmClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
+        self._llm_factory = llm_factory
         self._llm = llm or LLMClient(config)
 
     @property
     def ready(self) -> bool:
         return self._llm.ready
+
+    def _client_for(self, organization_id: str) -> ArticleLlmClient:
+        if self._llm_factory is not None:
+            return self._llm_factory.client(organization_id)
+        return self._llm
+
+    def generate_for_organization(
+        self,
+        task: TaskRecord,
+        *,
+        organization_id: str,
+        target_words: int,
+        prompt_snapshot: PromptSnapshot,
+        context_chunks: Sequence[PublishedGenerationContextChunk],
+    ) -> str:
+        return self.generate(
+            task,
+            target_words=target_words,
+            prompt_snapshot=prompt_snapshot,
+            context_chunks=context_chunks,
+            organization_id=organization_id,
+        )
 
     def generate(
         self,
@@ -496,8 +521,10 @@ class LlmServerArticleProvider:
         target_words: int,
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedGenerationContextChunk],
+        organization_id: str = "",
     ) -> str:
-        if not self.ready:
+        client = self._client_for(organization_id)
+        if not client.ready:
             raise ArticleGenerationUnavailable(
                 "article provider is not configured"
             )
@@ -508,7 +535,7 @@ class LlmServerArticleProvider:
             context_chunks=context_chunks,
         )
         try:
-            result = self._llm.chat(
+            result = client.chat(
                 [
                     {
                         "role": "system",
@@ -806,12 +833,26 @@ class ServerArticleGenerationHandler:
             raise JobCancelled(
                 "Article generation cancelled before provider call."
             )
-        raw_article = self._provider.generate(
-            task,
-            target_words=target_words,
-            prompt_snapshot=prompt_snapshot,
-            context_chunks=context_chunks,
+        generate_for_organization = getattr(
+            self._provider,
+            "generate_for_organization",
+            None,
         )
+        if callable(generate_for_organization):
+            raw_article = generate_for_organization(
+                task,
+                organization_id=organization_id,
+                target_words=target_words,
+                prompt_snapshot=prompt_snapshot,
+                context_chunks=context_chunks,
+            )
+        else:
+            raw_article = self._provider.generate(
+                task,
+                target_words=target_words,
+                prompt_snapshot=prompt_snapshot,
+                context_chunks=context_chunks,
+            )
         if cancelled():
             raise JobCancelled(
                 "Article generation cancelled before result commit."

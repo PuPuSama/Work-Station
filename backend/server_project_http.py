@@ -4322,6 +4322,11 @@ def generate_project_task_tdk(
         ServerTdkDocxExport(
             config=_server_app_config(request),
             objects=_knowledge_object_service(request),
+            llm_factory=getattr(
+                request.app.state,
+                "server_llm_client_factory",
+                None,
+            ),
         ).generate(
             actor=authorized.actor,
             project_id=authorized.project_id,

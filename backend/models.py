@@ -503,6 +503,7 @@ class ProjectContextUpdateRequest(WorkflowModel):
 class LlmSettingsUpdateRequest(WorkflowModel):
     model: str = Field(min_length=1, max_length=120)
     reasoning_effort: Literal["low", "medium", "high", "xhigh"]
+    revision: int = Field(default=0, ge=0)
 
 
 class WritingSettingsUpdateRequest(RevisionedRequest):
