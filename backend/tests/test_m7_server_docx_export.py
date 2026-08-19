@@ -208,6 +208,9 @@ class ServerArticleDocxExportTests(unittest.TestCase):
             )
 
             self.assertEqual(saved.status, "docx_exported")
+            self.assertTrue(saved.manual_completed)
+            self.assertEqual(saved.manual_completed_by, "editor")
+            self.assertTrue(saved.manual_completed_at)
             self.assertEqual(saved.docx_path, "")
             self.assertTrue(saved.docx_asset_id.startswith("asset_"))
             self.assertEqual(

@@ -181,6 +181,10 @@ function articleFor(task: TaskRecord) {
   );
 }
 
+function isTaskCompleted(task: Pick<TaskRecord, "manual_completed" | "status">) {
+  return task.manual_completed === true || task.status === "docx_exported";
+}
+
 function taskProductIds(task: TaskRecord) {
   return task.products.flatMap((product) =>
     product.product_id ? [product.product_id] : [],
@@ -654,7 +658,7 @@ export function ServerArticleWorkbench({
                   {roleLabel(role)}
                 </Badge>
                 <Badge>
-                  {task.manual_completed
+                  {isTaskCompleted(task)
                     ? "已完成"
                     : task.status === "title_selected" && task.products.length
                     ? "产品已保存 · 待生成大纲"
@@ -664,8 +668,13 @@ export function ServerArticleWorkbench({
                   <input
                     type="checkbox"
                     className="size-4 accent-primary"
-                    checked={task.manual_completed === true}
-                    disabled={loading || Boolean(pending) || !editAllowed}
+                    checked={isTaskCompleted(task)}
+                    disabled={
+                      loading ||
+                      Boolean(pending) ||
+                      !editAllowed ||
+                      task.status === "docx_exported"
+                    }
                     onChange={(event) =>
                       void runAction("更新完成标记", () =>
                         apiPut<TaskRecord>(`${taskApi}/manual-completion`, {

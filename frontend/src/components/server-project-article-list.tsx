@@ -79,6 +79,10 @@ function canEditProject(
   );
 }
 
+function isTaskCompleted(task: Pick<TaskRecord, "manual_completed" | "status">) {
+  return task.manual_completed === true || task.status === "docx_exported";
+}
+
 function stepForStatus(status: WorkflowStatus) {
   if (status === "new" || status === "titles_ready") return "setup";
   if (status === "title_selected" || status === "outline_ready") return "outline";
@@ -151,7 +155,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
     return tasks.filter((task) => {
       if (
         manualOnly &&
-        (task.manual_completed || !MANUAL_STATUSES.has(task.status))
+        (isTaskCompleted(task) || !MANUAL_STATUSES.has(task.status))
       ) {
         return false;
       }
@@ -324,7 +328,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                                   : "outline"
                             }
                           >
-                            {task.manual_completed
+                            {isTaskCompleted(task)
                               ? "已完成"
                               : task.workflow_error
                                 ? "处理失败"
@@ -342,9 +346,11 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                             <input
                               type="checkbox"
                               className="size-4 accent-primary"
-                              checked={task.manual_completed === true}
+                              checked={isTaskCompleted(task)}
                               disabled={
-                                !canEdit || completionPending === task.id
+                                !canEdit ||
+                                completionPending === task.id ||
+                                task.status === "docx_exported"
                               }
                               onChange={(event) =>
                                 void toggleCompletion(
@@ -355,7 +361,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                               aria-label={`标记 topic_${String(task.topic_index).padStart(3, "0")} 已完成`}
                             />
                             <span>
-                              {task.manual_completed ? "已完成" : "标记"}
+                              {isTaskCompleted(task) ? "已完成" : "标记"}
                             </span>
                           </label>
                         </TableCell>
