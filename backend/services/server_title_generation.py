@@ -203,9 +203,17 @@ class LlmServerTitleProvider:
     def ready(self) -> bool:
         return self._llm.ready
 
-    def _client_for(self, organization_id: str) -> TitleLlmClient:
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> TitleLlmClient:
         if self._llm_factory is not None:
-            return self._llm_factory.client(organization_id, title=True)
+            return self._llm_factory.client(
+                organization_id,
+                user_id,
+                title=True,
+            )
         return self._llm
 
     def generate_for_organization(
@@ -213,6 +221,7 @@ class LlmServerTitleProvider:
         task: TaskRecord,
         *,
         organization_id: str,
+        user_id: str,
         title_count: int,
         context_chunks: Sequence[PublishedOutlineContextChunk],
     ) -> tuple[str, ...]:
@@ -221,6 +230,7 @@ class LlmServerTitleProvider:
             title_count=title_count,
             context_chunks=context_chunks,
             organization_id=organization_id,
+            user_id=user_id,
         )
 
     def generate(
@@ -230,8 +240,9 @@ class LlmServerTitleProvider:
         title_count: int,
         context_chunks: Sequence[PublishedOutlineContextChunk],
         organization_id: str = "",
+        user_id: str = "",
     ) -> tuple[str, ...]:
-        client = self._client_for(organization_id)
+        client = self._client_for(organization_id, user_id)
         if not client.ready:
             raise TitleGenerationUnavailable(
                 "title provider is not configured"
@@ -389,6 +400,7 @@ class ServerTitleGenerationHandler:
             candidates = generate_for_organization(
                 task,
                 organization_id=organization_id,
+                user_id=requester,
                 title_count=title_count,
                 context_chunks=context_chunks,
             )

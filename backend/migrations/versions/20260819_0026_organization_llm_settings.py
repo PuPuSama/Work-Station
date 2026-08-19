@@ -1,4 +1,4 @@
-"""Persist organization-scoped model settings.
+"""Persist the initial organization-scoped model settings.
 
 Revision ID: 20260819_0026
 Revises: 20260819_0025

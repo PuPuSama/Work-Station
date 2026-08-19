@@ -35,7 +35,7 @@ def _service(request: Request) -> PostgresServerLlmSettings:
     if not isinstance(service, PostgresServerLlmSettings):
         raise HTTPException(
             status_code=503,
-            detail="Organization model settings are not available.",
+            detail="User model settings are not available.",
         )
     return service
 
@@ -86,11 +86,11 @@ def read_llm_settings(
             fallback_reasoning_effort=cfg.llm_reasoning_effort,
         )
     except ServerLlmSettingsDenied as exc:
-        raise HTTPException(status_code=403, detail="model settings read denied") from exc
+        raise HTTPException(status_code=403, detail="user model settings read denied") from exc
     except ServerLlmSettingsUnavailable as exc:
         raise HTTPException(
             status_code=503,
-            detail="Organization model settings are temporarily unavailable.",
+            detail="User model settings are temporarily unavailable.",
         ) from exc
     return _response(
         settings,
@@ -117,18 +117,18 @@ def update_llm_settings(
             event_id=f"llm_settings_{uuid.uuid4().hex}",
         )
     except ServerLlmSettingsDenied as exc:
-        raise HTTPException(status_code=403, detail="model settings update denied") from exc
+        raise HTTPException(status_code=403, detail="user model settings update denied") from exc
     except ServerLlmSettingsConflict as exc:
         raise HTTPException(
             status_code=409,
-            detail="model settings changed; reload and try again",
+            detail="your model settings changed; reload and try again",
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ServerLlmSettingsUnavailable as exc:
         raise HTTPException(
             status_code=503,
-            detail="Organization model settings could not be updated.",
+            detail="User model settings could not be updated.",
         ) from exc
     return _response(
         settings,

@@ -162,9 +162,13 @@ class LlmServerHumanizeProvider:
     def ready(self) -> bool:
         return self._llm.ready
 
-    def _client_for(self, organization_id: str) -> HumanizeLlmClient:
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> HumanizeLlmClient:
         if self._llm_factory is not None:
-            return self._llm_factory.client(organization_id)
+            return self._llm_factory.client(organization_id, user_id)
         return self._llm
 
     def generate_for_organization(
@@ -172,6 +176,7 @@ class LlmServerHumanizeProvider:
         task: TaskRecord,
         *,
         organization_id: str,
+        user_id: str,
         source_article: str,
         prompt_snapshot: PromptSnapshot,
     ) -> str:
@@ -180,6 +185,7 @@ class LlmServerHumanizeProvider:
             source_article=source_article,
             prompt_snapshot=prompt_snapshot,
             organization_id=organization_id,
+            user_id=user_id,
         )
 
     def generate(
@@ -189,8 +195,9 @@ class LlmServerHumanizeProvider:
         source_article: str,
         prompt_snapshot: PromptSnapshot,
         organization_id: str = "",
+        user_id: str = "",
     ) -> str:
-        client = self._client_for(organization_id)
+        client = self._client_for(organization_id, user_id)
         if not client.ready:
             raise HumanizeGenerationUnavailable(
                 "humanize provider is not configured"
@@ -376,6 +383,7 @@ class ServerHumanizeGenerationHandler:
             candidate = generate_for_organization(
                 task,
                 organization_id=organization_id,
+                user_id=requester,
                 source_article=source_article,
                 prompt_snapshot=prompt,
             )

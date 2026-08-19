@@ -432,9 +432,9 @@ export function ServerProjectSelector() {
       <Dialog open={llmSettingsOpen} onOpenChange={setLlmSettingsOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>全局模型设置</DialogTitle>
+            <DialogTitle>个人模型设置</DialogTitle>
             <DialogDescription>
-              当前组织的标题、产品分析、大纲、正文、复检和交付相关模型请求会使用这里的配置。
+              当前账号发起的标题、产品分析、大纲、正文、复检和交付相关模型请求会使用这里的配置；只影响当前账号，不影响其他成员。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-5 py-2">
@@ -484,7 +484,7 @@ export function ServerProjectSelector() {
               <Alert>
                 <AlertTitle>仅供查看</AlertTitle>
                 <AlertDescription>
-                  当前账号没有有效的组织成员身份，因此不能修改全局模型设置。
+                  当前账号没有有效的组织成员身份，因此不能修改个人模型设置。
                 </AlertDescription>
               </Alert>
             )}

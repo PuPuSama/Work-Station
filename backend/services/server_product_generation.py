@@ -386,7 +386,11 @@ class ProductGenerationProvider(Protocol):
     @property
     def model_identity(self) -> str: ...
 
-    def model_identity_for(self, organization_id: str) -> str: ...
+    def model_identity_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> str: ...
 
     def generate(
         self,
@@ -467,10 +471,11 @@ class ProductProviderReference:
         cls,
         provider: ProductGenerationProvider,
         organization_id: str = "",
+        user_id: str = "",
     ) -> ProductProviderReference:
         resolver = getattr(provider, "model_identity_for", None)
         identity = str(
-            resolver(organization_id)
+            resolver(organization_id, user_id)
             if callable(resolver)
             else provider.model_identity
         ).strip()
@@ -494,9 +499,10 @@ class ProductProviderReference:
         self,
         provider: ProductGenerationProvider,
         organization_id: str = "",
+        user_id: str = "",
     ) -> None:
         try:
-            current = self.current(provider, organization_id)
+            current = self.current(provider, organization_id, user_id)
         except ProductGenerationUnavailable as exc:
             raise JobConflict("pinned product provider changed") from exc
         if self != current:
@@ -651,25 +657,31 @@ class LlmServerProductProvider:
     def model_identity(self) -> str:
         return str(self._llm.model).strip()
 
-    def _client_for(self, organization_id: str) -> ProductLlmClient:
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> ProductLlmClient:
         if self._llm_factory is not None:
-            return self._llm_factory.client(organization_id)
+            return self._llm_factory.client(organization_id, user_id)
         return self._llm
 
-    def model_identity_for(self, organization_id: str) -> str:
-        return str(self._client_for(organization_id).model).strip()
+    def model_identity_for(self, organization_id: str, user_id: str) -> str:
+        return str(self._client_for(organization_id, user_id).model).strip()
 
     def generate_for_organization(
         self,
         task: TaskRecord,
         *,
         organization_id: str,
+        user_id: str,
         products: Sequence[ProductGenerationProduct],
     ) -> tuple[ProductGenerationRecommendation, ...]:
         return self.generate(
             task,
             products=products,
             organization_id=organization_id,
+            user_id=user_id,
         )
 
     def generate(
@@ -678,8 +690,9 @@ class LlmServerProductProvider:
         *,
         products: Sequence[ProductGenerationProduct],
         organization_id: str = "",
+        user_id: str = "",
     ) -> tuple[ProductGenerationRecommendation, ...]:
-        client = self._client_for(organization_id)
+        client = self._client_for(organization_id, user_id)
         if not client.ready:
             raise ProductGenerationUnavailable(
                 "product provider is not configured"
@@ -786,7 +799,11 @@ class ServerProductGenerationHandler:
         template = ProductTemplateReference.from_mapping(request)
         template.verify_current()
         provider_reference = ProductProviderReference.from_mapping(request)
-        provider_reference.verify_current(self._provider, organization_id)
+        provider_reference.verify_current(
+            self._provider,
+            organization_id,
+            requester,
+        )
         raw_bindings = request.get("product_bindings") or []
         if (
             isinstance(raw_bindings, (str, bytes))
@@ -841,6 +858,7 @@ class ServerProductGenerationHandler:
             proposed = generate_for_organization(
                 task,
                 organization_id=organization_id,
+                user_id=requester,
                 products=products,
             )
         else:
@@ -1042,6 +1060,7 @@ class ServerProductGenerationRegistry:
         provider_reference = ProductProviderReference.current(
             self._provider,
             actor.organization_id,
+            actor.user_id,
         )
         products = self._context.select(project_id=project_id)
         project = self._ensure_project(

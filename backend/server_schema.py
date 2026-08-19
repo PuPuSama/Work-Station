@@ -50,10 +50,11 @@ organizations = sa.Table(
 )
 
 
-organization_llm_settings = sa.Table(
-    "organization_llm_settings",
+workspace_user_llm_settings = sa.Table(
+    "workspace_user_llm_settings",
     metadata,
     sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("user_id", sa.Text(), nullable=False),
     sa.Column("model", sa.Text(), nullable=False),
     sa.Column("reasoning_effort", sa.Text(), nullable=False),
     sa.Column(
@@ -70,21 +71,22 @@ organization_llm_settings = sa.Table(
     ),
     sa.CheckConstraint(
         "btrim(model) <> '' AND btrim(reasoning_effort) <> ''",
-        name="ck_organization_llm_settings_values_nonempty",
+        name="ck_workspace_user_llm_settings_values_nonempty",
     ),
     sa.CheckConstraint(
         "revision >= 0",
-        name="ck_organization_llm_settings_revision_nonnegative",
+        name="ck_workspace_user_llm_settings_revision_nonnegative",
     ),
     sa.ForeignKeyConstraint(
-        ["organization_id"],
-        ["organizations.organization_id"],
-        name="fk_organization_llm_settings_organization",
+        ["organization_id", "user_id"],
+        ["workspace_users.organization_id", "workspace_users.user_id"],
+        name="fk_workspace_user_llm_settings_user",
         ondelete="CASCADE",
     ),
     sa.PrimaryKeyConstraint(
         "organization_id",
-        name="pk_organization_llm_settings",
+        "user_id",
+        name="pk_workspace_user_llm_settings",
     ),
 )
 
@@ -1339,7 +1341,7 @@ __all__ = [
     "external_identities",
     "job_batches",
     "organizations",
-    "organization_llm_settings",
+    "workspace_user_llm_settings",
     "object_orphan_observations",
     "project_memberships",
     "project_ownership",

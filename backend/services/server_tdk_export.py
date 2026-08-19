@@ -89,7 +89,10 @@ class ServerTdkDocxExport:
             and self._llm_factory is not None
             and self._llm_factory.ready
         ):
-            client = self._llm_factory.client(actor.organization_id)
+            client = self._llm_factory.client(
+                actor.organization_id,
+                actor.user_id,
+            )
         if client is None:
             client = LLMClient(self._config)
         if getattr(client, "ready", True) is False:

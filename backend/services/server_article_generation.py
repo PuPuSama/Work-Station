@@ -492,9 +492,13 @@ class LlmServerArticleProvider:
     def ready(self) -> bool:
         return self._llm.ready
 
-    def _client_for(self, organization_id: str) -> ArticleLlmClient:
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> ArticleLlmClient:
         if self._llm_factory is not None:
-            return self._llm_factory.client(organization_id)
+            return self._llm_factory.client(organization_id, user_id)
         return self._llm
 
     def generate_for_organization(
@@ -502,6 +506,7 @@ class LlmServerArticleProvider:
         task: TaskRecord,
         *,
         organization_id: str,
+        user_id: str,
         target_words: int,
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedGenerationContextChunk],
@@ -512,6 +517,7 @@ class LlmServerArticleProvider:
             prompt_snapshot=prompt_snapshot,
             context_chunks=context_chunks,
             organization_id=organization_id,
+            user_id=user_id,
         )
 
     def generate(
@@ -522,8 +528,9 @@ class LlmServerArticleProvider:
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedGenerationContextChunk],
         organization_id: str = "",
+        user_id: str = "",
     ) -> str:
-        client = self._client_for(organization_id)
+        client = self._client_for(organization_id, user_id)
         if not client.ready:
             raise ArticleGenerationUnavailable(
                 "article provider is not configured"
@@ -842,6 +849,7 @@ class ServerArticleGenerationHandler:
             raw_article = generate_for_organization(
                 task,
                 organization_id=organization_id,
+                user_id=requester,
                 target_words=target_words,
                 prompt_snapshot=prompt_snapshot,
                 context_chunks=context_chunks,

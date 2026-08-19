@@ -176,15 +176,20 @@ class LlmServerLinkRestorationProvider:
     def ready(self) -> bool:
         return self._llm.ready
 
-    def _client_for(self, organization_id: str) -> LinkRestorationLlmClient:
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> LinkRestorationLlmClient:
         if self._llm_factory is not None:
-            return self._llm_factory.client(organization_id)
+            return self._llm_factory.client(organization_id, user_id)
         return self._llm
 
     def restore_for_organization(
         self,
         *,
         organization_id: str,
+        user_id: str,
         source_article: str,
         candidate_article: str,
         missing_links: list[dict[str, object]],
@@ -194,6 +199,7 @@ class LlmServerLinkRestorationProvider:
             source_article=source_article,
             candidate_article=candidate_article,
             missing_links=missing_links,
+            user_id=user_id,
         )
 
     def restore(
@@ -203,10 +209,11 @@ class LlmServerLinkRestorationProvider:
         candidate_article: str,
         missing_links: list[dict[str, object]],
         organization_id: str = "",
+        user_id: str = "",
     ) -> str:
         if not missing_links:
             return candidate_article
-        client = self._client_for(organization_id)
+        client = self._client_for(organization_id, user_id)
         if not client.ready:
             raise LinkRestorationUnavailable(
                 "link restoration provider is not configured"
@@ -446,6 +453,7 @@ class ServerLinkRestorationHandler:
         if callable(restore_for_organization):
             restored = restore_for_organization(
                 organization_id=organization_id,
+                user_id=requester,
                 source_article=source_article,
                 candidate_article=candidate_article,
                 missing_links=missing,

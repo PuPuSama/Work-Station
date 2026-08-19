@@ -10,18 +10,18 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import AppConfig
-from server_schema import organization_llm_settings, workspace_users
+from server_schema import workspace_user_llm_settings, workspace_users
 from services.access_control import ActorIdentity
 from services.audit_log import AuditEvent, AuditEventWriter, PostgresAuditEventWriter
 from services.llm import LLMClient
 
 
 class ServerLlmSettingsDenied(PermissionError):
-    """The actor cannot read or change the organization model settings."""
+    """The actor cannot read or change their model settings."""
 
 
 class ServerLlmSettingsConflict(RuntimeError):
-    """The organization model settings changed since the client loaded them."""
+    """The user's model settings changed since the client loaded them."""
 
 
 class ServerLlmSettingsUnavailable(RuntimeError):
@@ -54,7 +54,7 @@ def _required_text(value: str, field_name: str) -> str:
 
 
 class PostgresServerLlmSettings:
-    """Read and update organization-scoped runtime LLM choices."""
+    """Read and update user-scoped runtime LLM choices."""
 
     def __init__(
         self,
@@ -103,30 +103,33 @@ class PostgresServerLlmSettings:
             statement = statement.where(workspace_users.c.user_id == user_id)
         return connection.execute(statement).scalar_one_or_none()
 
-    def get_for_organization(
+    def get_for_user(
         self,
         organization_id: str,
+        user_id: str,
         *,
         fallback_model: str,
         fallback_reasoning_effort: str,
     ) -> ServerLlmSettings:
         organization_id = _required_text(organization_id, "organization_id")
+        user_id = _required_text(user_id, "user_id")
         try:
             with self._engine.connect() as connection:
                 row = connection.execute(
                     sa.select(
-                        organization_llm_settings.c.model,
-                        organization_llm_settings.c.reasoning_effort,
-                        organization_llm_settings.c.revision,
-                        organization_llm_settings.c.updated_at,
+                        workspace_user_llm_settings.c.model,
+                        workspace_user_llm_settings.c.reasoning_effort,
+                        workspace_user_llm_settings.c.revision,
+                        workspace_user_llm_settings.c.updated_at,
                     ).where(
-                        organization_llm_settings.c.organization_id
-                        == organization_id
+                        workspace_user_llm_settings.c.organization_id
+                        == organization_id,
+                        workspace_user_llm_settings.c.user_id == user_id,
                     )
                 ).mappings().one_or_none()
         except (SQLAlchemyError, RuntimeError) as exc:
             raise ServerLlmSettingsUnavailable(
-                "organization model settings are unavailable"
+                "user model settings are unavailable"
             ) from exc
         return self._record(
             row,
@@ -154,24 +157,25 @@ class PostgresServerLlmSettings:
                 )
                 if role is None:
                     raise ServerLlmSettingsDenied(
-                        "organization model settings read denied"
+                        "user model settings read denied"
                     )
                 row = connection.execute(
                     sa.select(
-                        organization_llm_settings.c.model,
-                        organization_llm_settings.c.reasoning_effort,
-                        organization_llm_settings.c.revision,
-                        organization_llm_settings.c.updated_at,
+                        workspace_user_llm_settings.c.model,
+                        workspace_user_llm_settings.c.reasoning_effort,
+                        workspace_user_llm_settings.c.revision,
+                        workspace_user_llm_settings.c.updated_at,
                     ).where(
-                        organization_llm_settings.c.organization_id
-                        == actor.organization_id
+                        workspace_user_llm_settings.c.organization_id
+                        == actor.organization_id,
+                        workspace_user_llm_settings.c.user_id == actor.user_id,
                     )
                 ).mappings().one_or_none()
         except ServerLlmSettingsDenied:
             raise
         except (SQLAlchemyError, RuntimeError) as exc:
             raise ServerLlmSettingsUnavailable(
-                "organization model settings are unavailable"
+                "user model settings are unavailable"
             ) from exc
         return self._record(
             row,
@@ -180,7 +184,7 @@ class PostgresServerLlmSettings:
                 fallback_reasoning_effort,
                 "fallback_reasoning_effort",
             ),
-            # Every active workspace member may change the shared setting.
+            # Every active workspace member may change their own setting.
             # The organization membership check above remains the boundary;
             # this is not exposed to unauthenticated or inactive users.
             can_edit=True,
@@ -217,31 +221,33 @@ class PostgresServerLlmSettings:
                 )
                 if role is None:
                     raise ServerLlmSettingsDenied(
-                        "organization model settings update denied"
+                        "user model settings update denied"
                     )
                 current = connection.execute(
                     sa.select(
-                        organization_llm_settings.c.model,
-                        organization_llm_settings.c.reasoning_effort,
-                        organization_llm_settings.c.revision,
-                        organization_llm_settings.c.updated_at,
+                        workspace_user_llm_settings.c.model,
+                        workspace_user_llm_settings.c.reasoning_effort,
+                        workspace_user_llm_settings.c.revision,
+                        workspace_user_llm_settings.c.updated_at,
                     )
                     .where(
-                        organization_llm_settings.c.organization_id
-                        == actor.organization_id
+                        workspace_user_llm_settings.c.organization_id
+                        == actor.organization_id,
+                        workspace_user_llm_settings.c.user_id == actor.user_id,
                     )
                     .with_for_update()
                 ).mappings().one_or_none()
                 current_revision = 0 if current is None else int(current["revision"])
                 if current_revision != expected_revision:
                     raise ServerLlmSettingsConflict(
-                        "organization model settings revision changed"
+                        "user model settings revision changed"
                     )
                 next_revision = expected_revision + 1
                 if current is None:
                     connection.execute(
-                        organization_llm_settings.insert().values(
+                        workspace_user_llm_settings.insert().values(
                             organization_id=actor.organization_id,
+                            user_id=actor.user_id,
                             model=normalized_model,
                             reasoning_effort=normalized_effort,
                             revision=next_revision,
@@ -249,11 +255,13 @@ class PostgresServerLlmSettings:
                     )
                 else:
                     result = connection.execute(
-                        organization_llm_settings.update()
+                        workspace_user_llm_settings.update()
                         .where(
-                            organization_llm_settings.c.organization_id
+                            workspace_user_llm_settings.c.organization_id
                             == actor.organization_id,
-                            organization_llm_settings.c.revision
+                            workspace_user_llm_settings.c.user_id
+                            == actor.user_id,
+                            workspace_user_llm_settings.c.revision
                             == expected_revision,
                         )
                         .values(
@@ -265,7 +273,7 @@ class PostgresServerLlmSettings:
                     )
                     if result.rowcount != 1:
                         raise ServerLlmSettingsConflict(
-                            "organization model settings revision changed"
+                            "user model settings revision changed"
                         )
                 self._audit.append(
                     connection,
@@ -275,32 +283,34 @@ class PostgresServerLlmSettings:
                             event_id or "llm_settings_" + uuid.uuid4().hex
                         ),
                         actor_user_id=actor.user_id,
-                        action="workspace.llm_settings.updated",
-                        target_type="organization_llm_settings",
-                        target_id=actor.organization_id,
+                        action="workspace.user_llm_settings.updated",
+                        target_type="workspace_user_llm_settings",
+                        target_id=actor.user_id,
                         details={
                             "model": normalized_model,
                             "reasoning_effort": normalized_effort,
                             "revision": next_revision,
+                            "user_id": actor.user_id,
                         },
                     ),
                 )
                 updated = connection.execute(
                     sa.select(
-                        organization_llm_settings.c.model,
-                        organization_llm_settings.c.reasoning_effort,
-                        organization_llm_settings.c.revision,
-                        organization_llm_settings.c.updated_at,
+                        workspace_user_llm_settings.c.model,
+                        workspace_user_llm_settings.c.reasoning_effort,
+                        workspace_user_llm_settings.c.revision,
+                        workspace_user_llm_settings.c.updated_at,
                     ).where(
-                        organization_llm_settings.c.organization_id
-                        == actor.organization_id
+                        workspace_user_llm_settings.c.organization_id
+                        == actor.organization_id,
+                        workspace_user_llm_settings.c.user_id == actor.user_id,
                     )
                 ).mappings().one()
         except (ServerLlmSettingsDenied, ServerLlmSettingsConflict, ValueError):
             raise
         except (SQLAlchemyError, RuntimeError) as exc:
             raise ServerLlmSettingsUnavailable(
-                "organization model settings could not be updated"
+                "user model settings could not be updated"
             ) from exc
         return self._record(
             updated,
@@ -311,7 +321,7 @@ class PostgresServerLlmSettings:
 
 
 class ServerLlmClientFactory:
-    """Create per-job clients using the latest organization setting."""
+    """Create per-job clients using the requesting user's latest setting."""
 
     def __init__(
         self,
@@ -326,9 +336,16 @@ class ServerLlmClientFactory:
     def ready(self) -> bool:
         return self._base_client.ready
 
-    def client(self, organization_id: str, *, title: bool = False) -> LLMClient:
-        selected = self._settings.get_for_organization(
+    def client(
+        self,
+        organization_id: str,
+        user_id: str,
+        *,
+        title: bool = False,
+    ) -> LLMClient:
+        selected = self._settings.get_for_user(
             organization_id,
+            user_id,
             fallback_model=self._config.llm_model,
             fallback_reasoning_effort=self._config.llm_reasoning_effort,
         )

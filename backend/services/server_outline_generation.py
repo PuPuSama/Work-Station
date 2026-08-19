@@ -531,9 +531,13 @@ class LlmServerOutlineProvider:
     def ready(self) -> bool:
         return self._llm.ready
 
-    def _client_for(self, organization_id: str) -> OutlineLlmClient:
+    def _client_for(
+        self,
+        organization_id: str,
+        user_id: str,
+    ) -> OutlineLlmClient:
         if self._llm_factory is not None:
-            return self._llm_factory.client(organization_id)
+            return self._llm_factory.client(organization_id, user_id)
         return self._llm
 
     def generate_for_organization(
@@ -541,6 +545,7 @@ class LlmServerOutlineProvider:
         task: TaskRecord,
         *,
         organization_id: str,
+        user_id: str,
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedOutlineContextChunk],
     ) -> str:
@@ -549,6 +554,7 @@ class LlmServerOutlineProvider:
             prompt_snapshot=prompt_snapshot,
             context_chunks=context_chunks,
             organization_id=organization_id,
+            user_id=user_id,
         )
 
     def generate(
@@ -558,8 +564,9 @@ class LlmServerOutlineProvider:
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedOutlineContextChunk],
         organization_id: str = "",
+        user_id: str = "",
     ) -> str:
-        client = self._client_for(organization_id)
+        client = self._client_for(organization_id, user_id)
         if not client.ready:
             raise OutlineGenerationUnavailable(
                 "outline provider is not configured"
@@ -692,6 +699,7 @@ class ServerOutlineGenerationHandler:
             outline = generate_for_organization(
                 task,
                 organization_id=organization_id,
+                user_id=requester,
                 prompt_snapshot=prompt_snapshot,
                 context_chunks=context_chunks,
             )
