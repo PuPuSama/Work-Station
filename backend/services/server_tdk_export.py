@@ -12,6 +12,7 @@ from knowledge_agent.object_storage import (
 from models import TaskRecord
 from services.access_control import ActorIdentity
 from services.llm import LLMClient
+from services.server_llm_settings import ServerLlmClientFactory
 from services.tdk import (
     TdkGenerationError,
     build_tdk_docx_bytes,
@@ -64,10 +65,12 @@ class ServerTdkDocxExport:
         config: AppConfig,
         objects: ServerTdkObjectService,
         llm: TdkChatClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
         self._config = config
         self._objects = objects
         self._llm = llm
+        self._llm_factory = llm_factory
 
     def generate(
         self,
@@ -80,7 +83,11 @@ class ServerTdkDocxExport:
             raise ServerTdkError(
                 "the Server article Word document must be exported first"
             )
-        client = self._llm or LLMClient(self._config)
+        client = self._llm
+        if client is None and self._llm_factory is not None:
+            client = self._llm_factory.client(actor.organization_id)
+        if client is None:
+            client = LLMClient(self._config)
         if getattr(client, "ready", True) is False:
             raise ServerTdkUnavailable(
                 "TDK generation is temporarily unavailable"

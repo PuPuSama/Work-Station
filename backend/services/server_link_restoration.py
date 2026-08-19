@@ -59,6 +59,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.server_llm_settings import ServerLlmClientFactory
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
     ACTION_RESTORE_LINKS,
@@ -166,12 +167,34 @@ class LlmServerLinkRestorationProvider:
         config: AppConfig,
         *,
         llm: LinkRestorationLlmClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
+        self._llm_factory = llm_factory
         self._llm = llm or LLMClient(config)
 
     @property
     def ready(self) -> bool:
         return self._llm.ready
+
+    def _client_for(self, organization_id: str) -> LinkRestorationLlmClient:
+        if self._llm_factory is not None:
+            return self._llm_factory.client(organization_id)
+        return self._llm
+
+    def restore_for_organization(
+        self,
+        *,
+        organization_id: str,
+        source_article: str,
+        candidate_article: str,
+        missing_links: list[dict[str, object]],
+    ) -> str:
+        return self.restore(
+            organization_id=organization_id,
+            source_article=source_article,
+            candidate_article=candidate_article,
+            missing_links=missing_links,
+        )
 
     def restore(
         self,
@@ -179,10 +202,12 @@ class LlmServerLinkRestorationProvider:
         source_article: str,
         candidate_article: str,
         missing_links: list[dict[str, object]],
+        organization_id: str = "",
     ) -> str:
         if not missing_links:
             return candidate_article
-        if not self.ready:
+        client = self._client_for(organization_id)
+        if not client.ready:
             raise LinkRestorationUnavailable(
                 "link restoration provider is not configured"
             )
@@ -193,7 +218,7 @@ class LlmServerLinkRestorationProvider:
             CANDIDATE_ARTICLE=candidate_article,
         )
         try:
-            result = self._llm.chat(
+            result = client.chat(
                 [
                     {
                         "role": "system",
@@ -413,11 +438,24 @@ class ServerLinkRestorationHandler:
             raise JobCancelled(
                 "Link restoration cancelled before provider call."
             )
-        restored = self._provider.restore(
-            source_article=source_article,
-            candidate_article=candidate_article,
-            missing_links=missing,
+        restore_for_organization = getattr(
+            self._provider,
+            "restore_for_organization",
+            None,
         )
+        if callable(restore_for_organization):
+            restored = restore_for_organization(
+                organization_id=organization_id,
+                source_article=source_article,
+                candidate_article=candidate_article,
+                missing_links=missing,
+            )
+        else:
+            restored = self._provider.restore(
+                source_article=source_article,
+                candidate_article=candidate_article,
+                missing_links=missing,
+            )
         if cancelled():
             raise JobCancelled(
                 "Link restoration cancelled before result commit."

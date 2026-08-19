@@ -415,6 +415,16 @@ export type AuthStatus = {
   };
 };
 
+export type ServerLlmSettings = {
+  model: string;
+  reasoning_effort: string;
+  available_models: string[];
+  available_reasoning_efforts: string[];
+  revision: number;
+  updated_at?: string | null;
+  can_edit: boolean;
+};
+
 export type AccessibleProject = {
   project_id: string;
   customer_name: string;

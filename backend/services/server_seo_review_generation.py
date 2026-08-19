@@ -58,6 +58,7 @@ from services.server_task_commands import (
     PostgresAuditedTaskWriter,
     ServerTaskCommandUnavailable,
 )
+from services.server_llm_settings import ServerLlmClientFactory
 from storage import RevisionConflictError, content_hash, now_iso
 
 
@@ -145,13 +146,37 @@ class LlmServerSeoReviewProvider:
         config: AppConfig,
         *,
         llm: SeoReviewLlmClient | None = None,
+        llm_factory: ServerLlmClientFactory | None = None,
     ) -> None:
         self._config = config
+        self._llm_factory = llm_factory
         self._llm = llm or LLMClient(config)
 
     @property
     def ready(self) -> bool:
         return self._llm.ready
+
+    def _client_for(self, organization_id: str) -> SeoReviewLlmClient:
+        if self._llm_factory is not None:
+            return self._llm_factory.client(organization_id)
+        return self._llm
+
+    def generate_for_organization(
+        self,
+        task: TaskRecord,
+        *,
+        organization_id: str,
+        article: str,
+        prompt_snapshot: PromptSnapshot,
+        context_chunks: Sequence[PublishedGenerationContextChunk],
+    ) -> GeneratedSeoReview:
+        return self.generate(
+            task,
+            article=article,
+            prompt_snapshot=prompt_snapshot,
+            context_chunks=context_chunks,
+            organization_id=organization_id,
+        )
 
     def generate(
         self,
@@ -160,8 +185,10 @@ class LlmServerSeoReviewProvider:
         article: str,
         prompt_snapshot: PromptSnapshot,
         context_chunks: Sequence[PublishedGenerationContextChunk],
+        organization_id: str = "",
     ) -> GeneratedSeoReview:
-        if not self.ready:
+        client = self._client_for(organization_id)
+        if not client.ready:
             raise SeoReviewGenerationUnavailable(
                 "SEO review provider is not configured"
             )
@@ -177,7 +204,7 @@ class LlmServerSeoReviewProvider:
                     context_chunks
                 ),
             )
-            result = self._llm.chat(
+            result = client.chat(
                 [
                     {
                         "role": "system",
@@ -344,12 +371,26 @@ class ServerSeoReviewGenerationHandler:
             raise JobCancelled(
                 "SEO review cancelled before provider call."
             )
-        generated = self._provider.generate(
-            task,
-            article=article,
-            prompt_snapshot=prompt_snapshot,
-            context_chunks=context_chunks,
+        generate_for_organization = getattr(
+            self._provider,
+            "generate_for_organization",
+            None,
         )
+        if callable(generate_for_organization):
+            generated = generate_for_organization(
+                task,
+                organization_id=organization_id,
+                article=article,
+                prompt_snapshot=prompt_snapshot,
+                context_chunks=context_chunks,
+            )
+        else:
+            generated = self._provider.generate(
+                task,
+                article=article,
+                prompt_snapshot=prompt_snapshot,
+                context_chunks=context_chunks,
+            )
         if cancelled():
             raise JobCancelled(
                 "SEO review cancelled before result commit."
