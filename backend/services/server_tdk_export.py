@@ -84,7 +84,11 @@ class ServerTdkDocxExport:
                 "the Server article Word document must be exported first"
             )
         client = self._llm
-        if client is None and self._llm_factory is not None:
+        if (
+            client is None
+            and self._llm_factory is not None
+            and self._llm_factory.ready
+        ):
             client = self._llm_factory.client(actor.organization_id)
         if client is None:
             client = LLMClient(self._config)
