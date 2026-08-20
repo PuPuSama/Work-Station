@@ -807,6 +807,14 @@ export function WorkflowAssistantAttachments({
         ])].filter(Boolean);
         const reviewBusy = Boolean(review.pending || actionPending);
         const canClassify = attachment.status === "uploaded" || attachment.status === "failed";
+        const canReject = [
+          "uploading",
+          "uploaded",
+          "classifying",
+          "needs_user_choice",
+          "proposal_ready",
+          "failed",
+        ].includes(attachment.status);
         const canPreview = ["proposal_ready", "needs_user_choice"].includes(attachment.status);
         return (
           <article key={attachment.attachment_id} className="rounded-lg border bg-background px-3 py-2">
@@ -828,9 +836,9 @@ export function WorkflowAssistantAttachments({
               <Button type="button" size="sm" variant="outline" disabled={Boolean(actionPending || review.pending)} onClick={() => void download(attachment)}>
                 {downloadPending ? <Loader2 className="animate-spin" /> : <Download />}下载
               </Button>
-              <Button type="button" size="sm" variant="outline" disabled={Boolean(actionPending || review.pending)} onClick={() => void reject(attachment)}>
+              {canReject && <Button type="button" size="sm" variant="outline" disabled={Boolean(actionPending || review.pending)} onClick={() => void reject(attachment)}>
                 {rejectPending ? <Loader2 className="animate-spin" /> : <Trash2 />}拒绝并删除临时文件
-              </Button>
+              </Button>}
               {canClassify && <Button type="button" size="sm" variant="outline" disabled={reviewBusy} onClick={() => void classify(attachment)}>
                 {review.pending === "classify" ? <Loader2 className="animate-spin" /> : <RefreshCw />} {attachment.status === "failed" ? "重试分类" : "开始分类"}
               </Button>}
