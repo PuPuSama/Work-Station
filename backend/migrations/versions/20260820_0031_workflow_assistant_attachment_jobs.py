@@ -18,7 +18,118 @@ branch_labels = None
 depends_on = None
 
 
+def _constraint_exists(table_name: str, constraint_name: str, kind: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    if kind == "unique":
+        constraints = inspector.get_unique_constraints(table_name)
+    elif kind == "check":
+        constraints = inspector.get_check_constraints(table_name)
+    elif kind == "foreignkey":
+        constraints = inspector.get_foreign_keys(table_name)
+    else:  # pragma: no cover - migration authoring error
+        raise ValueError(f"unsupported constraint kind: {kind}")
+    return any(item.get("name") == constraint_name for item in constraints)
+
+
+def _ensure_unique(table_name: str, constraint_name: str, columns: list[str]) -> None:
+    if not _constraint_exists(table_name, constraint_name, "unique"):
+        op.create_unique_constraint(constraint_name, table_name, columns)
+
+
+def _replace_check(table_name: str, constraint_name: str, expression: str) -> None:
+    if _constraint_exists(table_name, constraint_name, "check"):
+        op.drop_constraint(constraint_name, table_name, type_="check")
+    op.create_check_constraint(constraint_name, table_name, expression)
+
+
+def _replace_foreign_key(
+    table_name: str,
+    constraint_name: str,
+    referred_table: str,
+    local_columns: list[str],
+    referred_columns: list[str],
+    *,
+    ondelete: str,
+) -> None:
+    if _constraint_exists(table_name, constraint_name, "foreignkey"):
+        op.drop_constraint(constraint_name, table_name, type_="foreignkey")
+    op.create_foreign_key(
+        constraint_name,
+        table_name,
+        referred_table,
+        local_columns,
+        referred_columns,
+        ondelete=ondelete,
+    )
+
+
+def _reconcile_legacy_m2_schema() -> None:
+    """Repair databases stamped at 0030 by an earlier M2 schema draft.
+
+    A development database may already report revision 0030 while it lacks the
+    creator-scoped keys and temporary lifecycle states required by the final
+    M2 contract.  Reconcile those additive boundaries before creating Job
+    foreign keys so the upgrade remains safe for both clean and legacy stores.
+    """
+
+    _ensure_unique(
+        "assistant_conversations",
+        "uq_assistant_conversations_creator_scope",
+        ["organization_id", "conversation_id", "creator_user_id"],
+    )
+    _ensure_unique(
+        "workflow_plans",
+        "uq_workflow_plans_creator_scope",
+        ["organization_id", "plan_id", "creator_user_id"],
+    )
+    _ensure_unique(
+        "assistant_attachments",
+        "uq_assistant_attachments_creator_scope",
+        ["organization_id", "attachment_id", "creator_user_id"],
+    )
+    _replace_check(
+        "assistant_attachments",
+        "ck_assistant_attachments_status",
+        "status IN ('uploading', 'uploaded', 'classifying', 'needs_user_choice', "
+        "'proposal_ready', 'importing', 'imported', 'rejected', 'expired', "
+        "'rejecting', 'expiring', 'failed')",
+    )
+    _replace_foreign_key(
+        "assistant_attachments",
+        "fk_assistant_attachments_conversation",
+        "assistant_conversations",
+        ["organization_id", "conversation_id", "creator_user_id"],
+        ["organization_id", "conversation_id", "creator_user_id"],
+        ondelete="RESTRICT",
+    )
+    _replace_foreign_key(
+        "assistant_attachments",
+        "fk_assistant_attachments_plan",
+        "workflow_plans",
+        ["organization_id", "plan_id", "creator_user_id"],
+        ["organization_id", "plan_id", "creator_user_id"],
+        ondelete="RESTRICT",
+    )
+    _replace_foreign_key(
+        "assistant_import_proposals",
+        "fk_assistant_import_proposals_attachment",
+        "assistant_attachments",
+        ["organization_id", "attachment_id", "creator_user_id"],
+        ["organization_id", "attachment_id", "creator_user_id"],
+        ondelete="CASCADE",
+    )
+    _replace_foreign_key(
+        "assistant_import_proposals",
+        "fk_assistant_import_proposals_plan",
+        "workflow_plans",
+        ["organization_id", "plan_id", "creator_user_id"],
+        ["organization_id", "plan_id", "creator_user_id"],
+        ondelete="RESTRICT",
+    )
+
+
 def upgrade() -> None:
+    _reconcile_legacy_m2_schema()
     op.create_table(
         "assistant_attachment_jobs",
         sa.Column("organization_id", sa.Text(), nullable=False),
