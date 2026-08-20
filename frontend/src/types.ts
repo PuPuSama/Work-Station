@@ -418,6 +418,7 @@ export type AuthStatus = {
     user_id?: string | null;
     workflow_assistant_enabled?: boolean;
     workflow_assistant_attachments_enabled?: boolean;
+    workflow_assistant_project_changes_enabled?: boolean;
     workflow_assistant_gap_fill_enabled?: boolean;
   };
 };

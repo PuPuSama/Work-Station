@@ -73,6 +73,11 @@ const targetKindLabels: Record<WorkflowAssistantImportTargetKind, string> = {
   topic_library: "话题库",
   needs_user_choice: "仍需选择",
 };
+const projectChangeTargetKinds = new Set<WorkflowAssistantImportTargetKind>([
+  "prompt_asset",
+  "project_notes",
+  "topic_library",
+]);
 
 const promptKindLabels: Record<PromptKind, string> = {
   outline: "大纲",
@@ -138,6 +143,7 @@ const EMPTY_REVIEW_STATE: ReviewState = {
 type WorkflowAssistantAttachmentsProps = {
   conversationId: string | null;
   selectedProjectIds: string[];
+  projectChangesEnabled: boolean;
   onActivity?: (message: string) => void;
 };
 
@@ -252,6 +258,7 @@ function responseErrorMessage(error: unknown) {
 export function WorkflowAssistantAttachments({
   conversationId,
   selectedProjectIds,
+  projectChangesEnabled,
   onActivity,
 }: WorkflowAssistantAttachmentsProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -799,6 +806,9 @@ export function WorkflowAssistantAttachments({
             ? [classification.classification as WorkflowAssistantImportTargetKind]
             : (Object.keys(targetKindLabels) as WorkflowAssistantImportTargetKind[])
               .filter((kind) => kind !== "needs_user_choice");
+        const availableTargetKindOptions = targetKindOptions.filter(
+          (kind) => projectChangesEnabled || !projectChangeTargetKinds.has(kind),
+        );
         const targetProjectOptions = [...new Set([
           ...selectedProjectIds,
           attachment.proposed_project_id || "",
@@ -815,7 +825,9 @@ export function WorkflowAssistantAttachments({
           "proposal_ready",
           "failed",
         ].includes(attachment.status);
-        const canPreview = ["proposal_ready", "needs_user_choice"].includes(attachment.status);
+        const canPreview = ["proposal_ready", "needs_user_choice"].includes(attachment.status)
+          && (projectChangesEnabled
+            || !projectChangeTargetKinds.has(review.targetKind as WorkflowAssistantImportTargetKind));
         return (
           <article key={attachment.attachment_id} className="rounded-lg border bg-background px-3 py-2">
             <div className="flex items-start justify-between gap-3">
@@ -829,9 +841,12 @@ export function WorkflowAssistantAttachments({
                 {statusLabels[attachment.status] || attachment.status}
               </Badge>
             </div>
-            <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
-              当前附件不会自动导入或发布；所有分类、差异和目标变更都需要人工确认。
-            </p>
+              <p className="mt-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+                当前附件不会自动导入或发布；所有分类、差异和目标变更都需要人工确认。
+              </p>
+              {!projectChangesEnabled && <p className="mt-1 text-xs text-muted-foreground">
+                项目提示词、注意事项和话题库导入暂未开放；知识文件和任务表仍可继续生成提案。
+              </p>}
             <div className="mt-2 flex flex-wrap gap-2">
               <Button type="button" size="sm" variant="outline" disabled={Boolean(actionPending || review.pending)} onClick={() => void download(attachment)}>
                 {downloadPending ? <Loader2 className="animate-spin" /> : <Download />}下载
@@ -874,7 +889,7 @@ export function WorkflowAssistantAttachments({
                     })}
                   >
                     <option value="">请选择</option>
-                    {targetKindOptions.map((kind) => <option key={kind} value={kind}>{targetKindLabels[kind]}</option>)}
+                    {availableTargetKindOptions.map((kind) => <option key={kind} value={kind}>{targetKindLabels[kind]}</option>)}
                   </select>
                 </label>
                 <label className="grid gap-1 text-xs font-medium">

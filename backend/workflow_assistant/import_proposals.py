@@ -20,6 +20,12 @@ ImportTargetKind = Literal[
     "topic_library",
     "needs_user_choice",
 ]
+# These target kinds change project-owned configuration or planning assets.
+# They remain separate from knowledge/task imports so the rollout can disable
+# project changes without disabling temporary attachments altogether.
+PROJECT_CHANGE_TARGET_KINDS = frozenset(
+    {"prompt_asset", "project_notes", "topic_library"}
+)
 ImportProposalStatus = Literal[
     "draft",
     "awaiting_confirmation",

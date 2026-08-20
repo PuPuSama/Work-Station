@@ -35,6 +35,7 @@ from .import_proposals import (
     ImportProposalNotFound,
     ImportProposalService,
     ImportTargetKind,
+    PROJECT_CHANGE_TARGET_KINDS,
     normalized_json_object,
 )
 from .import_adapters import (
@@ -82,12 +83,14 @@ class AttachmentReviewWorkflowService:
         llm_factory: AttachmentClassifierLlmFactory,
         access: ProjectAccessService,
         import_executor: TypedImportExecutor | None = None,
+        project_changes_enabled: bool = False,
         poll_interval_seconds: float = 1.0,
     ) -> None:
         if not 0.1 <= poll_interval_seconds <= 60:
             raise ValueError("poll_interval_seconds must be between 0.1 and 60")
         self._engine = engine
         self._access = access
+        self._project_changes_enabled = bool(project_changes_enabled)
         self._attachments = PostgresAttachmentRepository(engine)
         self._proposals = PostgresImportProposalRepository(engine)
         self._proposal_service = ImportProposalService(
@@ -194,6 +197,7 @@ class AttachmentReviewWorkflowService:
         project_id = str(target_project_id or "").strip()
         if not project_id:
             raise ValueError("target_project_id is required for proposal preview")
+        self._assert_project_changes_enabled(target_kind)
         self._access.require(actor, project_id, "project.view")
         resolved = self._resolve_choice(
             actor=actor,
@@ -273,6 +277,7 @@ class AttachmentReviewWorkflowService:
         normalized_diff: Mapping[str, object],
     ) -> ImportProposal:
         current = self.get_proposal(actor=actor, proposal_id=proposal_id)
+        self._assert_project_changes_enabled(target_kind)
         self._require_current_attachment_revision(
             actor, current.attachment_id, expected_attachment_revision
         )
@@ -344,6 +349,7 @@ class AttachmentReviewWorkflowService:
         expected_attachment_revision: int,
     ) -> ImportProposal:
         current = self.get_proposal(actor=actor, proposal_id=proposal_id)
+        self._assert_project_changes_enabled(current.target_kind)
         self._require_current_attachment_revision(
             actor, current.attachment_id, expected_attachment_revision
         )
@@ -439,6 +445,7 @@ class AttachmentReviewWorkflowService:
         proposal = self.get_proposal(actor=actor, proposal_id=proposal_id)
         if proposal.target_project_id is None:
             raise AttachmentJobConflict("import target project is missing")
+        self._assert_project_changes_enabled(proposal.target_kind)
         if proposal.status != "confirmed":
             conflict = AttachmentJobConflict(
                 "only a confirmed import proposal can be executed"
@@ -493,17 +500,37 @@ class AttachmentReviewWorkflowService:
         project_id = getattr(job, "project_id", None)
         if project_id:
             permission = "project.view"
-            if getattr(job, "operation", "") == "execute_import_proposal":
+            operation = getattr(job, "operation", "")
+            if operation == "preview_import_proposal":
+                target_kind = str(
+                    getattr(job, "request_payload", {}).get("target_kind") or ""
+                )
+                self._assert_project_changes_enabled(
+                    cast(ImportTargetKind, target_kind)
+                )
+            elif operation == "execute_import_proposal":
                 proposal_id = str(getattr(job, "proposal_id", ""))
                 proposal = self._proposal_service.get(
                     actor=actor, proposal_id=proposal_id
                 )
+                self._assert_project_changes_enabled(proposal.target_kind)
                 permission = _permission(proposal.target_kind, confirmation=True)
             self._access.require(
                 actor,
                 str(project_id),
                 cast(ProjectPermission, permission),
             )
+
+    def _assert_project_changes_enabled(self, target_kind: ImportTargetKind) -> None:
+        if target_kind not in PROJECT_CHANGE_TARGET_KINDS:
+            return
+        if self._project_changes_enabled:
+            return
+        conflict = AttachmentJobConflict(
+            "Workflow Assistant project changes are disabled."
+        )
+        conflict.code = "workflow_assistant_project_changes_disabled"
+        raise conflict
 
     def _require_active_actor(self, actor: ActorIdentity) -> None:
         with self._engine.connect() as connection:

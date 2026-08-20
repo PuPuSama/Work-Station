@@ -640,6 +640,9 @@ async def app_lifespan(application: FastAPI):
                             object_store=server_object_store,
                             llm_factory=server_llm_client_factory,
                             access=server_access,
+                            project_changes_enabled=(
+                                cfg.workflow_assistant_project_changes_enabled
+                            ),
                             import_executor=build_default_import_executor(
                                 engine=server_engine,
                                 access=server_access,
@@ -1285,6 +1288,14 @@ def auth_status(request: Request) -> ApiMessage:
                 and getattr(
                     runtime_config,
                     "workflow_assistant_attachments_enabled",
+                    False,
+                )
+            ),
+            "workflow_assistant_project_changes_enabled": bool(
+                workflow_assistant_enabled
+                and getattr(
+                    runtime_config,
+                    "workflow_assistant_project_changes_enabled",
                     False,
                 )
             ),
