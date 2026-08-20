@@ -5,6 +5,8 @@ import type {
   ResearchRun,
   ResearchRunDetail,
   ResearchRunQueued,
+  WorkflowAssistantGapFillRequest,
+  WorkflowAssistantGapFillResponse,
 } from "@/types";
 
 export type ServerResearchRunStart = {
@@ -63,6 +65,16 @@ export function resumeResearchRun(
 ) {
   return apiPost<ResearchRunQueued>(
     `${projectPath(projectId)}/research-runs/${encodeURIComponent(threadId)}/resume`,
+    request,
+  );
+}
+
+export function gapFillWorkflowAssistantPlan(
+  planId: string,
+  request: WorkflowAssistantGapFillRequest,
+) {
+  return apiPost<WorkflowAssistantGapFillResponse>(
+    `/api/workflow-assistant/plans/${encodeURIComponent(planId)}/gap-fill`,
     request,
   );
 }

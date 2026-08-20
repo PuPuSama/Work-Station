@@ -164,6 +164,17 @@ from server_llm_settings_http import router as server_llm_settings_router
 from server_profile_http import router as server_profile_router
 from workflow_assistant.context import WorkflowAssistantContextResolver
 from workflow_assistant.adapters import WorkflowAssistantServiceAdapters
+from workflow_assistant.attachment_http import (
+    router as workflow_assistant_attachment_router,
+)
+from workflow_assistant.attachment_review import AttachmentReviewWorkflowService
+from workflow_assistant.import_adapters import build_default_import_executor
+from workflow_assistant.attachment_review_http import (
+    router as workflow_assistant_attachment_review_router,
+)
+from workflow_assistant.attachment_repository import PostgresAttachmentRepository
+from workflow_assistant.attachment_retention import AttachmentRetentionRunner
+from workflow_assistant.attachments import AttachmentService
 from workflow_assistant.execution import WorkflowExecutionCoordinator
 from workflow_assistant.http import router as workflow_assistant_router
 from workflow_assistant.planner import StructuredWorkflowPlanner
@@ -219,6 +230,21 @@ async def app_lifespan(application: FastAPI):
     previous_workflow_assistant_runner = getattr(
         application.state,
         "workflow_assistant_runner",
+        None,
+    )
+    previous_workflow_assistant_attachment_service = getattr(
+        application.state,
+        "workflow_assistant_attachment_service",
+        None,
+    )
+    previous_workflow_assistant_attachment_retention = getattr(
+        application.state,
+        "workflow_assistant_attachment_retention",
+        None,
+    )
+    previous_workflow_assistant_attachment_review = getattr(
+        application.state,
+        "workflow_assistant_attachment_review_workflow",
         None,
     )
     previous_server_mode = getattr(
@@ -395,6 +421,8 @@ async def app_lifespan(application: FastAPI):
     workflow_assistant_tools = None
     workflow_assistant_coordinator = None
     workflow_assistant_runner = None
+    workflow_assistant_attachment_retention = None
+    workflow_assistant_attachment_review = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
@@ -406,6 +434,9 @@ async def app_lifespan(application: FastAPI):
     application.state.workflow_assistant_tools = None
     application.state.workflow_assistant_coordinator = None
     application.state.workflow_assistant_runner = None
+    application.state.workflow_assistant_attachment_service = None
+    application.state.workflow_assistant_attachment_retention = None
+    application.state.workflow_assistant_attachment_review_workflow = None
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_prompt_service_factory = None
@@ -584,6 +615,43 @@ async def app_lifespan(application: FastAPI):
                 store=server_object_store,
                 bucket=object_settings.bucket,
             )
+            if server_engine is not None:
+                attachment_service = AttachmentService(
+                    repository=PostgresAttachmentRepository(server_engine),
+                    store=server_object_store,
+                )
+                workflow_assistant_attachment_retention = (
+                    AttachmentRetentionRunner(attachment_service)
+                )
+                workflow_assistant_attachment_retention.start()
+                application.state.workflow_assistant_attachment_retention = (
+                    workflow_assistant_attachment_retention
+                )
+                if (
+                    cfg.workflow_assistant_enabled
+                    and cfg.workflow_assistant_attachments_enabled
+                ):
+                    application.state.workflow_assistant_attachment_service = (
+                        attachment_service
+                    )
+                    workflow_assistant_attachment_review = (
+                        AttachmentReviewWorkflowService(
+                            server_engine,
+                            object_store=server_object_store,
+                            llm_factory=server_llm_client_factory,
+                            access=server_access,
+                            import_executor=build_default_import_executor(
+                                engine=server_engine,
+                                access=server_access,
+                                object_store=server_object_store,
+                                ingestion=application.state.server_private_document_ingestion,
+                            ),
+                        )
+                    )
+                    workflow_assistant_attachment_review.start()
+                    application.state.workflow_assistant_attachment_review_workflow = (
+                        workflow_assistant_attachment_review
+                    )
         product_provider = LlmServerProductProvider(
             cfg,
             llm_factory=server_llm_client_factory,
@@ -888,6 +956,18 @@ async def app_lifespan(application: FastAPI):
             yield
         finally:
             shutdown_error: RuntimeError | None = None
+            if workflow_assistant_attachment_review is not None:
+                stop_report = workflow_assistant_attachment_review.stop()
+                if stop_report.alive:
+                    shutdown_error = RuntimeError(
+                        "workflow assistant attachment review did not stop"
+                    )
+            if workflow_assistant_attachment_retention is not None:
+                stop_report = workflow_assistant_attachment_retention.stop()
+                if stop_report.alive:
+                    shutdown_error = RuntimeError(
+                        "workflow assistant attachment retention did not stop"
+                    )
             if workflow_assistant_runner is not None:
                 stop_report = workflow_assistant_runner.stop()
                 if stop_report.alive:
@@ -990,6 +1070,15 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.workflow_assistant_runner = (
                 previous_workflow_assistant_runner
+            )
+            application.state.workflow_assistant_attachment_service = (
+                previous_workflow_assistant_attachment_service
+            )
+            application.state.workflow_assistant_attachment_retention = (
+                previous_workflow_assistant_attachment_retention
+            )
+            application.state.workflow_assistant_attachment_review_workflow = (
+                previous_workflow_assistant_attachment_review
             )
             application.state.server_request_security = (
                 previous_server_security
@@ -1100,6 +1189,8 @@ app.include_router(server_prompt_router)
 app.include_router(server_llm_settings_router)
 app.include_router(server_profile_router)
 app.include_router(workflow_assistant_router)
+app.include_router(workflow_assistant_attachment_router)
+app.include_router(workflow_assistant_attachment_review_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -1169,6 +1260,15 @@ def auth_status(request: Request) -> ApiMessage:
             authenticated = True
         except ServerRequestUnauthenticated:
             pass
+    runtime_config = getattr(
+        getattr(request.app, "state", None),
+        "article_agent_config",
+        None,
+    )
+    workflow_assistant_enabled = bool(
+        runtime_config
+        and getattr(runtime_config, "workflow_assistant_enabled", False)
+    )
     return ApiMessage(
         message="Server authentication status.",
         data={
@@ -1179,15 +1279,20 @@ def auth_status(request: Request) -> ApiMessage:
             "issuer": oidc_login.settings.issuer if oidc_enabled else None,
             "organization_id": actor.organization_id if actor is not None else None,
             "user_id": actor.user_id if actor is not None else None,
-            "workflow_assistant_enabled": bool(
-                getattr(
-                    getattr(request.app, "state", None),
-                    "article_agent_config",
-                    None,
-                )
+            "workflow_assistant_enabled": workflow_assistant_enabled,
+            "workflow_assistant_attachments_enabled": bool(
+                workflow_assistant_enabled
                 and getattr(
-                    request.app.state.article_agent_config,
-                    "workflow_assistant_enabled",
+                    runtime_config,
+                    "workflow_assistant_attachments_enabled",
+                    False,
+                )
+            ),
+            "workflow_assistant_gap_fill_enabled": bool(
+                workflow_assistant_enabled
+                and getattr(
+                    runtime_config,
+                    "workflow_assistant_gap_fill_enabled",
                     False,
                 )
             ),

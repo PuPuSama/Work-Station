@@ -417,6 +417,8 @@ export type AuthStatus = {
     organization_id?: string | null;
     user_id?: string | null;
     workflow_assistant_enabled?: boolean;
+    workflow_assistant_attachments_enabled?: boolean;
+    workflow_assistant_gap_fill_enabled?: boolean;
   };
 };
 
@@ -685,6 +687,9 @@ export type PublicConfig = {
   features?: {
     knowledge_agent_enabled: boolean;
     workflow_assistant_enabled?: boolean;
+    workflow_assistant_attachments_enabled?: boolean;
+    workflow_assistant_project_changes_enabled?: boolean;
+    workflow_assistant_gap_fill_enabled?: boolean;
   };
   workflow_assistant?: {
     max_concurrency: number;
@@ -1013,6 +1018,52 @@ export type ResearchRunQueued = {
   queue_job_id: string;
 };
 
+export type WorkflowAssistantGapFillCandidate = {
+  candidate_id: string;
+  url: string;
+  page_type: string;
+  needs_review: boolean;
+  evidence: {
+    reason: string | null;
+    channel: "official_site" | "tavily_discovery" | null;
+    same_site: boolean | null;
+    score: number | null;
+    reused_attempt: boolean | null;
+  };
+};
+
+export type WorkflowAssistantGapFillSnapshot = {
+  project_id: string;
+  research_thread_id: string;
+  retrieval_plan_id: string;
+  status: string;
+  current_scope_id: string | null;
+  gap_reasons: string[];
+  gap_fill_round: number;
+  max_gap_fill_rounds: number;
+  discovery_queries_used: number;
+  max_discovery_queries: number;
+  evidence_pack_ids: string[];
+  review_candidates: WorkflowAssistantGapFillCandidate[];
+};
+
+export type WorkflowAssistantGapFillRequest = {
+  revision: number;
+  step_id: string;
+  research_thread_id: string;
+  request_id: string;
+  approved_candidate_ids: string[];
+};
+
+export type WorkflowAssistantGapFillResponse = {
+  plan: WorkflowAssistantPlan;
+  step_id: string;
+  research_thread_id: string;
+  queue_job_id: string;
+  queue_job_status: string;
+  snapshot: WorkflowAssistantGapFillSnapshot;
+};
+
 export type ResearchCitation = {
   chunk_id: string;
   source_id: string;
@@ -1236,6 +1287,102 @@ export type WorkflowAssistantAttentionCount = {
 
 export type WorkflowAssistantAttentionList = {
   plans: WorkflowAssistantPlan[];
+};
+
+export type WorkflowAssistantAttachmentStatus =
+  | "uploading"
+  | "uploaded"
+  | "classifying"
+  | "needs_user_choice"
+  | "proposal_ready"
+  | "importing"
+  | "imported"
+  | "rejecting"
+  | "rejected"
+  | "expiring"
+  | "expired"
+  | "failed";
+
+export type WorkflowAssistantAttachment = {
+  attachment_id: string;
+  conversation_id: string;
+  proposed_project_id: string | null;
+  original_filename: string;
+  mime_type: string;
+  byte_size: number;
+  sha256: string;
+  classification: string | null;
+  classification_payload: Record<string, unknown>;
+  revision: number;
+  status: WorkflowAssistantAttachmentStatus;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  download_url: string | null;
+  download_url_expires_seconds: number | null;
+};
+
+export type WorkflowAssistantAttachmentList = {
+  attachments: WorkflowAssistantAttachment[];
+};
+
+export type WorkflowAssistantImportTargetKind =
+  | "knowledge_source"
+  | "prompt_asset"
+  | "task_workbook"
+  | "project_notes"
+  | "topic_library"
+  | "needs_user_choice";
+
+export type WorkflowAssistantAttachmentClassification = {
+  classification: string;
+  reason: string;
+  confidence: number;
+  target_project_id: string | null;
+  prompt_kind: PromptKind | null;
+  candidate_classifications: string[];
+  is_ambiguous: boolean;
+  structure_compatible: boolean;
+  affects_multiple_projects: boolean;
+};
+
+export type WorkflowAssistantAttachmentJob = {
+  job_id: string;
+  operation: string;
+  status: string;
+  attachment_id: string;
+  proposal_id: string | null;
+  expected_attachment_revision: number;
+  expected_proposal_revision: number | null;
+  result_payload: Record<string, unknown>;
+  result_attachment_revision: number | null;
+  result_proposal_revision: number | null;
+  standardized_error_code: string | null;
+};
+
+export type WorkflowAssistantImportProposal = {
+  proposal_id: string;
+  attachment_id: string;
+  target_project_id: string | null;
+  plan_id: string | null;
+  target_kind: WorkflowAssistantImportTargetKind;
+  normalized_diff: Record<string, unknown>;
+  revision: number;
+  status: string;
+  resulting_entity_refs: Array<Record<string, unknown>>;
+  standardized_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowAssistantAttachmentReviewResponse = {
+  attachment: WorkflowAssistantAttachment;
+  proposal: WorkflowAssistantImportProposal | null;
+  job: WorkflowAssistantAttachmentJob | null;
+  attachment_stage: string;
+  proposal_stage: string;
+  import_stage: string;
+  publication_stage: string;
 };
 
 export type WorkflowAssistantDispatch = {

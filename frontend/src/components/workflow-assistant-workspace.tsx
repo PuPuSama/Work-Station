@@ -33,16 +33,24 @@ import {
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
+import { WorkflowAssistantAttachments } from "@/components/workflow-assistant-attachments";
 import { ApiError, apiFileUrl, apiGet, apiPost } from "@/lib/api";
+import {
+  gapFillWorkflowAssistantPlan,
+  getResearchRun,
+} from "@/lib/research-api";
 import type {
   AccessibleProject,
+  AuthStatus,
   ProjectAssetDownload,
+  ResearchRunDetail,
   TaskRecord,
   WorkflowAssistantConversation,
   WorkflowAssistantConversationList,
   WorkflowAssistantDispatch,
   WorkflowAssistantAttentionCount,
   WorkflowAssistantAttentionList,
+  WorkflowAssistantGapFillResponse,
   WorkflowAssistantPlan,
   WorkflowAssistantStep,
 } from "@/types";
@@ -96,6 +104,32 @@ const stepStatusLabels: Record<string, string> = {
 function localId(prefix: string) {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   return `${prefix}-${random}`.replace(/[^A-Za-z0-9._:-]/g, "-");
+}
+
+function researchThreadId(step: WorkflowAssistantStep): string {
+  const inputThread = step.input_summary.research_thread_id;
+  const outputThread = step.output_summary.research_thread_id;
+  return typeof inputThread === "string" && inputThread.trim()
+    ? inputThread.trim()
+    : typeof outputThread === "string" && outputThread.trim()
+      ? outputThread.trim()
+      : "";
+}
+
+function researchGapReasons(detail: ResearchRunDetail): string[] {
+  const reasons = detail.gap_fill_attempts
+    .map((attempt) => attempt.reason.trim())
+    .filter(Boolean);
+  return [...new Set(reasons)].slice(-6);
+}
+
+function gapFillReviewCandidates(detail: ResearchRunDetail) {
+  return detail.review_candidates.filter(
+    (candidate) => candidate.needs_review
+      && candidate.evidence.same_site === true
+      && (candidate.evidence.channel === "official_site"
+        || candidate.evidence.channel === "tavily_discovery"),
+  );
 }
 
 function messageText(
@@ -191,8 +225,15 @@ export function WorkflowAssistantWorkspace() {
   const [artifactPending, setArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlan[]>([]);
+  const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
+  const [gapFillEnabled, setGapFillEnabled] = useState(false);
   const [error, setError] = useState("");
   const [timeline, setTimeline] = useState<string[]>([]);
+  const [researchDetails, setResearchDetails] = useState<Record<string, ResearchRunDetail | null>>({});
+  const [gapFillSelections, setGapFillSelections] = useState<Record<string, string[]>>({});
+  const [gapFillPending, setGapFillPending] = useState<string | null>(null);
+  const [gapFillQueueStatus, setGapFillQueueStatus] = useState<Record<string, string>>({});
+  const gapFillRequestIdsRef = useRef<Record<string, string>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
   const activePlanIdRef = useRef<string | null>(null);
@@ -217,9 +258,10 @@ export function WorkflowAssistantWorkspace() {
     setLoading(true);
     setError("");
     try {
-      const [nextProjects, nextConversations] = await Promise.all([
+      const [nextProjects, nextConversations, authStatus] = await Promise.all([
         apiGet<AccessibleProject[]>("/api/projects"),
         apiGet<WorkflowAssistantConversationList>("/api/workflow-assistant/conversations"),
+        apiGet<AuthStatus>("/api/auth/status"),
       ]);
       const nextTasks = (
         await Promise.all(
@@ -237,6 +279,14 @@ export function WorkflowAssistantWorkspace() {
       setProjects(nextProjects);
       setTasks(nextTasks);
       setConversations(nextConversations.conversations);
+      setAttachmentsEnabled(Boolean(
+        authStatus.data?.workflow_assistant_enabled &&
+        authStatus.data?.workflow_assistant_attachments_enabled,
+      ));
+      setGapFillEnabled(Boolean(
+        authStatus.data?.workflow_assistant_enabled &&
+        authStatus.data?.workflow_assistant_gap_fill_enabled,
+      ));
       void refreshAttention().catch(() => {
         // Keep the workspace usable when an older backend has no inbox route.
         setAttentionCount(0);
@@ -406,6 +456,54 @@ export function WorkflowAssistantWorkspace() {
     () => projects.filter((project) => selectedProjectIds.includes(project.project_id)),
     [projects, selectedProjectIds],
   );
+  const waitingResearchSteps = useMemo(
+    () => (plan?.steps || []).filter(
+      (step) => step.action_kind === "start_research" && step.status === "waiting_review",
+    ),
+    [plan],
+  );
+  const waitingResearchSignature = useMemo(
+    () => waitingResearchSteps
+      .map((step) => `${step.step_id}:${step.project_id}:${researchThreadId(step)}`)
+      .join("|"),
+    [waitingResearchSteps],
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    if (!gapFillEnabled || !waitingResearchSteps.length) {
+      setResearchDetails({});
+      setGapFillSelections({});
+      return;
+    }
+    void Promise.all(
+      waitingResearchSteps.map(async (step) => {
+        const threadId = researchThreadId(step);
+        if (!threadId) return [step.step_id, null] as const;
+        try {
+          return [step.step_id, await getResearchRun(step.project_id, threadId)] as const;
+        } catch {
+          return [step.step_id, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (disposed) return;
+      setResearchDetails(Object.fromEntries(entries));
+      setGapFillSelections((current) => {
+        const next: Record<string, string[]> = {};
+        for (const [stepId, detail] of entries) {
+          const visibleIds = new Set(
+            detail ? gapFillReviewCandidates(detail).map((candidate) => candidate.candidate_id) : [],
+          );
+          next[stepId] = (current[stepId] || []).filter((id) => visibleIds.has(id));
+        }
+        return next;
+      });
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [gapFillEnabled, waitingResearchSignature, waitingResearchSteps]);
 
   async function createConversation() {
     setPending(true);
@@ -487,6 +585,43 @@ export function WorkflowAssistantWorkspace() {
       setError(messageText(nextError, plan));
     } finally {
       setPending(false);
+    }
+  }
+
+  async function submitGapFill(step: WorkflowAssistantStep) {
+    if (!plan || gapFillPending) return;
+    const threadId = researchThreadId(step);
+    if (!threadId) {
+      setError("研究 Thread 标识缺失，暂时无法提交证据缺口处理。 ");
+      return;
+    }
+    setGapFillPending(step.step_id);
+    setError("");
+    try {
+      const requestId = gapFillRequestIdsRef.current[step.step_id]
+        || (gapFillRequestIdsRef.current[step.step_id] = localId("gap-fill"));
+      const response: WorkflowAssistantGapFillResponse = await gapFillWorkflowAssistantPlan(
+        plan.plan_id,
+        {
+          revision: plan.revision,
+          step_id: step.step_id,
+          research_thread_id: threadId,
+          request_id: requestId,
+          approved_candidate_ids: gapFillSelections[step.step_id] || [],
+        },
+      );
+      setPlan(response.plan);
+      setGapFillQueueStatus((current) => ({
+        ...current,
+        [step.step_id]: response.queue_job_status || "queued",
+      }));
+      setGapFillSelections((current) => ({ ...current, [step.step_id]: [] }));
+      delete gapFillRequestIdsRef.current[step.step_id];
+      void refreshAttention().catch(() => undefined);
+    } catch (nextError) {
+      setError(messageText(nextError, plan));
+    } finally {
+      setGapFillPending(null);
     }
   }
 
@@ -651,6 +786,13 @@ export function WorkflowAssistantWorkspace() {
             </ScrollArea>
             {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>助手暂时无法继续</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
             <div className="grid gap-2">
+              {attachmentsEnabled && (
+                <WorkflowAssistantAttachments
+                  conversationId={selectedConversation?.conversation_id ?? null}
+                  selectedProjectIds={selectedProjectIds}
+                  onActivity={(message) => setTimeline((current) => [...current, message].slice(-50))}
+                />
+              )}
               <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="描述你想查询或计划的文章工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
               <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="animate-spin" /> : <Send />}发送</Button></div>
             </div>
@@ -700,6 +842,68 @@ export function WorkflowAssistantWorkspace() {
                     return <li key={step.step_id} className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm"><span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span><span className="min-w-0"><span className="flex items-center gap-2 font-medium"><span>{actionLabels[step.action_kind] || step.action_kind}</span><Badge variant="outline">{stepStatusLabels[step.status] || step.status}</Badge>{researchReviewRequired && <Badge variant="outline">待审查研究来源</Badge>}{pendingAiConfirmation && <Badge variant="outline">待确认交付包</Badge>}</span><span className="block text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" && plannedTopic ? ` · 主题：${plannedTopic}` : ""}{step.background_job_id ? ` · Job ${step.background_job_id}` : ""}{step.retry_count ? ` · 重试 ${step.retry_count}` : ""}{step.hard_gate && !step.human_gate_confirmed ? " · 需要人工确认" : ""}{step.standardized_error_code ? ` · ${step.standardized_error_code}` : ""}</span>{Object.keys(step.output_summary).length > 0 && <span className="mt-1 block truncate text-xs text-muted-foreground">结果：{JSON.stringify(step.output_summary)}</span>}<span className="flex flex-wrap gap-2">{artifact && step.article_task_id && <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void downloadArtifact(step)} disabled={Boolean(artifactPending)}>{artifactPending === artifactKey ? <Loader2 className="animate-spin" /> : <Download />}{artifact.label}</Button>}{researchReviewRequired && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=outline`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开研究候选审查</Link>}{pendingAiConfirmation && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=review`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开文章工作台并提交人工截图</Link>}</span></span></li>;
                   })}
                 </ol>
+                {gapFillEnabled && waitingResearchSteps.map((step) => {
+                  const detail = researchDetails[step.step_id];
+                  const reviewCandidates = detail ? gapFillReviewCandidates(detail) : [];
+                  const selectedIds = gapFillSelections[step.step_id] || [];
+                  const reasons = detail ? researchGapReasons(detail) : [];
+                  const canSubmit = detail?.status === "waiting_for_review" && gapFillPending === null;
+                  return (
+                    <Card key={`gap-fill:${step.step_id}`} className="gap-0 border-dashed py-0">
+                      <CardHeader className="border-b px-4 py-3">
+                        <CardTitle className="text-base">精准补全证据缺口</CardTitle>
+                        <CardDescription>仅审查当前项目官网候选；未选中的资料不会进入证据通道。</CardDescription>
+                      </CardHeader>
+                      <CardContent className="grid gap-3 px-4 py-4">
+                        {detail ? (
+                          <>
+                            <div className="grid gap-1 rounded-lg border bg-muted/20 p-3 text-sm">
+                              <span className="font-medium">当前缺口</span>
+                              {reasons.length ? reasons.map((reason) => (
+                                <span key={reason} className="text-muted-foreground">· {reason}</span>
+                              )) : <span className="text-muted-foreground">当前 Scope 仍缺少可作证资料，请审查官网候选。</span>}
+                              <span className="text-xs text-muted-foreground">Gap round {detail.gap_fill_round}/{detail.max_gap_fill_rounds} · Scope {detail.current_scope_id || "-"}</span>
+                            </div>
+                            <div className="grid gap-2">
+                              <span className="text-sm font-medium">官网候选资料</span>
+                              {reviewCandidates.length ? reviewCandidates.map((candidate) => (
+                                <label key={candidate.candidate_id} className="flex cursor-pointer items-start gap-2 rounded-lg border p-3 text-sm">
+                                  <input
+                                    type="checkbox"
+                                    className="mt-1 size-4 accent-primary"
+                                    checked={selectedIds.includes(candidate.candidate_id)}
+                                    disabled={!canSubmit}
+                                    onChange={(event) => setGapFillSelections((current) => ({
+                                      ...current,
+                                      [step.step_id]: event.target.checked
+                                        ? [...(current[step.step_id] || []), candidate.candidate_id]
+                                        : (current[step.step_id] || []).filter((id) => id !== candidate.candidate_id),
+                                    }))}
+                                  />
+                                  <span className="min-w-0">
+                                    <span className="block break-all font-medium">{candidate.url}</span>
+                                    <span className="mt-1 block text-xs text-muted-foreground">{candidate.page_type} · {candidate.evidence.channel || "official discovery"}</span>
+                                  </span>
+                                </label>
+                              )) : <p className="text-sm text-muted-foreground">当前没有可审查的官网候选；仍可明确拒绝全部并继续。</p>}
+                            </div>
+                            <Button type="button" className="min-h-11 justify-self-start" disabled={!canSubmit} onClick={() => void submitGapFill(step)}>
+                              {gapFillPending === step.step_id ? <Loader2 className="animate-spin" /> : <Check />}
+                              {selectedIds.length ? `批准 ${selectedIds.length} 个并继续` : "拒绝全部并继续"}
+                            </Button>
+                          </>
+                        ) : <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在读取研究缺口和官网候选……</p>}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+                {Object.entries(gapFillQueueStatus).map(([stepId, status]) => (
+                  <Alert key={`gap-fill-status:${stepId}`}>
+                    <Check />
+                    <AlertTitle>证据补全已排队</AlertTitle>
+                    <AlertDescription>队列状态：{status}。研究完成后，原计划会继续执行未完成步骤。</AlertDescription>
+                  </Alert>
+                ))}
                 {plan.status === "awaiting_confirmation" && <Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button>}
                 {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
                 {plan.status === "queued" || plan.status === "running" ? <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}><Pause />暂停</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div> : null}

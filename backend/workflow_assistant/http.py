@@ -31,6 +31,15 @@ from .contracts import (
     PlanStep,
     WorkflowPlanResponse,
 )
+from .gap_fill import (
+    GapFillConflict,
+    GapFillError,
+    GapFillNotFound,
+    GapFillRequest,
+    GapFillResponse,
+    GapFillUnavailable,
+    WorkflowAssistantGapFillService,
+)
 from .planner import (
     PlannerModelIdentity,
     PlannerOutputError,
@@ -94,6 +103,25 @@ def _feature_enabled(request: Request) -> None:
         raise HTTPException(status_code=404, detail="Workflow Assistant is disabled.")
 
 
+def _gap_fill_feature_enabled(request: Request) -> None:
+    _feature_enabled(request)
+    config = getattr(request.app.state, "article_agent_config", None)
+    if config is None or not bool(
+        getattr(config, "workflow_assistant_gap_fill_enabled", False)
+    ):
+        raise HTTPException(status_code=404, detail="Workflow Assistant gap-fill is disabled.")
+
+
+def _gap_fill_service(request: Request) -> WorkflowAssistantGapFillService:
+    registry = getattr(request.app.state, "server_knowledge_research", None)
+    if registry is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Workflow Assistant knowledge research is not available.",
+        )
+    return WorkflowAssistantGapFillService(registry)
+
+
 def _apply_execution_limits(request: Request, plan: Any) -> Any:
     """Apply server concurrency ceilings to every persisted plan variant."""
 
@@ -138,6 +166,23 @@ def _assistant_identity(value: str, *, prefix: str) -> str:
 
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return f"{prefix}_{digest}"
+
+
+def _gap_fill_request_identity(
+    *,
+    plan_id: str,
+    step_id: str,
+    thread_id: str,
+    request_id: str,
+    approved_candidate_ids: list[str],
+) -> str:
+    """Derive a server-owned idempotency identity for the domain Resume Job."""
+
+    candidate_key = "\x1f".join(sorted(dict.fromkeys(approved_candidate_ids)))
+    raw = "\x1f".join(
+        (plan_id, step_id, thread_id, request_id, candidate_key)
+    )
+    return "assistant-gap-fill-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _message_response(message: AssistantMessage) -> AssistantMessageResponse:
@@ -428,6 +473,12 @@ def _error(exc: Exception) -> HTTPException:
     if isinstance(exc, (PlannerOutputError, AssistantPolicyError)):
         return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, PlannerUnavailable):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, GapFillNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, GapFillConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, GapFillUnavailable):
         return HTTPException(status_code=503, detail=str(exc))
     return HTTPException(status_code=503, detail="Workflow Assistant is temporarily unavailable.")
 
@@ -1166,6 +1217,124 @@ def get_plan(
                 plan_id=plan.plan_id,
             )
         return _plan_response(plan)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post(
+    "/plans/{plan_id}/gap-fill",
+    response_model=GapFillResponse,
+)
+def gap_fill_plan(
+    plan_id: str,
+    payload: GapFillRequest,
+    request: Request,
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> GapFillResponse:
+    """Approve bounded research candidates and release the waiting step.
+
+    Candidate URLs are never accepted from this request.  The current graph
+    checkpoint is the only authority for candidate IDs; the existing Server
+    research registry resolves those IDs to private URLs after authorization.
+    """
+
+    _gap_fill_feature_enabled(request)
+    try:
+        repository = _repository(request)
+        plan = repository.get_plan(actor=actor, plan_id=plan_id)
+        _reauthorize_plan_read(request, actor=actor, plan=plan)
+        step = next(
+            (item for item in plan.steps if item.step_id == payload.step_id),
+            None,
+        )
+        if step is None:
+            raise GapFillNotFound("plan step not found")
+        if step.action_kind != "start_research":
+            raise GapFillConflict("gap-fill target step is not a research step")
+        persisted_thread_id = str(
+            step.input_summary.get("research_thread_id")
+            or step.output_summary.get("research_thread_id")
+            or ""
+        ).strip()
+        if not persisted_thread_id or persisted_thread_id != payload.research_thread_id:
+            raise GapFillConflict("research thread does not match the waiting step")
+        request_identity = _gap_fill_request_identity(
+            plan_id=plan.plan_id,
+            step_id=step.step_id,
+            thread_id=persisted_thread_id,
+            request_id=payload.request_id,
+            approved_candidate_ids=payload.approved_candidate_ids,
+        )
+        service = _gap_fill_service(request)
+        snapshot = service.snapshot(
+            actor=actor,
+            project_id=step.project_id,
+            thread_id=persisted_thread_id,
+        )
+        if snapshot.research_thread_id != persisted_thread_id:
+            raise GapFillConflict("research checkpoint identity is invalid")
+        same_request = (
+            step.input_summary.get("gap_fill_request_id") == request_identity
+        )
+        if same_request:
+            # Exact retries are answered from the durable assistant binding.
+            # In particular, do not revalidate candidate IDs after the graph
+            # has advanced and cleared its review-candidate checkpoint.
+            return GapFillResponse(
+                plan=_plan_response(plan),
+                step_id=step.step_id,
+                research_thread_id=persisted_thread_id,
+                queue_job_id=str(step.background_job_id or ""),
+                queue_job_status=(
+                    "queued"
+                    if step.status == "waiting_job"
+                    else str(step.output_summary.get("status") or step.status)
+                ),
+                snapshot=snapshot,
+            )
+        if snapshot.status != "waiting_for_review":
+            raise GapFillConflict("research run is not waiting for candidate review")
+        visible_candidate_ids = {
+            candidate.candidate_id for candidate in snapshot.review_candidates
+        }
+        unknown = set(payload.approved_candidate_ids) - visible_candidate_ids
+        if unknown:
+            raise GapFillConflict(
+                "approved_candidate_ids contain unknown or non-official candidates"
+            )
+        queued = service.enqueue_resume(
+            actor=actor,
+            project_id=step.project_id,
+            thread_id=persisted_thread_id,
+            request_id=request_identity,
+            approved_candidate_ids=payload.approved_candidate_ids,
+        )
+        current = repository.release_research_gap_fill(
+            actor=actor,
+            plan_id=plan.plan_id,
+            expected_revision=payload.revision,
+            step_id=step.step_id,
+            research_thread_id=persisted_thread_id,
+            approved_candidate_ids=payload.approved_candidate_ids,
+            request_id=request_identity,
+            background_job_id=str(queued["job_id"]),
+        )
+        runner = getattr(request.app.state, "workflow_assistant_runner", None)
+        wake = getattr(runner, "wake", None)
+        if callable(wake):
+            wake()
+        return GapFillResponse(
+            plan=_plan_response(current),
+            step_id=step.step_id,
+            research_thread_id=persisted_thread_id,
+            queue_job_id=str(queued["job_id"]),
+            queue_job_status=str(queued.get("status") or "queued"),
+            snapshot=snapshot,
+        )
+    except HTTPException:
+        raise
+    except GapFillError as exc:
+        raise _error(exc) from exc
     except Exception as exc:
         raise _error(exc) from exc
 

@@ -1,12 +1,14 @@
 # Workflow Assistant M2 实施方案
 
-- 状态：已获准启动，等待 M1 工程候选提交并合并后创建独立分支
+- 状态：M2.0–M2.5 工程实现完成；M2.6 已完成本地运行、浏览器主链路和双用户隔离验收，发布门仍待执行
 - 确认日期：2026-08-17
 - 启动授权日期：2026-08-20
 - 前置方案：[`workflow-assistant-m1-plan.md`](workflow-assistant-m1-plan.md)
 - 开发前提：M1 工程实现和隔离环境 `deferred` 验收已完成，并已合并形成新的稳定主分支基线
 - 验收例外：用户明确选择不执行真实 ZeroGPT 截图；该例外仅允许启动 M2 本地开发，不代表 M1 正式交付通过
-- 建议后续分支：`codex/workflow-assistant-m2`
+- 稳定主线基线：`main` / `7aa2ae1`（已通过 `77d5850` 合并进本分支）
+- 开发分支：`codex/workflow-assistant-m2`
+- 开发工作树：`D:\Project\article\article-agent-workflow-assistant-m2`
 
 ## 1. 目标
 
@@ -320,42 +322,65 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 
 ### M2.0：重新基线和契约确认
 
-- 从合并 M1 后的稳定主分支创建新工作树或新分支。
-- 核对 M1 实际 Schema、API、页面和工具目录，不按旧计划猜测接口。
-- 固定允许的附件类型、大小限制和导入契约。
+- [x] 从合并 M1 后的稳定主分支创建新工作树和新分支。
+- [x] 核对 M1 实际 Schema、API、页面和工具目录，不按旧计划猜测接口。
+- [x] 固定允许的附件类型、大小限制和导入契约。
 
 ### M2.1：附件暂存
 
-- 增加 Alembic、Repository、私有对象存储前缀和七天清理任务。
-- 实现上传、下载签名 URL、内容哈希、幂等和权限隔离。
+- [x] 增加 additive Alembic、PostgreSQL Repository、私有对象存储前缀和七天到期清理边界。
+- [x] 实现上传、下载签名 URL、内容哈希、幂等和 Organization/User/Conversation 权限隔离。
+- [x] 对预选项目重新执行 `project.view` 鉴权；上传成功不触发分类、导入或发布。
+- [x] 补齐附件卡片、多文件上传进度、失败重试、下载和拒绝交互。
+- [x] 完成真实浏览器跨用户隔离验收。
 
 ### M2.2：分类和导入提案
 
-- 实现严格分类结构和 `needs_user_choice`。
-- 生成可复查的目标项目、类型、重复项、冲突和差异。
-- 确认前不调用正式导入服务。
+- [x] 实现严格分类结构和 `needs_user_choice`，附件正文始终按不可信数据处理。
+- [x] 使用独立 PostgreSQL durable Job 生成可复查的目标项目、类型、重复项、冲突和差异。
+- [x] Proposal 使用 actor scope、幂等、revision/CAS 和执行前/提交前重新鉴权。
+- [x] 确认只释放 Proposal，不调用正式导入或知识发布服务。
+- [x] 在真实浏览器完成分类、人工消歧、差异修订和确认验收。
 
 ### M2.3：正式导入适配器
 
-- 复用知识文件、Prompt、任务表、注意事项和话题库现有能力。
-- 完成 revision、幂等、Audit 和部分条目排除。
+- [x] 复用知识文件、Prompt、任务表、注意事项和话题库现有能力。
+- [x] 完成 revision、幂等、Audit 和部分条目排除。
+- [x] 确认后释放持久化 execute Job；Proposal/附件状态迁移支持 CAS、失败回滚和崩溃重放。
+- [x] 在干净 PostgreSQL 上验证 0032 迁移、Proposal/Job 生命周期和 Prompt 导入幂等。
 
 ### M2.4：精准证据补全
 
-- 将研究缺口结构化。
-- 增加现有知识检索、官网定向搜索、候选审查和快照恢复。
-- 验证博客与第三方来源不能进入证据通道。
+- [x] 将研究缺口结构化。
+- [x] 增加现有知识检索、官网定向搜索、候选审查和快照恢复。
+- [x] 验证博客与第三方来源不能进入证据通道。
 
 ### M2.5：前端交互
 
-- 附件、分类、提案、差异、发布审查和恢复计划 UI。
-- SSE 时间线覆盖上传、解析、导入和 gap-fill 子 Job。
+- [x] 在助手计划中接入 waiting-review 研究缺口、官网候选勾选/拒绝、队列状态和恢复计划刷新。
+- [x] 补齐附件分类、导入提案、结构化差异、发布审查和其他恢复计划 UI，并支持刷新后恢复最新 Job/Proposal。
+- [x] SSE 时间线覆盖上传、解析、导入和 gap-fill 子 Job。
 
 ### M2.6：验收与上线
 
-- 自动测试、迁移测试、前端 lint/build 和真实浏览器验证。
-- 验证七天清理、对象存储权限和跨项目隔离。
-- 分别报告 Push、CI、生产构建、部署和线上 smoke 状态。
+- [x] 完成后端 998 项无数据库回归、前端 lint/build 和差异检查。
+- [x] 在干净 PostgreSQL/对象存储环境完成迁移、七天清理、权限和跨项目隔离验收。
+- [x] 完成真实浏览器附件主链路验证，并分别记录 Push、CI、生产构建、部署和线上 smoke 状态。
+- [x] Push 当前 M2 分支并完成 PR quality CI；生产构建随 quality Job 通过。
+- [ ] 合并到 `main`、执行生产部署和线上 smoke；当前按授权保持未执行。
+
+本轮本地验收记录（2026-08-20）：
+
+- 在独立空 PostgreSQL 数据库执行 Alembic 至 `20260820_0032`，M2 专用 PostgreSQL 测试与 MinIO 真实 put/get/list/签名/删除往返测试通过。
+- 复用的旧开发数据库卷曾标记为 `20260820_0030`，实际缺少 M2.1/M2.3 需要的约束和 `execution_idempotency_key`；本轮通过 0031 迁移的兼容性修复完成升级至 `20260820_0032`，未删除业务数据。
+- Edge 已验证会话可加载本地 3000 端口。由于浏览器扩展未开放 file URL，真实文件选择器上传未完成；随后使用真实 `AttachmentService` 写入一次性 Markdown 测试附件，在浏览器中完成分类重试、`needs_user_choice`、目标项目选择、提案预览、结构化差异修订、取消和拒绝清理；未执行真实项目导入，数据库记录与 MinIO 对象均已清除。
+- Edge 同一已验证会话随后在一次性测试项目中完成 `confirm` 与 `execute_import_proposal`，页面显示“已导入”，数据库确认 Proposal `completed`、三个附件 Job 均 `succeeded`、生成一个 `project_notes` 业务实体引用；测试项目恢复原始内容后归档，附件对象和记录清理，审计事件保留。
+- 使用 Edge 主用户会话和独立 In-app Browser 隔离会话完成真实浏览器跨用户验收：主用户看不到隔离用户的 `M2 private browser fixture` 与 `m2-private-b-only.md`，隔离用户只看到自己的会话与附件且看不到主用户会话；一次性用户、会话、附件、对象和本地认证跳转服务均已清理。
+- 独立服务端隔离验收使用两个签名会话：所有者上传返回 201 且可列出附件；另一用户读取同一会话和附件均返回 404；所有者把附件预选到无权项目返回 403。独立 PostgreSQL/MinIO 保留对象哨兵验证七天清理只删除过期临时对象，正式对象仍在。
+- 合并最新 `main` 的 `7aa2ae1` 后重新执行本地回归：后端 `998` 项通过（`skipped=299`），前端 `npm.cmd run lint`、`npm.cmd run build`、`git diff --check` 和本地 3000/8000 健康检查均通过。
+- 发布前本地复核：共享开发 PostgreSQL 的 Alembic 当前版本和 `upgrade head` 均为 `20260820_0032 (head)`，CI workflow YAML 解析通过，前端 `npm ci --dry-run --ignore-scripts` 通过；Windows 当前没有可用 Bash，因此 `deploy/deploy-production.sh` 未进行脚本级语法执行。
+- 远端只读状态：`origin/main` 的 `7aa2ae1` 对应 GitHub Actions run `32358308862`，quality 和 production deploy 两个 Job 均成功；M2 PR `#8` 的 quality run `32363190632` 通过且 PR 状态 `MERGEABLE/CLEAN`，production deploy 按 workflow 条件跳过，合并、生产部署和线上 smoke 仍待执行。
+- 生产构建门状态：前端本地 `npm.cmd run lint`、`npm.cmd run build` 通过；PR #8 的 quality CI run `32363190632` 通过，PR 上 production deploy 按 workflow 条件跳过；合并、生产部署和线上 smoke 未执行。
 
 ## 14. 测试重点
 

@@ -314,6 +314,39 @@ class ServerProjectPromptTests(unittest.TestCase):
             audit=self.audit,
         )
 
+    def test_imported_prompt_has_deterministic_identity_and_replay(self) -> None:
+        first = self.service.create_imported(
+            self.editor,
+            prompt_id="assistant_prompt_import_one",
+            name="Imported outline",
+            kind="outline",
+            content="Write an evidence-backed outline.",
+        )
+        replay = self.service.create_imported(
+            self.editor,
+            prompt_id="assistant_prompt_import_one",
+            name="Imported outline",
+            kind="outline",
+            content="Write an evidence-backed outline.",
+        )
+        self.assertEqual(first.prompt_id, replay.prompt_id)
+        self.assertEqual(first.version, replay.version)
+        self.assertEqual(first.name, replay.name)
+        self.assertEqual(first.content, replay.content)
+        self.assertEqual(first.version, 1)
+        self.assertEqual(
+            [event.action for event in self.audit.events],
+            ["project_prompt.imported"],
+        )
+        with self.assertRaises(ServerProjectPromptConflict):
+            self.service.create_imported(
+                self.editor,
+                prompt_id="assistant_prompt_import_one",
+                name="Imported outline",
+                kind="outline",
+                content="A different prompt.",
+            )
+
 
     def test_edit_updates_current_prompt_version_and_default(
         self,

@@ -1252,6 +1252,117 @@ class ServerKnowledgeResearchRegistry:
             )
         return tuple(candidates[item] for item in approved_candidate_ids)
 
+    def gap_fill_snapshot(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        thread_id: str,
+    ) -> dict[str, object]:
+        """Return a bounded review projection for an assistant gap-fill gate.
+
+        The graph checkpoint remains the only source for candidate URLs and
+        explicit gap reasons.  This method does not expose query receipts,
+        snippets, private request bodies, or unreviewed candidates; it merely
+        projects the same-site candidates already shown by the knowledge
+        workspace so the Assistant can safely bind an approval to a plan.
+        """
+
+        normalized_project_id = _required_text(
+            project_id,
+            "project_id",
+            max_length=255,
+        )
+        normalized_thread_id = _required_text(
+            thread_id,
+            "thread_id",
+            max_length=200,
+        )
+        self._access.require(actor, normalized_project_id, "knowledge.publish")
+        run = self._runs.get_run(normalized_project_id, normalized_thread_id)
+        if run is None:
+            raise ResearchRunNotFound(normalized_thread_id)
+        if run.organization_id != actor.organization_id:
+            raise ResearchRunConflictError(
+                "research run does not belong to the active organization"
+            )
+        if self._execution is None:
+            raise ServerKnowledgeResearchUnavailable(
+                "knowledge research runner is not configured"
+            )
+        state = self._execution.checkpoint_state(
+            project_id=normalized_project_id,
+            thread_id=normalized_thread_id,
+        )
+        raw_candidates = state.get("discovered_candidates") or ()
+        candidates: list[dict[str, object]] = []
+        for raw in raw_candidates:  # type: ignore[union-attr]
+            if not isinstance(raw, Mapping) or raw.get("needs_review") is not True:
+                continue
+            evidence = raw.get("evidence")
+            evidence_map = dict(evidence) if isinstance(evidence, Mapping) else {}
+            # The discovery adapters mark every candidate as same-site and
+            # route it through one of these two explicit channels. Fail closed
+            # if a future adapter omits the marker or reports another channel.
+            if evidence_map.get("same_site") is not True:
+                continue
+            if str(evidence_map.get("channel") or "") not in {
+                "official_site",
+                "tavily_discovery",
+            }:
+                continue
+            candidate_id = str(raw.get("candidate_id") or "").strip()
+            url = str(raw.get("url") or "").strip()
+            page_type = str(raw.get("page_type") or "unknown").strip()
+            if not candidate_id or not url or not page_type:
+                continue
+            candidates.append(
+                {
+                    "candidate_id": candidate_id[:200],
+                    "url": url[:4096],
+                    "page_type": page_type[:200],
+                    "needs_review": True,
+                    "evidence": {
+                        key: evidence_map[key]
+                        for key in (
+                            "reason",
+                            "channel",
+                            "same_site",
+                            "score",
+                            "reused_attempt",
+                        )
+                        if key in evidence_map
+                    },
+                }
+            )
+            if len(candidates) >= MAX_APPROVED_CANDIDATES:
+                break
+        raw_reasons = state.get("latest_gap_reasons") or ()
+        gap_reasons = tuple(
+            str(reason).strip()[:500]
+            for reason in raw_reasons  # type: ignore[union-attr]
+            if str(reason).strip()
+        )
+        raw_current_scope = state.get("current_scope_id")
+        return {
+            "project_id": normalized_project_id,
+            "research_thread_id": normalized_thread_id,
+            "retrieval_plan_id": run.retrieval_plan_id,
+            "status": run.status,
+            "current_scope_id": (
+                str(raw_current_scope).strip()
+                if raw_current_scope
+                else run.current_scope_id
+            ),
+            "gap_reasons": gap_reasons[:20],
+            "gap_fill_round": run.gap_fill_round,
+            "max_gap_fill_rounds": run.max_gap_fill_rounds,
+            "discovery_queries_used": run.discovery_queries_used,
+            "max_discovery_queries": run.max_discovery_queries,
+            "evidence_pack_ids": list(run.evidence_pack_ids),
+            "review_candidates": candidates,
+        }
+
     def _lock_access(
         self,
         connection: Connection,
