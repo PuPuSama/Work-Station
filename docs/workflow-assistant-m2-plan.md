@@ -6,7 +6,7 @@
 - 前置方案：[`workflow-assistant-m1-plan.md`](workflow-assistant-m1-plan.md)
 - 开发前提：M1 工程实现和隔离环境 `deferred` 验收已完成，并已合并形成新的稳定主分支基线
 - 验收例外：用户明确选择不执行真实 ZeroGPT 截图；该例外仅允许启动 M2 本地开发，不代表 M1 正式交付通过
-- 稳定主线基线：`main` / `83986c5`
+- 稳定主线基线：`main` / `7aa2ae1`（已通过 `77d5850` 合并进本分支）
 - 开发分支：`codex/workflow-assistant-m2`
 - 开发工作树：`D:\Project\article\article-agent-workflow-assistant-m2`
 
@@ -363,7 +363,7 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 
 ### M2.6：验收与上线
 
-- [x] 完成后端 996 项无数据库回归、前端 lint/build 和差异检查。
+- [x] 完成后端 998 项无数据库回归、前端 lint/build 和差异检查。
 - [x] 在干净 PostgreSQL/对象存储环境完成迁移、七天清理、权限和跨项目隔离验收。
 - [x] 完成真实浏览器附件主链路验证，并分别记录 Push、CI、生产构建、部署和线上 smoke 状态。
 - [ ] 执行 Push、CI、生产构建、部署和线上 smoke 发布门；当前按授权保持未执行。
@@ -376,6 +376,7 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 - Edge 同一已验证会话随后在一次性测试项目中完成 `confirm` 与 `execute_import_proposal`，页面显示“已导入”，数据库确认 Proposal `completed`、三个附件 Job 均 `succeeded`、生成一个 `project_notes` 业务实体引用；测试项目恢复原始内容后归档，附件对象和记录清理，审计事件保留。
 - 使用 Edge 主用户会话和独立 In-app Browser 隔离会话完成真实浏览器跨用户验收：主用户看不到隔离用户的 `M2 private browser fixture` 与 `m2-private-b-only.md`，隔离用户只看到自己的会话与附件且看不到主用户会话；一次性用户、会话、附件、对象和本地认证跳转服务均已清理。
 - 独立服务端隔离验收使用两个签名会话：所有者上传返回 201 且可列出附件；另一用户读取同一会话和附件均返回 404；所有者把附件预选到无权项目返回 403。独立 PostgreSQL/MinIO 保留对象哨兵验证七天清理只删除过期临时对象，正式对象仍在。
+- 合并最新 `main` 的 `7aa2ae1` 后重新执行本地回归：后端 `998` 项通过（`skipped=299`），前端 `npm.cmd run lint`、`npm.cmd run build`、`git diff --check` 和本地 3000/8000 健康检查均通过。
 - 生产构建门状态：前端本地 `npm.cmd run lint`、`npm.cmd run build` 通过；Push、CI、部署和线上 smoke 未执行。
 
 ## 14. 测试重点
