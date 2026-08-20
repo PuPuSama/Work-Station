@@ -16,6 +16,10 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from config import load_config, public_config  # noqa: E402
+from workflow_assistant.attachment_jobs import AttachmentJobConflict  # noqa: E402
+from workflow_assistant.attachment_review import (  # noqa: E402
+    AttachmentReviewWorkflowService,
+)
 
 
 class WorkflowAssistantM2ConfigTests(unittest.TestCase):
@@ -47,6 +51,19 @@ class WorkflowAssistantM2ConfigTests(unittest.TestCase):
         self.assertFalse(config.workflow_assistant_attachments_enabled)
         self.assertFalse(config.workflow_assistant_project_changes_enabled)
         self.assertFalse(config.workflow_assistant_gap_fill_enabled)
+
+    def test_project_change_gate_fails_closed_when_disabled(self) -> None:
+        service = object.__new__(AttachmentReviewWorkflowService)
+        service._project_changes_enabled = False
+        with self.assertRaises(AttachmentJobConflict) as captured:
+            service._assert_project_changes_enabled("project_notes")
+        self.assertEqual(
+            captured.exception.code,
+            "workflow_assistant_project_changes_disabled",
+        )
+        service._assert_project_changes_enabled("knowledge_source")
+        service._project_changes_enabled = True
+        service._assert_project_changes_enabled("topic_library")
 
     def test_environment_can_enable_each_subfeature(self) -> None:
         with patch.dict(

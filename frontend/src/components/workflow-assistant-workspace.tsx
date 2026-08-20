@@ -226,6 +226,7 @@ export function WorkflowAssistantWorkspace() {
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlan[]>([]);
   const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
+  const [projectChangesEnabled, setProjectChangesEnabled] = useState(false);
   const [gapFillEnabled, setGapFillEnabled] = useState(false);
   const [error, setError] = useState("");
   const [timeline, setTimeline] = useState<string[]>([]);
@@ -282,6 +283,10 @@ export function WorkflowAssistantWorkspace() {
       setAttachmentsEnabled(Boolean(
         authStatus.data?.workflow_assistant_enabled &&
         authStatus.data?.workflow_assistant_attachments_enabled,
+      ));
+      setProjectChangesEnabled(Boolean(
+        authStatus.data?.workflow_assistant_enabled &&
+        authStatus.data?.workflow_assistant_project_changes_enabled,
       ));
       setGapFillEnabled(Boolean(
         authStatus.data?.workflow_assistant_enabled &&
@@ -790,6 +795,7 @@ export function WorkflowAssistantWorkspace() {
                 <WorkflowAssistantAttachments
                   conversationId={selectedConversation?.conversation_id ?? null}
                   selectedProjectIds={selectedProjectIds}
+                  projectChangesEnabled={projectChangesEnabled}
                   onActivity={(message) => setTimeline((current) => [...current, message].slice(-50))}
                 />
               )}
