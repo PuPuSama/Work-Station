@@ -885,12 +885,13 @@ retrieval_plans = sa.Table(
         "outline_version",
         name="uq_retrieval_plans_article_version_identity",
     ),
-    sa.UniqueConstraint(
-        "project_id",
-        "article_id",
-        "outline_version",
-        name="uq_retrieval_plans_article_version",
-    ),
+)
+
+sa.Index(
+    "ix_retrieval_plans_article_version",
+    retrieval_plans.c.project_id,
+    retrieval_plans.c.article_id,
+    retrieval_plans.c.outline_version,
 )
 
 
