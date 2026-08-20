@@ -33,9 +33,11 @@ import {
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
+import { WorkflowAssistantAttachments } from "@/components/workflow-assistant-attachments";
 import { ApiError, apiFileUrl, apiGet, apiPost } from "@/lib/api";
 import type {
   AccessibleProject,
+  AuthStatus,
   ProjectAssetDownload,
   TaskRecord,
   WorkflowAssistantConversation,
@@ -191,6 +193,7 @@ export function WorkflowAssistantWorkspace() {
   const [artifactPending, setArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlan[]>([]);
+  const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
   const [error, setError] = useState("");
   const [timeline, setTimeline] = useState<string[]>([]);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -217,9 +220,10 @@ export function WorkflowAssistantWorkspace() {
     setLoading(true);
     setError("");
     try {
-      const [nextProjects, nextConversations] = await Promise.all([
+      const [nextProjects, nextConversations, authStatus] = await Promise.all([
         apiGet<AccessibleProject[]>("/api/projects"),
         apiGet<WorkflowAssistantConversationList>("/api/workflow-assistant/conversations"),
+        apiGet<AuthStatus>("/api/auth/status"),
       ]);
       const nextTasks = (
         await Promise.all(
@@ -237,6 +241,10 @@ export function WorkflowAssistantWorkspace() {
       setProjects(nextProjects);
       setTasks(nextTasks);
       setConversations(nextConversations.conversations);
+      setAttachmentsEnabled(Boolean(
+        authStatus.data?.workflow_assistant_enabled &&
+        authStatus.data?.workflow_assistant_attachments_enabled,
+      ));
       void refreshAttention().catch(() => {
         // Keep the workspace usable when an older backend has no inbox route.
         setAttentionCount(0);
@@ -651,6 +659,12 @@ export function WorkflowAssistantWorkspace() {
             </ScrollArea>
             {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>助手暂时无法继续</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
             <div className="grid gap-2">
+              {attachmentsEnabled && (
+                <WorkflowAssistantAttachments
+                  conversationId={selectedConversation?.conversation_id ?? null}
+                  selectedProjectIds={selectedProjectIds}
+                />
+              )}
               <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="描述你想查询或计划的文章工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
               <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="animate-spin" /> : <Send />}发送</Button></div>
             </div>

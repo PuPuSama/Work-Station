@@ -41,6 +41,9 @@ llm:
 features:
   knowledge_agent_enabled: false
   workflow_assistant_enabled: false
+  workflow_assistant_attachments_enabled: false
+  workflow_assistant_project_changes_enabled: false
+  workflow_assistant_gap_fill_enabled: false
 
 workflow_assistant:
   max_concurrency: 3

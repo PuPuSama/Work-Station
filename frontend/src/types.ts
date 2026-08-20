@@ -417,6 +417,7 @@ export type AuthStatus = {
     organization_id?: string | null;
     user_id?: string | null;
     workflow_assistant_enabled?: boolean;
+    workflow_assistant_attachments_enabled?: boolean;
   };
 };
 
@@ -677,6 +678,9 @@ export type PublicConfig = {
   features?: {
     knowledge_agent_enabled: boolean;
     workflow_assistant_enabled?: boolean;
+    workflow_assistant_attachments_enabled?: boolean;
+    workflow_assistant_project_changes_enabled?: boolean;
+    workflow_assistant_gap_fill_enabled?: boolean;
   };
   workflow_assistant?: {
     max_concurrency: number;
@@ -1228,6 +1232,43 @@ export type WorkflowAssistantAttentionCount = {
 
 export type WorkflowAssistantAttentionList = {
   plans: WorkflowAssistantPlan[];
+};
+
+export type WorkflowAssistantAttachmentStatus =
+  | "uploading"
+  | "uploaded"
+  | "classifying"
+  | "needs_user_choice"
+  | "proposal_ready"
+  | "importing"
+  | "imported"
+  | "rejecting"
+  | "rejected"
+  | "expiring"
+  | "expired"
+  | "failed";
+
+export type WorkflowAssistantAttachment = {
+  attachment_id: string;
+  conversation_id: string;
+  proposed_project_id: string | null;
+  original_filename: string;
+  mime_type: string;
+  byte_size: number;
+  sha256: string;
+  classification: string | null;
+  classification_payload: Record<string, unknown>;
+  revision: number;
+  status: WorkflowAssistantAttachmentStatus;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  download_url: string | null;
+  download_url_expires_seconds: number | null;
+};
+
+export type WorkflowAssistantAttachmentList = {
+  attachments: WorkflowAssistantAttachment[];
 };
 
 export type WorkflowAssistantDispatch = {

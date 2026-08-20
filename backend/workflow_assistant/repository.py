@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from server_schema import (
     article_tasks,
+    assistant_attachments,
     assistant_conversations,
     assistant_messages,
     assistant_usage_events,
@@ -1927,6 +1928,16 @@ class PostgresWorkflowAssistantRepository:
                     == assistant_conversations.c.conversation_id,
                 )
             )
+            has_attachment = sa.exists(
+                sa.select(1)
+                .select_from(assistant_attachments)
+                .where(
+                    assistant_attachments.c.organization_id
+                    == assistant_conversations.c.organization_id,
+                    assistant_attachments.c.conversation_id
+                    == assistant_conversations.c.conversation_id,
+                )
+            )
             # Private messages expire after 30 days. Confirmed plans remain
             # durable, so retain their parent conversation row as an opaque
             # anchor while removing the message bodies.
@@ -1941,6 +1952,7 @@ class PostgresWorkflowAssistantRepository:
                 assistant_conversations.delete().where(
                     assistant_conversations.c.expires_at < before,
                     ~has_plan,
+                    ~has_attachment,
                 )
             )
             return int(result.rowcount or 0)

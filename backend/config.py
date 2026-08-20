@@ -89,6 +89,9 @@ class AppConfig:
     llm_runtime_override: bool
     knowledge_agent_enabled: bool
     workflow_assistant_enabled: bool
+    workflow_assistant_attachments_enabled: bool
+    workflow_assistant_project_changes_enabled: bool
+    workflow_assistant_gap_fill_enabled: bool
     workflow_assistant_max_concurrency: int
     workflow_assistant_soft_budget_tokens: int
 
@@ -194,6 +197,18 @@ def load_config() -> AppConfig:
             "WORKFLOW_ASSISTANT_ENABLED",
             bool(features.get("workflow_assistant_enabled", False)),
         ),
+        workflow_assistant_attachments_enabled=_environment_bool(
+            "WORKFLOW_ASSISTANT_ATTACHMENTS_ENABLED",
+            bool(features.get("workflow_assistant_attachments_enabled", False)),
+        ),
+        workflow_assistant_project_changes_enabled=_environment_bool(
+            "WORKFLOW_ASSISTANT_PROJECT_CHANGES_ENABLED",
+            bool(features.get("workflow_assistant_project_changes_enabled", False)),
+        ),
+        workflow_assistant_gap_fill_enabled=_environment_bool(
+            "WORKFLOW_ASSISTANT_GAP_FILL_ENABLED",
+            bool(features.get("workflow_assistant_gap_fill_enabled", False)),
+        ),
         workflow_assistant_max_concurrency=_environment_int(
             "WORKFLOW_ASSISTANT_MAX_CONCURRENCY",
             int(workflow_assistant.get("max_concurrency", 3)),
@@ -264,6 +279,15 @@ def public_config(config: AppConfig) -> dict[str, Any]:
     # flag to the workspace UI.
     if config.workflow_assistant_enabled:
         features["workflow_assistant_enabled"] = True
+        features["workflow_assistant_attachments_enabled"] = bool(
+            config.workflow_assistant_attachments_enabled
+        )
+        features["workflow_assistant_project_changes_enabled"] = bool(
+            config.workflow_assistant_project_changes_enabled
+        )
+        features["workflow_assistant_gap_fill_enabled"] = bool(
+            config.workflow_assistant_gap_fill_enabled
+        )
     payload = {
         "topic_library": str(config.topic_library),
         "knowledge_base": str(config.knowledge_base),

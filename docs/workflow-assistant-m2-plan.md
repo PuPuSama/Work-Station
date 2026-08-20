@@ -1,12 +1,14 @@
 # Workflow Assistant M2 实施方案
 
-- 状态：已获准启动，等待 M1 工程候选提交并合并后创建独立分支
+- 状态：M2.0 已完成；M2.1 工程实现完成，真实浏览器隔离验收待执行
 - 确认日期：2026-08-17
 - 启动授权日期：2026-08-20
 - 前置方案：[`workflow-assistant-m1-plan.md`](workflow-assistant-m1-plan.md)
 - 开发前提：M1 工程实现和隔离环境 `deferred` 验收已完成，并已合并形成新的稳定主分支基线
 - 验收例外：用户明确选择不执行真实 ZeroGPT 截图；该例外仅允许启动 M2 本地开发，不代表 M1 正式交付通过
-- 建议后续分支：`codex/workflow-assistant-m2`
+- 稳定主线基线：`main` / `83986c5`
+- 开发分支：`codex/workflow-assistant-m2`
+- 开发工作树：`D:\Project\article\article-agent-workflow-assistant-m2`
 
 ## 1. 目标
 
@@ -320,14 +322,17 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 
 ### M2.0：重新基线和契约确认
 
-- 从合并 M1 后的稳定主分支创建新工作树或新分支。
-- 核对 M1 实际 Schema、API、页面和工具目录，不按旧计划猜测接口。
-- 固定允许的附件类型、大小限制和导入契约。
+- [x] 从合并 M1 后的稳定主分支创建新工作树和新分支。
+- [x] 核对 M1 实际 Schema、API、页面和工具目录，不按旧计划猜测接口。
+- [x] 固定允许的附件类型、大小限制和导入契约。
 
 ### M2.1：附件暂存
 
-- 增加 Alembic、Repository、私有对象存储前缀和七天清理任务。
-- 实现上传、下载签名 URL、内容哈希、幂等和权限隔离。
+- [x] 增加 additive Alembic、PostgreSQL Repository、私有对象存储前缀和七天到期清理边界。
+- [x] 实现上传、下载签名 URL、内容哈希、幂等和 Organization/User/Conversation 权限隔离。
+- [x] 对预选项目重新执行 `project.view` 鉴权；上传成功不触发分类、导入或发布。
+- [x] 补齐附件卡片、多文件上传进度、失败重试、下载和拒绝交互。
+- [ ] 完成真实浏览器跨用户隔离验收。
 
 ### M2.2：分类和导入提案
 

@@ -135,3 +135,66 @@ export async function apiUpload<T>(path: string, body: FormData): Promise<T> {
   });
   return readJson<T>(response);
 }
+
+export async function apiUploadWithProgress<T>(
+  path: string,
+  body: FormData,
+  onProgress: (percent: number) => void,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", `${API_BASE}${path}`);
+    request.withCredentials = true;
+    request.timeout = timeoutMs;
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total <= 0) return;
+      onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+    };
+    request.onerror = () => reject(new Error("Network request failed."));
+    request.onabort = () => reject(new Error("Upload was cancelled."));
+    request.ontimeout = () => reject(
+      new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`),
+    );
+    request.onload = () => {
+      const text = request.responseText;
+      if (request.status >= 200 && request.status < 300) {
+        try {
+          const payload = text ? (JSON.parse(text) as T) : ({} as T);
+          onProgress(100);
+          resolve(payload);
+        } catch {
+          reject(new Error("Server returned an invalid JSON response."));
+        }
+        return;
+      }
+      if (
+        request.status === 401 &&
+        typeof window !== "undefined" &&
+        window.location.pathname !== "/login"
+      ) {
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+      }
+      let detail: unknown = text;
+      if (text) {
+        try {
+          const payload = JSON.parse(text) as { detail?: unknown };
+          detail = payload.detail ?? payload;
+        } catch {
+          detail = text;
+        }
+      }
+      const message =
+        typeof detail === "string"
+          ? detail
+          : detail && typeof detail === "object" && "message" in detail
+            ? String((detail as { message: unknown }).message)
+            : detail
+              ? JSON.stringify(detail)
+              : `Request failed with ${request.status}`;
+      reject(new ApiError(request.status, message, detail));
+    };
+    request.send(body);
+  });
+}
