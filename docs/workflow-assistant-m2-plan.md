@@ -377,6 +377,7 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 - 使用 Edge 主用户会话和独立 In-app Browser 隔离会话完成真实浏览器跨用户验收：主用户看不到隔离用户的 `M2 private browser fixture` 与 `m2-private-b-only.md`，隔离用户只看到自己的会话与附件且看不到主用户会话；一次性用户、会话、附件、对象和本地认证跳转服务均已清理。
 - 独立服务端隔离验收使用两个签名会话：所有者上传返回 201 且可列出附件；另一用户读取同一会话和附件均返回 404；所有者把附件预选到无权项目返回 403。独立 PostgreSQL/MinIO 保留对象哨兵验证七天清理只删除过期临时对象，正式对象仍在。
 - 合并最新 `main` 的 `7aa2ae1` 后重新执行本地回归：后端 `998` 项通过（`skipped=299`），前端 `npm.cmd run lint`、`npm.cmd run build`、`git diff --check` 和本地 3000/8000 健康检查均通过。
+- 发布前本地复核：共享开发 PostgreSQL 的 Alembic 当前版本和 `upgrade head` 均为 `20260820_0032 (head)`，CI workflow YAML 解析通过，前端 `npm ci --dry-run --ignore-scripts` 通过；Windows 当前没有可用 Bash，因此 `deploy/deploy-production.sh` 未进行脚本级语法执行。
 - 生产构建门状态：前端本地 `npm.cmd run lint`、`npm.cmd run build` 通过；Push、CI、部署和线上 smoke 未执行。
 
 ## 14. 测试重点
