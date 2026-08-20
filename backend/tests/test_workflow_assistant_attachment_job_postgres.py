@@ -21,6 +21,7 @@ from server_schema import (  # noqa: E402
     assistant_attachments,
     assistant_conversations,
     assistant_import_proposals,
+    audit_events,
     organizations,
     project_ownership,
     workspace_users,
@@ -141,6 +142,66 @@ class AttachmentJobPostgresTests(unittest.TestCase):
                     idempotency_key="proposal-1",
                     revision=0,
                     status="awaiting_confirmation",
+                )
+            )
+
+    def tearDown(self) -> None:
+        """Remove durable job fixtures while retaining append-only audit parents."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                assistant_attachment_jobs.delete().where(
+                    assistant_attachment_jobs.c.organization_id
+                    == self.organization_id
+                )
+            )
+            connection.execute(
+                assistant_import_proposals.delete().where(
+                    assistant_import_proposals.c.organization_id
+                    == self.organization_id
+                )
+            )
+            connection.execute(
+                assistant_attachments.delete().where(
+                    assistant_attachments.c.organization_id == self.organization_id
+                )
+            )
+            connection.execute(
+                assistant_conversations.delete().where(
+                    assistant_conversations.c.organization_id
+                    == self.organization_id
+                )
+            )
+            has_audit = (
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(audit_events)
+                    .where(
+                        audit_events.c.organization_id == self.organization_id
+                    )
+                ).scalar_one()
+                > 0
+            )
+            if has_audit:
+                # Audit is immutable. Keep the parent identities required by
+                # those rows, while allowing the next test to start clean.
+                return
+            connection.execute(
+                project_ownership.delete().where(
+                    project_ownership.c.organization_id == self.organization_id
+                )
+            )
+            connection.execute(
+                projects.delete().where(projects.c.project_id == self.project_id)
+            )
+            connection.execute(
+                workspace_users.delete().where(
+                    workspace_users.c.organization_id == self.organization_id
+                )
+            )
+            connection.execute(
+                organizations.delete().where(
+                    organizations.c.organization_id == self.organization_id
                 )
             )
 
