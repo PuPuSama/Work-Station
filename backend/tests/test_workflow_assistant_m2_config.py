@@ -7,8 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = BACKEND_DIR.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
@@ -16,6 +19,21 @@ from config import load_config, public_config  # noqa: E402
 
 
 class WorkflowAssistantM2ConfigTests(unittest.TestCase):
+    def test_production_docker_config_enables_the_validated_m2_features(self) -> None:
+        config = yaml.safe_load(
+            (REPOSITORY_ROOT / "config.docker.yaml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            config["features"],
+            {
+                "knowledge_agent_enabled": False,
+                "workflow_assistant_enabled": True,
+                "workflow_assistant_attachments_enabled": True,
+                "workflow_assistant_project_changes_enabled": True,
+                "workflow_assistant_gap_fill_enabled": True,
+            },
+        )
+
     def test_subfeatures_default_to_disabled(self) -> None:
         names = {
             "WORKFLOW_ASSISTANT_ATTACHMENTS_ENABLED",
