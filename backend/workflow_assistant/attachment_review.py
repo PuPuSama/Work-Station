@@ -235,6 +235,32 @@ class AttachmentReviewWorkflowService:
             self._access.require(actor, job.project_id, "project.view")
         return job
 
+    def get_attachment_review(
+        self,
+        *,
+        actor: ActorIdentity,
+        conversation_id: str,
+        attachment_id: str,
+    ) -> tuple[AssistantAttachment, ImportProposal | None, AttachmentJob | None]:
+        """Recover the newest durable review state after a page refresh."""
+
+        attachment = self._load_attachment(actor, attachment_id)
+        if attachment is None or attachment.conversation_id != conversation_id:
+            raise ImportProposalNotFound("attachment not found")
+        job = self._job_repository(actor.organization_id).get_latest_for_attachment_for_actor(
+            user_id=actor.user_id,
+            attachment_id=attachment_id,
+        )
+        if job is not None and job.project_id is not None:
+            self._access.require(actor, job.project_id, "project.view")
+        proposal = self._proposals.get_latest_for_attachment_for_actor(
+            actor=actor,
+            attachment_id=attachment_id,
+        )
+        if proposal is not None and proposal.target_project_id is not None:
+            self._access.require(actor, proposal.target_project_id, "project.view")
+        return attachment, proposal, job
+
     def revise_proposal(
         self,
         *,

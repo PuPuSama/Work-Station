@@ -677,6 +677,31 @@ class PostgresImportProposalRepository:
             ).mappings().one_or_none()
         return _from_row(row) if row is not None else None
 
+    def get_latest_for_attachment_for_actor(
+        self,
+        *,
+        actor: ActorIdentity,
+        attachment_id: str,
+    ) -> ImportProposal | None:
+        """Load the newest proposal for an actor-scoped attachment."""
+
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(assistant_import_proposals)
+                .where(
+                    assistant_import_proposals.c.organization_id == actor.organization_id,
+                    assistant_import_proposals.c.creator_user_id == actor.user_id,
+                    assistant_import_proposals.c.attachment_id == attachment_id,
+                )
+                .order_by(
+                    assistant_import_proposals.c.updated_at.desc(),
+                    assistant_import_proposals.c.created_at.desc(),
+                    assistant_import_proposals.c.proposal_id,
+                )
+                .limit(1)
+            ).mappings().one_or_none()
+        return _from_row(row) if row is not None else None
+
     def revise(
         self,
         *,

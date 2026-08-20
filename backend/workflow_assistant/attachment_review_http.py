@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import time
 from typing import Mapping, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from models import PromptKind
@@ -68,6 +71,14 @@ class AttachmentReviewWorkflow(Protocol):
     ) -> ImportProposal: ...
 
     def get_job(self, *, actor: ActorIdentity, job_id: str) -> AttachmentJob: ...
+
+    def get_attachment_review(
+        self,
+        *,
+        actor: ActorIdentity,
+        conversation_id: str,
+        attachment_id: str,
+    ) -> tuple[AssistantAttachment, ImportProposal | None, AttachmentJob | None]: ...
 
     def revise_proposal(
         self,
@@ -476,6 +487,137 @@ def get_attachment_job(
         return _response(attachment, proposal=proposal, job=job)
     except Exception as exc:
         raise _review_error(exc) from exc
+
+
+@router.get(
+    "/attachments/{attachment_id}/review",
+    response_model=AttachmentReviewResponse,
+)
+def get_attachment_review(
+    attachment_id: str,
+    request: Request,
+    conversation_id: str = Query(..., min_length=1, max_length=128),
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> AttachmentReviewResponse:
+    """Return the newest durable Job/Proposal for an attachment."""
+
+    _attachments_enabled(request)
+    try:
+        workflow = _workflow(request)
+        method = getattr(workflow, "get_attachment_review", None)
+        if not callable(method):
+            raise HTTPException(
+                status_code=503,
+                detail="Workflow Assistant attachment review is not available.",
+            )
+        attachment, proposal, job = method(
+            actor=actor,
+            conversation_id=conversation_id,
+            attachment_id=attachment_id,
+        )
+        return _response(attachment, proposal=proposal, job=job)
+    except Exception as exc:
+        raise _review_error(exc) from exc
+
+
+@router.get("/conversations/{conversation_id}/attachments/events/stream")
+def stream_attachment_events(
+    conversation_id: str,
+    request: Request,
+    after_sequence: int = Query(default=0, ge=0, le=10_000_000),
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> StreamingResponse:
+    """Stream bounded, actor-scoped attachment review state changes.
+
+    Attachment Jobs already have durable PostgreSQL state and audit records.
+    This endpoint deliberately emits a small projection rather than private
+    source content or signed object URLs.  The bounded stream reconnects via
+    EventSource, so a worker completion is visible without exposing an
+    unbounded database cursor.
+    """
+
+    _attachments_enabled(request)
+    _require_conversation(request, actor=actor, conversation_id=conversation_id)
+    attachment_service = _attachment_service(request)
+    workflow = _workflow(request)
+    review_method = getattr(workflow, "get_attachment_review", None)
+
+    def stream():
+        sequence = after_sequence
+        previous: object = None
+        for _ in range(30):
+            attachments = attachment_service.list(
+                actor=actor,
+                conversation_id=conversation_id,
+                limit=200,
+            )
+            projection: list[dict[str, object]] = []
+            for attachment in attachments:
+                job = None
+                proposal = None
+                if callable(review_method) and attachment.status in {
+                    "classifying",
+                    "needs_user_choice",
+                    "proposal_ready",
+                    "importing",
+                    "imported",
+                    "failed",
+                }:
+                    try:
+                        _, proposal, job = review_method(
+                            actor=actor,
+                            conversation_id=conversation_id,
+                            attachment_id=attachment.attachment_id,
+                        )
+                    except Exception:
+                        # The attachment itself remains a safe public state;
+                        # a transient review lookup failure is retried on the
+                        # next stream tick.
+                        pass
+                operation = getattr(job, "operation", None)
+                if operation == "classify_attachment":
+                    event_kind = "attachment_classification"
+                elif operation == "preview_import_proposal":
+                    event_kind = "attachment_proposal_preview"
+                elif operation == "execute_import_proposal":
+                    event_kind = "attachment_import"
+                else:
+                    event_kind = "attachment_updated"
+                projection.append(
+                    {
+                        "attachment_id": attachment.attachment_id,
+                        "revision": attachment.revision,
+                        "status": attachment.status,
+                        "event_kind": event_kind,
+                        "job_id": getattr(job, "job_id", None),
+                        "job_status": getattr(job, "status", None),
+                        "proposal_id": getattr(proposal, "proposal_id", None),
+                        "proposal_status": getattr(proposal, "status", None),
+                    }
+                )
+            projection.sort(key=lambda item: str(item["attachment_id"]))
+            if projection != previous:
+                previous = projection
+                sequence += 1
+                payload = {
+                    "sequence": sequence,
+                    "event_kind": "attachment_state",
+                    "public_payload": {"attachments": projection},
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+            else:
+                yield ": keepalive\n\n"
+            time.sleep(1)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(

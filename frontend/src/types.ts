@@ -1318,6 +1318,65 @@ export type WorkflowAssistantAttachmentList = {
   attachments: WorkflowAssistantAttachment[];
 };
 
+export type WorkflowAssistantImportTargetKind =
+  | "knowledge_source"
+  | "prompt_asset"
+  | "task_workbook"
+  | "project_notes"
+  | "topic_library"
+  | "needs_user_choice";
+
+export type WorkflowAssistantAttachmentClassification = {
+  classification: string;
+  reason: string;
+  confidence: number;
+  target_project_id: string | null;
+  prompt_kind: PromptKind | null;
+  candidate_classifications: string[];
+  is_ambiguous: boolean;
+  structure_compatible: boolean;
+  affects_multiple_projects: boolean;
+};
+
+export type WorkflowAssistantAttachmentJob = {
+  job_id: string;
+  operation: string;
+  status: string;
+  attachment_id: string;
+  proposal_id: string | null;
+  expected_attachment_revision: number;
+  expected_proposal_revision: number | null;
+  result_payload: Record<string, unknown>;
+  result_attachment_revision: number | null;
+  result_proposal_revision: number | null;
+  standardized_error_code: string | null;
+};
+
+export type WorkflowAssistantImportProposal = {
+  proposal_id: string;
+  attachment_id: string;
+  target_project_id: string | null;
+  plan_id: string | null;
+  target_kind: WorkflowAssistantImportTargetKind;
+  normalized_diff: Record<string, unknown>;
+  revision: number;
+  status: string;
+  resulting_entity_refs: Array<Record<string, unknown>>;
+  standardized_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowAssistantAttachmentReviewResponse = {
+  attachment: WorkflowAssistantAttachment;
+  proposal: WorkflowAssistantImportProposal | null;
+  job: WorkflowAssistantAttachmentJob | null;
+  attachment_stage: string;
+  proposal_stage: string;
+  import_stage: string;
+  publication_stage: string;
+};
+
 export type WorkflowAssistantDispatch = {
   message: WorkflowAssistantMessage;
   plan: WorkflowAssistantPlan | null;

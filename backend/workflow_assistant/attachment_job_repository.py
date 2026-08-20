@@ -628,6 +628,31 @@ class PostgresAttachmentJobRepository:
             raise AttachmentJobNotFound("attachment job was not found")
         return self._job(row)
 
+    def get_latest_for_attachment_for_actor(
+        self,
+        *,
+        user_id: str,
+        attachment_id: str,
+    ) -> AttachmentJob | None:
+        """Return the latest private review Job for one attachment."""
+
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(assistant_attachment_jobs)
+                .where(
+                    assistant_attachment_jobs.c.organization_id == self.organization_id,
+                    assistant_attachment_jobs.c.requested_by_user_id == user_id,
+                    assistant_attachment_jobs.c.attachment_id == attachment_id,
+                )
+                .order_by(
+                    assistant_attachment_jobs.c.updated_at.desc(),
+                    assistant_attachment_jobs.c.created_at.desc(),
+                    assistant_attachment_jobs.c.job_id,
+                )
+                .limit(1)
+            ).mappings().one_or_none()
+        return self._job(row) if row is not None else None
+
     def _finish_pending(
         self, job_id: str, *, status: AttachmentJobStatus, error_code: str
     ) -> bool:

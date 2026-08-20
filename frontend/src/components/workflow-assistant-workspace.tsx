@@ -790,6 +790,7 @@ export function WorkflowAssistantWorkspace() {
                 <WorkflowAssistantAttachments
                   conversationId={selectedConversation?.conversation_id ?? null}
                   selectedProjectIds={selectedProjectIds}
+                  onActivity={(message) => setTimeline((current) => [...current, message].slice(-50))}
                 />
               )}
               <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="描述你想查询或计划的文章工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />

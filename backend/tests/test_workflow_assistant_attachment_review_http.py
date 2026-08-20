@@ -28,8 +28,10 @@ from workflow_assistant.attachment_review_http import (  # noqa: E402
     confirm_import_proposal,
     create_import_proposal,
     get_attachment_job,
+    get_attachment_review,
     get_import_proposal,
     revise_import_proposal,
+    stream_attachment_events,
 )
 from workflow_assistant.attachments import (  # noqa: E402
     AttachmentDownload,
@@ -180,6 +182,10 @@ class Workflow:
             result_proposal_revision=3,
         )
 
+    def get_attachment_review(self, **kwargs):
+        self.calls.append(("get_review", kwargs))
+        return attachment(), self.current, job("preview_import_proposal")
+
     def get_proposal(self, **kwargs):
         self.calls.append(("get", kwargs))
         return self.current
@@ -306,6 +312,28 @@ class AttachmentReviewHttpTests(unittest.TestCase):
         self.assertEqual("aip-a", result.job.result_payload["proposal_id"])  # type: ignore[union-attr]
         self.assertEqual("aip-a", result.proposal.proposal_id)  # type: ignore[union-attr]
         self.assertEqual("not_imported", result.import_stage)
+
+    def test_get_attachment_review_recovers_latest_job_and_proposal(self) -> None:
+        workflow = Workflow()
+        result = get_attachment_review(
+            "asa-a",
+            request=request(workflow=workflow),  # type: ignore[arg-type]
+            conversation_id="conv-a",
+            actor=ACTOR,
+        )
+        self.assertEqual("asa-a", result.attachment.attachment_id)
+        self.assertEqual("aip-a", result.proposal.proposal_id)  # type: ignore[union-attr]
+        self.assertEqual("job-preview_import_proposal", result.job.job_id)  # type: ignore[union-attr]
+
+    def test_attachment_event_stream_is_actor_scoped_and_uncached(self) -> None:
+        response = stream_attachment_events(
+            "conv-a",
+            request=request(workflow=Workflow()),  # type: ignore[arg-type]
+            after_sequence=4,
+            actor=ACTOR,
+        )
+        self.assertEqual("text/event-stream", response.media_type)
+        self.assertEqual("no-cache", response.headers["cache-control"])
 
     def test_revise_passes_both_revisions_and_reauthorizes_target(self) -> None:
         workflow = Workflow()
