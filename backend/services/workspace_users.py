@@ -113,6 +113,135 @@ class PostgresWorkspaceUserService:
         self._engine = engine
         self._audit = audit or PostgresAuditEventWriter()
 
+    def get_profile(self, *, actor: ActorIdentity) -> WorkspaceUserRecord:
+        """Read the authenticated user's organization-scoped profile."""
+
+        try:
+            with self._engine.connect() as connection:
+                current = connection.execute(
+                    sa.select(workspace_users.c.user_id)
+                    .select_from(
+                        workspace_users.join(
+                            organizations,
+                            organizations.c.organization_id
+                            == workspace_users.c.organization_id,
+                        )
+                    )
+                    .where(
+                        workspace_users.c.organization_id
+                        == actor.organization_id,
+                        workspace_users.c.user_id == actor.user_id,
+                        workspace_users.c.status == "active",
+                        organizations.c.status == "active",
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise WorkspaceUserNotFound(
+                        "workspace user profile is unavailable"
+                    )
+                return self._read_user(
+                    connection,
+                    organization_id=actor.organization_id,
+                    user_id=actor.user_id,
+                )
+        except WorkspaceUserNotFound:
+            raise
+        except SQLAlchemyError as exc:
+            raise WorkspaceUserUnavailable(
+                "workspace user profile is unavailable"
+            ) from exc
+
+    def update_profile(
+        self,
+        *,
+        actor: ActorIdentity,
+        display_name: str,
+        event_id: str,
+    ) -> WorkspaceUserRecord:
+        """Allow an active user to change only their own display name."""
+
+        normalized_display_name = _required_text(display_name, "display_name")
+        normalized_event_id = _required_text(event_id, "event_id")
+        try:
+            with self._engine.begin() as connection:
+                organization_exists = connection.execute(
+                    sa.select(organizations.c.organization_id)
+                    .where(
+                        organizations.c.organization_id
+                        == actor.organization_id,
+                        organizations.c.status == "active",
+                    )
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                current = connection.execute(
+                    sa.select(
+                        workspace_users.c.display_name,
+                        workspace_users.c.status,
+                    )
+                    .where(
+                        workspace_users.c.organization_id
+                        == actor.organization_id,
+                        workspace_users.c.user_id == actor.user_id,
+                    )
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if organization_exists is None or current is None:
+                    raise WorkspaceUserNotFound(
+                        "workspace user profile is unavailable"
+                    )
+                if current["status"] != "active":
+                    raise WorkspaceUserNotFound(
+                        "workspace user profile is unavailable"
+                    )
+                if current["display_name"] == normalized_display_name:
+                    return self._read_user(
+                        connection,
+                        organization_id=actor.organization_id,
+                        user_id=actor.user_id,
+                    )
+                connection.execute(
+                    workspace_users.update()
+                    .where(
+                        workspace_users.c.organization_id
+                        == actor.organization_id,
+                        workspace_users.c.user_id == actor.user_id,
+                    )
+                    .values(
+                        display_name=normalized_display_name,
+                        updated_at=sa.func.now(),
+                    )
+                )
+                self._append_audit(
+                    connection,
+                    AuditEvent(
+                        organization_id=actor.organization_id,
+                        event_id=normalized_event_id,
+                        actor_user_id=actor.user_id,
+                        action="workspace_user.profile_updated",
+                        target_type="workspace_user",
+                        target_id=actor.user_id,
+                        details={"display_name_changed": True},
+                    ),
+                )
+                return self._read_user(
+                    connection,
+                    organization_id=actor.organization_id,
+                    user_id=actor.user_id,
+                )
+        except (
+            WorkspaceUserNotFound,
+            WorkspaceUserUnavailable,
+        ):
+            raise
+        except IntegrityError as exc:
+            raise WorkspaceUserConflict(
+                "workspace user profile change conflicted"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise WorkspaceUserUnavailable(
+                "workspace user profile change is unavailable"
+            ) from exc
+
     def list_users(
         self,
         *,

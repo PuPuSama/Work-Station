@@ -348,6 +348,45 @@ class WorkspaceUserHttpTests(unittest.TestCase):
         finally:
             self._restore_client(client, previous)
 
+    def test_member_can_update_only_their_own_profile_display_name(self) -> None:
+        audit = RecordingAuditWriter()
+        client, previous = self._client(
+            PostgresWorkspaceUserService(self.engine, audit=audit)
+        )
+        try:
+            self.assertEqual(client.get("/api/account/profile").status_code, 401)
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, self.member_a),
+            )
+            profile = client.get("/api/account/profile")
+            self.assertEqual(profile.status_code, 200, profile.text)
+            self.assertEqual(profile.json()["user_id"], self.member_a)
+            self.assertEqual(profile.json()["display_name"], "Member A")
+
+            updated = client.patch(
+                "/api/account/profile",
+                json={"display_name": "成员 A"},
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            self.assertEqual(updated.json()["display_name"], "成员 A")
+            self.assertEqual(
+                [event.action for event in audit.events],
+                ["workspace_user.profile_updated"],
+            )
+            self.assertNotIn("成员 A", str(audit.events[0].details))
+
+            with self.engine.connect() as connection:
+                target_name = connection.execute(
+                    sa.select(workspace_users.c.display_name).where(
+                        workspace_users.c.organization_id == self.org_a,
+                        workspace_users.c.user_id == self.target_a,
+                    )
+                ).scalar_one()
+            self.assertEqual(target_name, "Target A")
+        finally:
+            self._restore_client(client, previous)
+
     def test_disable_and_reenable_each_invalidate_prior_sessions(self) -> None:
         client, previous = self._client(
             PostgresWorkspaceUserService(self.engine)

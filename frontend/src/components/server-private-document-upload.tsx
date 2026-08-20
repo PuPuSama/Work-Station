@@ -35,7 +35,7 @@ type ServerPrivateDocumentUploadProps = {
   onUploaded: (result: KnowledgeUploadResult) => Promise<void>;
 };
 
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 type UploadOutcome = {
   key: string;
@@ -86,7 +86,7 @@ export function ServerPrivateDocumentUpload({
     setSelectedFiles(uniqueFiles);
     if (oversized.length) {
       setError(
-        `以下文件超过 25 MB，未加入上传队列：${oversized.map((file) => file.name).join("、")}`,
+        `以下文件超过 100 MB，未加入上传队列：${oversized.map((file) => file.name).join("、")}`,
       );
     }
     if (uniqueFiles.length === 1) {
@@ -216,7 +216,7 @@ export function ServerPrivateDocumentUpload({
               id="server-knowledge-file-help"
               className="text-xs leading-5 text-muted-foreground"
             >
-              支持一次多选 DOCX、PDF、XLSX、XLSM，单文件最大 25 MB。
+              支持一次多选 DOCX、PDF、XLSX、XLSM，单文件最大 100 MB。
             </p>
           </div>
 

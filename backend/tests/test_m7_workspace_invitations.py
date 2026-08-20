@@ -286,6 +286,12 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
                     external_identities.c.subject == identity.subject,
                 )
             ).one()
+            display_name = connection.execute(
+                sa.select(workspace_users.c.display_name).where(
+                    workspace_users.c.organization_id == self.org_a,
+                    workspace_users.c.user_id == expected_user_id,
+                )
+            ).scalar_one()
             accepted_audits = connection.execute(
                 sa.select(sa.func.count())
                 .select_from(audit_events)
@@ -299,6 +305,7 @@ class WorkspaceInvitationPostgresTests(unittest.TestCase):
             ).scalar_one()
         self.assertEqual(invitation_status, "accepted")
         self.assertEqual(mapping, (self.org_a, expected_user_id))
+        self.assertEqual(display_name, "新成员")
         self.assertEqual(accepted_audits, 1)
 
     def test_wrong_issuer_expired_or_disabled_target_is_denied(self) -> None:

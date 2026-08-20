@@ -161,6 +161,7 @@ from server_invitation_http import router as server_invitation_router
 from server_job_http import router as server_job_router
 from server_prompt_http import router as server_prompt_router
 from server_llm_settings_http import router as server_llm_settings_router
+from server_profile_http import router as server_profile_router
 from workflow_assistant.context import WorkflowAssistantContextResolver
 from workflow_assistant.adapters import WorkflowAssistantServiceAdapters
 from workflow_assistant.attachment_http import (
@@ -1186,6 +1187,7 @@ app.include_router(server_invitation_router)
 app.include_router(server_job_router)
 app.include_router(server_prompt_router)
 app.include_router(server_llm_settings_router)
+app.include_router(server_profile_router)
 app.include_router(workflow_assistant_router)
 app.include_router(workflow_assistant_attachment_router)
 app.include_router(workflow_assistant_attachment_review_router)

@@ -114,6 +114,11 @@ def server_http_route_available(method: str, path: str) -> bool:
         and normalized_path == "/api/settings/llm"
     ):
         return True
+    if (
+        normalized_method in {"GET", "PATCH"}
+        and normalized_path == "/api/account/profile"
+    ):
+        return True
     if normalized_method in {"GET", "POST"} and normalized_path.rstrip(
         "/"
     ) == "/api/projects":

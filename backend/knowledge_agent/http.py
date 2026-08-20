@@ -114,7 +114,7 @@ from .wordpress import (
 )
 
 
-MAX_KNOWLEDGE_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_KNOWLEDGE_UPLOAD_BYTES = 100 * 1024 * 1024
 TrustTierValue = Literal[
     "hard_fact",
     "reference_material",
@@ -2234,7 +2234,7 @@ def upload_private_knowledge(
     filename = PurePath(file.filename or "").name
     content = file.file.read(MAX_KNOWLEDGE_UPLOAD_BYTES + 1)
     if len(content) > MAX_KNOWLEDGE_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Knowledge file exceeds 25 MB.")
+        raise HTTPException(status_code=413, detail="Knowledge file exceeds 100 MB.")
     if not content:
         raise HTTPException(status_code=422, detail="Knowledge file is empty.")
     resolved_source_id = (source_id or "").strip() or (
