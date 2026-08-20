@@ -358,6 +358,10 @@ class TaskRecord(WorkflowModel):
     competitor_keyword: str = ""
     competitor_blog: str = ""
     status: str = STATUS_NEW
+    # Human bookkeeping marker kept separate from the generation workflow.
+    manual_completed: bool = False
+    manual_completed_at: str = ""
+    manual_completed_by: str = ""
     task_dir: str
     title_candidates: list[str] = Field(default_factory=list)
     selected_title: str = ""

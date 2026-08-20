@@ -27,6 +27,7 @@ from services.server_article_images import (
     MAX_SERVER_IMAGE_PIXELS,
     MAX_SERVER_SOURCE_IMAGE_BYTES,
 )
+from storage import now_iso
 from workflow.state_machine import transition_task
 
 
@@ -192,6 +193,9 @@ class ServerArticleDocxExport:
         task.delivery_package_path = ""
         task.workflow_error = None
         transition_task(task, STATUS_DOCX_EXPORTED)
+        task.manual_completed = True
+        task.manual_completed_at = now_iso()
+        task.manual_completed_by = actor.user_id
         return task
 
 

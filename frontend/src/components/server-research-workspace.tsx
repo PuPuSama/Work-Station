@@ -143,10 +143,21 @@ export function ServerResearchWorkspace({
         ? `topic_${String(scopedTask.topic_index).padStart(3, "0")}`
         : "";
       const visiblePlans = scopedArticleId
-        ? nextPlans.filter((plan) => plan.article_id === scopedArticleId)
+        ? nextPlans.filter(
+            (plan) =>
+              plan.article_id === scopedArticleId &&
+              String(plan.metadata.task_id || "") === scopedTask?.id,
+          )
         : nextPlans;
+      const visiblePlanIds = new Set(
+        visiblePlans.map((plan) => plan.retrieval_plan_id),
+      );
       const visibleRuns = scopedArticleId
-        ? nextRuns.filter((run) => run.article_id === scopedArticleId)
+        ? nextRuns.filter(
+            (run) =>
+              run.article_id === scopedArticleId &&
+              visiblePlanIds.has(run.retrieval_plan_id),
+          )
         : nextRuns;
       setPlans(visiblePlans);
       setRuns(visibleRuns);
@@ -189,12 +200,19 @@ export function ServerResearchWorkspace({
 
   const refreshRuns = useCallback(async () => {
     const nextRuns = await listResearchRuns(customer);
+    const visiblePlanIds = new Set(
+      plans.map((plan) => plan.retrieval_plan_id),
+    );
     setRuns(
       scopedArticleId
-        ? nextRuns.filter((run) => run.article_id === scopedArticleId)
+        ? nextRuns.filter(
+            (run) =>
+              run.article_id === scopedArticleId &&
+              visiblePlanIds.has(run.retrieval_plan_id),
+          )
         : nextRuns,
     );
-  }, [customer, scopedArticleId]);
+  }, [customer, plans, scopedArticleId]);
 
   const refreshDetail = useCallback(
     async (threadId: string, showSpinner = false) => {
@@ -332,11 +350,33 @@ export function ServerResearchWorkspace({
     setMessage("");
     try {
       const plan = await createTaskResearchPlan(customer, selectedTaskId);
-      const nextPlans = await listResearchPlans(customer);
-      setPlans(
-        taskId
-          ? nextPlans.filter((item) => item.article_id === plan.article_id)
-          : nextPlans,
+      const [nextPlans, nextRuns] = await Promise.all([
+        listResearchPlans(customer),
+        listResearchRuns(customer),
+      ]);
+      const visiblePlans = taskId
+        ? nextPlans.filter(
+            (item) =>
+              item.article_id === plan.article_id &&
+              String(item.metadata.task_id || "") === selectedTaskId,
+          )
+        : nextPlans;
+      const visiblePlanIds = new Set(
+        visiblePlans.map((item) => item.retrieval_plan_id),
+      );
+      const visibleRuns = taskId
+        ? nextRuns.filter(
+            (run) =>
+              run.article_id === plan.article_id &&
+              visiblePlanIds.has(run.retrieval_plan_id),
+          )
+        : nextRuns;
+      setPlans(visiblePlans);
+      setRuns(visibleRuns);
+      setSelectedThreadId((current) =>
+        visibleRuns.some((run) => run.thread_id === current)
+          ? current
+          : visibleRuns[0]?.thread_id || "",
       );
       startRequestId.current = "";
       setSelectedPlanId(plan.retrieval_plan_id);

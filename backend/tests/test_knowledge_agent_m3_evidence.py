@@ -23,6 +23,9 @@ from knowledge_agent import (  # noqa: E402
     RetrievalScope,
     calculate_knowledge_coverage,
 )
+from knowledge_agent.retrieval_plan_generation import (  # noqa: E402
+    generate_retrieval_plan,
+)
 
 
 def digest(value: str) -> str:
@@ -116,6 +119,70 @@ class RetrievalPlanContractTests(unittest.TestCase):
                 scopes=(foreign_scope,),
                 max_gap_fill_rounds=3,
             )
+
+
+class RetrievalPlanGenerationTests(unittest.TestCase):
+    def _plan(self, **overrides):
+        payload = {
+            "project_id": "project-a",
+            "article_id": "topic_001",
+            "task_id": "task-a",
+            "outline_version": 1,
+            "outline": "## Materials\n\n## Installation",
+            "topic": "Commercial flooring selection",
+            "products": (
+                {
+                    "name": "OakShield Pro",
+                    "url": "https://example.test/products/oakshield-pro",
+                },
+            ),
+        }
+        payload.update(overrides)
+        return generate_retrieval_plan(**payload)
+
+    def test_plan_identity_is_stable_for_same_content(self) -> None:
+        first = self._plan()
+        second = self._plan()
+
+        self.assertEqual(first.retrieval_plan_id, second.retrieval_plan_id)
+        self.assertEqual(
+            first.metadata["content_fingerprint"],
+            second.metadata["content_fingerprint"],
+        )
+
+    def test_plan_identity_changes_when_snapshot_content_changes(self) -> None:
+        first = self._plan()
+
+        changed_outline = self._plan(
+            outline="## Materials\n\n## Maintenance",
+        )
+        changed_topic = self._plan(topic="Hospitality flooring procurement")
+        changed_product = self._plan(
+            products=(
+                {
+                    "name": "OakShield Pro",
+                    "url": "https://example.test/products/oakshield-pro-v2",
+                },
+            ),
+        )
+        changed_task = self._plan(task_id="task-b")
+
+        self.assertNotEqual(
+            first.retrieval_plan_id,
+            changed_outline.retrieval_plan_id,
+        )
+        self.assertNotEqual(
+            first.retrieval_plan_id,
+            changed_topic.retrieval_plan_id,
+        )
+        self.assertNotEqual(
+            first.retrieval_plan_id,
+            changed_product.retrieval_plan_id,
+        )
+        self.assertNotEqual(
+            first.retrieval_plan_id,
+            changed_task.retrieval_plan_id,
+        )
 
 
 class EvidencePackBuilderTests(unittest.TestCase):

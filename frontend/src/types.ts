@@ -344,6 +344,9 @@ export type TaskRecord = {
   competitor_keyword: string;
   competitor_blog: string;
   status: WorkflowStatus;
+  manual_completed?: boolean;
+  manual_completed_at?: string;
+  manual_completed_by?: string;
   task_dir: string;
   title_candidates: string[];
   selected_title: string;

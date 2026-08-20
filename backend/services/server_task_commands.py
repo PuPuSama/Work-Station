@@ -26,6 +26,7 @@ from storage import RevisionConflictError, now_iso
 
 ServerTaskAuditAction = Literal[
     "article.task.rewritten",
+    "article.task.completion.updated",
     "article.titles.generated",
     "article.title.selected",
     "article.products.generated",
@@ -59,6 +60,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     ProjectPermission,
 ] = {
     "article.task.rewritten": "article.edit",
+    "article.task.completion.updated": "article.edit",
     "article.titles.generated": "article.edit",
     "article.title.selected": "article.edit",
     "article.products.generated": "article.edit",
@@ -92,6 +94,7 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
     frozenset[str],
 ] = {
     "article.task.rewritten": frozenset(),
+    "article.task.completion.updated": frozenset({"completed"}),
     "article.titles.generated": frozenset(
         {
             "candidate_count",

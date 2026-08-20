@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
@@ -39,8 +40,34 @@ def generate_retrieval_plan(
     if not normalized_outline:
         raise ValueError("confirmed outline is required")
     outline_hash = sha256(normalized_outline.encode("utf-8")).hexdigest()
+    product_identity: list[dict[str, str]] = []
+    for product in products:
+        name = str(product.get("name") or "").strip()
+        if not name:
+            continue
+        product_identity.append(
+            {
+                "name": name,
+                "url": str(product.get("url") or "").strip(),
+            }
+        )
+    identity_payload = json.dumps(
+        {
+            "task_id": task_id,
+            "outline_hash": outline_hash,
+            "topic": topic.strip(),
+            "products": product_identity,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    content_fingerprint = sha256(
+        identity_payload.encode("utf-8")
+    ).hexdigest()[:16]
     plan_id = (
-        f"plan-{_slug(article_id, 'article')}-outline-v{outline_version}"
+        f"plan-{_slug(article_id, 'article')}-outline-v{outline_version}-"
+        f"{content_fingerprint}"
     )
     scopes: list[RetrievalScope] = []
 
@@ -76,7 +103,7 @@ def generate_retrieval_plan(
             )
         )
 
-    for product in products:
+    for product in product_identity:
         name = str(product.get("name") or "").strip()
         if not name:
             continue
@@ -135,6 +162,7 @@ def generate_retrieval_plan(
         metadata={
             "task_id": task_id,
             "outline_hash": outline_hash,
+            "content_fingerprint": content_fingerprint,
             "generated_from": "confirmed_task_outline",
         },
     )

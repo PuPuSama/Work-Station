@@ -34,8 +34,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiGet } from "@/lib/api";
-import type { TaskRecord, WorkflowStatus } from "@/types";
+import { apiGet, apiPut } from "@/lib/api";
+import { sameProjectId } from "@/lib/project-id";
+import type { AccessibleProject, TaskRecord, WorkflowStatus } from "@/types";
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   new: "待生成标题",
@@ -65,6 +66,21 @@ const MANUAL_STATUSES = new Set<WorkflowStatus>([
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "文章任务加载失败。";
+}
+
+function canEditProject(
+  role: AccessibleProject["effective_role"] | null,
+  isProjectOwner: boolean,
+) {
+  return (
+    role === "org_admin" ||
+    role === "editor" ||
+    (role === "team_lead" && isProjectOwner)
+  );
+}
+
+function isTaskCompleted(task: Pick<TaskRecord, "manual_completed" | "status">) {
+  return task.manual_completed === true || task.status === "docx_exported";
 }
 
 function stepForStatus(status: WorkflowStatus) {
@@ -98,14 +114,29 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [manualOnly, setManualOnly] = useState(false);
+  const [canEdit, setCanEdit] = useState(false);
+  const [completionPending, setCompletionPending] = useState<string | null>(
+    null,
+  );
 
   const loadTasks = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      setTasks(
-        await apiGet<TaskRecord[]>(
+      const [nextTasks, projects] = await Promise.all([
+        apiGet<TaskRecord[]>(
           `/api/projects/${encodeURIComponent(customer)}/tasks`,
+        ),
+        apiGet<AccessibleProject[]>("/api/projects"),
+      ]);
+      const project = projects.find((item) =>
+        sameProjectId(item.project_id, customer),
+      );
+      setTasks(nextTasks);
+      setCanEdit(
+        canEditProject(
+          project?.effective_role ?? null,
+          project?.is_project_owner === true,
         ),
       );
     } catch (reason) {
@@ -122,7 +153,12 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
   const filteredTasks = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return tasks.filter((task) => {
-      if (manualOnly && !MANUAL_STATUSES.has(task.status)) return false;
+      if (
+        manualOnly &&
+        (isTaskCompleted(task) || !MANUAL_STATUSES.has(task.status))
+      ) {
+        return false;
+      }
       if (!normalized) return true;
       return [
         task.id,
@@ -135,6 +171,27 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
         .includes(normalized);
     });
   }, [manualOnly, query, tasks]);
+
+  async function toggleCompletion(task: TaskRecord, completed: boolean) {
+    setCompletionPending(task.id);
+    setError("");
+    try {
+      const updated = await apiPut<TaskRecord>(
+        `/api/projects/${encodeURIComponent(customer)}/tasks/${encodeURIComponent(task.id)}/manual-completion`,
+        {
+          revision: task.revision ?? 0,
+          completed,
+        },
+      );
+      setTasks((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setCompletionPending(null);
+    }
+  }
 
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
 
@@ -182,8 +239,8 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
               Project 工作队列
             </CardTitle>
             <CardDescription>
-              “待我处理”只按工作流状态过滤；最终权限仍由每次 Server API
-              请求实时判断。
+              “待我处理”按工作流状态过滤，并排除已手动标记完成的任务；完成标记仍由
+              Server API 以 Revision CAS 保存。
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 px-4 py-4">
@@ -231,6 +288,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                     <TableHead>话题 / 标题</TableHead>
                     <TableHead className="w-40">状态</TableHead>
                     <TableHead className="w-36">更新时间</TableHead>
+                    <TableHead className="w-28">完成</TableHead>
                     <TableHead className="w-20 text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -270,8 +328,10 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                                   : "outline"
                             }
                           >
-                            {task.workflow_error
-                              ? "处理失败"
+                            {isTaskCompleted(task)
+                              ? "已完成"
+                              : task.workflow_error
+                                ? "处理失败"
                               : task.status === "title_selected" &&
                                   task.products.length
                                 ? "产品已保存 · 待生成大纲"
@@ -280,6 +340,30 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {formatUpdatedAt(task.updated_at)}
+                        </TableCell>
+                        <TableCell>
+                          <label className="inline-flex items-center gap-2 text-xs">
+                            <input
+                              type="checkbox"
+                              className="size-4 accent-primary"
+                              checked={isTaskCompleted(task)}
+                              disabled={
+                                !canEdit ||
+                                completionPending === task.id ||
+                                task.status === "docx_exported"
+                              }
+                              onChange={(event) =>
+                                void toggleCompletion(
+                                  task,
+                                  event.target.checked,
+                                )
+                              }
+                              aria-label={`标记 topic_${String(task.topic_index).padStart(3, "0")} 已完成`}
+                            />
+                            <span>
+                              {isTaskCompleted(task) ? "已完成" : "标记"}
+                            </span>
+                          </label>
                         </TableCell>
                         <TableCell className="text-right">
                           <Button
@@ -303,7 +387,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                   {loading && !tasks.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={5}
+                        colSpan={6}
                         className="h-40 text-center text-muted-foreground"
                       >
                         <span
@@ -320,7 +404,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                   {!loading && !filteredTasks.length && (
                     <TableRow>
                       <TableCell
-                        colSpan={5}
+                        colSpan={6}
                         className="h-40 text-center text-muted-foreground"
                       >
                         当前筛选下没有文章任务

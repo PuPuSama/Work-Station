@@ -22,6 +22,8 @@ from knowledge_agent.research_runs import (  # noqa: E402
     PostgresResearchRunRepository,
 )
 from knowledge_agent.schema import (  # noqa: E402
+    evidence_pack_hits,
+    evidence_packs,
     gap_fill_attempts,
     projects,
     research_graph_events,
@@ -47,7 +49,7 @@ from services.access_control import (  # noqa: E402
     PostgresProjectAccessRepository,
     ProjectAccessService,
 )
-from services.job_queue import JobCancelled  # noqa: E402
+from services.job_queue import JobCancelled, JobConflict  # noqa: E402
 from services.postgres_job_queue import PostgresJobQueue  # noqa: E402
 from services.postgres_task_repository import (  # noqa: E402
     PostgresTaskRepository,
@@ -369,6 +371,28 @@ class ServerKnowledgeResearchTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.registry.stop()
         with self.engine.begin() as connection:
+            for table_name in (
+                "checkpoints",
+                "checkpoint_blobs",
+                "checkpoint_writes",
+            ):
+                connection.execute(
+                    sa.text(
+                        f"DELETE FROM {table_name} "
+                        "WHERE thread_id LIKE :thread_prefix"
+                    ),
+                    {"thread_prefix": f"{self.task_id}%"},
+                )
+            connection.execute(
+                evidence_pack_hits.delete().where(
+                    evidence_pack_hits.c.project_id == self.project_id
+                )
+            )
+            connection.execute(
+                evidence_packs.delete().where(
+                    evidence_packs.c.project_id == self.project_id
+                )
+            )
             connection.execute(
                 research_graph_events.delete().where(
                     research_graph_events.c.project_id == self.project_id
@@ -467,6 +491,364 @@ class ServerKnowledgeResearchTests(unittest.TestCase):
                 return job
             time.sleep(0.02)
         self.fail("research job did not reach a terminal state")
+
+    def _rewrite_outline(self) -> TaskRecord:
+        rewritten = self.task.model_copy(
+            update={
+                "outline": (
+                    "## Rewritten buyer requirements\n\n### Application\n\n"
+                    "## Rewritten product facts\n\n### Materials"
+                ),
+                "revision": self.task.revision + 1,
+                "updated_at": "2026-08-20T00:00:00+00:00",
+            }
+        )
+        PostgresTaskRepository(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        ).upsert(rewritten.model_dump())
+        self.task = rewritten
+        return rewritten
+
+    def _insert_evidence_pack(self, plan, suffix: str = "old") -> str:
+        evidence_pack_id = f"{self.task_id}-{suffix}-pack"
+        with self.engine.begin() as connection:
+            connection.execute(
+                evidence_packs.insert().values(
+                    project_id=self.project_id,
+                    evidence_pack_id=evidence_pack_id,
+                    retrieval_plan_id=plan.retrieval_plan_id,
+                    scope_id=plan.scopes[0].scope_id,
+                    article_id=plan.article_id,
+                    outline_version=plan.outline_version,
+                    sufficiency="missing",
+                    gap_reasons=["test gap"],
+                    hard_fact_chunk_ids=[],
+                    public_citation_urls=[],
+                    created_at=sa.func.now(),
+                )
+            )
+        return evidence_pack_id
+
+    def _insert_completed_run(self, plan) -> str:
+        thread_id = f"{self.task_id}-old-thread"
+        runs = PostgresResearchRunRepository(self.engine)
+        runs.create_run(
+            ResearchGraphRequest(
+                organization_id=self.organization_id,
+                project_id=self.project_id,
+                article_id=plan.article_id,
+                outline_version=plan.outline_version,
+                retrieval_plan_id=plan.retrieval_plan_id,
+                thread_id=thread_id,
+                max_gap_fill_rounds=plan.max_gap_fill_rounds,
+                max_discovery_queries=2,
+            )
+        )
+        runs.append_event(
+            project_id=self.project_id,
+            thread_id=thread_id,
+            event_type="completed",
+            node_name="completed",
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "INSERT INTO checkpoints "
+                    "(thread_id, checkpoint_ns, checkpoint_id, type, "
+                    "checkpoint, metadata) VALUES "
+                    "(:thread_id, '', 'checkpoint-test', 'json', "
+                    "'{}'::jsonb, '{}'::jsonb)"
+                ),
+                {"thread_id": thread_id},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO checkpoint_blobs "
+                    "(thread_id, checkpoint_ns, channel, version, type, blob) "
+                    "VALUES (:thread_id, '', 'test', '1', 'empty', NULL)"
+                ),
+                {"thread_id": thread_id},
+            )
+            connection.execute(
+                sa.text(
+                    "INSERT INTO checkpoint_writes "
+                    "(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, "
+                    "channel, type, blob, task_path) VALUES "
+                    "(:thread_id, '', 'checkpoint-test', 'task', 0, "
+                    "'test', 'bytes', :blob, '')"
+                ),
+                {"thread_id": thread_id, "blob": b"test"},
+            )
+            connection.execute(
+                gap_fill_attempts.insert().values(
+                    project_id=self.project_id,
+                    thread_id=thread_id,
+                    retrieval_plan_id=plan.retrieval_plan_id,
+                    scope_id=plan.scopes[0].scope_id,
+                    round_number=1,
+                    attempt_id=f"{thread_id}-attempt",
+                    reason="test gap",
+                    channel="official_site",
+                    query="test query",
+                    discovered_urls=[],
+                    published_source_ids=[],
+                    result="no_change",
+                    cost_usage={},
+                )
+            )
+            connection.execute(
+                research_graph_runs.update()
+                .where(
+                    research_graph_runs.c.project_id == self.project_id,
+                    research_graph_runs.c.thread_id == thread_id,
+                )
+                .values(
+                    status="completed",
+                    current_node="completed",
+                    finished_at=sa.func.now(),
+                )
+            )
+        return thread_id
+
+    def test_changed_plan_discards_old_research_artifacts_atomically(
+        self,
+    ) -> None:
+        old_plan = self.registry.create_plan_from_task(
+            actor=self.actor,
+            project_id=self.project_id,
+            task_id=self.task_id,
+        )
+        evidence_pack_id = self._insert_evidence_pack(old_plan)
+        thread_id = self._insert_completed_run(old_plan)
+        self._rewrite_outline()
+
+        new_plan = self.registry.create_plan_from_task(
+            actor=self.actor,
+            project_id=self.project_id,
+            task_id=self.task_id,
+        )
+
+        self.assertNotEqual(
+            old_plan.retrieval_plan_id,
+            new_plan.retrieval_plan_id,
+        )
+        with self.engine.connect() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    sa.select(retrieval_plans.c.retrieval_plan_id).where(
+                        retrieval_plans.c.project_id == self.project_id,
+                        retrieval_plans.c.retrieval_plan_id
+                        == old_plan.retrieval_plan_id,
+                    )
+                ).scalar_one_or_none()
+            )
+            self.assertIsNotNone(
+                connection.execute(
+                    sa.select(retrieval_plans.c.retrieval_plan_id).where(
+                        retrieval_plans.c.project_id == self.project_id,
+                        retrieval_plans.c.retrieval_plan_id
+                        == new_plan.retrieval_plan_id,
+                    )
+                ).scalar_one_or_none()
+            )
+            for table, condition in (
+                (
+                    evidence_packs,
+                    evidence_packs.c.evidence_pack_id == evidence_pack_id,
+                ),
+                (
+                    research_graph_runs,
+                    research_graph_runs.c.thread_id == thread_id,
+                ),
+                (
+                    research_graph_events,
+                    research_graph_events.c.thread_id == thread_id,
+                ),
+                (
+                    gap_fill_attempts,
+                    gap_fill_attempts.c.thread_id == thread_id,
+                ),
+            ):
+                self.assertEqual(
+                    connection.execute(
+                        sa.select(sa.func.count())
+                        .select_from(table)
+                        .where(
+                            table.c.project_id == self.project_id,
+                            condition,
+                        )
+                    ).scalar_one(),
+                    0,
+                )
+            for table_name in (
+                "checkpoints",
+                "checkpoint_blobs",
+                "checkpoint_writes",
+            ):
+                self.assertEqual(
+                    connection.execute(
+                        sa.text(
+                            f"SELECT count(*) FROM {table_name} "
+                            "WHERE thread_id = :thread_id"
+                        ),
+                        {"thread_id": thread_id},
+                    ).scalar_one(),
+                    0,
+                )
+        replacement_audit = next(
+            event
+            for event in reversed(self.audit.events)
+            if event.action == "knowledge.retrieval_plan.replaced"
+        )
+        self.assertEqual(replacement_audit.details["discarded_plan_count"], 1)
+        self.assertEqual(replacement_audit.details["discarded_run_count"], 1)
+        self.assertEqual(
+            replacement_audit.details["discarded_evidence_pack_count"],
+            1,
+        )
+
+    def test_same_plan_keeps_its_existing_evidence(self) -> None:
+        plan = self.registry.create_plan_from_task(
+            actor=self.actor,
+            project_id=self.project_id,
+            task_id=self.task_id,
+        )
+        evidence_pack_id = self._insert_evidence_pack(plan, "current")
+
+        repeated = self.registry.create_plan_from_task(
+            actor=self.actor,
+            project_id=self.project_id,
+            task_id=self.task_id,
+        )
+
+        self.assertEqual(repeated.retrieval_plan_id, plan.retrieval_plan_id)
+        with self.engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(evidence_packs)
+                    .where(
+                        evidence_packs.c.project_id == self.project_id,
+                        evidence_packs.c.evidence_pack_id == evidence_pack_id,
+                    )
+                ).scalar_one(),
+                1,
+            )
+
+    def test_active_task_job_prevents_plan_replacement(self) -> None:
+        old_plan = self.registry.create_plan_from_task(
+            actor=self.actor,
+            project_id=self.project_id,
+            task_id=self.task_id,
+        )
+        evidence_pack_id = self._insert_evidence_pack(old_plan, "active-job")
+        self._rewrite_outline()
+        queue = PostgresJobQueue(
+            self.engine,
+            organization_id=self.organization_id,
+            project_id=self.project_id,
+        )
+        queue.create_batch(
+            "article",
+            [
+                {
+                    "task_id": self.task_id,
+                    "source_revision": self.task.revision,
+                }
+            ],
+            requested_by_user_id=self.user_id,
+        )
+
+        with self.assertRaisesRegex(
+            JobConflict,
+            "wait for the active task job",
+        ):
+            self.registry.create_plan_from_task(
+                actor=self.actor,
+                project_id=self.project_id,
+                task_id=self.task_id,
+            )
+
+        with self.engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(retrieval_plans)
+                    .where(
+                        retrieval_plans.c.project_id == self.project_id,
+                        retrieval_plans.c.retrieval_plan_id
+                        == old_plan.retrieval_plan_id,
+                    )
+                ).scalar_one(),
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(evidence_packs)
+                    .where(
+                        evidence_packs.c.project_id == self.project_id,
+                        evidence_packs.c.evidence_pack_id == evidence_pack_id,
+                    )
+                ).scalar_one(),
+                1,
+            )
+
+    def test_replacement_audit_failure_restores_old_plan_and_evidence(
+        self,
+    ) -> None:
+        old_plan = self.registry.create_plan_from_task(
+            actor=self.actor,
+            project_id=self.project_id,
+            task_id=self.task_id,
+        )
+        evidence_pack_id = self._insert_evidence_pack(old_plan, "rollback")
+        self._rewrite_outline()
+        failing = ServerKnowledgeResearchRegistry(
+            self.engine,
+            access=self.access,
+            execution=self.execution,  # type: ignore[arg-type]
+            audit=FailingAuditWriter(),
+        )
+        try:
+            with self.assertRaisesRegex(
+                ServerKnowledgeResearchUnavailable,
+                "retrieval plan could not be created",
+            ):
+                failing.create_plan_from_task(
+                    actor=self.actor,
+                    project_id=self.project_id,
+                    task_id=self.task_id,
+                )
+        finally:
+            failing.stop()
+
+        with self.engine.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(retrieval_plans)
+                    .where(
+                        retrieval_plans.c.project_id == self.project_id,
+                        retrieval_plans.c.retrieval_plan_id
+                        == old_plan.retrieval_plan_id,
+                    )
+                ).scalar_one(),
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(evidence_packs)
+                    .where(
+                        evidence_packs.c.project_id == self.project_id,
+                        evidence_packs.c.evidence_pack_id == evidence_pack_id,
+                    )
+                ).scalar_one(),
+                1,
+            )
 
     def test_plan_and_start_use_confirmed_postgres_task_identity(self) -> None:
         plan = self.registry.create_plan_from_task(

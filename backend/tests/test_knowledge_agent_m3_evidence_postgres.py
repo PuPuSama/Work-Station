@@ -271,6 +271,42 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
             pack,
         )
 
+    def test_distinct_plans_can_share_one_outline_version(self) -> None:
+        project_id = self._project()
+        first = self._plan(project_id)
+        second_plan_id = f"{self.prefix}-plan-rewritten"
+        second = replace(
+            first,
+            retrieval_plan_id=second_plan_id,
+            scopes=(
+                replace(
+                    first.scopes[0],
+                    retrieval_plan_id=second_plan_id,
+                    scope_id=f"{self.prefix}-scope-rewritten",
+                    title="Rewritten dimensions",
+                ),
+            ),
+            metadata={"content_fingerprint": "rewritten"},
+        )
+
+        self.plans.save_retrieval_plan(first)
+        self.plans.save_retrieval_plan(second)
+
+        self.assertEqual(
+            self.plans.get_retrieval_plan(
+                project_id,
+                first.retrieval_plan_id,
+            ),
+            first,
+        )
+        self.assertEqual(
+            self.plans.get_retrieval_plan(
+                project_id,
+                second.retrieval_plan_id,
+            ),
+            second,
+        )
+
     def test_plan_conflict_and_outline_mismatch_are_rejected(self) -> None:
         project_id = self._project()
         _, retrieval_hit = self._published_chunk(

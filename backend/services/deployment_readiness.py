@@ -31,7 +31,7 @@ from services.server_auth import (
 )
 
 
-EXPECTED_ALEMBIC_HEAD = "20260819_0027"
+EXPECTED_ALEMBIC_HEAD = "20260820_0028"
 
 
 @dataclass(frozen=True, slots=True)

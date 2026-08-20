@@ -3327,6 +3327,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     delivered["status"],
                     "docx_exported",
                 )
+                self.assertTrue(delivered["manual_completed"])
                 self.assertEqual(
                     [event.action for event in audit.events],
                     [
