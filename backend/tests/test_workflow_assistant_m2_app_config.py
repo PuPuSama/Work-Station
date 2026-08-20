@@ -13,13 +13,14 @@ if str(BACKEND_DIR) not in sys.path:
 from app import auth_status  # noqa: E402
 
 
-def request(*, master: bool, attachments: bool):
+def request(*, master: bool, attachments: bool, gap_fill: bool = False):
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 article_agent_config=SimpleNamespace(
                     workflow_assistant_enabled=master,
                     workflow_assistant_attachments_enabled=attachments,
+                    workflow_assistant_gap_fill_enabled=gap_fill,
                 ),
                 server_request_security=None,
                 server_oidc_login=None,
@@ -31,13 +32,17 @@ def request(*, master: bool, attachments: bool):
 
 class WorkflowAssistantM2AppConfigTests(unittest.TestCase):
     def test_auth_status_exposes_attachment_gate_under_master_only(self) -> None:
-        enabled = auth_status(request(master=True, attachments=True))  # type: ignore[arg-type]
+        enabled = auth_status(  # type: ignore[arg-type]
+            request(master=True, attachments=True, gap_fill=True)
+        )
         self.assertTrue(enabled.data["workflow_assistant_enabled"])
         self.assertTrue(enabled.data["workflow_assistant_attachments_enabled"])
+        self.assertTrue(enabled.data["workflow_assistant_gap_fill_enabled"])
 
         disabled = auth_status(request(master=False, attachments=True))  # type: ignore[arg-type]
         self.assertFalse(disabled.data["workflow_assistant_enabled"])
         self.assertFalse(disabled.data["workflow_assistant_attachments_enabled"])
+        self.assertFalse(disabled.data["workflow_assistant_gap_fill_enabled"])
 
 
 if __name__ == "__main__":

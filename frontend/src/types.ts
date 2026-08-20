@@ -418,6 +418,7 @@ export type AuthStatus = {
     user_id?: string | null;
     workflow_assistant_enabled?: boolean;
     workflow_assistant_attachments_enabled?: boolean;
+    workflow_assistant_gap_fill_enabled?: boolean;
   };
 };
 
@@ -1007,6 +1008,52 @@ export type ResearchRunQueued = {
   run: ResearchRun;
   queue_batch_id: string;
   queue_job_id: string;
+};
+
+export type WorkflowAssistantGapFillCandidate = {
+  candidate_id: string;
+  url: string;
+  page_type: string;
+  needs_review: boolean;
+  evidence: {
+    reason: string | null;
+    channel: "official_site" | "tavily_discovery" | null;
+    same_site: boolean | null;
+    score: number | null;
+    reused_attempt: boolean | null;
+  };
+};
+
+export type WorkflowAssistantGapFillSnapshot = {
+  project_id: string;
+  research_thread_id: string;
+  retrieval_plan_id: string;
+  status: string;
+  current_scope_id: string | null;
+  gap_reasons: string[];
+  gap_fill_round: number;
+  max_gap_fill_rounds: number;
+  discovery_queries_used: number;
+  max_discovery_queries: number;
+  evidence_pack_ids: string[];
+  review_candidates: WorkflowAssistantGapFillCandidate[];
+};
+
+export type WorkflowAssistantGapFillRequest = {
+  revision: number;
+  step_id: string;
+  research_thread_id: string;
+  request_id: string;
+  approved_candidate_ids: string[];
+};
+
+export type WorkflowAssistantGapFillResponse = {
+  plan: WorkflowAssistantPlan;
+  step_id: string;
+  research_thread_id: string;
+  queue_job_id: string;
+  queue_job_status: string;
+  snapshot: WorkflowAssistantGapFillSnapshot;
 };
 
 export type ResearchCitation = {

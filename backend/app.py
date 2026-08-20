@@ -1286,6 +1286,14 @@ def auth_status(request: Request) -> ApiMessage:
                     False,
                 )
             ),
+            "workflow_assistant_gap_fill_enabled": bool(
+                workflow_assistant_enabled
+                and getattr(
+                    runtime_config,
+                    "workflow_assistant_gap_fill_enabled",
+                    False,
+                )
+            ),
         },
     )
 
