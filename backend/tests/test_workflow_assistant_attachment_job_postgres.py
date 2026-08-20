@@ -358,6 +358,77 @@ class AttachmentJobPostgresTests(unittest.TestCase):
         self.assertEqual(completed.result_payload["proposal_id"], built_proposal_id)
         self.assertEqual(completed.result_proposal_revision, 0)
 
+    def test_execute_job_replays_after_import_claim_advanced_revisions(self) -> None:
+        with self.engine.begin() as connection:
+            now = datetime.now(timezone.utc)
+            connection.execute(
+                assistant_attachments.update()
+                .where(
+                    assistant_attachments.c.organization_id == self.organization_id,
+                    assistant_attachments.c.attachment_id == self.attachment_id,
+                )
+                .values(status="proposal_ready")
+            )
+            connection.execute(
+                assistant_import_proposals.update()
+                .where(
+                    assistant_import_proposals.c.organization_id == self.organization_id,
+                    assistant_import_proposals.c.proposal_id == self.proposal_id,
+                )
+                .values(
+                    revision=1,
+                    status="confirmed",
+                    confirmed_by=self.user_id,
+                    confirmed_at=now,
+                )
+            )
+        queued = self.repository.enqueue(
+            requested_by_user_id=self.user_id,
+            attachment_id=self.attachment_id,
+            operation="execute_import_proposal",
+            idempotency_key="execute-replay-after-claim",
+            expected_attachment_revision=0,
+            project_id=self.project_id,
+            proposal_id=self.proposal_id,
+            expected_proposal_revision=1,
+        )
+        claimed = self.repository.claim_authorized((queued.job_id,), limit=1)[0]
+        self.assertEqual(claimed.attempts, 1)
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                assistant_attachments.update()
+                .where(
+                    assistant_attachments.c.organization_id == self.organization_id,
+                    assistant_attachments.c.attachment_id == self.attachment_id,
+                )
+                .values(status="importing", revision=1)
+            )
+            connection.execute(
+                assistant_import_proposals.update()
+                .where(
+                    assistant_import_proposals.c.organization_id == self.organization_id,
+                    assistant_import_proposals.c.proposal_id == self.proposal_id,
+                )
+                .values(
+                    status="running",
+                    revision=2,
+                    execution_idempotency_key=queued.idempotency_key,
+                )
+            )
+            connection.execute(
+                assistant_attachment_jobs.update()
+                .where(
+                    assistant_attachment_jobs.c.organization_id == self.organization_id,
+                    assistant_attachment_jobs.c.job_id == queued.job_id,
+                )
+                .values(lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+            )
+        self.assertEqual(self.repository.recover_interrupted(), 1)
+        replayed = self.repository.claim_authorized((queued.job_id,), limit=1)[0]
+        self.assertEqual(replayed.job_id, queued.job_id)
+        self.assertEqual(replayed.attempts, 2)
+
     def test_stale_revision_conflicts_and_expired_lease_recovers(self) -> None:
         first = self.repository.enqueue(
             requested_by_user_id=self.user_id,

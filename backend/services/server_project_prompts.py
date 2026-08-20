@@ -423,6 +423,91 @@ class PostgresProjectPromptService:
                 "project prompt command is temporarily unavailable"
             ) from exc
 
+    def create_imported(
+        self,
+        actor: ActorIdentity,
+        *,
+        prompt_id: str,
+        name: str,
+        kind: PromptKind,
+        content: str,
+    ) -> PromptSnapshot:
+        """Create one import-owned Prompt with a retry-stable identity.
+
+        The regular ``create`` command intentionally allocates a random ID
+        for interactive use. Imports need a deterministic ID so a worker
+        crash after the business write can safely replay the same Proposal.
+        """
+
+        normalized_id = _required_text(prompt_id, "prompt_id", max_length=255)
+        validated_kind = _validate_kind(kind)
+        cleaned_name = _required_text(name, "name", max_length=120)
+        cleaned_content = _required_text(content, "content", max_length=40000)
+        _validate_content_contract(validated_kind, cleaned_content)
+        digest = sha256(cleaned_content.encode("utf-8")).hexdigest()
+        try:
+            with self._engine.begin() as connection:
+                self._lock_write_access(connection, actor)
+                current = self._current_row(connection, normalized_id, lock=True)
+                if current is not None:
+                    if (
+                        str(current["kind"]) != validated_kind
+                        or str(current["name"]) != cleaned_name
+                        or str(current["content_hash"]) != digest
+                        or str(current["content"]) != cleaned_content
+                    ):
+                        raise ServerProjectPromptConflict(
+                            "imported prompt identity has different content"
+                        )
+                    return self._snapshot(current, source="library")
+                connection.execute(
+                    project_prompt_heads.insert().values(
+                        organization_id=self.organization_id,
+                        project_id=self.project_id,
+                        prompt_id=normalized_id,
+                        kind=validated_kind,
+                        current_version=1,
+                    )
+                )
+                connection.execute(
+                    project_prompt_versions.insert().values(
+                        organization_id=self.organization_id,
+                        project_id=self.project_id,
+                        prompt_id=normalized_id,
+                        kind=validated_kind,
+                        version=1,
+                        name=cleaned_name,
+                        content=cleaned_content,
+                        content_hash=digest,
+                        created_by_user_id=actor.user_id,
+                    )
+                )
+                self._append_audit(
+                    connection,
+                    actor=actor,
+                    prompt_id=normalized_id,
+                    action="project_prompt.imported",
+                    details={
+                        "content_characters": len(cleaned_content),
+                        "kind": validated_kind,
+                        "version": 1,
+                    },
+                )
+                row = self._current_row(connection, normalized_id)
+                assert row is not None
+                return self._snapshot(row, source="library")
+        except (
+            ProjectAccessDenied,
+            ServerProjectPromptConflict,
+            ServerProjectPromptError,
+            ValueError,
+        ):
+            raise
+        except (SQLAlchemyError, RuntimeError) as exc:
+            raise ServerProjectPromptUnavailable(
+                "project prompt import is temporarily unavailable"
+            ) from exc
+
     def update(
         self,
         actor: ActorIdentity,

@@ -38,8 +38,7 @@ class AttachmentReviewWorkflow(Protocol):
 
     Preview jobs do not point at a proposal: the worker builds the normalized
     diff first and creates the review proposal only after that succeeds.
-    Confirmation is only a proposal CAS in M2.2; execution is intentionally
-    unavailable until the M2.3 import adapters are wired.
+    Confirmation releases a Proposal to the M2.3 durable formal-import Job.
     """
 
     def enqueue_classification(
@@ -99,6 +98,15 @@ class AttachmentReviewWorkflow(Protocol):
         proposal_id: str,
         expected_revision: int,
     ) -> ImportProposal: ...
+
+    def enqueue_import_proposal(
+        self,
+        *,
+        actor: ActorIdentity,
+        proposal_id: str,
+        expected_attachment_revision: int,
+        expected_proposal_revision: int,
+    ) -> AttachmentJob: ...
 
 
 class ClassifyAttachmentRequest(BaseModel):
@@ -201,6 +209,7 @@ def _workflow(request: Request) -> AttachmentReviewWorkflow:
         "get_proposal",
         "revise_proposal",
         "confirm_proposal",
+        "enqueue_import_proposal",
         "cancel_proposal",
     )
     if not all(callable(getattr(service, name, None)) for name in required):
@@ -456,7 +465,10 @@ def get_attachment_job(
         _authorize_target(request, actor=actor, project_id=job.project_id)
         proposal = None
         result_proposal_id = job.result_payload.get("proposal_id")
-        if job.operation == "preview_import_proposal" and result_proposal_id:
+        if job.operation in {
+            "preview_import_proposal",
+            "execute_import_proposal",
+        } and result_proposal_id:
             proposal = _workflow(request).get_proposal(
                 actor=actor,
                 proposal_id=str(result_proposal_id),
@@ -572,7 +584,13 @@ def confirm_import_proposal(
             expected_revision=payload.expected_revision,
             expected_attachment_revision=payload.expected_attachment_revision,
         )
-        return _response(attachment, proposal=proposal)
+        job = _workflow(request).enqueue_import_proposal(
+            actor=actor,
+            proposal_id=proposal.proposal_id,
+            expected_attachment_revision=payload.expected_attachment_revision,
+            expected_proposal_revision=proposal.revision,
+        )
+        return _response(attachment, proposal=proposal, job=job)
     except Exception as exc:
         raise _review_error(exc) from exc
 

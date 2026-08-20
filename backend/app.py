@@ -167,6 +167,7 @@ from workflow_assistant.attachment_http import (
     router as workflow_assistant_attachment_router,
 )
 from workflow_assistant.attachment_review import AttachmentReviewWorkflowService
+from workflow_assistant.import_adapters import build_default_import_executor
 from workflow_assistant.attachment_review_http import (
     router as workflow_assistant_attachment_review_router,
 )
@@ -638,6 +639,12 @@ async def app_lifespan(application: FastAPI):
                             object_store=server_object_store,
                             llm_factory=server_llm_client_factory,
                             access=server_access,
+                            import_executor=build_default_import_executor(
+                                engine=server_engine,
+                                access=server_access,
+                                object_store=server_object_store,
+                                ingestion=application.state.server_private_document_ingestion,
+                            ),
                         )
                     )
                     workflow_assistant_attachment_review.start()

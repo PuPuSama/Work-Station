@@ -209,6 +209,10 @@ class Workflow:
         self.current = replace(self.current, status="cancelled")
         return self.current
 
+    def enqueue_import_proposal(self, **kwargs):
+        self.calls.append(("enqueue_import", kwargs))
+        return job("execute_import_proposal", proposal_id="aip-a")
+
 
 def request(
     *,
@@ -325,7 +329,7 @@ class AttachmentReviewHttpTests(unittest.TestCase):
         self.assertEqual(result.proposal.revision, 4)  # type: ignore[union-attr]
         self.assertEqual(security.calls, [("session-a", "project-a", "project.view")])
 
-    def test_confirm_only_cas_confirms_without_enqueuing_execution(self) -> None:
+    def test_confirm_releases_and_enqueues_execution(self) -> None:
         workflow = Workflow()
         result = confirm_import_proposal(
             "aip-a",
@@ -339,12 +343,14 @@ class AttachmentReviewHttpTests(unittest.TestCase):
             actor=ACTOR,
         )
         self.assertEqual(
-            [name for name, _ in workflow.calls], ["get", "confirm"]
+            [name for name, _ in workflow.calls],
+            ["get", "confirm", "enqueue_import"],
         )
         self.assertEqual(result.proposal_stage, "confirmed")
         self.assertEqual(result.import_stage, "not_imported")
         self.assertEqual(result.publication_stage, "not_published")
-        self.assertIsNone(result.job)
+        self.assertIsNotNone(result.job)
+        self.assertEqual(result.job.operation, "execute_import_proposal")  # type: ignore[union-attr]
 
     def test_cancel_reauthorizes_existing_target(self) -> None:
         workflow = Workflow()

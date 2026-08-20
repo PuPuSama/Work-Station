@@ -157,6 +157,15 @@ class ImportProposal:
     standardized_error_code: str | None
     created_at: datetime
     updated_at: datetime
+    execution_idempotency_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImportExecutionState:
+    """Durable execution state returned together with source revisions."""
+
+    proposal: ImportProposal
+    attachment_revision: int
 
 
 class ImportProposalRepository(Protocol):
@@ -514,6 +523,7 @@ class ImportProposalService:
 
 __all__ = [
     "ImportProposal",
+    "ImportExecutionState",
     "ImportProposalConflict",
     "ImportProposalError",
     "ImportProposalNotFound",

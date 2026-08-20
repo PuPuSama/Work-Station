@@ -1808,6 +1808,7 @@ assistant_import_proposals = sa.Table(
     sa.Column("plan_id", sa.Text(), nullable=True),
     sa.Column("target_kind", sa.Text(), nullable=False),
     sa.Column("idempotency_key", sa.Text(), nullable=False),
+    sa.Column("execution_idempotency_key", sa.Text(), nullable=True),
     sa.Column(
         "normalized_diff",
         postgresql.JSONB(astext_type=sa.Text()),

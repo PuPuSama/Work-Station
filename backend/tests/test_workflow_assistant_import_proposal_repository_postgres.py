@@ -434,6 +434,123 @@ class ImportProposalRepositoryPostgresTests(unittest.TestCase):
         self.assertEqual(cancelled.status, "cancelled")
         self.assertEqual(cancelled.revision, 1)
 
+    def test_execution_claim_and_completion_are_replay_safe(self) -> None:
+        created = self.repository.create(self.proposal("proposal-execute"))
+        confirmed = self.repository.confirm(
+            actor=self.actor,
+            proposal_id=created.proposal_id,
+            expected_revision=0,
+            target_project_id=self.project_id,
+            authorize_target=lambda: None,
+            now=self.now + timedelta(minutes=1),
+        )
+
+        claimed = self.repository.claim_execution(
+            actor=self.actor,
+            proposal_id=confirmed.proposal_id,
+            expected_revision=confirmed.revision,
+            execution_idempotency_key="execute-proposal",
+            now=self.now + timedelta(minutes=2),
+        )
+        self.assertEqual(claimed.proposal.status, "running")
+        self.assertEqual(claimed.proposal.revision, 2)
+        self.assertEqual(claimed.attachment_revision, 3)
+
+        replayed_claim = self.repository.claim_execution(
+            actor=self.actor,
+            proposal_id=confirmed.proposal_id,
+            expected_revision=confirmed.revision,
+            execution_idempotency_key="execute-proposal",
+            now=self.now + timedelta(minutes=3),
+        )
+        self.assertEqual(replayed_claim, claimed)
+
+        completed = self.repository.complete_execution(
+            actor=self.actor,
+            proposal_id=confirmed.proposal_id,
+            expected_running_revision=claimed.proposal.revision,
+            execution_idempotency_key="execute-proposal",
+            resulting_entity_refs=(
+                {
+                    "entity_type": "knowledge_source",
+                    "entity_id": "source-1",
+                    "action": "create",
+                },
+            ),
+            waiting_publication=True,
+            now=self.now + timedelta(minutes=4),
+        )
+        self.assertEqual(completed.proposal.status, "waiting_publication")
+        self.assertEqual(completed.proposal.revision, 3)
+        self.assertEqual(completed.attachment_revision, 4)
+        self.assertEqual(completed.proposal.resulting_entity_refs[0]["entity_id"], "source-1")
+
+        replayed_completion = self.repository.complete_execution(
+            actor=self.actor,
+            proposal_id=confirmed.proposal_id,
+            expected_running_revision=claimed.proposal.revision,
+            execution_idempotency_key="execute-proposal",
+            resulting_entity_refs=(),
+            waiting_publication=False,
+            now=self.now + timedelta(minutes=5),
+        )
+        self.assertEqual(replayed_completion, completed)
+
+    def test_execution_failure_reverts_attachment_and_is_idempotent(self) -> None:
+        created = self.repository.create(self.proposal("proposal-execute-fail"))
+        confirmed = self.repository.confirm(
+            actor=self.actor,
+            proposal_id=created.proposal_id,
+            expected_revision=0,
+            target_project_id=self.project_id,
+            authorize_target=lambda: None,
+            now=self.now + timedelta(minutes=1),
+        )
+        claimed = self.repository.claim_execution(
+            actor=self.actor,
+            proposal_id=confirmed.proposal_id,
+            expected_revision=confirmed.revision,
+            execution_idempotency_key="execute-fail",
+            now=self.now + timedelta(minutes=2),
+        )
+
+        failed = self.repository.fail_execution(
+            actor=self.actor,
+            proposal_id=confirmed.proposal_id,
+            expected_running_revision=claimed.proposal.revision,
+            execution_idempotency_key="execute-fail",
+            error_code="target_revision_conflict",
+            now=self.now + timedelta(minutes=3),
+        )
+        self.assertEqual(failed.proposal.status, "failed")
+        self.assertEqual(failed.proposal.revision, 3)
+        self.assertEqual(failed.proposal.standardized_error_code, "target_revision_conflict")
+        self.assertEqual(failed.attachment_revision, 4)
+
+        with self.engine.connect() as connection:
+            attachment = connection.execute(
+                sa.select(
+                    assistant_attachments.c.status,
+                    assistant_attachments.c.revision,
+                ).where(
+                    assistant_attachments.c.organization_id == self.organization_id,
+                    assistant_attachments.c.attachment_id == self.attachment_id,
+                )
+            ).mappings().one()
+        self.assertEqual(attachment["status"], "proposal_ready")
+        self.assertEqual(attachment["revision"], 4)
+        self.assertEqual(
+            self.repository.fail_execution(
+                actor=self.actor,
+                proposal_id=confirmed.proposal_id,
+                expected_running_revision=claimed.proposal.revision,
+                execution_idempotency_key="execute-fail",
+                error_code="different_error",
+                now=self.now + timedelta(minutes=4),
+            ),
+            failed,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

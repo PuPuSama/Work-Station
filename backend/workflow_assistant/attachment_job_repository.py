@@ -257,7 +257,10 @@ class PostgresAttachmentJobRepository:
             ).mappings().all()
             for row in rows:
                 try:
-                    if not self._classification_replay_ready(connection, row):
+                    if not (
+                        self._classification_replay_ready(connection, row)
+                        or self._execute_replay_ready(connection, row)
+                    ):
                         self._require_source_revisions(
                             connection,
                             requester=str(row["requested_by_user_id"]),
@@ -773,6 +776,37 @@ class PostgresAttachmentJobRepository:
         payload = dict(row["classification_payload"] or {})
         return payload.get("classification_job_idempotency_key") == str(
             job["idempotency_key"]
+        )
+
+    def _execute_replay_ready(
+        self,
+        connection: Any,
+        job: RowMapping,
+    ) -> bool:
+        if str(job["operation"]) != "execute_import_proposal":
+            return False
+        proposal_id = job["proposal_id"]
+        if not proposal_id:
+            return False
+        row = connection.execute(
+            sa.select(
+                assistant_import_proposals.c.attachment_id,
+                assistant_import_proposals.c.creator_user_id,
+                assistant_import_proposals.c.target_project_id,
+                assistant_import_proposals.c.status,
+                assistant_import_proposals.c.execution_idempotency_key,
+            ).where(
+                assistant_import_proposals.c.organization_id == self.organization_id,
+                assistant_import_proposals.c.proposal_id == proposal_id,
+            )
+        ).mappings().one_or_none()
+        return bool(
+            row is not None
+            and row["attachment_id"] == job["attachment_id"]
+            and row["creator_user_id"] == job["requested_by_user_id"]
+            and row["target_project_id"] == job["project_id"]
+            and row["status"] in {"running", "waiting_publication", "completed"}
+            and row["execution_idempotency_key"] == job["idempotency_key"]
         )
 
     @staticmethod

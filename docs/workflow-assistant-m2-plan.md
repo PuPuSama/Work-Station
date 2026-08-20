@@ -1,6 +1,6 @@
 # Workflow Assistant M2 实施方案
 
-- 状态：M2.0 已完成；M2.1 工程实现完成，真实浏览器隔离验收待执行
+- 状态：M2.0、M2.1、M2.2、M2.3 工程实现完成；M2.1/M2.2 真实浏览器隔离验收待执行
 - 确认日期：2026-08-17
 - 启动授权日期：2026-08-20
 - 前置方案：[`workflow-assistant-m1-plan.md`](workflow-assistant-m1-plan.md)
@@ -344,8 +344,10 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 
 ### M2.3：正式导入适配器
 
-- 复用知识文件、Prompt、任务表、注意事项和话题库现有能力。
-- 完成 revision、幂等、Audit 和部分条目排除。
+- [x] 复用知识文件、Prompt、任务表、注意事项和话题库现有能力。
+- [x] 完成 revision、幂等、Audit 和部分条目排除。
+- [x] 确认后释放持久化 execute Job；Proposal/附件状态迁移支持 CAS、失败回滚和崩溃重放。
+- [x] 在干净 PostgreSQL 上验证 0032 迁移、Proposal/Job 生命周期和 Prompt 导入幂等。
 
 ### M2.4：精准证据补全
 

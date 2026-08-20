@@ -31,9 +31,16 @@ from .classification import AttachmentClassification
 from .import_proposal_repository import PostgresImportProposalRepository
 from .import_proposals import (
     ImportProposal,
+    ImportProposalConflict,
+    ImportProposalNotFound,
     ImportProposalService,
     ImportTargetKind,
     normalized_json_object,
+)
+from .import_adapters import (
+    TypedImportError,
+    TypedImportExecutor,
+    TypedImportRequest,
 )
 from .proposal_preview import ProposalPreviewBuilder
 from .proposal_target_snapshot import PostgresProposalTargetSnapshotProvider
@@ -74,6 +81,7 @@ class AttachmentReviewWorkflowService:
         object_store: ObjectStore,
         llm_factory: AttachmentClassifierLlmFactory,
         access: ProjectAccessService,
+        import_executor: TypedImportExecutor | None = None,
         poll_interval_seconds: float = 1.0,
     ) -> None:
         if not 0.1 <= poll_interval_seconds <= 60:
@@ -95,6 +103,7 @@ class AttachmentReviewWorkflowService:
         )
         self._preview = ProposalPreviewBuilder(object_store)
         self._targets = PostgresProposalTargetSnapshotProvider(engine, access=access)
+        self._import_executor = import_executor
         self._discovery = PostgresAttachmentJobOrganizationDiscovery(engine)
         self._dispatcher = AttachmentJobOrganizationDispatcher(
             self._discovery,
@@ -389,6 +398,54 @@ class AttachmentReviewWorkflowService:
             now=datetime.now(timezone.utc),
         )
 
+    def enqueue_import_proposal(
+        self,
+        *,
+        actor: ActorIdentity,
+        proposal_id: str,
+        expected_attachment_revision: int,
+        expected_proposal_revision: int,
+    ) -> AttachmentJob:
+        """Release a confirmed Proposal to the durable formal-import Job."""
+
+        if self._import_executor is None:
+            raise AttachmentJobConflict("formal import adapters are unavailable")
+        proposal = self.get_proposal(actor=actor, proposal_id=proposal_id)
+        if proposal.target_project_id is None:
+            raise AttachmentJobConflict("import target project is missing")
+        if proposal.status != "confirmed":
+            conflict = AttachmentJobConflict(
+                "only a confirmed import proposal can be executed"
+            )
+            conflict.code = "import_proposal_status_conflict"
+            raise conflict
+        self._access.require(
+            actor,
+            proposal.target_project_id,
+            cast(ProjectPermission, _permission(proposal.target_kind, confirmation=True)),
+        )
+        if proposal.revision != expected_proposal_revision:
+            raise AttachmentJobConflict("import proposal revision changed")
+        attachment = self._require_current_attachment_revision(
+            actor,
+            proposal.attachment_id,
+            expected_attachment_revision,
+        )
+        key = f"import-proposal:{proposal.proposal_id}:r{expected_proposal_revision}"
+        job = self._job_repository(actor.organization_id).enqueue(
+            requested_by_user_id=actor.user_id,
+            attachment_id=attachment.attachment_id,
+            operation="execute_import_proposal",
+            idempotency_key=key,
+            expected_attachment_revision=expected_attachment_revision,
+            project_id=proposal.target_project_id,
+            proposal_id=proposal.proposal_id,
+            expected_proposal_revision=expected_proposal_revision,
+            request_payload={"target_kind": proposal.target_kind},
+        )
+        self.wake()
+        return job
+
     def _runner_for_organization(self, organization_id: str) -> AttachmentJobRunner:
         repository = self._job_repository(organization_id)
         return AttachmentJobRunner(
@@ -397,6 +454,7 @@ class AttachmentReviewWorkflowService:
             handlers={
                 "classify_attachment": self._handle_classification,
                 "preview_import_proposal": self._handle_preview,
+                "execute_import_proposal": self._handle_import,
             },
         )
 
@@ -537,6 +595,146 @@ class AttachmentReviewWorkflowService:
             },
             attachment_revision=attachment.revision,
             proposal_revision=proposal.revision,
+        )
+
+    def _handle_import(
+        self,
+        job: AttachmentJob,
+        cancelled: object,
+        commit_guard: object,
+    ) -> AttachmentJobResult:
+        if self._import_executor is None or not job.proposal_id:
+            raise AttachmentJobConflict("formal import adapters are unavailable")
+        actor = ActorIdentity(job.organization_id, job.requested_by_user_id)
+        if callable(cancelled) and cancelled():
+            raise AttachmentJobConflict("formal import was cancelled")
+        current = self._proposal_service.get(actor=actor, proposal_id=job.proposal_id)
+        if current.target_project_id != job.project_id:
+            raise AttachmentJobConflict("import target changed")
+        now = datetime.now(timezone.utc)
+        if current.status in {"completed", "waiting_publication"}:
+            if current.execution_idempotency_key != job.idempotency_key:
+                raise AttachmentJobConflict("import execution identity changed")
+            if callable(commit_guard):
+                commit_guard()
+            attachment = self._load_attachment(actor, current.attachment_id)
+            if attachment is None:
+                raise AttachmentJobConflict("import attachment is unavailable")
+            return AttachmentJobResult(
+                result_payload={
+                    "proposal_id": current.proposal_id,
+                    "proposal_status": current.status,
+                    "resulting_entity_refs": [dict(item) for item in current.resulting_entity_refs],
+                },
+                attachment_revision=attachment.revision,
+                proposal_revision=current.revision,
+            )
+        if current.status == "confirmed":
+            if callable(commit_guard):
+                commit_guard()
+        try:
+            claimed = self._proposals.claim_execution(
+                actor=actor,
+                proposal_id=current.proposal_id,
+                expected_revision=job.expected_proposal_revision or 0,
+                execution_idempotency_key=job.idempotency_key,
+                now=now,
+            )
+        except (ImportProposalConflict, ImportProposalNotFound) as exc:
+            conflict = AttachmentJobConflict(str(exc))
+            conflict.code = str(getattr(exc, "code", "import_execution_conflict"))
+            raise conflict from exc
+        running = claimed.proposal
+        attachment = self._load_attachment(actor, running.attachment_id)
+        if attachment is None:
+            raise AttachmentJobConflict("import attachment is unavailable")
+        try:
+            if callable(commit_guard):
+                commit_guard()
+            if callable(cancelled) and cancelled():
+                raise AttachmentJobConflict("formal import was cancelled")
+            result = self._import_executor.execute(
+                TypedImportRequest(
+                    actor=actor,
+                    proposal=running,
+                    attachment=attachment,
+                    expected_proposal_revision=running.revision,
+                    idempotency_key=job.idempotency_key,
+                )
+            )
+        except TypedImportError as exc:
+            try:
+                self._proposals.fail_execution(
+                    actor=actor,
+                    proposal_id=running.proposal_id,
+                    expected_running_revision=running.revision,
+                    execution_idempotency_key=job.idempotency_key,
+                    error_code=exc.code,
+                    now=datetime.now(timezone.utc),
+                )
+            except Exception:
+                pass
+            conflict = AttachmentJobConflict(str(exc))
+            conflict.code = exc.code
+            raise conflict from exc
+        except Exception as exc:
+            try:
+                self._proposals.fail_execution(
+                    actor=actor,
+                    proposal_id=running.proposal_id,
+                    expected_running_revision=running.revision,
+                    execution_idempotency_key=job.idempotency_key,
+                    error_code=str(getattr(exc, "code", "import_execution_failed")),
+                    now=datetime.now(timezone.utc),
+                )
+            except Exception:
+                pass
+            raise
+        try:
+            if callable(cancelled) and cancelled():
+                conflict = AttachmentJobConflict("formal import was cancelled")
+                conflict.code = "job_cancelled"
+                raise conflict
+            if callable(commit_guard):
+                commit_guard()
+            finished = self._proposals.complete_execution(
+                actor=actor,
+                proposal_id=running.proposal_id,
+                expected_running_revision=running.revision,
+                execution_idempotency_key=job.idempotency_key,
+                resulting_entity_refs=tuple(
+                    item.public_dict() for item in result.entity_refs
+                ),
+                waiting_publication=result.status == "waiting_publication",
+                now=datetime.now(timezone.utc),
+            )
+        except (ImportProposalConflict, ImportProposalNotFound) as exc:
+            conflict = AttachmentJobConflict(str(exc))
+            conflict.code = str(getattr(exc, "code", "import_execution_conflict"))
+            raise conflict from exc
+        except Exception as exc:
+            try:
+                self._proposals.fail_execution(
+                    actor=actor,
+                    proposal_id=running.proposal_id,
+                    expected_running_revision=running.revision,
+                    execution_idempotency_key=job.idempotency_key,
+                    error_code=str(getattr(exc, "code", "import_completion_failed")),
+                    now=datetime.now(timezone.utc),
+                )
+            except Exception:
+                pass
+            raise
+        return AttachmentJobResult(
+            result_payload={
+                "proposal_id": finished.proposal.proposal_id,
+                "proposal_status": finished.proposal.status,
+                "resulting_entity_refs": [
+                    dict(item) for item in finished.proposal.resulting_entity_refs
+                ],
+            },
+            attachment_revision=finished.attachment_revision,
+            proposal_revision=finished.proposal.revision,
         )
 
     def _authorize_attachment_project(self, actor: ActorIdentity, project_id: str) -> None:
