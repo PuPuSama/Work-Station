@@ -18,6 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from knowledge_agent.database import create_knowledge_engine  # noqa: E402
 from server_schema import (  # noqa: E402
+    assistant_attachment_jobs,
     assistant_attachments,
     assistant_conversations,
     audit_events,
@@ -279,6 +280,21 @@ class AttachmentRepositoryPostgresTests(unittest.TestCase):
             )
         )
         self.assertEqual(
+            owner,
+            self.repository.get_by_id_for_actor(
+                organization_id=self.organization_id,
+                creator_user_id=self.owner_user_id,
+                attachment_id=owner.attachment_id,
+            ),
+        )
+        self.assertIsNone(
+            self.repository.get_by_id_for_actor(
+                organization_id=self.organization_id,
+                creator_user_id=self.other_user_id,
+                attachment_id=owner.attachment_id,
+            )
+        )
+        self.assertEqual(
             self.repository.get_by_idempotency_for_actor(
                 organization_id=self.organization_id,
                 creator_user_id=self.other_user_id,
@@ -296,6 +312,79 @@ class AttachmentRepositoryPostgresTests(unittest.TestCase):
             ),
             (owner,),
         )
+
+    def test_classification_uses_revision_cas_and_records_bounded_audit(self) -> None:
+        uploaded = self.persist(self.attachment("attachment-classify"))
+        claimed = self.repository.claim_classification(
+            attachment=uploaded,
+            expected_revision=uploaded.revision,
+            now=self.now + timedelta(minutes=1),
+        )
+        self.assertEqual("classifying", claimed.status)
+        self.assertEqual(uploaded.revision + 1, claimed.revision)
+        with self.assertRaises(AttachmentConflict):
+            self.repository.claim_classification(
+                attachment=uploaded,
+                expected_revision=uploaded.revision,
+                now=self.now + timedelta(minutes=1),
+            )
+
+        completed = self.repository.complete_classification(
+            attachment=claimed,
+            classification="knowledge_source",
+            classification_payload={
+                "schema_version": 1,
+                "classification": {"classification": "knowledge_source"},
+                "source_sha256": uploaded.sha256,
+            },
+            now=self.now + timedelta(minutes=2),
+        )
+        self.assertEqual("proposal_ready", completed.status)
+        self.assertEqual(claimed.revision + 1, completed.revision)
+        with self.engine.connect() as connection:
+            audit = connection.execute(
+                sa.select(audit_events).where(
+                    audit_events.c.organization_id == self.organization_id,
+                    audit_events.c.action == "assistant.attachment.classified",
+                )
+            ).mappings().one()
+        self.assertEqual(completed.attachment_id, audit["target_id"])
+        self.assertNotIn("classification_payload", audit["details"])
+
+    def test_classification_failure_is_retryable_without_storing_source(self) -> None:
+        uploaded = self.persist(self.attachment("attachment-classify-failed"))
+        claimed = self.repository.claim_classification(
+            attachment=uploaded,
+            expected_revision=uploaded.revision,
+            now=self.now + timedelta(minutes=1),
+        )
+        self.repository.mark_classification_failed(
+            attachment=claimed,
+            error_code="attachment_parse_failed",
+            now=self.now + timedelta(minutes=2),
+        )
+        failed = self.repository.get_for_actor(
+            organization_id=self.organization_id,
+            creator_user_id=self.owner_user_id,
+            conversation_id=self.conversation_id,
+            attachment_id=uploaded.attachment_id,
+        )
+        self.assertIsNotNone(failed)
+        self.assertEqual("failed", failed.status)  # type: ignore[union-attr]
+        self.assertEqual(
+            {
+                "schema_version": 1,
+                "error_code": "attachment_parse_failed",
+            },
+            failed.classification_payload,  # type: ignore[union-attr]
+        )
+        retried = self.repository.claim_classification(
+            attachment=failed,  # type: ignore[arg-type]
+            expected_revision=failed.revision,  # type: ignore[union-attr]
+            now=self.now + timedelta(minutes=3),
+        )
+        self.assertEqual("classifying", retried.status)
+        self.assertEqual({}, retried.classification_payload)
 
     def test_mark_rejected_is_actor_scoped_and_revisioned(self) -> None:
         attachment = self.persist(self.attachment("attachment-reject"))
@@ -409,6 +498,49 @@ class AttachmentRepositoryPostgresTests(unittest.TestCase):
         self.assertIsNone(expiry_events[0]["actor_user_id"])
         self.assertEqual(expiry_events[0]["target_id"], expired.attachment_id)
         self.assertEqual(expiry_events[0]["details"]["sha256"], "a" * 64)
+
+    def test_rejection_and_expiry_skip_attachment_with_active_job(self) -> None:
+        attachment = self.persist(self.attachment("attachment-active-job"))
+        with self.engine.begin() as connection:
+            connection.execute(
+                assistant_attachment_jobs.insert().values(
+                    organization_id=self.organization_id,
+                    job_id="active-classification-job",
+                    requested_by_user_id=self.owner_user_id,
+                    project_id=None,
+                    attachment_id=attachment.attachment_id,
+                    proposal_id=None,
+                    operation="classify_attachment",
+                    idempotency_key="active-classification",
+                    expected_attachment_revision=attachment.revision,
+                    expected_proposal_revision=None,
+                    request_payload={"conversation_id": self.conversation_id},
+                    result_payload={},
+                    status="queued",
+                    attempts=0,
+                    max_attempts=4,
+                    cancel_requested=False,
+                    available_at=self.now,
+                    created_at=self.now,
+                    updated_at=self.now,
+                )
+            )
+        self.assertEqual(
+            (),
+            self.repository.claim_expired(
+                before=attachment.expires_at + timedelta(seconds=1),
+                limit=10,
+                exclude_attachment_ids=(),
+            ),
+        )
+        with self.assertRaises(AttachmentConflict):
+            self.repository.claim_rejection(
+                organization_id=self.organization_id,
+                creator_user_id=self.owner_user_id,
+                conversation_id=self.conversation_id,
+                attachment_id=attachment.attachment_id,
+                now=self.now + timedelta(minutes=1),
+            )
 
     def test_rejects_naive_datetimes_and_non_json_payloads(self) -> None:
         naive = replace(

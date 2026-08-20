@@ -166,6 +166,10 @@ from workflow_assistant.adapters import WorkflowAssistantServiceAdapters
 from workflow_assistant.attachment_http import (
     router as workflow_assistant_attachment_router,
 )
+from workflow_assistant.attachment_review import AttachmentReviewWorkflowService
+from workflow_assistant.attachment_review_http import (
+    router as workflow_assistant_attachment_review_router,
+)
 from workflow_assistant.attachment_repository import PostgresAttachmentRepository
 from workflow_assistant.attachment_retention import AttachmentRetentionRunner
 from workflow_assistant.attachments import AttachmentService
@@ -234,6 +238,11 @@ async def app_lifespan(application: FastAPI):
     previous_workflow_assistant_attachment_retention = getattr(
         application.state,
         "workflow_assistant_attachment_retention",
+        None,
+    )
+    previous_workflow_assistant_attachment_review = getattr(
+        application.state,
+        "workflow_assistant_attachment_review_workflow",
         None,
     )
     previous_server_mode = getattr(
@@ -411,6 +420,7 @@ async def app_lifespan(application: FastAPI):
     workflow_assistant_coordinator = None
     workflow_assistant_runner = None
     workflow_assistant_attachment_retention = None
+    workflow_assistant_attachment_review = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
@@ -424,6 +434,7 @@ async def app_lifespan(application: FastAPI):
     application.state.workflow_assistant_runner = None
     application.state.workflow_assistant_attachment_service = None
     application.state.workflow_assistant_attachment_retention = None
+    application.state.workflow_assistant_attachment_review_workflow = None
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_prompt_service_factory = None
@@ -620,6 +631,18 @@ async def app_lifespan(application: FastAPI):
                 ):
                     application.state.workflow_assistant_attachment_service = (
                         attachment_service
+                    )
+                    workflow_assistant_attachment_review = (
+                        AttachmentReviewWorkflowService(
+                            server_engine,
+                            object_store=server_object_store,
+                            llm_factory=server_llm_client_factory,
+                            access=server_access,
+                        )
+                    )
+                    workflow_assistant_attachment_review.start()
+                    application.state.workflow_assistant_attachment_review_workflow = (
+                        workflow_assistant_attachment_review
                     )
         product_provider = LlmServerProductProvider(
             cfg,
@@ -925,6 +948,12 @@ async def app_lifespan(application: FastAPI):
             yield
         finally:
             shutdown_error: RuntimeError | None = None
+            if workflow_assistant_attachment_review is not None:
+                stop_report = workflow_assistant_attachment_review.stop()
+                if stop_report.alive:
+                    shutdown_error = RuntimeError(
+                        "workflow assistant attachment review did not stop"
+                    )
             if workflow_assistant_attachment_retention is not None:
                 stop_report = workflow_assistant_attachment_retention.stop()
                 if stop_report.alive:
@@ -1040,6 +1069,9 @@ async def app_lifespan(application: FastAPI):
             application.state.workflow_assistant_attachment_retention = (
                 previous_workflow_assistant_attachment_retention
             )
+            application.state.workflow_assistant_attachment_review_workflow = (
+                previous_workflow_assistant_attachment_review
+            )
             application.state.server_request_security = (
                 previous_server_security
             )
@@ -1149,6 +1181,7 @@ app.include_router(server_prompt_router)
 app.include_router(server_llm_settings_router)
 app.include_router(workflow_assistant_router)
 app.include_router(workflow_assistant_attachment_router)
+app.include_router(workflow_assistant_attachment_review_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

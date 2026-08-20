@@ -9,7 +9,11 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 
-from server_schema import assistant_attachments
+from server_schema import (
+    assistant_attachment_jobs,
+    assistant_attachments,
+    assistant_import_proposals,
+)
 from services.audit_log import AuditEvent, AuditEventWriter, PostgresAuditEventWriter
 from workflow_assistant.attachments import (
     AssistantAttachment,
@@ -28,6 +32,32 @@ _EXPIRABLE_STATUSES = (
     "proposal_ready",
     "failed",
 )
+
+
+def _has_active_job() -> sa.Exists:
+    return sa.exists(
+        sa.select(sa.literal(1)).where(
+            assistant_attachment_jobs.c.organization_id
+            == assistant_attachments.c.organization_id,
+            assistant_attachment_jobs.c.attachment_id
+            == assistant_attachments.c.attachment_id,
+            assistant_attachment_jobs.c.status.in_(("queued", "running", "retry_wait")),
+        )
+    )
+
+
+def _has_committed_proposal() -> sa.Exists:
+    return sa.exists(
+        sa.select(sa.literal(1)).where(
+            assistant_import_proposals.c.organization_id
+            == assistant_attachments.c.organization_id,
+            assistant_import_proposals.c.attachment_id
+            == assistant_attachments.c.attachment_id,
+            assistant_import_proposals.c.status.in_(
+                ("confirmed", "running", "waiting_publication")
+            ),
+        )
+    )
 
 
 def _aware_utc(value: datetime, field_name: str) -> datetime:
@@ -238,6 +268,229 @@ class PostgresAttachmentRepository:
                 .values(status="failed", revision=assistant_attachments.c.revision + 1, updated_at=_aware_utc(now, "now"))
             )
 
+    def claim_classification(
+        self,
+        *,
+        attachment: AssistantAttachment,
+        expected_revision: int,
+        now: datetime,
+    ) -> AssistantAttachment:
+        changed_at = _aware_utc(now, "now")
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                assistant_attachments.update()
+                .where(
+                    assistant_attachments.c.organization_id
+                    == attachment.organization_id,
+                    assistant_attachments.c.creator_user_id
+                    == attachment.creator_user_id,
+                    assistant_attachments.c.conversation_id
+                    == attachment.conversation_id,
+                    assistant_attachments.c.attachment_id
+                    == attachment.attachment_id,
+                    assistant_attachments.c.revision == expected_revision,
+                    assistant_attachments.c.status.in_(("uploaded", "failed")),
+                    assistant_attachments.c.expires_at > changed_at,
+                )
+                .values(
+                    classification=None,
+                    classification_payload={},
+                    status="classifying",
+                    revision=assistant_attachments.c.revision + 1,
+                    updated_at=changed_at,
+                )
+                .returning(*assistant_attachments.c)
+            ).mappings().one_or_none()
+        if row is None:
+            raise AttachmentConflict(
+                "attachment revision or classification state changed"
+            )
+        return _from_row(row)
+
+    def complete_classification(
+        self,
+        *,
+        attachment: AssistantAttachment,
+        classification: str,
+        classification_payload: Mapping[str, object],
+        now: datetime,
+    ) -> AssistantAttachment:
+        changed_at = _aware_utc(now, "now")
+        if classification not in {
+            "knowledge_source",
+            "prompt_asset",
+            "task_workbook",
+            "project_notes",
+            "topic_library",
+            "needs_user_choice",
+            "unsupported",
+        }:
+            raise ValueError("unsupported attachment classification")
+        next_status = (
+            "needs_user_choice"
+            if classification in {"needs_user_choice", "unsupported"}
+            else "proposal_ready"
+        )
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                assistant_attachments.update()
+                .where(
+                    assistant_attachments.c.organization_id
+                    == attachment.organization_id,
+                    assistant_attachments.c.creator_user_id
+                    == attachment.creator_user_id,
+                    assistant_attachments.c.conversation_id
+                    == attachment.conversation_id,
+                    assistant_attachments.c.attachment_id
+                    == attachment.attachment_id,
+                    assistant_attachments.c.revision == attachment.revision,
+                    assistant_attachments.c.status == "classifying",
+                    assistant_attachments.c.expires_at > changed_at,
+                )
+                .values(
+                    classification=classification,
+                    classification_payload=_json_object(classification_payload),
+                    status=next_status,
+                    revision=assistant_attachments.c.revision + 1,
+                    updated_at=changed_at,
+                )
+                .returning(*assistant_attachments.c)
+            ).mappings().one_or_none()
+            if row is None:
+                raise AttachmentConflict(
+                    "attachment classification claim changed before completion"
+                )
+            completed = _from_row(row)
+            self._audit.append(
+                connection,
+                self._audit_event(
+                    completed,
+                    transition="classified",
+                    actor_user_id=completed.creator_user_id,
+                ),
+            )
+            return completed
+
+    def resolve_classification_choice(
+        self,
+        *,
+        attachment: AssistantAttachment,
+        expected_revision: int,
+        classification: str,
+        classification_payload: Mapping[str, object],
+        now: datetime,
+    ) -> AssistantAttachment:
+        """Persist an explicit human resolution without rerunning the model."""
+
+        changed_at = _aware_utc(now, "now")
+        if classification not in {
+            "knowledge_source",
+            "prompt_asset",
+            "task_workbook",
+            "project_notes",
+            "topic_library",
+        }:
+            raise ValueError("classification choice must be a concrete target")
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                assistant_attachments.update()
+                .where(
+                    assistant_attachments.c.organization_id
+                    == attachment.organization_id,
+                    assistant_attachments.c.creator_user_id
+                    == attachment.creator_user_id,
+                    assistant_attachments.c.conversation_id
+                    == attachment.conversation_id,
+                    assistant_attachments.c.attachment_id
+                    == attachment.attachment_id,
+                    assistant_attachments.c.revision == expected_revision,
+                    assistant_attachments.c.status == "needs_user_choice",
+                    assistant_attachments.c.expires_at > changed_at,
+                )
+                .values(
+                    classification=classification,
+                    classification_payload=_json_object(classification_payload),
+                    status="proposal_ready",
+                    revision=assistant_attachments.c.revision + 1,
+                    updated_at=changed_at,
+                )
+                .returning(*assistant_attachments.c)
+            ).mappings().one_or_none()
+            if row is None:
+                raise AttachmentConflict(
+                    "attachment classification choice revision changed"
+                )
+            resolved = _from_row(row)
+            self._audit.append(
+                connection,
+                self._audit_event(
+                    resolved,
+                    transition="classification_resolved",
+                    actor_user_id=resolved.creator_user_id,
+                ),
+            )
+            return resolved
+
+    def mark_classification_failed(
+        self,
+        *,
+        attachment: AssistantAttachment,
+        error_code: str,
+        now: datetime,
+    ) -> None:
+        changed_at = _aware_utc(now, "now")
+        normalized_error = str(error_code or "").strip()
+        if not normalized_error or len(normalized_error) > 128:
+            normalized_error = "attachment_classification_failed"
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                assistant_attachments.update()
+                .where(
+                    assistant_attachments.c.organization_id
+                    == attachment.organization_id,
+                    assistant_attachments.c.creator_user_id
+                    == attachment.creator_user_id,
+                    assistant_attachments.c.conversation_id
+                    == attachment.conversation_id,
+                    assistant_attachments.c.attachment_id
+                    == attachment.attachment_id,
+                    assistant_attachments.c.revision == attachment.revision,
+                    assistant_attachments.c.status == "classifying",
+                )
+                .values(
+                    classification=None,
+                    classification_payload={
+                        "schema_version": 1,
+                        "error_code": normalized_error,
+                    },
+                    status="failed",
+                    revision=assistant_attachments.c.revision + 1,
+                    updated_at=changed_at,
+                )
+                .returning(*assistant_attachments.c)
+            ).mappings().one_or_none()
+            if row is None:
+                return
+            failed = _from_row(row)
+            event = self._audit_event(
+                failed,
+                transition="classification_failed",
+                actor_user_id=failed.creator_user_id,
+            )
+            self._audit.append(
+                connection,
+                AuditEvent(
+                    organization_id=event.organization_id,
+                    event_id=event.event_id,
+                    actor_user_id=event.actor_user_id,
+                    project_id=event.project_id,
+                    action=event.action,
+                    target_type=event.target_type,
+                    target_id=event.target_id,
+                    details={**event.details, "error_code": normalized_error},
+                ),
+            )
+
     def get_for_actor(self, *, organization_id: str, creator_user_id: str, conversation_id: str, attachment_id: str) -> AssistantAttachment | None:
         with self._engine.connect() as connection:
             row = connection.execute(sa.select(assistant_attachments).where(
@@ -246,6 +499,30 @@ class PostgresAttachmentRepository:
                 assistant_attachments.c.conversation_id == conversation_id,
                 assistant_attachments.c.attachment_id == attachment_id,
             )).mappings().one_or_none()
+        return _from_row(row) if row is not None else None
+
+    def get_by_id_for_actor(
+        self,
+        *,
+        organization_id: str,
+        creator_user_id: str,
+        attachment_id: str,
+    ) -> AssistantAttachment | None:
+        """Load by opaque id while preserving the creator boundary.
+
+        Proposal and worker code does not receive a client-supplied
+        conversation id.  The composite actor scope prevents an attachment id
+        from becoming a cross-user lookup oracle.
+        """
+
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(assistant_attachments).where(
+                    assistant_attachments.c.organization_id == organization_id,
+                    assistant_attachments.c.creator_user_id == creator_user_id,
+                    assistant_attachments.c.attachment_id == attachment_id,
+                )
+            ).mappings().one_or_none()
         return _from_row(row) if row is not None else None
 
     def get_by_idempotency_for_actor(self, *, organization_id: str, creator_user_id: str, conversation_id: str, idempotency_key: str) -> AssistantAttachment | None:
@@ -282,6 +559,8 @@ class PostgresAttachmentRepository:
                 *scope,
                 assistant_attachments.c.status.in_(_EXPIRABLE_STATUSES),
                 assistant_attachments.c.expires_at > changed_at,
+                ~_has_active_job(),
+                ~_has_committed_proposal(),
             ).values(status="rejecting", revision=assistant_attachments.c.revision + 1, updated_at=changed_at).returning(*assistant_attachments.c)).mappings().one_or_none()
             if row is not None:
                 return _from_row(row)
@@ -330,7 +609,11 @@ class PostgresAttachmentRepository:
             assistant_attachments.c.status == "expiring",
             sa.and_(assistant_attachments.c.expires_at <= cutoff, assistant_attachments.c.status.in_(_EXPIRABLE_STATUSES)),
         )
-        filters: list[object] = [eligible]
+        filters: list[object] = [
+            eligible,
+            ~_has_active_job(),
+            ~_has_committed_proposal(),
+        ]
         if exclude_attachment_ids:
             filters.append(assistant_attachments.c.attachment_id.not_in(exclude_attachment_ids))
         with self._engine.begin() as connection:
