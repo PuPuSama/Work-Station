@@ -366,7 +366,8 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 - [x] 完成后端 998 项无数据库回归、前端 lint/build 和差异检查。
 - [x] 在干净 PostgreSQL/对象存储环境完成迁移、七天清理、权限和跨项目隔离验收。
 - [x] 完成真实浏览器附件主链路验证，并分别记录 Push、CI、生产构建、部署和线上 smoke 状态。
-- [ ] 执行 Push、CI、生产构建、部署和线上 smoke 发布门；当前按授权保持未执行。
+- [x] Push 当前 M2 分支并完成 PR quality CI；生产构建随 quality Job 通过。
+- [ ] 合并到 `main`、执行生产部署和线上 smoke；当前按授权保持未执行。
 
 本轮本地验收记录（2026-08-20）：
 
@@ -378,8 +379,8 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 - 独立服务端隔离验收使用两个签名会话：所有者上传返回 201 且可列出附件；另一用户读取同一会话和附件均返回 404；所有者把附件预选到无权项目返回 403。独立 PostgreSQL/MinIO 保留对象哨兵验证七天清理只删除过期临时对象，正式对象仍在。
 - 合并最新 `main` 的 `7aa2ae1` 后重新执行本地回归：后端 `998` 项通过（`skipped=299`），前端 `npm.cmd run lint`、`npm.cmd run build`、`git diff --check` 和本地 3000/8000 健康检查均通过。
 - 发布前本地复核：共享开发 PostgreSQL 的 Alembic 当前版本和 `upgrade head` 均为 `20260820_0032 (head)`，CI workflow YAML 解析通过，前端 `npm ci --dry-run --ignore-scripts` 通过；Windows 当前没有可用 Bash，因此 `deploy/deploy-production.sh` 未进行脚本级语法执行。
-- 远端只读状态：`origin/main` 的 `7aa2ae1` 对应 GitHub Actions run `32358308862`，quality 和 production deploy 两个 Job 均成功；当前 M2 分支没有远端 upstream 或 PR，因此该结果不替代 M2 自身的 Push、CI、部署和线上 smoke 验收。
-- 生产构建门状态：前端本地 `npm.cmd run lint`、`npm.cmd run build` 通过；Push、CI、部署和线上 smoke 未执行。
+- 远端只读状态：`origin/main` 的 `7aa2ae1` 对应 GitHub Actions run `32358308862`，quality 和 production deploy 两个 Job 均成功；M2 PR `#8` 的 quality run `32363190632` 通过且 PR 状态 `MERGEABLE/CLEAN`，production deploy 按 workflow 条件跳过，合并、生产部署和线上 smoke 仍待执行。
+- 生产构建门状态：前端本地 `npm.cmd run lint`、`npm.cmd run build` 通过；PR #8 的 quality CI run `32363190632` 通过，PR 上 production deploy 按 workflow 条件跳过；合并、生产部署和线上 smoke 未执行。
 
 ## 14. 测试重点
 
