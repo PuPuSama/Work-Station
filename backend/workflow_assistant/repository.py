@@ -818,6 +818,7 @@ class PostgresWorkflowAssistantRepository:
         standardized_error_code: str | None = None,
         background_job_id: str | None = None,
         retry_count: int | None = None,
+        human_gate_confirmed: bool | None = None,
     ) -> bool:
         """Commit a step result only from the claimed running revision."""
 
@@ -839,6 +840,10 @@ class PostgresWorkflowAssistantRepository:
         }
         if retry_count is not None:
             values["retry_count"] = retry_count
+        if human_gate_confirmed is not None:
+            if not isinstance(human_gate_confirmed, bool):
+                raise ValueError("human_gate_confirmed must be boolean")
+            values["human_gate_confirmed"] = human_gate_confirmed
         with self._engine.begin() as connection:
             plan = self._lock_plan(connection, actor, plan_id)
             if plan is None:
@@ -854,6 +859,178 @@ class PostgresWorkflowAssistantRepository:
                 .values(**values)
             )
             return bool(result.rowcount)
+
+    def release_research_gap_fill(
+        self,
+        *,
+        actor: ActorIdentity,
+        plan_id: str,
+        expected_revision: int,
+        step_id: str,
+        research_thread_id: str,
+        approved_candidate_ids: Sequence[str],
+        request_id: str,
+        background_job_id: str,
+    ) -> WorkflowPlan:
+        """Bind a queued research Resume Job back to its waiting step.
+
+        Queueing the domain Resume Job and this assistant transition are
+        intentionally separate transactions: the domain queue owns its own
+        idempotency receipt.  If a CAS conflict occurs after queueing, the
+        same request can be retried and this method returns the already-bound
+        plan without creating a second assistant action.
+        """
+
+        plan_id = _required(plan_id, "plan_id")
+        step_id = _required(step_id, "step_id")
+        normalized_thread_id = _required(
+            research_thread_id,
+            "research_thread_id",
+            max_length=200,
+        )
+        normalized_request_id = _required(
+            request_id,
+            "request_id",
+            max_length=200,
+        )
+        normalized_job_id = _required(
+            background_job_id,
+            "background_job_id",
+            max_length=200,
+        )
+        candidate_ids = tuple(
+            dict.fromkeys(str(item).strip() for item in approved_candidate_ids)
+        )
+        if len(candidate_ids) > 20 or any(
+            not item or len(item) > 200 for item in candidate_ids
+        ):
+            raise ValueError("approved_candidate_ids are invalid")
+        with self._engine.begin() as connection:
+            existing = self._lock_plan(connection, actor, plan_id)
+            if existing is None:
+                raise WorkflowAssistantNotFound("plan not found")
+            step_row = connection.execute(
+                sa.select(workflow_plan_steps)
+                .where(
+                    workflow_plan_steps.c.organization_id == actor.organization_id,
+                    workflow_plan_steps.c.plan_id == plan_id,
+                    workflow_plan_steps.c.step_id == step_id,
+                )
+                .with_for_update()
+            ).mappings().one_or_none()
+            if step_row is None:
+                raise WorkflowAssistantNotFound("plan step not found")
+            current_input = _json_dict(step_row["input_summary"])
+            current_request_id = str(
+                current_input.get("gap_fill_request_id") or ""
+            ).strip()
+            if current_request_id == normalized_request_id:
+                # Idempotent retry: the original request may already have
+                # advanced the plan revision or the worker may have finished
+                # the Resume Job before the HTTP retry arrived.
+                result = self._get_plan_in_connection(connection, actor, plan_id)
+                if result is None:
+                    raise WorkflowAssistantRepositoryError(
+                        "plan disappeared during gap-fill retry"
+                    )
+                return result
+            current_revision = int(existing["revision"])
+            if current_revision != expected_revision:
+                raise WorkflowAssistantConflict(
+                    "plan revision conflict",
+                    code="plan_revision_conflict",
+                    current_revision=current_revision,
+                    current_plan_hash=str(existing["plan_hash"]),
+                    current_steps=_current_plan_steps(
+                        connection,
+                        organization_id=actor.organization_id,
+                        plan_id=plan_id,
+                    ),
+                )
+            if str(existing["status"]) not in {"waiting_review", "running"}:
+                raise WorkflowAssistantConflict(
+                    "gap-fill can only release an active plan"
+                )
+            if str(step_row["action_kind"]) != "start_research":
+                raise WorkflowAssistantConflict(
+                    "gap-fill target step is not a research step"
+                )
+            if str(step_row["status"]) != "waiting_review":
+                raise WorkflowAssistantConflict(
+                    "research step is no longer waiting for candidate review"
+                )
+            existing_thread = str(
+                current_input.get("research_thread_id")
+                or _json_dict(step_row["output_summary"]).get(
+                    "research_thread_id"
+                )
+                or ""
+            ).strip()
+            if existing_thread and existing_thread != normalized_thread_id:
+                raise WorkflowAssistantConflict(
+                    "research thread does not match the waiting step"
+                )
+            next_input = dict(current_input)
+            next_input.update(
+                {
+                    "research_thread_id": normalized_thread_id,
+                    "approved_candidate_ids": list(candidate_ids),
+                    "gap_fill_request_id": normalized_request_id,
+                }
+            )
+            safe_input = sanitize_public_summary(next_input)
+            connection.execute(
+                workflow_plan_steps.update()
+                .where(
+                    workflow_plan_steps.c.organization_id == actor.organization_id,
+                    workflow_plan_steps.c.plan_id == plan_id,
+                    workflow_plan_steps.c.step_id == step_id,
+                    workflow_plan_steps.c.status == "waiting_review",
+                )
+                .values(
+                    status="waiting_job",
+                    background_job_id=normalized_job_id,
+                    human_gate_confirmed=True,
+                    input_summary=safe_input,
+                    standardized_error_code=None,
+                    updated_at=sa.func.now(),
+                )
+            )
+            new_revision = current_revision + 1
+            connection.execute(
+                workflow_plans.update()
+                .where(
+                    workflow_plans.c.organization_id == actor.organization_id,
+                    workflow_plans.c.plan_id == plan_id,
+                    workflow_plans.c.revision == current_revision,
+                )
+                .values(
+                    status="running",
+                    revision=new_revision,
+                    attention_state="none",
+                    updated_at=sa.func.now(),
+                )
+            )
+            self._insert_event(
+                connection,
+                actor=actor,
+                plan_id=plan_id,
+                event_kind="gap_fill_released",
+                public_payload={
+                    "step_id": step_id,
+                    "research_thread_id": normalized_thread_id,
+                    "approved_candidate_count": len(candidate_ids),
+                    "background_job_id": normalized_job_id,
+                    "revision": new_revision,
+                    "status": "running",
+                },
+            )
+            result = self._get_plan_in_connection(connection, actor, plan_id)
+            if result is None:
+                raise WorkflowAssistantRepositoryError(
+                    "plan disappeared during gap-fill release"
+                )
+            return result
 
     @staticmethod
     def _recoverable_server_job_ids(

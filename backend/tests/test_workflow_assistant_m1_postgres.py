@@ -673,6 +673,100 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
         self.assertEqual(resumed.steps[0].status, "waiting_review")
         self.assertFalse(resumed.steps[0].human_gate_confirmed)
 
+    def test_gap_fill_release_binds_resume_job_and_is_idempotent(self) -> None:
+        repository = PostgresWorkflowAssistantRepository(self.engine)
+        conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Research gap fill",
+            project_ids=(self.project_a,),
+        )
+        plan = repository.create_plan(
+            actor=self.actor,
+            conversation_id=conversation.conversation_id,
+            plan=PlanDraft(
+                title="Research article",
+                natural_language_request="Research the article",
+                project_ids=[self.project_a],
+                steps=[
+                    PlanStep(
+                        step_id="research-step",
+                        sequence=1,
+                        action_kind="start_research",
+                        project_id=self.project_a,
+                    )
+                ],
+            ),
+        )
+        plan = repository.confirm_plan(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            expected_plan_hash=plan.plan_hash,
+        )
+        plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="running",
+        )
+        self.assertTrue(
+            repository.claim_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="research-step",
+            )
+        )
+        self.assertTrue(
+            repository.finish_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="research-step",
+                status="waiting_review",
+                output_summary={
+                    "research_thread_id": "thread-a",
+                    "retrieval_plan_id": "retrieval-a",
+                },
+            )
+        )
+        plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="waiting_review",
+        )
+
+        released = repository.release_research_gap_fill(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            step_id="research-step",
+            research_thread_id="thread-a",
+            approved_candidate_ids=("candidate-a",),
+            request_id="assistant-gap-fill-request-a",
+            background_job_id="resume-job-a",
+        )
+
+        self.assertEqual(released.status, "running")
+        self.assertEqual(released.steps[0].status, "waiting_job")
+        self.assertEqual(released.steps[0].background_job_id, "resume-job-a")
+        self.assertTrue(released.steps[0].human_gate_confirmed)
+        self.assertEqual(
+            released.steps[0].input_summary["approved_candidate_ids"],
+            ["candidate-a"],
+        )
+        retried = repository.release_research_gap_fill(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            step_id="research-step",
+            research_thread_id="thread-a",
+            approved_candidate_ids=("candidate-a",),
+            request_id="assistant-gap-fill-request-a",
+            background_job_id="resume-job-a",
+        )
+        self.assertEqual(retried.revision, released.revision)
+        self.assertEqual(retried.steps[0].background_job_id, "resume-job-a")
+
     def test_revision_event_bounds_more_than_fifty_preserved_step_ids(self) -> None:
         repository = PostgresWorkflowAssistantRepository(self.engine)
         conversation = repository.create_conversation(

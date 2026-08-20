@@ -462,6 +462,7 @@ class WorkflowExecutionCoordinator:
                         standardized_error_code="human_confirmation_required",
                         background_job_id=step.background_job_id,
                         retry_count=self._retry_count(status),
+                        human_gate_confirmed=False,
                     )
                     if not committed:
                         continue
