@@ -657,7 +657,10 @@ class PostgresWorkspaceInvitationService:
                     # New-account invitations cannot attach an already-linked
                     # identity to a second workspace.
                     user_id = f"usr_{hashlib.sha256((identity.issuer + '\n' + identity.subject).encode('utf-8')).hexdigest()[:32]}"
-                    display_name = identity.subject[:200] or user_id
+                    # The OIDC subject is an opaque login key, not a person
+                    # name.  New members can set their display name from the
+                    # account profile after redeeming the invitation.
+                    display_name = "新成员"
                     try:
                         connection.execute(
                             workspace_users.insert().values(

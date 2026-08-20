@@ -15,6 +15,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
+import { AccountProfileButton } from "@/components/account-profile-button";
 import { ServerProjectJobCenter } from "@/components/server-project-job-center";
 import {
   Breadcrumb,
@@ -190,6 +191,7 @@ export function ProjectShell({
             role={role}
             isProjectOwner={isProjectOwner}
           />
+          <AccountProfileButton iconOnly />
           <LogoutButton iconOnly />
         </header>
         <div className="min-w-0 flex-1">{children}</div>

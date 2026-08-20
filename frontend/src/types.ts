@@ -420,6 +420,14 @@ export type AuthStatus = {
   };
 };
 
+export type AccountProfile = {
+  organization_id: string;
+  user_id: string;
+  display_name: string;
+  status: "active" | "disabled";
+  organization_role: "org_admin" | "member";
+};
+
 export type ServerLlmSettings = {
   model: string;
   reasoning_effort: string;

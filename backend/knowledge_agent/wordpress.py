@@ -957,6 +957,19 @@ def sitemap_locations(
         document = etree.fromstring(source, parser=etree.XMLParser(recover=True))
     except (ValueError, etree.XMLSyntaxError):
         return ()
+    # Some Shopify sites redirect a missing WordPress sitemap to an HTML
+    # fallback while keeping an XML content type.  lxml may return None for
+    # that recoverable-but-not-XML document; other malformed roots can still
+    # expose a loc element.  Only a real sitemap root is eligible for URL
+    # extraction so one bad discovery candidate cannot abort the whole scan.
+    if document is None:
+        return ()
+    try:
+        root_name = etree.QName(document).localname
+    except (TypeError, ValueError):
+        return ()
+    if root_name not in {"sitemapindex", "urlset"}:
+        return ()
     locations: list[str] = []
     seen: set[str] = set()
     for raw in document.xpath("//*[local-name()='loc']/text()"):

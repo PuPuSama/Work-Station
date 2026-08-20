@@ -18,6 +18,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
+import { AccountProfileButton } from "@/components/account-profile-button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -292,6 +293,7 @@ export function ServerProjectSelector() {
               )}
               刷新
             </Button>
+            <AccountProfileButton />
             <LogoutButton />
           </div>
         </div>

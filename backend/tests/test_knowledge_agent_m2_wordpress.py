@@ -382,6 +382,23 @@ class GeneralOfficialSiteDiscoveryTests(unittest.TestCase):
             ),
         )
 
+    def test_sitemap_locations_ignores_html_fallback_and_invalid_roots(self) -> None:
+        html_fallback = b"<!doctype html><html><body><h1>Not found</h1></body></html>"
+        self.assertEqual(
+            sitemap_locations(
+                site_url="https://example.com",
+                payload=html_fallback,
+            ),
+            (),
+        )
+        self.assertEqual(
+            sitemap_locations(
+                site_url="https://example.com",
+                payload=b"<html><loc>https://example.com/fake.xml</loc></html>",
+            ),
+            (),
+        )
+
     def test_internal_link_discovery_is_cms_agnostic_and_filters_assets(self) -> None:
         links = discover_internal_page_links(
             site_url="https://example.com",
