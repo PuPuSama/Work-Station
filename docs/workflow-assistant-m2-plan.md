@@ -1,12 +1,12 @@
 # Workflow Assistant M2 实施方案
 
-- 状态：M2.0–M2.5 工程实现完成；M2.6 已完成本地运行、浏览器主链路和双用户隔离验收，发布门仍待执行
+- 状态：M2.0–M2.6 工程实现、验收、合并和生产部署完成；生产 M2 能力开关已开启，线上未登录 smoke 通过
 - 确认日期：2026-08-17
 - 启动授权日期：2026-08-20
 - 前置方案：[`workflow-assistant-m1-plan.md`](workflow-assistant-m1-plan.md)
 - 开发前提：M1 工程实现和隔离环境 `deferred` 验收已完成，并已合并形成新的稳定主分支基线
 - 验收例外：用户明确选择不执行真实 ZeroGPT 截图；该例外仅允许启动 M2 本地开发，不代表 M1 正式交付通过
-- 稳定主线基线：`main` / `7aa2ae1`（已通过 `77d5850` 合并进本分支）
+- 稳定主线基线：`main` / `f5a7653`（包含 M2 发布配置和项目变更闸门）
 - 开发分支：`codex/workflow-assistant-m2`
 - 开发工作树：`D:\Project\article\article-agent-workflow-assistant-m2`
 
@@ -318,6 +318,8 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 
 能力在完成验证后对所有项目负责人开放，不增加用户白名单管理 UI。任何子开关关闭时，M1 的只读问答和文章工作流仍可继续使用。
 
+生产 Docker 镜像使用 `config.docker.yaml`，验收完成后四个 Workflow Assistant 开关均为 `true`；`config.yaml` 和 `config.ci.yaml` 仍默认关闭，便于本地/CI 在显式验证时按需开启。项目提示词、注意事项和话题库的提案预览、确认及持久化 Job 均重新检查 `workflow_assistant_project_changes_enabled`，关闭时 fail closed。
+
 ## 13. 实施里程碑
 
 ### M2.0：重新基线和契约确认
@@ -367,7 +369,7 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 - [x] 在干净 PostgreSQL/对象存储环境完成迁移、七天清理、权限和跨项目隔离验收。
 - [x] 完成真实浏览器附件主链路验证，并分别记录 Push、CI、生产构建、部署和线上 smoke 状态。
 - [x] Push 当前 M2 分支并完成 PR quality CI；生产构建随 quality Job 通过。
-- [ ] 合并到 `main`、执行生产部署和线上 smoke；当前按授权保持未执行。
+- [x] 合并到 `main`、执行生产部署和线上 smoke；未登录保护路由继续返回认证错误。
 
 本轮本地验收记录（2026-08-20）：
 
@@ -377,10 +379,11 @@ M2 不得成为 M1 上线的阻塞项。M1 的核心文章工作流应当在没�
 - Edge 同一已验证会话随后在一次性测试项目中完成 `confirm` 与 `execute_import_proposal`，页面显示“已导入”，数据库确认 Proposal `completed`、三个附件 Job 均 `succeeded`、生成一个 `project_notes` 业务实体引用；测试项目恢复原始内容后归档，附件对象和记录清理，审计事件保留。
 - 使用 Edge 主用户会话和独立 In-app Browser 隔离会话完成真实浏览器跨用户验收：主用户看不到隔离用户的 `M2 private browser fixture` 与 `m2-private-b-only.md`，隔离用户只看到自己的会话与附件且看不到主用户会话；一次性用户、会话、附件、对象和本地认证跳转服务均已清理。
 - 独立服务端隔离验收使用两个签名会话：所有者上传返回 201 且可列出附件；另一用户读取同一会话和附件均返回 404；所有者把附件预选到无权项目返回 403。独立 PostgreSQL/MinIO 保留对象哨兵验证七天清理只删除过期临时对象，正式对象仍在。
-- 合并最新 `main` 的 `7aa2ae1` 后重新执行本地回归：后端 `998` 项通过（`skipped=299`），前端 `npm.cmd run lint`、`npm.cmd run build`、`git diff --check` 和本地 3000/8000 健康检查均通过。
+- 合并最新 `main` 的 `7aa2ae1` 后重新执行本地回归：后端 `998` 项通过（`skipped=299`），前端 `npm.cmd run lint`、`npm.cmd run build`、`git diff --check` 和本地 3000/8000 健康检查均通过；随后 PR #10 quality CI 的完整后端与前端质量门再次通过。
 - 发布前本地复核：共享开发 PostgreSQL 的 Alembic 当前版本和 `upgrade head` 均为 `20260820_0032 (head)`，CI workflow YAML 解析通过，前端 `npm ci --dry-run --ignore-scripts` 通过；Windows 当前没有可用 Bash，因此 `deploy/deploy-production.sh` 未进行脚本级语法执行。
-- 远端只读状态：`origin/main` 的 `7aa2ae1` 对应 GitHub Actions run `32358308862`，quality 和 production deploy 两个 Job 均成功；M2 PR `#8` 的 quality run `32363190632` 通过且 PR 状态 `MERGEABLE/CLEAN`，production deploy 按 workflow 条件跳过，合并、生产部署和线上 smoke 仍待执行。
-- 生产构建门状态：前端本地 `npm.cmd run lint`、`npm.cmd run build` 通过；PR #8 的 quality CI run `32363190632` 通过，PR 上 production deploy 按 workflow 条件跳过；合并、生产部署和线上 smoke 未执行。
+- 发布配置状态：PR #9（`aea874b`）质量 CI run `32364390881` 通过并合并为 `1dd5135`，生产 workflow `32364584918` 的 quality/deploy 均成功；线上首次 smoke 已确认健康、首页和 `/assistant` 为 200，且主开关/附件/gap-fill 均已开启。
+- 项目变更闸门状态：PR #10（`a74bc88`）质量 CI run `32365359142` 通过并合并为 `f5a7653`，生产 workflow `32365546943` 的 quality/deploy 均成功；线上 `/api/auth/status` 返回四个 Workflow Assistant 开关均为 `true`，未登录附件和 gap-fill POST 路由分别返回 `401`，未暴露业务数据。
+- 线上认证边界：当前 smoke 使用未登录请求，OIDC 登录可用但本轮没有重新建立生产用户会话；M2 的真实浏览器主链路和双用户隔离已在前述独立验收中完成。
 
 ## 14. 测试重点
 
