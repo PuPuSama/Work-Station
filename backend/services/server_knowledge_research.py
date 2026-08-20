@@ -47,6 +47,15 @@ from knowledge_agent.research_runs import (
     ResearchRunConflictError,
     ResearchRunNotFound,
 )
+from knowledge_agent.schema import (
+    evidence_pack_hits,
+    evidence_packs,
+    gap_fill_attempts,
+    research_graph_events,
+    research_graph_runs,
+    retrieval_plans,
+    retrieval_scopes,
+)
 from knowledge_agent.research_telemetry import PostgresResearchTelemetry
 from knowledge_agent.retrieval_plan_generation import generate_retrieval_plan
 from knowledge_agent.scope_evidence import ScopeEvidenceService
@@ -70,7 +79,12 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
-from services.job_queue import ActiveJobError, JobCancelled, JobConflict
+from services.job_queue import (
+    ACTIVE_JOB_STATUSES,
+    ActiveJobError,
+    JobCancelled,
+    JobConflict,
+)
 from services.object_store import ObjectStore
 from services.server_knowledge_commands import (
     PostgresServerKnowledgeCommands,
@@ -109,6 +123,14 @@ _ACTIVE_RESEARCH_EXECUTION: ContextVar[
 
 class ServerKnowledgeResearchUnavailable(RuntimeError):
     """The authorized Server research command could not be completed safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanReplacement:
+    kept_plan_exists: bool = False
+    discarded_plan_count: int = 0
+    discarded_run_count: int = 0
+    discarded_evidence_pack_count: int = 0
 
 
 def _required_text(value: object, field_name: str, *, max_length: int) -> str:
@@ -181,6 +203,125 @@ def _validate_plan_task(plan: RetrievalPlan, task: TaskRecord) -> None:
         or str(metadata.get("outline_hash") or "") != _outline_hash(task)
     ):
         raise JobConflict("confirmed outline changed after plan creation")
+
+
+def _discard_replaced_task_plans(
+    connection: Connection,
+    *,
+    project_id: str,
+    article_id: str,
+    task_id: str,
+    keep_plan_id: str,
+) -> _PlanReplacement:
+    """Delete superseded research artifacts inside the Plan transaction."""
+
+    rows = connection.execute(
+        sa.select(
+            retrieval_plans.c.retrieval_plan_id,
+            retrieval_plans.c.metadata,
+        )
+        .where(
+            retrieval_plans.c.project_id == project_id,
+            retrieval_plans.c.article_id == article_id,
+        )
+        .with_for_update()
+    ).mappings()
+    task_plan_ids = tuple(
+        str(row["retrieval_plan_id"])
+        for row in rows
+        if str(dict(row["metadata"] or {}).get("task_id") or "") == task_id
+    )
+    kept_plan_exists = keep_plan_id in task_plan_ids
+    discarded_plan_ids = tuple(
+        plan_id for plan_id in task_plan_ids if plan_id != keep_plan_id
+    )
+    if not discarded_plan_ids:
+        return _PlanReplacement(kept_plan_exists=kept_plan_exists)
+
+    thread_ids = tuple(
+        str(thread_id)
+        for thread_id in connection.execute(
+            sa.select(research_graph_runs.c.thread_id).where(
+                research_graph_runs.c.project_id == project_id,
+                research_graph_runs.c.retrieval_plan_id.in_(
+                    discarded_plan_ids
+                ),
+            )
+        ).scalars()
+    )
+    evidence_pack_ids = tuple(
+        str(evidence_pack_id)
+        for evidence_pack_id in connection.execute(
+            sa.select(evidence_packs.c.evidence_pack_id).where(
+                evidence_packs.c.project_id == project_id,
+                evidence_packs.c.retrieval_plan_id.in_(
+                    discarded_plan_ids
+                ),
+            )
+        ).scalars()
+    )
+
+    connection.execute(
+        gap_fill_attempts.delete().where(
+            gap_fill_attempts.c.project_id == project_id,
+            gap_fill_attempts.c.retrieval_plan_id.in_(discarded_plan_ids),
+        )
+    )
+    if thread_ids:
+        connection.execute(
+            research_graph_events.delete().where(
+                research_graph_events.c.project_id == project_id,
+                research_graph_events.c.thread_id.in_(thread_ids),
+            )
+        )
+        for table_name in (
+            "checkpoints",
+            "checkpoint_blobs",
+            "checkpoint_writes",
+        ):
+            connection.execute(
+                sa.text(
+                    f"DELETE FROM {table_name} WHERE thread_id IN :thread_ids"
+                ).bindparams(sa.bindparam("thread_ids", expanding=True)),
+                {"thread_ids": thread_ids},
+            )
+    connection.execute(
+        research_graph_runs.delete().where(
+            research_graph_runs.c.project_id == project_id,
+            research_graph_runs.c.retrieval_plan_id.in_(discarded_plan_ids),
+        )
+    )
+    if evidence_pack_ids:
+        connection.execute(
+            evidence_pack_hits.delete().where(
+                evidence_pack_hits.c.project_id == project_id,
+                evidence_pack_hits.c.evidence_pack_id.in_(evidence_pack_ids),
+            )
+        )
+    connection.execute(
+        evidence_packs.delete().where(
+            evidence_packs.c.project_id == project_id,
+            evidence_packs.c.retrieval_plan_id.in_(discarded_plan_ids),
+        )
+    )
+    connection.execute(
+        retrieval_scopes.delete().where(
+            retrieval_scopes.c.project_id == project_id,
+            retrieval_scopes.c.retrieval_plan_id.in_(discarded_plan_ids),
+        )
+    )
+    connection.execute(
+        retrieval_plans.delete().where(
+            retrieval_plans.c.project_id == project_id,
+            retrieval_plans.c.retrieval_plan_id.in_(discarded_plan_ids),
+        )
+    )
+    return _PlanReplacement(
+        kept_plan_exists=kept_plan_exists,
+        discarded_plan_count=len(discarded_plan_ids),
+        discarded_run_count=len(thread_ids),
+        discarded_evidence_pack_count=len(evidence_pack_ids),
+    )
 
 
 def _server_thread_id(
@@ -681,6 +822,22 @@ class ServerKnowledgeResearchRegistry:
                     raise JobConflict(
                         "confirm the outline before creating a retrieval plan"
                     )
+                active_job = connection.execute(
+                    sa.select(background_jobs.c.job_id)
+                    .where(
+                        background_jobs.c.organization_id
+                        == actor.organization_id,
+                        background_jobs.c.project_id == project_id,
+                        background_jobs.c.task_id == task.id,
+                        background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
+                    )
+                    .with_for_update()
+                ).first()
+                if active_job is not None:
+                    raise JobConflict(
+                        "wait for the active task job before replacing "
+                        "the retrieval plan"
+                    )
                 plan = generate_retrieval_plan(
                     project_id=project_id,
                     article_id=_article_id(task),
@@ -692,22 +849,32 @@ class ServerKnowledgeResearchRegistry:
                         product.model_dump() for product in task.products
                     ],
                 )
-                existing = self._plans.get_retrieval_plan_in_transaction(
+                replacement = _discard_replaced_task_plans(
                     connection,
-                    project_id,
-                    plan.retrieval_plan_id,
+                    project_id=project_id,
+                    article_id=plan.article_id,
+                    task_id=task.id,
+                    keep_plan_id=plan.retrieval_plan_id,
                 )
                 persisted = self._plans.save_retrieval_plan_in_transaction(
                     connection,
                     plan,
                 )
-                if existing is not None:
+                if (
+                    replacement.kept_plan_exists
+                    and replacement.discarded_plan_count == 0
+                ):
                     return persisted
+                action = (
+                    "knowledge.retrieval_plan.replaced"
+                    if replacement.discarded_plan_count
+                    else "knowledge.retrieval_plan.created"
+                )
                 self._append_audit(
                     connection,
                     actor=actor,
                     project_id=project_id,
-                    action="knowledge.retrieval_plan.created",
+                    action=action,
                     target_type="retrieval_plan",
                     target_id=persisted.retrieval_plan_id,
                     details={
@@ -715,6 +882,15 @@ class ServerKnowledgeResearchRegistry:
                         "article_id": persisted.article_id,
                         "outline_version": persisted.outline_version,
                         "scope_count": len(persisted.scopes),
+                        "discarded_plan_count": (
+                            replacement.discarded_plan_count
+                        ),
+                        "discarded_run_count": (
+                            replacement.discarded_run_count
+                        ),
+                        "discarded_evidence_pack_count": (
+                            replacement.discarded_evidence_pack_count
+                        ),
                     },
                 )
                 return persisted
