@@ -67,7 +67,7 @@ class DeploymentReadinessTests(unittest.TestCase):
         report = run_deployment_preflight(
             environment=COMPLETE_ENVIRONMENT,
             database_probe=lambda: DatabaseReadiness(
-                revision="20260817_0024",
+                revision="20260818_0025",
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
@@ -115,7 +115,7 @@ class DeploymentReadinessTests(unittest.TestCase):
         report = run_deployment_preflight(
             environment=COMPLETE_ENVIRONMENT,
             database_probe=lambda: DatabaseReadiness(
-                revision="20260817_0024",
+                revision="20260818_0025",
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
@@ -219,7 +219,7 @@ class DeploymentReadinessTests(unittest.TestCase):
                 ),
             },
             database_probe=lambda: DatabaseReadiness(
-                revision="20260817_0024",
+                revision="20260818_0025",
                 vector_extension="0.8.1",
             ),
             object_store_factory=lambda settings: FakeReadyStore(),
@@ -316,7 +316,7 @@ class DeploymentReadinessTests(unittest.TestCase):
             readiness = postgres_database_probe(engine)
         finally:
             engine.dispose()
-        self.assertEqual(readiness.revision, "20260820_0028")
+        self.assertEqual(readiness.revision, "20260820_0029")
         self.assertTrue(readiness.vector_extension)
 
 

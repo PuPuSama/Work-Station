@@ -161,6 +161,15 @@ from server_invitation_http import router as server_invitation_router
 from server_job_http import router as server_job_router
 from server_prompt_http import router as server_prompt_router
 from server_llm_settings_http import router as server_llm_settings_router
+from workflow_assistant.context import WorkflowAssistantContextResolver
+from workflow_assistant.adapters import WorkflowAssistantServiceAdapters
+from workflow_assistant.execution import WorkflowExecutionCoordinator
+from workflow_assistant.http import router as workflow_assistant_router
+from workflow_assistant.planner import StructuredWorkflowPlanner
+from workflow_assistant.repository import PostgresWorkflowAssistantRepository
+from workflow_assistant.retention import prune_expired_assistant_conversations
+from workflow_assistant.runner import WorkflowAssistantRunner
+from workflow_assistant.tools import WorkflowToolRegistry
 
 
 load_dotenv(ROOT_DIR / ".env")
@@ -171,6 +180,46 @@ load_dotenv(ROOT_DIR / "backend" / ".env")
 async def app_lifespan(application: FastAPI):
     cfg = config()
     server_engine = None
+    previous_article_agent_config = getattr(
+        application.state,
+        "article_agent_config",
+        None,
+    )
+    previous_workflow_assistant_repository = getattr(
+        application.state,
+        "workflow_assistant_repository",
+        None,
+    )
+    previous_workflow_assistant_context = getattr(
+        application.state,
+        "workflow_assistant_context",
+        None,
+    )
+    previous_workflow_assistant_planner = getattr(
+        application.state,
+        "workflow_assistant_planner",
+        None,
+    )
+    previous_workflow_assistant_adapters = getattr(
+        application.state,
+        "workflow_assistant_adapters",
+        None,
+    )
+    previous_workflow_assistant_tools = getattr(
+        application.state,
+        "workflow_assistant_tools",
+        None,
+    )
+    previous_workflow_assistant_coordinator = getattr(
+        application.state,
+        "workflow_assistant_coordinator",
+        None,
+    )
+    previous_workflow_assistant_runner = getattr(
+        application.state,
+        "workflow_assistant_runner",
+        None,
+    )
     previous_server_mode = getattr(
         application.state,
         "server_mode_enabled",
@@ -340,9 +389,22 @@ async def app_lifespan(application: FastAPI):
     server_link_restoration = None
     server_seo_review_generation = None
     server_humanize_generation = None
+    workflow_assistant_repository = None
+    workflow_assistant_adapters = None
+    workflow_assistant_tools = None
+    workflow_assistant_coordinator = None
+    workflow_assistant_runner = None
     server_oidc_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
+    application.state.article_agent_config = cfg
+    application.state.workflow_assistant_repository = None
+    application.state.workflow_assistant_context = None
+    application.state.workflow_assistant_planner = None
+    application.state.workflow_assistant_adapters = None
+    application.state.workflow_assistant_tools = None
+    application.state.workflow_assistant_coordinator = None
+    application.state.workflow_assistant_runner = None
     application.state.server_request_security = None
     application.state.server_project_task_store_factory = None
     application.state.server_project_prompt_service_factory = None
@@ -421,6 +483,22 @@ async def app_lifespan(application: FastAPI):
             access=server_access,
             sessions=server_actor_sessions,
         )
+        if cfg.workflow_assistant_enabled:
+            workflow_assistant_repository = PostgresWorkflowAssistantRepository(
+                server_engine
+            )
+            prune_expired_assistant_conversations(workflow_assistant_repository)
+            application.state.workflow_assistant_repository = workflow_assistant_repository
+            application.state.workflow_assistant_context = (
+                WorkflowAssistantContextResolver(server_engine)
+            )
+            application.state.workflow_assistant_planner = (
+                StructuredWorkflowPlanner(
+                    cfg,
+                    access=server_access,
+                    llm_factory=server_llm_client_factory,
+                )
+            )
         oidc_settings = OidcProviderSettings.from_environment()
         if oidc_settings is not None:
             server_oidc_login = OidcLoginService.create(
@@ -734,6 +812,73 @@ async def app_lifespan(application: FastAPI):
         application.state.server_knowledge_research = (
             server_knowledge_research
         )
+        if (
+            cfg.workflow_assistant_enabled
+            and workflow_assistant_repository is not None
+            and server_engine is not None
+        ):
+            workflow_assistant_adapters = WorkflowAssistantServiceAdapters(
+                engine=server_engine,
+                config=cfg,
+                task_factory=application.state.server_project_task_store_factory,
+                context=application.state.workflow_assistant_context,
+                plan_status=lambda plan_id, actor: {
+                    "plan_id": plan_id,
+                    "status": workflow_assistant_repository.get_plan(
+                        actor=actor,
+                        plan_id=plan_id,
+                    ).status,
+                },
+                evidence_chat=(
+                    None
+                    if knowledge_runtime is None
+                    else knowledge_runtime.research_chat
+                ),
+                product_selection=(
+                    application.state.server_confirmed_product_selection
+                ),
+                project_catalog=application.state.server_project_catalog,
+                title_generation=server_title_generation,
+                product_generation=server_product_generation,
+                outline_generation=server_outline_generation,
+                article_generation=server_article_generation,
+                humanize_generation=server_humanize_generation,
+                link_restoration=server_link_restoration,
+                seo_review_generation=server_seo_review_generation,
+                knowledge_research=server_knowledge_research,
+                object_service=application.state.server_project_object_service,
+            )
+            workflow_assistant_tools = WorkflowToolRegistry(
+                access=application.state.workflow_assistant_context.access,
+                handlers=workflow_assistant_adapters.handlers(),
+            )
+            workflow_assistant_coordinator = WorkflowExecutionCoordinator(
+                repository=workflow_assistant_repository,
+                access=application.state.workflow_assistant_context.access,
+                tools=workflow_assistant_tools,
+                max_concurrency=int(
+                    getattr(cfg, "workflow_assistant_max_concurrency", 3)
+                ),
+                job_status_resolver=workflow_assistant_adapters.job_status,
+            )
+            workflow_assistant_runner = WorkflowAssistantRunner(
+                repository=workflow_assistant_repository,
+                coordinator=workflow_assistant_coordinator,
+                database_url=database_url,
+            )
+            application.state.workflow_assistant_adapters = (
+                workflow_assistant_adapters
+            )
+            application.state.workflow_assistant_tools = (
+                workflow_assistant_tools
+            )
+            application.state.workflow_assistant_coordinator = (
+                workflow_assistant_coordinator
+            )
+            application.state.workflow_assistant_runner = (
+                workflow_assistant_runner
+            )
+            workflow_assistant_runner.start()
         # Project operations use their own PostgreSQL runners.
         application.state.job_queue = None
         application.state.batch_runner = None
@@ -742,6 +887,12 @@ async def app_lifespan(application: FastAPI):
             yield
         finally:
             shutdown_error: RuntimeError | None = None
+            if workflow_assistant_runner is not None:
+                stop_report = workflow_assistant_runner.stop()
+                if stop_report.alive:
+                    shutdown_error = RuntimeError(
+                        "workflow assistant runner did not stop"
+                    )
             if server_product_rediscovery is not None:
                 stop_report = server_product_rediscovery.stop()
                 if not stop_report.drained:
@@ -817,6 +968,28 @@ async def app_lifespan(application: FastAPI):
             application.state.knowledge_agent_runtime = None
             application.state.knowledge_research_enqueue = None
             application.state.server_mode_enabled = previous_server_mode
+            application.state.article_agent_config = previous_article_agent_config
+            application.state.workflow_assistant_repository = (
+                previous_workflow_assistant_repository
+            )
+            application.state.workflow_assistant_context = (
+                previous_workflow_assistant_context
+            )
+            application.state.workflow_assistant_planner = (
+                previous_workflow_assistant_planner
+            )
+            application.state.workflow_assistant_adapters = (
+                previous_workflow_assistant_adapters
+            )
+            application.state.workflow_assistant_tools = (
+                previous_workflow_assistant_tools
+            )
+            application.state.workflow_assistant_coordinator = (
+                previous_workflow_assistant_coordinator
+            )
+            application.state.workflow_assistant_runner = (
+                previous_workflow_assistant_runner
+            )
             application.state.server_request_security = (
                 previous_server_security
             )
@@ -924,6 +1097,7 @@ app.include_router(server_invitation_router)
 app.include_router(server_job_router)
 app.include_router(server_prompt_router)
 app.include_router(server_llm_settings_router)
+app.include_router(workflow_assistant_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -1003,6 +1177,18 @@ def auth_status(request: Request) -> ApiMessage:
             "issuer": oidc_login.settings.issuer if oidc_enabled else None,
             "organization_id": actor.organization_id if actor is not None else None,
             "user_id": actor.user_id if actor is not None else None,
+            "workflow_assistant_enabled": bool(
+                getattr(
+                    getattr(request.app, "state", None),
+                    "article_agent_config",
+                    None,
+                )
+                and getattr(
+                    request.app.state.article_agent_config,
+                    "workflow_assistant_enabled",
+                    False,
+                )
+            ),
         },
     )
 

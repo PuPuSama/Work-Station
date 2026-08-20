@@ -91,6 +91,11 @@ def server_http_route_available(method: str, path: str) -> bool:
     if normalized_method == "OPTIONS":
         return True
     normalized_path = "/" + path.strip().lstrip("/")
+    if normalized_path.startswith("/api/workflow-assistant/"):
+        # The assistant router performs authentication, feature-flag, and
+        # project-scope checks.  Keep the middleware allow-list explicit to
+        # avoid accidentally reviving legacy unscoped routes.
+        return normalized_method in {"GET", "POST"}
     if normalized_method == "GET" and normalized_path in {
         "/api/health",
         "/api/auth/status",

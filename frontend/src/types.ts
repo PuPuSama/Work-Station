@@ -416,6 +416,7 @@ export type AuthStatus = {
     issuer?: string | null;
     organization_id?: string | null;
     user_id?: string | null;
+    workflow_assistant_enabled?: boolean;
   };
 };
 
@@ -675,6 +676,11 @@ export type PublicConfig = {
   };
   features?: {
     knowledge_agent_enabled: boolean;
+    workflow_assistant_enabled?: boolean;
+  };
+  workflow_assistant?: {
+    max_concurrency: number;
+    soft_budget_warning_tokens: number;
   };
 };
 
@@ -1123,4 +1129,108 @@ export type ServerBatchPage = {
 export type ApiMessage = {
   message: string;
   data?: unknown;
+};
+
+export type WorkflowAssistantActionKind =
+  | "list_projects"
+  | "list_tasks"
+  | "read_project_context"
+  | "evidence_query"
+  | "read_plan_status"
+  | "create_task"
+  | "generate_titles"
+  | "select_title"
+  | "generate_products"
+  | "confirm_products"
+  | "generate_outline"
+  | "start_research"
+  | "generate_article"
+  | "humanize"
+  | "review"
+  | "restore_links"
+  | "prepare_images"
+  | "export_docx"
+  | "generate_tdk"
+  | "package_delivery";
+
+export type WorkflowAssistantMessage = {
+  message_id: string;
+  sequence: number;
+  role: "user" | "assistant" | "system";
+  content: string;
+  request_id: string;
+  created_at: string;
+};
+
+export type WorkflowAssistantConversation = {
+  conversation_id: string;
+  title: string;
+  project_ids: string[];
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+  messages: WorkflowAssistantMessage[];
+};
+
+export type WorkflowAssistantStep = {
+  step_id: string;
+  sequence: number;
+  action_kind: WorkflowAssistantActionKind;
+  project_id: string;
+  article_task_id: string | null;
+  expected_task_revision: number | null;
+  pinned_prompt_version: Record<string, unknown>;
+  pinned_knowledge_snapshot: Record<string, unknown>;
+  input_summary: Record<string, unknown>;
+  hard_gate: boolean;
+  status: "pending" | "running" | "waiting_job" | "waiting_review" | "succeeded" | "failed" | "skipped" | "cancelled";
+  background_job_id: string | null;
+  retry_count: number;
+  output_summary: Record<string, unknown>;
+  standardized_error_code: string | null;
+  human_gate_confirmed: boolean;
+};
+
+export type WorkflowAssistantPlan = {
+  plan_id: string;
+  conversation_id: string;
+  title: string;
+  natural_language_request: string;
+  plan_hash: string;
+  revision: number;
+  status:
+    | "draft"
+    | "awaiting_confirmation"
+    | "queued"
+    | "running"
+    | "waiting_review"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  project_ids: string[];
+  paused_project_ids: string[];
+  steps: WorkflowAssistantStep[];
+  concurrency_limit: number;
+  budget_warning: boolean;
+  attention_state: string;
+  approved_by: string | null;
+  approved_at: string | null;
+};
+
+export type WorkflowAssistantConversationList = {
+  conversations: WorkflowAssistantConversation[];
+};
+
+export type WorkflowAssistantAttentionCount = {
+  count: number;
+};
+
+export type WorkflowAssistantAttentionList = {
+  plans: WorkflowAssistantPlan[];
+};
+
+export type WorkflowAssistantDispatch = {
+  message: WorkflowAssistantMessage;
+  plan: WorkflowAssistantPlan | null;
 };

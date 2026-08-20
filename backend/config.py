@@ -38,6 +38,26 @@ def _environment_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
+def _environment_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        parsed = default
+    else:
+        try:
+            parsed = int(value.strip())
+        except ValueError as exc:
+            raise ValueError(f"{name} must be an integer value") from exc
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
 def _configured_path(value: object) -> Path:
     path = Path(str(value or "")).expanduser()
     return path.resolve() if path.is_absolute() else (ROOT_DIR / path).resolve()
@@ -68,6 +88,9 @@ class AppConfig:
     llm_available_reasoning_efforts: tuple[str, ...]
     llm_runtime_override: bool
     knowledge_agent_enabled: bool
+    workflow_assistant_enabled: bool
+    workflow_assistant_max_concurrency: int
+    workflow_assistant_soft_budget_tokens: int
 
     @property
     def current_week_folder(self) -> str:
@@ -96,6 +119,7 @@ def load_config() -> AppConfig:
     styles = docx["styles"]
     llm = raw.get("llm", {})
     features = raw.get("features", {})
+    workflow_assistant = raw.get("workflow_assistant", {}) or {}
     legacy_week = raw.get("week_folder", {})
     configured_model = str(llm.get("model", "")).strip()
     configured_reasoning_effort = str(
@@ -166,6 +190,22 @@ def load_config() -> AppConfig:
             "KNOWLEDGE_AGENT_ENABLED",
             bool(features.get("knowledge_agent_enabled", False)),
         ),
+        workflow_assistant_enabled=_environment_bool(
+            "WORKFLOW_ASSISTANT_ENABLED",
+            bool(features.get("workflow_assistant_enabled", False)),
+        ),
+        workflow_assistant_max_concurrency=_environment_int(
+            "WORKFLOW_ASSISTANT_MAX_CONCURRENCY",
+            int(workflow_assistant.get("max_concurrency", 3)),
+            minimum=1,
+            maximum=32,
+        ),
+        workflow_assistant_soft_budget_tokens=_environment_int(
+            "WORKFLOW_ASSISTANT_SOFT_BUDGET_TOKENS",
+            int(workflow_assistant.get("soft_budget_warning_tokens", 24000)),
+            minimum=1000,
+            maximum=1_000_000,
+        ),
     )
 
 
@@ -216,7 +256,15 @@ def public_config(config: AppConfig) -> dict[str, Any]:
     # Integration secrets stay server-side. The UI only needs a readiness flag.
     load_dotenv(ROOT_DIR / ".env")
     load_dotenv(ROOT_DIR / "backend" / ".env")
-    return {
+    features: dict[str, bool] = {
+        "knowledge_agent_enabled": config.knowledge_agent_enabled,
+    }
+    # Keep the legacy public response byte-for-byte stable while the new
+    # assistant is disabled.  Once explicitly enabled, expose its readiness
+    # flag to the workspace UI.
+    if config.workflow_assistant_enabled:
+        features["workflow_assistant_enabled"] = True
+    payload = {
         "topic_library": str(config.topic_library),
         "knowledge_base": str(config.knowledge_base),
         "output_root": str(config.output_root),
@@ -258,7 +306,15 @@ def public_config(config: AppConfig) -> dict[str, Any]:
                 ).strip()
             ),
         },
-        "features": {
-            "knowledge_agent_enabled": config.knowledge_agent_enabled,
-        },
+        "features": features,
     }
+    if config.workflow_assistant_enabled:
+        payload["workflow_assistant"] = {
+            "max_concurrency": int(
+                getattr(config, "workflow_assistant_max_concurrency", 3)
+            ),
+            "soft_budget_warning_tokens": int(
+                getattr(config, "workflow_assistant_soft_budget_tokens", 24000)
+            ),
+        }
+    return payload

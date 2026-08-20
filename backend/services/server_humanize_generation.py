@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -26,7 +27,12 @@ from services.access_control import (
     decide_project_permission,
 )
 from services.article_validation import (
+    IMG_MARKER_PATTERN,
+    MARKDOWN_IMAGE_PATTERN,
     ArticleStructureError,
+    markdown_link_counter,
+    strip_llm_code_fence,
+    url_counter,
     validate_humanized_article,
     visible_word_count,
 )
@@ -36,6 +42,8 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.generator import (
+    ARTICLE_TARGET_MAX,
+    ARTICLE_TARGET_MIN,
     PromptTemplateError,
     article_output_token_limit,
 )
@@ -74,6 +82,66 @@ from workflow.state_machine import (
 
 
 HUMANIZE_OPERATION = "humanize"
+# 1000-1200 remains the writing target, not a destructive hard cutoff.  The
+# wider acceptance band keeps a structurally sound edit when semantic
+# compression cannot safely remove more prose without changing locked facts,
+# links, headings, tables, or image markers.
+HUMANIZE_ACCEPT_MIN = ARTICLE_TARGET_MIN - 100
+HUMANIZE_ACCEPT_MAX = ARTICLE_TARGET_MAX + 200
+_LOGGER = logging.getLogger(__name__)
+
+
+def _record_humanize_failure(
+    category: str,
+    *,
+    source_words: int,
+    candidate_words: int,
+) -> None:
+    """Log only non-sensitive diagnostics for a rejected provider result."""
+
+    _LOGGER.warning(
+        "humanize_failure category=%s source_words=%d candidate_words=%d",
+        category,
+        source_words,
+        candidate_words,
+    )
+
+
+def _validate_locked_humanize_content(
+    source: str,
+    candidate: str,
+    *,
+    required_phrases: list[str],
+) -> None:
+    """Validate every locally provable invariant promised by Humanize."""
+
+    validate_humanized_article(
+        source,
+        candidate,
+        required_phrases=required_phrases,
+    )
+    if markdown_link_counter(source) != markdown_link_counter(candidate):
+        raise ArticleStructureError("Humanization changed Markdown links.")
+    if url_counter(source) != url_counter(candidate):
+        raise ArticleStructureError("Humanization changed URL occurrences.")
+    if MARKDOWN_IMAGE_PATTERN.findall(source) != MARKDOWN_IMAGE_PATTERN.findall(
+        candidate
+    ):
+        raise ArticleStructureError("Humanization changed Markdown images.")
+    if IMG_MARKER_PATTERN.findall(source) != IMG_MARKER_PATTERN.findall(candidate):
+        raise ArticleStructureError("Humanization changed image markers.")
+
+
+def _word_range_failure_category(word_count: int) -> str:
+    return "word_count_high" if word_count > HUMANIZE_ACCEPT_MAX else "word_count_low"
+
+
+def _word_range_distance(word_count: int) -> int:
+    if word_count < HUMANIZE_ACCEPT_MIN:
+        return HUMANIZE_ACCEPT_MIN - word_count
+    if word_count > HUMANIZE_ACCEPT_MAX:
+        return word_count - HUMANIZE_ACCEPT_MAX
+    return 0
 
 
 class HumanizeGenerationUnavailable(RuntimeError):
@@ -160,6 +228,8 @@ class LlmServerHumanizeProvider:
 
     @property
     def ready(self) -> bool:
+        if self._llm_factory is not None:
+            return self._llm_factory.ready
         return self._llm.ready
 
     def _client_for(
@@ -197,62 +267,227 @@ class LlmServerHumanizeProvider:
         organization_id: str = "",
         user_id: str = "",
     ) -> str:
-        client = self._client_for(organization_id, user_id)
-        if not client.ready:
-            raise HumanizeGenerationUnavailable(
-                "humanize provider is not configured"
-            )
         _validate_prompt(prompt_snapshot)
+        source_words = visible_word_count(source_article)
+        candidate_words = 0
         try:
-            result = client.chat(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a careful B2B editor. Preserve every "
-                            "fact, link, heading, product name, and required "
-                            "phrase. State supported facts directly. Never "
-                            "expose source, website, supplier, manufacturer, "
-                            "product-page, retrieval, "
-                            "or writing-workflow narration in reader-facing "
-                            "copy. Preserve supplied img index-tag blocks "
-                            "exactly. Return only Markdown."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt_snapshot.content.replace(
-                            "{{ARTICLE}}",
-                            source_article,
-                        ),
-                    },
-                ],
-                temperature=0.5,
-                max_tokens=article_output_token_limit(
-                    max(visible_word_count(source_article), 1500)
-                ),
-            )
-            candidate = str(result or "").strip()
-            if not candidate:
-                raise ArticleStructureError(
-                    "humanize provider returned no article"
+            client = self._client_for(organization_id, user_id)
+            if not client.ready:
+                raise HumanizeGenerationUnavailable(
+                    "humanize provider is not configured"
                 )
-            validate_humanized_article(
-                source_article,
-                candidate,
-                required_phrases=_required_phrases(task),
-            )
+            required_phrases = _required_phrases(task)
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a careful B2B editor. Preserve every "
+                        "fact, link, heading, product name, and required "
+                        "phrase. State supported facts directly. Never "
+                        "expose source, website, supplier, manufacturer, "
+                        "product-page, retrieval, "
+                        "or writing-workflow narration in reader-facing "
+                        "copy. Preserve supplied img index-tag blocks "
+                        "exactly. Keep the finished article between 1000 "
+                        "and 1200 visible English words. Return only "
+                        "Markdown."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt_snapshot.content.replace(
+                        "{{ARTICLE}}",
+                        source_article,
+                    ),
+                },
+            ]
+            candidate = ""
+            for initial_attempt in range(3):
+                attempt_messages = messages
+                if initial_attempt:
+                    attempt_messages = [
+                        messages[0],
+                        {
+                            "role": "user",
+                            "content": (
+                                messages[1]["content"]
+                                + "\n\nThe previous result was empty or changed "
+                                "locked content. "
+                                "Try again from the supplied article. Preserve "
+                                "the exact heading hierarchy and heading text, "
+                                "numeric facts and occurrence counts, tables, "
+                                "list structure, required phrases, links, and "
+                                "image markers. Return only Markdown."
+                            ),
+                        },
+                    ]
+                result = client.chat(
+                    attempt_messages,
+                    temperature=0.5 if initial_attempt == 0 else 0.3,
+                    max_tokens=article_output_token_limit(
+                        max(visible_word_count(source_article), 1500)
+                    ),
+                )
+                candidate = strip_llm_code_fence(str(result or "")).strip()
+                candidate_words = visible_word_count(candidate)
+                if not candidate:
+                    _record_humanize_failure(
+                        "initial_empty",
+                        source_words=source_words,
+                        candidate_words=0,
+                    )
+                    continue
+                try:
+                    _validate_locked_humanize_content(
+                        source_article,
+                        candidate,
+                        required_phrases=required_phrases,
+                    )
+                except ArticleStructureError:
+                    _record_humanize_failure(
+                        "initial_locked_content",
+                        source_words=source_words,
+                        candidate_words=candidate_words,
+                    )
+                    continue
+                break
+            else:
+                raise ArticleStructureError(
+                    "humanize provider repeatedly changed locked content"
+                )
+            if (
+                source_words >= ARTICLE_TARGET_MIN
+                and not HUMANIZE_ACCEPT_MIN <= candidate_words <= HUMANIZE_ACCEPT_MAX
+            ):
+                best_candidate = candidate
+                best_words = candidate_words
+                for correction_attempt in range(6):
+                    direction = (
+                        "compress"
+                        if best_words > HUMANIZE_ACCEPT_MAX
+                        else "expand"
+                    )
+                    target_low, target_high, target_center = (
+                        (1100, 1180, 1140)
+                        if direction == "compress"
+                        else (1020, 1100, 1060)
+                    )
+                    semantic_delta = (
+                        best_words - target_center
+                        if direction == "compress"
+                        else target_center - best_words
+                    )
+                    result = client.chat(
+                        [
+                            messages[0],
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"The valid edit below has {best_words} visible "
+                                    f"English words. Semantically {direction} it by "
+                                    f"approximately {max(1, semantic_delta)} words, "
+                                    f"aiming for {target_low}-{target_high} visible "
+                                    "English words inside the preferred 1000-1200 "
+                                    "target. Rewrite sentences and paragraphs; "
+                                    "do not mechanically truncate, cut off the ending, "
+                                    "or delete a whole section. Preserve every heading "
+                                    "and its order, "
+                                    "all numeric facts and their occurrence counts, "
+                                    "tables, list structure, exact required phrases, "
+                                    "Markdown links, and img index-tag blocks. "
+                                    "When expanding, add only explanatory prose "
+                                    "supported by the existing article and introduce "
+                                    "no new facts or numbers. "
+                                    f"This is correction attempt {correction_attempt + 1}. "
+                                    "Return only the revised Markdown.\n\n"
+                                    f"{best_candidate}"
+                                ),
+                            },
+                        ],
+                        temperature=0.1,
+                        max_tokens=article_output_token_limit(
+                            ARTICLE_TARGET_MAX
+                        ),
+                    )
+                    corrected = strip_llm_code_fence(str(result or "")).strip()
+                    corrected_words = visible_word_count(corrected)
+                    candidate_words = corrected_words
+                    if not corrected:
+                        _record_humanize_failure(
+                            "correction_empty",
+                            source_words=source_words,
+                            candidate_words=0,
+                        )
+                        continue
+                    try:
+                        _validate_locked_humanize_content(
+                            source_article,
+                            corrected,
+                            required_phrases=required_phrases,
+                        )
+                    except ArticleStructureError:
+                        _record_humanize_failure(
+                            "correction_locked_content",
+                            source_words=source_words,
+                            candidate_words=corrected_words,
+                        )
+                        continue
+                    if HUMANIZE_ACCEPT_MIN <= corrected_words <= HUMANIZE_ACCEPT_MAX:
+                        candidate = corrected
+                        candidate_words = corrected_words
+                        break
+                    _record_humanize_failure(
+                        _word_range_failure_category(corrected_words),
+                        source_words=source_words,
+                        candidate_words=corrected_words,
+                    )
+                    # Only accumulate a structurally valid result when it is
+                    # closer to the hard range. A valid regression must not
+                    # replace the best retry source and cause oscillation.
+                    if _word_range_distance(corrected_words) < _word_range_distance(
+                        best_words
+                    ):
+                        best_candidate = corrected
+                        best_words = corrected_words
+                else:
+                    candidate_words = best_words
+                    _record_humanize_failure(
+                        "correction_exhausted_"
+                        + _word_range_failure_category(best_words).removeprefix(
+                            "word_count_"
+                        ),
+                        source_words=source_words,
+                        candidate_words=best_words,
+                    )
+                    raise ArticleStructureError(
+                        "humanize provider returned an article outside the "
+                        "required word range or changed locked content"
+                    )
             return candidate
         except HumanizeGenerationUnavailable:
             raise
-        except (
-            ArticleStructureError,
-            PromptTemplateError,
-            RuntimeError,
-        ) as exc:
+        except ArticleStructureError:
             raise HumanizeGenerationUnavailable(
                 "humanize provider returned an invalid result"
-            ) from exc
+            ) from None
+        except PromptTemplateError:
+            _record_humanize_failure(
+                "prompt_template",
+                source_words=source_words,
+                candidate_words=candidate_words,
+            )
+            raise HumanizeGenerationUnavailable(
+                "humanize provider returned an invalid result"
+            ) from None
+        except RuntimeError:
+            _record_humanize_failure(
+                "provider_runtime",
+                source_words=source_words,
+                candidate_words=candidate_words,
+            )
+            raise HumanizeGenerationUnavailable(
+                "humanize provider returned an invalid result"
+            ) from None
 
 
 def apply_generated_humanized_article(
@@ -275,13 +510,13 @@ def apply_generated_humanized_article(
     except WorkflowActionNotAllowed as exc:
         raise JobConflict("task cannot be humanized") from exc
     try:
-        validate_humanized_article(
+        _validate_locked_humanize_content(
             current_source,
             candidate,
             required_phrases=_required_phrases(task),
         )
-    except ArticleStructureError as exc:
-        raise JobConflict("humanize result is invalid") from exc
+    except ArticleStructureError:
+        raise JobConflict("humanize result is invalid") from None
     timestamp = now_iso()
     humanized = candidate.strip()
     task.humanized_article = humanized

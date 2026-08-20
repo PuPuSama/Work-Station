@@ -12,6 +12,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Settings2,
+  Sparkles,
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -43,6 +44,7 @@ import type {
   AccessibleProject,
   AuthStatus,
   ServerLlmSettings,
+  WorkflowAssistantAttentionCount,
   WorkspaceTeam,
   WorkspaceTeamPage,
 } from "@/types";
@@ -78,14 +80,32 @@ export function ServerProjectSelector() {
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState("");
   const [llmSettingsPending, setLlmSettingsPending] = useState(false);
   const [llmSettingsError, setLlmSettingsError] = useState("");
+  const [assistantEnabled, setAssistantEnabled] = useState(false);
+  const [assistantAttentionCount, setAssistantAttentionCount] = useState(0);
 
   const loadProjects = useCallback(async () => {
     setLoading(true);
     setError("");
+    setAssistantEnabled(false);
+    setAssistantAttentionCount(0);
     try {
       setProjects(await apiGet<AccessibleProject[]>("/api/projects"));
       try {
         const status = await apiGet<AuthStatus>("/api/auth/status");
+        const workflowAssistantEnabled = Boolean(
+          status.data?.workflow_assistant_enabled,
+        );
+        setAssistantEnabled(workflowAssistantEnabled);
+        if (workflowAssistantEnabled) {
+          try {
+            const attention = await apiGet<WorkflowAssistantAttentionCount>(
+              "/api/workflow-assistant/attention-count",
+            );
+            setAssistantAttentionCount(attention.count);
+          } catch {
+            setAssistantAttentionCount(0);
+          }
+        }
         const currentOrganizationId = status.data?.organization_id || "";
         if (!currentOrganizationId) {
           setCanOpenOrganization(false);
@@ -218,6 +238,17 @@ export function ServerProjectSelector() {
           </div>
           <div className="flex items-center gap-2">
             <>
+              {assistantEnabled && <Button
+                nativeButton={false}
+                variant="outline"
+                render={<Link href="/assistant" />}
+              >
+                <Sparkles />
+                助手
+                {assistantAttentionCount > 0 && (
+                  <Badge variant="secondary">{assistantAttentionCount}</Badge>
+                )}
+              </Button>}
                 <Button
                   type="button"
                   variant="outline"

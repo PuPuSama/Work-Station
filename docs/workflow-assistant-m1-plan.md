@@ -1,8 +1,11 @@
 # Workflow Assistant M1 实施方案
 
-- 状态：已确认，等待实施
+- 状态：工程实现与隔离环境延期交付验收完成；真实 ZeroGPT 与正式交付未执行
 - 确认日期：2026-08-17
-- 稳定基线：`origin/main` / `f795884`
+- 验收日期：2026-08-20
+- 验收记录：[`validation/workflow-assistant-m1-acceptance.md`](validation/workflow-assistant-m1-acceptance.md)
+- 初始稳定基线：`origin/main` / `f795884`
+- 最新同步主线：`main` / `76dfe5c`
 - 开发分支：`codex/workflow-assistant-m1`
 - 开发工作树：`D:\Project\article\article-agent-workflow-assistant`
 - 稳定写作目录：`D:\Project\article\article-agent-formal`
@@ -343,8 +346,9 @@
 ## 11. 第二阶段范围
 
 M2 是独立交付阶段，不与 M1 同批实现。完整方案见
-[`workflow-assistant-m2-plan.md`](workflow-assistant-m2-plan.md)。M2 在 M1
-通过真实跨项目文章验收并合并到稳定主分支后启动。
+[`workflow-assistant-m2-plan.md`](workflow-assistant-m2-plan.md)。2026-08-20 用户明确接受
+M1 的隔离环境 `deferred` 验收作为 M2 本地开发前提；M2 仍须在 M1 工程候选合并到稳定
+主分支后创建独立分支。该决定不把缺少 ZeroGPT 截图的待确认交付包升级为正式交付。
 
 M2 增加：
 

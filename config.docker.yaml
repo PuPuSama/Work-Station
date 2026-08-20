@@ -32,3 +32,8 @@ llm:
 
 features:
   knowledge_agent_enabled: false
+  workflow_assistant_enabled: false
+
+workflow_assistant:
+  max_concurrency: 3
+  soft_budget_warning_tokens: 24000
