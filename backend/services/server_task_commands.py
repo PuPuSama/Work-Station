@@ -37,6 +37,7 @@ ServerTaskAuditAction = Literal[
     "article.draft.regenerated",
     "article.initial_ai_screenshot.uploaded",
     "article.initial_ai_check.updated",
+    "article.knowledge_coverage.checked",
     "article.humanized.updated",
     "article.humanized.generated",
     "article.links.restored",
@@ -71,6 +72,7 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.draft.regenerated": "article.edit",
     "article.initial_ai_screenshot.uploaded": "article.review",
     "article.initial_ai_check.updated": "article.review",
+    "article.knowledge_coverage.checked": "article.review",
     "article.humanized.updated": "article.edit",
     "article.humanized.generated": "article.edit",
     "article.links.restored": "article.edit",
@@ -148,6 +150,8 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "prompt_version",
             "raw_word_count",
             "target_words",
+            "knowledge_coverage_status",
+            "knowledge_supported_sentences",
         }
     ),
     "article.draft.regenerated": frozenset(
@@ -158,6 +162,8 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "prompt_version",
             "raw_word_count",
             "target_words",
+            "knowledge_coverage_status",
+            "knowledge_supported_sentences",
         }
     ),
     "article.initial_ai_screenshot.uploaded": frozenset(
@@ -174,6 +180,15 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "score_recorded",
         }
     ),
+    "article.knowledge_coverage.checked": frozenset(
+        {
+            "status",
+            "eligible_sentences",
+            "supported_sentences",
+            "hard_fact_sentences",
+            "supported_hard_fact_sentences",
+        }
+    ),
     "article.humanized.updated": frozenset(
         {"humanized_word_count"}
     ),
@@ -183,6 +198,8 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "prompt_source",
             "prompt_version",
             "rehumanizing",
+            "knowledge_coverage_status",
+            "knowledge_supported_sentences",
         }
     ),
     "article.links.restored": frozenset(

@@ -34,6 +34,8 @@ from services.postgres_task_repository import (  # noqa: E402
 )
 from services.server_task_commands import (  # noqa: E402
     PostgresAuditedTaskWriter,
+    SERVER_TASK_ACTION_DETAIL_KEYS,
+    SERVER_TASK_ACTION_PERMISSIONS,
     ServerTaskCommandUnavailable,
 )
 from storage import RevisionConflictError  # noqa: E402
@@ -43,6 +45,38 @@ class FailingAuditWriter:
     def append(self, connection, event) -> None:
         del connection, event
         raise RuntimeError("injected audit failure")
+
+
+class ServerTaskCommandContractTests(unittest.TestCase):
+    def test_knowledge_coverage_audit_contract_is_allowlisted(self) -> None:
+        action = "article.knowledge_coverage.checked"
+
+        self.assertEqual(SERVER_TASK_ACTION_PERMISSIONS[action], "article.review")
+        self.assertEqual(
+            SERVER_TASK_ACTION_DETAIL_KEYS[action],
+            frozenset(
+                {
+                    "status",
+                    "eligible_sentences",
+                    "supported_sentences",
+                    "hard_fact_sentences",
+                    "supported_hard_fact_sentences",
+                }
+            ),
+        )
+        for generated_action in (
+            "article.draft.generated",
+            "article.draft.regenerated",
+            "article.humanized.generated",
+        ):
+            self.assertIn(
+                "knowledge_coverage_status",
+                SERVER_TASK_ACTION_DETAIL_KEYS[generated_action],
+            )
+            self.assertIn(
+                "knowledge_supported_sentences",
+                SERVER_TASK_ACTION_DETAIL_KEYS[generated_action],
+            )
 
 
 @unittest.skipUnless(
