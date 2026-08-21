@@ -15,6 +15,7 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import AppConfig
 from knowledge_agent.object_storage import (
@@ -292,6 +293,66 @@ class ProjectRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision: int = Field(ge=0)
+
+
+class ProjectKnowledgeCoverageApiModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectKnowledgeCoverageEvidenceResponse(
+    ProjectKnowledgeCoverageApiModel
+):
+    evidence_link_id: str
+    chunk_id: str
+    source_id: str
+    snapshot_id: str
+    source_name: str
+    heading_path: list[str]
+    source_kind: str
+    trust_tier: str
+    claim_type: str
+    support_type: str
+    excerpt: str
+    canonical_url: str | None
+
+
+class ProjectKnowledgeCoverageSentenceResponse(
+    ProjectKnowledgeCoverageApiModel
+):
+    paragraph_id: str
+    sentence_id: str
+    text: str
+    eligible: bool
+    supported: bool
+    hard_fact: bool
+    evidence: list[ProjectKnowledgeCoverageEvidenceResponse]
+
+
+class ProjectKnowledgeCoverageParagraphResponse(
+    ProjectKnowledgeCoverageApiModel
+):
+    paragraph_id: str
+    sentences: list[ProjectKnowledgeCoverageSentenceResponse]
+
+
+class ProjectKnowledgeCoverageDetailResponse(
+    ProjectKnowledgeCoverageApiModel
+):
+    task_id: str
+    task_revision: int
+    title: str
+    status: Literal["not_checked", "available", "stale", "unavailable"]
+    message: str
+    checked_at: str
+    eligible_sentences: int
+    supported_sentences: int
+    sentence_coverage: float
+    hard_fact_sentences: int
+    supported_hard_fact_sentences: int
+    hard_fact_coverage: float
+    evidence_link_count: int
+    content_hash: str
+    paragraphs: list[ProjectKnowledgeCoverageParagraphResponse]
 
 
 class ArticleGenerationRequest(ProjectRevisionRequest):
@@ -3805,6 +3866,42 @@ def save_project_task_humanized_article(
             "humanized_word_count": visible_word_count(candidate),
         },
     )
+
+
+@router.get(
+    "/{project}/tasks/{task_id}/checks/knowledge-coverage",
+    response_model=ProjectKnowledgeCoverageDetailResponse,
+)
+def read_project_task_knowledge_coverage(
+    project: str,
+    task_id: str,
+    request: Request,
+    response: Response,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectKnowledgeCoverageDetailResponse:
+    del project
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    try:
+        detail = _knowledge_coverage(request).read_detail(
+            task,
+            project_id=authorized.project_id,
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge coverage details are temporarily unavailable.",
+        ) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return ProjectKnowledgeCoverageDetailResponse.model_validate(detail)
 
 
 @router.put(

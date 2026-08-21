@@ -67,6 +67,54 @@ export type KnowledgeCoverageCheckRecord = {
   message: string;
 };
 
+export type KnowledgeCoverageEvidenceDetail = {
+  evidence_link_id: string;
+  chunk_id: string;
+  source_id: string;
+  snapshot_id: string;
+  source_name: string;
+  heading_path: string[];
+  source_kind: string;
+  trust_tier: string;
+  claim_type: string;
+  support_type: string;
+  excerpt: string;
+  canonical_url: string | null;
+};
+
+export type KnowledgeCoverageSentenceDetail = {
+  paragraph_id: string;
+  sentence_id: string;
+  text: string;
+  eligible: boolean;
+  supported: boolean;
+  hard_fact: boolean;
+  evidence: KnowledgeCoverageEvidenceDetail[];
+};
+
+export type KnowledgeCoverageParagraphDetail = {
+  paragraph_id: string;
+  sentences: KnowledgeCoverageSentenceDetail[];
+};
+
+export type KnowledgeCoverageDetail = {
+  task_id: string;
+  task_revision: number;
+  title: string;
+  status: KnowledgeCoverageCheckRecord["status"];
+  message: string;
+  checked_at: string;
+  eligible_sentences: number;
+  supported_sentences: number;
+  sentence_coverage: number;
+  hard_fact_sentences: number;
+  supported_hard_fact_sentences: number;
+  hard_fact_coverage: number;
+  evidence_link_count: number;
+  content_hash: string;
+  paragraphs: KnowledgeCoverageParagraphDetail[];
+};
+
 export type ArticleLink = {
   anchor: string;
   url: string;

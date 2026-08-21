@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from models import TaskRecord
+from models import KnowledgeCoverageCheck, TaskRecord
+from server_project_http import ProjectKnowledgeCoverageDetailResponse
 from services.server_knowledge_coverage import (
     CoverageEvidenceChunk,
     SentenceSupportDecision,
@@ -60,6 +61,14 @@ class FakeLinks:
 
     def save_evidence_link(self, link):
         self.saved.append(link)
+
+
+class FakeDetails:
+    def __init__(self, rows):
+        self.rows = tuple(rows)
+
+    def load(self, **_kwargs):
+        return self.rows
 
 
 def task(article: str = ARTICLE) -> TaskRecord:
@@ -228,6 +237,107 @@ class KnowledgeCoverageServiceTests(unittest.TestCase):
 
         self.assertEqual(report.status, "unavailable")
         self.assertIn("Evidence Pack", report.message)
+
+    def test_detail_maps_supported_sentences_to_source_links(self) -> None:
+        article = (
+            "# Title\n\nBrief note. "
+            "The enclosure has an IP65 rating for exposed production areas."
+        )
+        record = task(article)
+        sentence = extract_article_sentences(article)[0]
+        coverage_hash = sentence_content_hash((sentence,))
+        record.knowledge_coverage = KnowledgeCoverageCheck(
+            status="available",
+            eligible_sentences=1,
+            supported_sentences=1,
+            sentence_coverage=1.0,
+            hard_fact_sentences=1,
+            supported_hard_fact_sentences=1,
+            hard_fact_coverage=1.0,
+            evidence_link_count=1,
+            content_hash=coverage_hash,
+            checked_at="2026-08-21T00:00:00+00:00",
+        )
+        service = ServerKnowledgeCoverageService(
+            object(),  # type: ignore[arg-type]
+            provider=FakeProvider(()),
+            context=FakeContext(()),  # type: ignore[arg-type]
+            links=FakeLinks(),  # type: ignore[arg-type]
+            details=FakeDetails(
+                (
+                    {
+                        "evidence_link_id": "coverage-link-a",
+                        "sentence_id": sentence.sentence_id,
+                        "chunk_id": self.hard_fact_chunk.chunk_id,
+                        "claim_type": "hard_fact",
+                        "support_type": "direct",
+                        "metadata": {
+                            "coverage_content_hash": coverage_hash,
+                            "sentence_hash": sentence.sentence_hash,
+                        },
+                        "source_id": "source-a",
+                        "snapshot_id": "snapshot-a",
+                        "heading_path": ["Ingress protection"],
+                        "text": self.hard_fact_chunk.text,
+                        "display_name": "Official enclosure page",
+                        "source_kind": "product_detail",
+                        "trust_tier": "hard_fact",
+                        "public_source": True,
+                        "canonical_url": self.hard_fact_chunk.canonical_url,
+                    },
+                )
+            ),  # type: ignore[arg-type]
+        )
+
+        detail = service.read_detail(record, project_id="example.com")
+        sentences = [
+            item
+            for paragraph in detail.paragraphs
+            for item in paragraph.sentences
+        ]
+
+        self.assertEqual(detail.status, "available")
+        self.assertEqual(len(sentences), 2)
+        self.assertFalse(sentences[0].eligible)
+        self.assertFalse(sentences[0].supported)
+        self.assertTrue(sentences[1].supported)
+        self.assertTrue(sentences[1].hard_fact)
+        self.assertEqual(
+            sentences[1].evidence[0].canonical_url,
+            "https://example.com/enclosure",
+        )
+        response = ProjectKnowledgeCoverageDetailResponse.model_validate(detail)
+        self.assertEqual(response.paragraphs[0].sentences[1].evidence[0].source_id, "source-a")
+
+    def test_detail_rejects_links_for_stale_article_content(self) -> None:
+        record = task()
+        record.knowledge_coverage = KnowledgeCoverageCheck(
+            status="available",
+            content_hash="0" * 64,
+            checked_at="2026-08-21T00:00:00+00:00",
+        )
+        details = FakeDetails(({"unexpected": "row"},))
+        service = ServerKnowledgeCoverageService(
+            object(),  # type: ignore[arg-type]
+            provider=FakeProvider(()),
+            context=FakeContext(()),  # type: ignore[arg-type]
+            links=FakeLinks(),  # type: ignore[arg-type]
+            details=details,  # type: ignore[arg-type]
+        )
+
+        detail = service.read_detail(record, project_id="example.com")
+
+        self.assertEqual(detail.status, "stale")
+        sentence_details = [
+            item
+            for paragraph in detail.paragraphs
+            for item in paragraph.sentences
+        ]
+        self.assertEqual(
+            sum(1 for item in sentence_details if item.eligible),
+            len(extract_article_sentences(ARTICLE)),
+        )
+        self.assertFalse(any(item.supported for item in sentence_details))
 
 
 if __name__ == "__main__":
