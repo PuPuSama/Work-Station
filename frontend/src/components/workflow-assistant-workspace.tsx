@@ -200,6 +200,28 @@ function messageText(
   return error instanceof Error ? error.message : "助手请求失败。";
 }
 
+function MessageContent({ content }: { content: string }) {
+  return (
+    <>
+      {content.split(/(https?:\/\/[^\s]+)/g).map((part, index) => (
+        /^https?:\/\//.test(part) ? (
+          <a
+            key={`${part}-${index}`}
+            href={part}
+            target="_blank"
+            rel="noreferrer"
+            className="break-all underline underline-offset-2"
+          >
+            {part}
+          </a>
+        ) : (
+          part
+        )
+      ))}
+    </>
+  );
+}
+
 function statusVariant(status: WorkflowAssistantPlan["status"]): "default" | "outline" | "secondary" | "destructive" {
   if (status === "failed") return "destructive";
   if (status === "awaiting_confirmation" || status === "waiting_review") return "outline";
@@ -588,7 +610,7 @@ export function WorkflowAssistantWorkspace() {
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
       pendingMessageDispatchRef.current = null;
-      setPlan(response.plan);
+      if (response.plan) setPlan(response.plan);
       void refreshAttention().catch(() => undefined);
       setDraft("");
       const refreshed = await apiGet<WorkflowAssistantConversation>(
@@ -819,10 +841,10 @@ export function WorkflowAssistantWorkspace() {
             <ScrollArea className="min-h-0 flex-1 rounded-xl border bg-background p-4">
               <div className="grid gap-3">
                 {conversationMessages.length ? conversationMessages.map((message) => (
-                  <div key={message.message_id} className={`max-w-[92%] rounded-xl px-3 py-2.5 text-sm leading-6 ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}>
-                    {message.content}
+                  <div key={message.message_id} className={`max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2.5 text-sm leading-6 ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}>
+                    <MessageContent content={message.content} />
                   </div>
-                )) : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><Workflow className="mb-3 size-8" /><p className="font-medium text-foreground">从一个明确的问题开始</p><p className="mt-1 max-w-sm">例如：读取两个项目未开始的文章任务，并为每个项目规划两篇文章。</p></div>}
+                )) : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
               </div>
             </ScrollArea>
             {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>助手暂时无法继续</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
@@ -835,7 +857,7 @@ export function WorkflowAssistantWorkspace() {
                   onActivity={(message) => setTimeline((current) => [...current, message].slice(-50))}
                 />
               )}
-              <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="描述你想查询或计划的文章工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
+              <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="直接聊天、查询所选项目的知识库，或描述要执行的工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
               <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="animate-spin" /> : <Send />}发送</Button></div>
             </div>
           </CardContent>

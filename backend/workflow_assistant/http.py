@@ -41,6 +41,11 @@ from .gap_fill import (
     GapFillUnavailable,
     WorkflowAssistantGapFillService,
 )
+from .message_router import (
+    AssistantMessageRouter,
+    AssistantMessageRouterUnavailable,
+    render_knowledge_answer,
+)
 from .planner import (
     PlannerModelIdentity,
     PlannerOutputError,
@@ -159,6 +164,64 @@ def _planner(request: Request) -> StructuredWorkflowPlanner:
     if not isinstance(planner, StructuredWorkflowPlanner):
         raise HTTPException(status_code=503, detail="Workflow Assistant planner is not available.")
     return planner
+
+
+def _message_router(request: Request) -> AssistantMessageRouter:
+    return AssistantMessageRouter(
+        getattr(request.app.state, "server_llm_client_factory", None)
+    )
+
+
+def _knowledge_chat(request: Request) -> Any:
+    runtime = getattr(request.app.state, "knowledge_agent_runtime", None)
+    service = getattr(runtime, "research_chat", None)
+    if service is None:
+        raise AssistantMessageRouterUnavailable(
+            "project knowledge Q&A is not configured"
+        )
+    return service
+
+
+def _knowledge_reply(
+    request: Request,
+    *,
+    project_id: str,
+    question: str,
+    conversation_id: str,
+    request_id: str,
+    article_id: str | None,
+) -> str:
+    research_conversation_id = _assistant_identity(
+        "\x00".join((conversation_id, project_id, article_id or "project")),
+        prefix="assistant_chat",
+    )
+    try:
+        conversation = _knowledge_chat(request).ask(
+            project_id=project_id,
+            question=question,
+            request_id=request_id,
+            conversation_id=research_conversation_id,
+            article_id=article_id,
+        )
+    except AssistantMessageRouterUnavailable:
+        raise
+    except Exception as exc:
+        raise AssistantMessageRouterUnavailable(
+            "project knowledge Q&A is temporarily unavailable"
+        ) from exc
+    answer = next(
+        (
+            message
+            for message in reversed(conversation.messages)
+            if message.role == "assistant" and message.request_id == request_id
+        ),
+        None,
+    )
+    if answer is None:
+        raise AssistantMessageRouterUnavailable(
+            "project knowledge Q&A returned no answer"
+        )
+    return render_knowledge_answer(answer)
 
 
 def _iso(value: datetime | None) -> str:
@@ -477,6 +540,8 @@ def _error(exc: Exception) -> HTTPException:
     if isinstance(exc, (PlannerOutputError, AssistantPolicyError)):
         return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, PlannerUnavailable):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, AssistantMessageRouterUnavailable):
         return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, GapFillNotFound):
         return HTTPException(status_code=404, detail=str(exc))
@@ -1005,9 +1070,10 @@ def append_message(
             if assistant_message is None:
                 should_append_user_message = False
             else:
-                existing_plan = repository.get_latest_plan_for_conversation(
+                existing_plan = repository.get_plan_by_idempotency(
                     actor=actor,
                     conversation_id=conversation_id,
+                    source_idempotency_key=payload.idempotency_key,
                 )
                 if existing_plan is not None:
                     _reauthorize_plan_read(
@@ -1092,9 +1158,10 @@ def append_message(
             None,
         )
         if existing_assistant is not None:
-            existing_plan = repository.get_latest_plan_for_conversation(
+            existing_plan = repository.get_plan_by_idempotency(
                 actor=actor,
                 conversation_id=conversation_id,
+                source_idempotency_key=payload.idempotency_key,
             )
             if existing_plan is not None:
                 _reauthorize_plan_read(
@@ -1128,6 +1195,85 @@ def append_message(
                 actor=actor,
                 conversation_id=conversation_id,
                 project_ids=context.project_ids,
+            )
+        message_router = _message_router(request)
+        intent = message_router.route(
+            actor=actor,
+            request=payload.content,
+            context=context,
+        )
+        LOGGER.info(
+            "workflow assistant message routed: request_id=%s kind=%s project_id=%s",
+            payload.request_id,
+            intent.kind,
+            intent.project_id or "",
+        )
+        if intent.kind == "chat":
+            assistant_content = message_router.chat_reply(
+                actor=actor,
+                request=payload.content,
+                recent_messages=[
+                    {"role": message.role, "content": message.content}
+                    for message in persisted_conversation.messages
+                ],
+            )
+            assistant_message = repository.append_message(
+                actor=actor,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_content,
+                request_id=_assistant_identity(payload.request_id, prefix="asst_req"),
+                idempotency_key=_assistant_identity(
+                    payload.idempotency_key,
+                    prefix="asst",
+                ),
+            )
+            return AssistantMessageDispatchResponse(
+                message=_message_response(assistant_message),
+                plan=None,
+            )
+        if intent.kind == "knowledge_qa":
+            if intent.project_id is None:
+                assistant_content = (
+                    "知识库问答一次只查询一个项目。请在左侧只保留一个项目，"
+                    "或者在问题中明确写出项目域名后再发送。"
+                )
+            else:
+                if intent.project_id not in context.project_ids:
+                    raise AssistantContextError(
+                        "project scope contains an inaccessible project"
+                    )
+                article_id = (
+                    selected_task_ids[0]
+                    if len(selected_task_ids) == 1
+                    and intent.project_id in task_projects[selected_task_ids[0]]
+                    else None
+                )
+                assistant_content = _knowledge_reply(
+                    request,
+                    project_id=intent.project_id,
+                    question=payload.content,
+                    conversation_id=conversation_id,
+                    request_id=_assistant_identity(
+                        payload.idempotency_key,
+                        prefix="knowledge_req",
+                    ),
+                    article_id=article_id,
+                )
+            assistant_message = repository.append_message(
+                actor=actor,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_content,
+                request_id=_assistant_identity(payload.request_id, prefix="asst_req"),
+                idempotency_key=_assistant_identity(
+                    payload.idempotency_key,
+                    prefix="asst",
+                ),
+            )
+            return AssistantMessageDispatchResponse(
+                message=_message_response(assistant_message),
+                plan=None,
             )
         planner = _planner(request)
         planner_started_at = time.monotonic()
