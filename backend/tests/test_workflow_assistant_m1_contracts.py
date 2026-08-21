@@ -136,6 +136,236 @@ def make_plan(*, project_id: str = "project-a", action_kind: str = "list_tasks")
 
 
 class WorkflowAssistantContractTests(unittest.TestCase):
+    def test_natural_language_project_notes_change_is_previewed_and_executed(self) -> None:
+        class NotesLlm:
+            ready = True
+
+            def __init__(self) -> None:
+                self.input: dict[str, object] = {}
+
+            def chat(self, messages, temperature=0.7, max_tokens=1800):
+                del temperature, max_tokens
+                self.input = json.loads(messages[1]["content"])
+                return json.dumps(
+                    {
+                        "title": "Update project notes",
+                        "natural_language_request": "ignored",
+                        "project_ids": ["project-a"],
+                        "steps": [
+                            {
+                                "step_id": "notes-1",
+                                "sequence": 1,
+                                "action_kind": "update_project_notes",
+                                "project_id": "project-a",
+                                "input_summary": {
+                                    "notes_to_add": "- Prefer hybrid inverter positioning.",
+                                    "notes_to_remove": [],
+                                    "change_summary": "Add hybrid positioning rule",
+                                },
+                            }
+                        ],
+                    }
+                )
+
+        context = AssistantWorkspaceContext(
+            projects=(
+                AssistantProjectContext(
+                    project_id="project-a",
+                    customer_name="A",
+                    official_domain="a.example",
+                    project_notes="- Existing requirement.",
+                    revision=7,
+                    effective_role="editor",
+                    tasks=(),
+                    prompts=(),
+                    knowledge=(),
+                ),
+            ),
+        )
+        llm = NotesLlm()
+        planner = StructuredWorkflowPlanner(
+            SimpleNamespace(
+                workflow_assistant_max_concurrency=3,
+                workflow_assistant_soft_budget_tokens=24_000,
+                workflow_assistant_project_changes_enabled=True,
+            ),
+            access=FakeAccess({"project-a"}),  # type: ignore[arg-type]
+            llm=llm,
+        )
+
+        draft = planner.plan(
+            actor=ActorIdentity("org-a", "user-a"),
+            request="Add a hybrid inverter positioning rule to project notes",
+            context=context,
+            selected_project_ids=("project-a",),
+        )
+        self.assertIn(
+            "update_project_notes",
+            llm.input["allowed_action_kinds"],  # type: ignore[operator]
+        )
+        bound = bind_plan_context(draft, context=context)
+        summary = bound.steps[0].input_summary
+        self.assertEqual(summary["previous_project_notes"], "- Existing requirement.")
+        self.assertEqual(
+            summary["project_notes"],
+            "- Existing requirement.\n- Prefer hybrid inverter positioning.",
+        )
+        self.assertEqual(summary["expected_project_revision"], 7)
+
+        class Metadata:
+            def __init__(self) -> None:
+                self.current = SimpleNamespace(
+                    project_id="project-a",
+                    customer_name="A",
+                    official_domain="a.example",
+                    project_notes="- Existing requirement.",
+                    revision=7,
+                )
+
+            def get(self, **_: object) -> SimpleNamespace:
+                return self.current
+
+            def update(self, **kwargs: object) -> SimpleNamespace:
+                self.assertion = kwargs
+                return SimpleNamespace(
+                    project_notes=str(kwargs["project_notes"]),
+                    revision=8,
+                )
+
+        metadata = Metadata()
+        adapter = WorkflowAssistantServiceAdapters(
+            engine=object(),  # type: ignore[arg-type]
+            config=SimpleNamespace(
+                workflow_assistant_project_changes_enabled=True,
+            ),
+            task_factory=None,
+            project_metadata=metadata,
+        )
+        result = adapter.handlers()["update_project_notes"](
+            WorkflowToolInvocation(
+                actor=ActorIdentity("org-a", "user-a"),
+                plan_id="plan-1",
+                step_id="notes-1",
+                action_kind="update_project_notes",
+                project_id="project-a",
+                article_task_id=None,
+                expected_task_revision=None,
+                input_summary=summary,
+                pinned_prompt_version={},
+                pinned_knowledge_snapshot={},
+                confirmed=True,
+            )
+        )
+        self.assertTrue(result["project_notes_updated"])
+        self.assertEqual(result["project_revision"], 8)
+        self.assertEqual(metadata.assertion["expected_revision"], 7)
+        self.assertEqual(
+            metadata.assertion["project_notes"],
+            "- Existing requirement.\n- Prefer hybrid inverter positioning.",
+        )
+
+    def test_planner_retries_a_contract_mismatch(self) -> None:
+        class RetryContractLlm:
+            ready = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, _messages, temperature=0.7, max_tokens=1800):
+                del temperature, max_tokens
+                self.calls += 1
+                return json.dumps(
+                    {
+                        "title": "Read tasks",
+                        "natural_language_request": "ignored",
+                        "project_ids": ["project-a"],
+                        "steps": [] if self.calls == 1 else [
+                            {
+                                "step_id": "step-1",
+                                "sequence": 1,
+                                "action_kind": "list_tasks",
+                                "project_id": "project-a",
+                            }
+                        ],
+                    }
+                )
+
+        context = AssistantWorkspaceContext(
+            projects=(
+                AssistantProjectContext(
+                    project_id="project-a",
+                    customer_name="A",
+                    official_domain="a.example",
+                    project_notes="",
+                    revision=1,
+                    effective_role="editor",
+                    tasks=(),
+                    prompts=(),
+                    knowledge=(),
+                ),
+            ),
+        )
+        llm = RetryContractLlm()
+        plan = StructuredWorkflowPlanner(
+            SimpleNamespace(workflow_assistant_max_concurrency=3),
+            access=FakeAccess({"project-a"}),  # type: ignore[arg-type]
+            llm=llm,
+        ).plan(
+            actor=ActorIdentity("org-a", "user-a"),
+            request="list tasks",
+            context=context,
+            selected_project_ids=("project-a",),
+        )
+
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(plan.steps[0].action_kind, "list_tasks")
+
+    def test_project_notes_change_cannot_mix_with_article_steps(self) -> None:
+        context = AssistantWorkspaceContext(
+            projects=(
+                AssistantProjectContext(
+                    project_id="project-a",
+                    customer_name="A",
+                    official_domain="a.example",
+                    project_notes="Existing notes",
+                    revision=1,
+                    effective_role="editor",
+                    tasks=(),
+                    prompts=(),
+                    knowledge=(),
+                ),
+            ),
+        )
+        plan = PlanDraft(
+            title="Invalid mixed plan",
+            natural_language_request="change notes and list tasks",
+            project_ids=("project-a",),
+            steps=(
+                PlanStep(
+                    step_id="notes-1",
+                    sequence=1,
+                    action_kind="update_project_notes",
+                    project_id="project-a",
+                    input_summary={
+                        "notes_to_add": "New note",
+                        "notes_to_remove": [],
+                    },
+                ),
+                PlanStep(
+                    step_id="read-1",
+                    sequence=2,
+                    action_kind="list_tasks",
+                    project_id="project-a",
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            AssistantPolicyError,
+            "cannot be combined",
+        ):
+            bind_plan_context(plan, context=context)
+
     def test_plan_keeps_running_when_gate_arrives_before_other_jobs(self) -> None:
         plan = SimpleNamespace(
             paused_project_ids=(),

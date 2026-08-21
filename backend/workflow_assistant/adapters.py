@@ -102,6 +102,7 @@ class WorkflowAssistantServiceAdapters:
         evidence_chat: Any = None,
         product_selection: Any = None,
         project_catalog: Any = None,
+        project_metadata: Any = None,
         title_generation: Any = None,
         product_generation: Any = None,
         outline_generation: Any = None,
@@ -121,6 +122,7 @@ class WorkflowAssistantServiceAdapters:
         self._evidence_chat = evidence_chat
         self._product_selection = product_selection
         self._project_catalog = project_catalog
+        self._project_metadata = project_metadata
         self._services: dict[str, Any] = {
             "title_generation": title_generation,
             "product_generation": product_generation,
@@ -137,6 +139,7 @@ class WorkflowAssistantServiceAdapters:
         """Return the complete closed registry used by the coordinator."""
 
         handlers: dict[ActionKind, WorkflowToolHandler] = {
+            "update_project_notes": self._update_project_notes,
             "create_task": self._create_task,
             "generate_titles": self._queue_generation,
             "select_title": self._select_title,
@@ -155,6 +158,63 @@ class WorkflowAssistantServiceAdapters:
         }
         handlers.update(self._read_handlers())
         return handlers
+
+    def _update_project_notes(
+        self,
+        invocation: WorkflowToolInvocation,
+    ) -> Mapping[str, Any]:
+        if not bool(
+            getattr(
+                self._config,
+                "workflow_assistant_project_changes_enabled",
+                False,
+            )
+        ):
+            raise WorkflowToolUnavailable(
+                "Workflow Assistant project changes are disabled"
+            )
+        if self._project_metadata is None:
+            raise WorkflowToolUnavailable("project metadata is unavailable")
+        self._validate_pins(invocation)
+        summary = invocation.input_summary
+        previous_notes = summary.get("previous_project_notes")
+        project_notes = summary.get("project_notes")
+        expected_revision = summary.get("expected_project_revision")
+        if not isinstance(previous_notes, str) or not isinstance(project_notes, str):
+            raise WorkflowToolError("project notes preview is invalid")
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise WorkflowToolError("project notes revision is invalid")
+        try:
+            current = self._project_metadata.get(
+                actor=invocation.actor,
+                project_id=invocation.project_id,
+            )
+            if (
+                current.revision != expected_revision
+                or current.project_notes != previous_notes
+            ):
+                raise WorkflowToolError("project context changed; revise the plan")
+            updated = self._project_metadata.update(
+                actor=invocation.actor,
+                project_id=invocation.project_id,
+                expected_revision=expected_revision,
+                customer_name=current.customer_name,
+                official_domain=current.official_domain,
+                project_notes=project_notes,
+            )
+        except WorkflowToolError:
+            raise
+        except Exception as exc:
+            raise WorkflowToolError("project notes could not be updated") from exc
+        return {
+            "project_id": invocation.project_id,
+            "project_notes_updated": updated.project_notes != previous_notes,
+            "project_revision": updated.revision,
+        }
 
     def job_status(
         self,

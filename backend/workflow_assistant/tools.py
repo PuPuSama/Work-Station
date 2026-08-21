@@ -63,6 +63,7 @@ _ACTION_PERMISSIONS = {
     "read_project_context": "project.view",
     "evidence_query": "project.view",
     "read_plan_status": "project.view",
+    "update_project_notes": "article.edit",
     "create_task": "article.edit",
     "generate_titles": "article.edit",
     "select_title": "article.edit",

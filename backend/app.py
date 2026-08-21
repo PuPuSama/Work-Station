@@ -910,6 +910,7 @@ async def app_lifespan(application: FastAPI):
                     application.state.server_confirmed_product_selection
                 ),
                 project_catalog=application.state.server_project_catalog,
+                project_metadata=application.state.server_project_metadata,
                 title_generation=server_title_generation,
                 product_generation=server_product_generation,
                 outline_generation=server_outline_generation,

@@ -11,6 +11,7 @@ ActionKind = Literal[
     "read_project_context",
     "evidence_query",
     "read_plan_status",
+    "update_project_notes",
     "create_task",
     "generate_titles",
     "select_title",

@@ -20,6 +20,7 @@ ALLOWED_ACTION_KINDS: frozenset[ActionKind] = frozenset(
         "read_project_context",
         "evidence_query",
         "read_plan_status",
+        "update_project_notes",
         "create_task",
         "generate_titles",
         "select_title",
@@ -243,6 +244,55 @@ def canonical_plan_hash(plan: PlanDraft | Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _project_notes_change(
+    current_notes: str,
+    summary: Mapping[str, Any],
+) -> tuple[str, str, list[str]]:
+    """Apply a model-proposed notes delta to the complete Server value.
+
+    The planner sees only a bounded project summary.  Applying additions and
+    exact removals to the full Server value prevents a long, truncated notes
+    field from being overwritten by a model-generated partial replacement.
+    """
+
+    raw_addition = summary.get("notes_to_add", "")
+    if raw_addition is None:
+        raw_addition = ""
+    if not isinstance(raw_addition, str):
+        raise AssistantPolicyError("project notes addition must be text")
+    addition = (
+        sanitize_message(raw_addition, max_length=10_000)
+        if raw_addition.strip()
+        else ""
+    )
+    raw_removals = summary.get("notes_to_remove", [])
+    if raw_removals is None:
+        raw_removals = []
+    if not isinstance(raw_removals, list) or len(raw_removals) > 50:
+        raise AssistantPolicyError("project notes removals must be a bounded list")
+    removals: list[str] = []
+    for raw_removal in raw_removals:
+        if not isinstance(raw_removal, str):
+            raise AssistantPolicyError("project notes removal must be text")
+        removal = sanitize_message(raw_removal, max_length=3_000)
+        if removal not in removals:
+            removals.append(removal)
+    if not addition and not removals:
+        raise AssistantPolicyError("project notes change is empty")
+
+    updated = str(current_notes or "").replace("\r\n", "\n").replace("\r", "\n")
+    for removal in removals:
+        updated = updated.replace(removal, "")
+    updated = updated.strip()
+    if addition and addition not in updated:
+        updated = f"{updated}\n{addition}".strip() if updated else addition
+    if len(updated) > 30_000:
+        raise AssistantPolicyError("project notes change exceeds the project limit")
+    if updated == str(current_notes or "").replace("\r\n", "\n").replace("\r", "\n").strip():
+        raise AssistantPolicyError("project notes change has no effect")
+    return updated, addition, removals
+
+
 def validate_plan_scope(
     plan: PlanDraft,
     *,
@@ -297,6 +347,18 @@ def bind_plan_context(
     by_project = {project.project_id: project for project in context.projects}
     if not set(plan.project_ids).issubset(by_project):
         raise AssistantPolicyError("plan contains an inaccessible project")
+    project_note_steps = [
+        step for step in plan.steps if step.action_kind == "update_project_notes"
+    ]
+    if project_note_steps and len(project_note_steps) != len(plan.steps):
+        raise AssistantPolicyError(
+            "project notes changes cannot be combined with article workflow steps"
+        )
+    project_note_ids = [step.project_id for step in project_note_steps]
+    if len(project_note_ids) != len(set(project_note_ids)):
+        raise AssistantPolicyError(
+            "a project notes plan may update each project only once"
+        )
     selected_tasks = (
         {
             task_id.strip()
@@ -473,10 +535,33 @@ def bind_plan_context(
                     "generate_article cannot disable the research Evidence Pack"
                 )
             source_input_summary["use_evidence_pack"] = True
-        safe_input_summary = _safe_summary(source_input_summary)
+        if step.action_kind == "update_project_notes":
+            updated_notes, addition, removals = _project_notes_change(
+                project.project_notes,
+                source_input_summary,
+            )
+            source_input_summary = {
+                "previous_project_notes": project.project_notes,
+                "project_notes": updated_notes,
+                "notes_to_add": addition,
+                "notes_to_remove": removals,
+                "expected_project_revision": project.revision,
+                "change_summary": source_input_summary.get(
+                    "change_summary",
+                    "Update project notes",
+                ),
+            }
+            safe_input_summary = _safe_summary(
+                source_input_summary,
+                string_max_length=30_000,
+                allow_empty_strings=True,
+            )
+        else:
+            safe_input_summary = _safe_summary(source_input_summary)
         if dynamic_task_source is not None:
             safe_input_summary["create_task_step_id"] = dynamic_task_source
-        if len(canonical_json(safe_input_summary)) > 8_000:
+        summary_limit = 70_000 if step.action_kind == "update_project_notes" else 8_000
+        if len(canonical_json(safe_input_summary)) > summary_limit:
             raise AssistantPolicyError("plan input summary is too large")
         bound_steps.append(
             step.model_copy(

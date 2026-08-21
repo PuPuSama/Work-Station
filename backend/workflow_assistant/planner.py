@@ -224,6 +224,15 @@ def planner_system_prompt() -> str:
         "review immediately after generate_article and before humanize; the "
         "confirmed plan applies only safe review suggestions and rejects "
         "suggestions that require a separate risk confirmation."
+        " For a natural-language project-notes change, emit exactly one "
+        "update_project_notes step for each affected project. Put only the "
+        "new text in input_summary.notes_to_add and exact obsolete text in "
+        "input_summary.notes_to_remove. Include a concise change_summary. "
+        "Write the addition as a durable project instruction in the language "
+        "and style of the existing notes, preserving concrete product facts "
+        "from the user's request without meta-narrative wording. "
+        "Do not copy the complete current notes and do not combine a project "
+        "notes update with article workflow steps in the same plan."
     )
 
 
@@ -233,6 +242,7 @@ def _planner_input(
     *,
     selected_project_ids: Sequence[str],
     selected_task_ids: Sequence[str] = (),
+    project_changes_enabled: bool = False,
 ) -> str:
     selected_project_set = set(selected_project_ids)
     task_selection_candidates = {
@@ -272,6 +282,7 @@ def _planner_input(
             "read_project_context",
             "evidence_query",
             "read_plan_status",
+            *(["update_project_notes"] if project_changes_enabled else []),
             "create_task",
             "generate_titles",
             "select_title",
@@ -321,6 +332,9 @@ def _planner_input(
                         "primary_keyword": "optional for create_task",
                         "bind_step_ids": ["optional later step id for create_task"],
                         "create_task_step_id": "server-bound for later article steps",
+                        "notes_to_add": "new project-note text only; update_project_notes only",
+                        "notes_to_remove": ["exact obsolete text; update_project_notes only"],
+                        "change_summary": "concise user-visible project-notes change summary",
                     },
                     "hard_gate": False,
                 }
@@ -648,6 +662,13 @@ class StructuredWorkflowPlanner:
                     context,
                     selected_project_ids=selected,
                     selected_task_ids=selected_tasks,
+                    project_changes_enabled=bool(
+                        getattr(
+                            self._config,
+                            "workflow_assistant_project_changes_enabled",
+                            False,
+                        )
+                    ),
                 ),
             },
         ]
@@ -684,13 +705,35 @@ class StructuredWorkflowPlanner:
                     raise PlannerUnavailable(
                         "workflow assistant planner is temporarily unavailable"
                     ) from exc
-            candidate = parse_planner_output(
-                output,
-                request=request,
-                actor=actor,
-                access=self._access,
-                accessible_project_ids=context.project_ids,
-            )
+            try:
+                candidate = parse_planner_output(
+                    output,
+                    request=request,
+                    actor=actor,
+                    access=self._access,
+                    accessible_project_ids=context.project_ids,
+                )
+            except PlannerOutputError:
+                if semantic_attempt >= 2:
+                    raise
+                LOGGER.warning(
+                    "workflow assistant planner contract mismatch: attempt=%s",
+                    semantic_attempt + 1,
+                )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Regenerate one complete JSON plan matching the "
+                            "supplied schema. Include at least one step and use "
+                            "only an allowed_action_kind. For a project-notes "
+                            "request, use update_project_notes with "
+                            "input_summary.notes_to_add and "
+                            "input_summary.notes_to_remove."
+                        ),
+                    }
+                )
+                continue
             actual_counts = _planned_article_counts(candidate)
             mismatched = {
                 project_id: {
