@@ -494,6 +494,16 @@ def server_http_route_available(method: str, path: str) -> bool:
         return True
     if (
         normalized_method == "GET"
+        and len(parts) == 8
+        and parts[1:3] == ["api", "projects"]
+        and bool(parts[3])
+        and parts[4] == "tasks"
+        and bool(parts[5])
+        and parts[6:8] == ["checks", "knowledge-coverage"]
+    ):
+        return True
+    if (
+        normalized_method == "GET"
         and len(parts) == 10
         and parts[1:3] == ["api", "projects"]
         and bool(parts[3])

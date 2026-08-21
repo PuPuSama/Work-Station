@@ -26,6 +26,7 @@ from knowledge_agent.evidence_repository import (
 )
 from knowledge_agent.schema import (
     evidence_pack_hits,
+    evidence_links,
     knowledge_chunks,
     knowledge_sources,
     research_graph_runs,
@@ -95,6 +96,7 @@ class ArticleSentence:
     sentence_hash: str
     text: str
     visible_words: int
+    eligible: bool = True
 
     def coverage_target(self) -> SentenceEvidenceTarget:
         return SentenceEvidenceTarget(
@@ -103,6 +105,7 @@ class ArticleSentence:
             paragraph_hash=self.paragraph_hash,
             sentence_hash=self.sentence_hash,
             visible_words=self.visible_words,
+            eligible=self.eligible,
         )
 
 
@@ -124,6 +127,67 @@ class SentenceSupportDecision:
     chunk_ids: tuple[str, ...]
     support_type: str = "paraphrase"
     hard_fact: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCoverageEvidenceDetail:
+    evidence_link_id: str
+    chunk_id: str
+    source_id: str
+    snapshot_id: str
+    source_name: str
+    heading_path: tuple[str, ...]
+    source_kind: str
+    trust_tier: str
+    claim_type: str
+    support_type: str
+    excerpt: str
+    canonical_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCoverageSentenceDetail:
+    paragraph_id: str
+    sentence_id: str
+    text: str
+    eligible: bool
+    supported: bool
+    hard_fact: bool
+    evidence: tuple[KnowledgeCoverageEvidenceDetail, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCoverageParagraphDetail:
+    paragraph_id: str
+    sentences: tuple[KnowledgeCoverageSentenceDetail, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCoverageTaskDetail:
+    task_id: str
+    task_revision: int
+    title: str
+    status: str
+    message: str
+    checked_at: str
+    eligible_sentences: int
+    supported_sentences: int
+    sentence_coverage: float
+    hard_fact_sentences: int
+    supported_hard_fact_sentences: int
+    hard_fact_coverage: float
+    evidence_link_count: int
+    content_hash: str
+    paragraphs: tuple[KnowledgeCoverageParagraphDetail, ...]
+
+
+class KnowledgeCoverageDetailReader(Protocol):
+    def load(
+        self,
+        *,
+        project_id: str,
+        article_id: str,
+    ) -> Sequence[Mapping[str, object]]: ...
 
 
 class KnowledgeCoverageLlmClient(Protocol):
@@ -268,9 +332,11 @@ def _article_paragraphs(markdown: str) -> tuple[str, ...]:
     return tuple(value for value in paragraphs if value)
 
 
-def extract_article_sentences(markdown: str) -> tuple[ArticleSentence, ...]:
-    """Return stable, reader-visible sentence targets for knowledge coverage."""
-
+def _extract_article_sentences(
+    markdown: str,
+    *,
+    include_ineligible: bool,
+) -> tuple[ArticleSentence, ...]:
     sentences: list[ArticleSentence] = []
     paragraph_occurrences: Counter[str] = Counter()
     sentence_occurrences: Counter[str] = Counter()
@@ -282,7 +348,8 @@ def extract_article_sentences(markdown: str) -> tuple[ArticleSentence, ...]:
         )
         for sentence in _split_sentences(paragraph):
             words = visible_word_count(sentence)
-            if words < 5:
+            eligible = words >= 5
+            if not eligible and not include_ineligible:
                 continue
             sentence_hash = _digest(" ".join(sentence.split()))
             sentence_occurrences[sentence_hash] += 1
@@ -297,9 +364,22 @@ def extract_article_sentences(markdown: str) -> tuple[ArticleSentence, ...]:
                     sentence_hash=sentence_hash,
                     text=sentence,
                     visible_words=words,
+                    eligible=eligible,
                 )
             )
     return tuple(sentences)
+
+
+def extract_article_sentences(markdown: str) -> tuple[ArticleSentence, ...]:
+    """Return stable eligible sentence targets for knowledge coverage."""
+
+    return _extract_article_sentences(markdown, include_ineligible=False)
+
+
+def extract_article_sentence_stream(markdown: str) -> tuple[ArticleSentence, ...]:
+    """Return all reader-visible sentences for the evidence detail page."""
+
+    return _extract_article_sentences(markdown, include_ineligible=True)
 
 
 def sentence_content_hash(sentences: Sequence[ArticleSentence]) -> str:
@@ -492,6 +572,74 @@ class PostgresKnowledgeCoverageContext:
             if len(chunks) >= MAX_COVERAGE_CONTEXT_CHUNKS:
                 break
         return tuple(chunks)
+
+
+class PostgresKnowledgeCoverageDetailReader:
+    """Read current sentence links and their project-scoped source metadata."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def load(
+        self,
+        *,
+        project_id: str,
+        article_id: str,
+    ) -> tuple[Mapping[str, object], ...]:
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(
+                    evidence_links.c.evidence_link_id,
+                    evidence_links.c.sentence_id,
+                    evidence_links.c.chunk_id,
+                    evidence_links.c.claim_type,
+                    evidence_links.c.support_type,
+                    evidence_links.c.metadata,
+                    knowledge_chunks.c.source_id,
+                    knowledge_chunks.c.snapshot_id,
+                    knowledge_chunks.c.heading_path,
+                    knowledge_chunks.c.text,
+                    knowledge_sources.c.display_name,
+                    knowledge_sources.c.source_kind,
+                    knowledge_sources.c.trust_tier,
+                    knowledge_sources.c.public_source,
+                    knowledge_sources.c.canonical_url,
+                )
+                .select_from(
+                    evidence_links.join(
+                        knowledge_chunks,
+                        sa.and_(
+                            knowledge_chunks.c.project_id
+                            == evidence_links.c.project_id,
+                            knowledge_chunks.c.chunk_id
+                            == evidence_links.c.chunk_id,
+                        ),
+                    ).join(
+                        knowledge_sources,
+                        sa.and_(
+                            knowledge_sources.c.project_id
+                            == knowledge_chunks.c.project_id,
+                            knowledge_sources.c.source_id
+                            == knowledge_chunks.c.source_id,
+                            knowledge_sources.c.current_snapshot_id
+                            == knowledge_chunks.c.snapshot_id,
+                        ),
+                    )
+                )
+                .where(
+                    evidence_links.c.project_id == project_id,
+                    evidence_links.c.article_id == article_id,
+                    evidence_links.c.support_scope == "sentence",
+                    evidence_links.c.validation_status == "valid",
+                    knowledge_sources.c.status == "published",
+                    knowledge_sources.c.source_kind != "official_blog",
+                )
+                .order_by(
+                    evidence_links.c.sentence_id,
+                    evidence_links.c.evidence_link_id,
+                )
+            ).mappings().all()
+        return tuple(rows)
 
 
 def _json_object(raw: str) -> dict[str, object]:
@@ -689,10 +837,12 @@ class ServerKnowledgeCoverageService:
         provider: KnowledgeCoverageProvider,
         context: PostgresKnowledgeCoverageContext | None = None,
         links: PostgresEvidenceLinkRepository | None = None,
+        details: KnowledgeCoverageDetailReader | None = None,
     ) -> None:
         self._provider = provider
         self._context = context or PostgresKnowledgeCoverageContext(engine)
         self._links = links or PostgresEvidenceLinkRepository(engine)
+        self._details = details or PostgresKnowledgeCoverageDetailReader(engine)
 
     @staticmethod
     def _failure(
@@ -889,16 +1039,160 @@ class ServerKnowledgeCoverageService:
         )
         return task.knowledge_coverage
 
+    def read_detail(
+        self,
+        task: TaskRecord,
+        *,
+        project_id: str,
+    ) -> KnowledgeCoverageTaskDetail:
+        """Return current article sentences with their persisted evidence links."""
+
+        article = current_article_for_coverage(task)
+        eligible_sentences = extract_article_sentences(article)
+        sentence_stream = extract_article_sentence_stream(article)
+        content_hash = sentence_content_hash(eligible_sentences)
+        report = task.knowledge_coverage
+        status = report.status
+        message = report.message
+        if status == "available" and report.content_hash != content_hash:
+            status = "stale"
+            message = "正文句子发生变化，请重新检查知识库支撑率。"
+
+        rows: Sequence[Mapping[str, object]] = ()
+        article_id = f"topic_{task.topic_index:03d}"
+        if status == "available":
+            rows = self._details.load(
+                project_id=project_id,
+                article_id=article_id,
+            )
+
+        current_by_id = {
+            sentence.sentence_id: sentence for sentence in eligible_sentences
+        }
+        evidence_by_sentence: dict[
+            str,
+            list[KnowledgeCoverageEvidenceDetail],
+        ] = {}
+        seen_links: set[str] = set()
+        for row in rows:
+            metadata = dict(row["metadata"] or {})
+            sentence_id = str(row["sentence_id"] or "")
+            sentence = current_by_id.get(sentence_id)
+            evidence_link_id = str(row["evidence_link_id"])
+            if (
+                sentence is None
+                or evidence_link_id in seen_links
+                or str(metadata.get("coverage_content_hash") or "")
+                != content_hash
+                or str(metadata.get("sentence_hash") or "")
+                != sentence.sentence_hash
+            ):
+                continue
+            seen_links.add(evidence_link_id)
+            canonical_url = (
+                str(row["canonical_url"])
+                if bool(row["public_source"])
+                and row["canonical_url"] is not None
+                else None
+            )
+            excerpt = " ".join(str(row["text"]).split())[:700]
+            evidence_by_sentence.setdefault(sentence_id, []).append(
+                KnowledgeCoverageEvidenceDetail(
+                    evidence_link_id=evidence_link_id,
+                    chunk_id=str(row["chunk_id"]),
+                    source_id=str(row["source_id"]),
+                    snapshot_id=str(row["snapshot_id"]),
+                    source_name=(
+                        str(row["display_name"] or "").strip()
+                        or str(row["source_id"])
+                    ),
+                    heading_path=tuple(
+                        str(value) for value in (row["heading_path"] or ())
+                    ),
+                    source_kind=str(row["source_kind"]),
+                    trust_tier=str(row["trust_tier"]),
+                    claim_type=str(row["claim_type"]),
+                    support_type=str(row["support_type"]),
+                    excerpt=excerpt,
+                    canonical_url=canonical_url,
+                )
+            )
+
+        paragraphs: list[KnowledgeCoverageParagraphDetail] = []
+        paragraph_sentences: list[KnowledgeCoverageSentenceDetail] = []
+        active_paragraph_id = ""
+        for sentence in sentence_stream:
+            if active_paragraph_id and sentence.paragraph_id != active_paragraph_id:
+                paragraphs.append(
+                    KnowledgeCoverageParagraphDetail(
+                        paragraph_id=active_paragraph_id,
+                        sentences=tuple(paragraph_sentences),
+                    )
+                )
+                paragraph_sentences = []
+            active_paragraph_id = sentence.paragraph_id
+            references = tuple(evidence_by_sentence.get(sentence.sentence_id, ()))
+            paragraph_sentences.append(
+                KnowledgeCoverageSentenceDetail(
+                    paragraph_id=sentence.paragraph_id,
+                    sentence_id=sentence.sentence_id,
+                    text=sentence.text,
+                    eligible=sentence.eligible,
+                    supported=bool(references),
+                    hard_fact=(
+                        any(
+                            reference.claim_type == "hard_fact"
+                            for reference in references
+                        )
+                        or bool(HARD_FACT_PATTERN.search(sentence.text))
+                    ),
+                    evidence=references,
+                )
+            )
+        if active_paragraph_id:
+            paragraphs.append(
+                KnowledgeCoverageParagraphDetail(
+                    paragraph_id=active_paragraph_id,
+                    sentences=tuple(paragraph_sentences),
+                )
+            )
+
+        return KnowledgeCoverageTaskDetail(
+            task_id=task.id,
+            task_revision=task.revision,
+            title=task.selected_title or task.topic,
+            status=status,
+            message=message,
+            checked_at=report.checked_at,
+            eligible_sentences=report.eligible_sentences,
+            supported_sentences=report.supported_sentences,
+            sentence_coverage=report.sentence_coverage,
+            hard_fact_sentences=report.hard_fact_sentences,
+            supported_hard_fact_sentences=(
+                report.supported_hard_fact_sentences
+            ),
+            hard_fact_coverage=report.hard_fact_coverage,
+            evidence_link_count=report.evidence_link_count,
+            content_hash=content_hash,
+            paragraphs=tuple(paragraphs),
+        )
+
 
 __all__ = [
     "ArticleSentence",
     "CoverageEvidenceChunk",
+    "KnowledgeCoverageEvidenceDetail",
+    "KnowledgeCoverageParagraphDetail",
+    "KnowledgeCoverageSentenceDetail",
+    "KnowledgeCoverageTaskDetail",
     "KnowledgeCoverageUnavailable",
     "LlmServerKnowledgeCoverageProvider",
     "PostgresKnowledgeCoverageContext",
+    "PostgresKnowledgeCoverageDetailReader",
     "SentenceSupportDecision",
     "ServerKnowledgeCoverageService",
     "current_article_for_coverage",
+    "extract_article_sentence_stream",
     "extract_article_sentences",
     "mark_knowledge_coverage_stale",
     "sentence_content_hash",

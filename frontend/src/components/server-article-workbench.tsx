@@ -5,6 +5,8 @@
 import {
   AlertCircle,
   ArrowLeft,
+  ArrowRight,
+  BookOpenCheck,
   CheckCircle2,
   Download,
   FileCheck2,
@@ -219,8 +221,6 @@ export function ServerArticleWorkbench({
   const [humanizedDraft, setHumanizedDraft] = useState("");
   const [initialScore, setInitialScore] = useState("");
   const [finalScore, setFinalScore] = useState("");
-  const [finalReport, setFinalReport] = useState("");
-  const [showSkippedAiRecheck, setShowSkippedAiRecheck] = useState(false);
   const [finalScreenshot, setFinalScreenshot] = useState<File | null>(null);
   const [finalScreenshotPreview, setFinalScreenshotPreview] = useState("");
   const [useEvidencePack, setUseEvidencePack] = useState(true);
@@ -242,6 +242,7 @@ export function ServerArticleWorkbench({
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
   const taskApi = `${projectApi}/tasks/${encodeURIComponent(taskId)}`;
   const productSelectionHref = `/projects/${encodeURIComponent(customer)}/articles/${encodeURIComponent(taskId)}/products`;
+  const knowledgeCoverageHref = `/projects/${encodeURIComponent(customer)}/articles/${encodeURIComponent(taskId)}/knowledge-coverage`;
   const workbenchScope = `${customer}\n${taskId}`;
   const activeWorkbenchScopeRef = useRef("");
 
@@ -315,7 +316,6 @@ export function ServerArticleWorkbench({
     setTask(null);
     setIsProjectOwner(false);
     setFinalScreenshot(null);
-    setShowSkippedAiRecheck(false);
     setPending("");
     setMessage("");
     setWritingSettingsDirty(false);
@@ -347,7 +347,6 @@ export function ServerArticleWorkbench({
           ? ""
           : String(task.final_ai_check.score),
       );
-      setFinalReport(task.final_ai_check?.report || "");
       setProductAnchors(
         Object.fromEntries(
           task.products.flatMap((product) =>
@@ -1381,20 +1380,18 @@ export function ServerArticleWorkbench({
             </Card>
 
             <div className="grid gap-4">
-              {task.humanization_skipped ? (
-                <Card>
-                  <CardHeader className="border-b">
-                    <CardTitle>AI-rate</CardTitle>
-                    <CardDescription>
-                      初稿已低于 30%，因此没有第二次 AI-rate。
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="grid gap-3">
+              <Card>
+                <CardHeader className="border-b">
+                  <CardTitle>AI-rate 与截图凭证</CardTitle>
+                  <CardDescription>
+                    当前文章只保留一组 AI-rate 与截图；低于 30% 只跳过人化，不再隐藏截图上传。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-4">
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,0.45fr)_minmax(0,0.55fr)] xl:grid-cols-1 2xl:grid-cols-[minmax(0,0.45fr)_minmax(0,0.55fr)]">
                     <div className="rounded-xl border bg-accent/35 px-4 py-5 text-center">
-                      <p className="text-sm text-muted-foreground">
-                        当前文章 AI-rate
-                      </p>
-                      <p className="mt-2 text-3xl font-semibold">
+                      <p className="text-sm text-muted-foreground">当前文章 AI-rate</p>
+                      <p className="mt-2 text-3xl font-semibold tabular-nums">
                         {task.final_ai_check?.score ??
                           task.initial_ai_check?.score ??
                           "—"}
@@ -1404,94 +1401,30 @@ export function ServerArticleWorkbench({
                           : ""}
                       </p>
                     </div>
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      已沿用初稿并跳过人化、第二次检测；如重新在
-                      ZeroGPT 检查，可在这里更新当前文章的 AI-rate。
-                    </p>
-                    {showSkippedAiRecheck ? (
-                      <div className="grid gap-3 rounded-xl border p-3">
-                        <div className="grid gap-2">
-                          <Label htmlFor="skipped-final-score">
-                            重新检查后的 AI-rate（%）
-                          </Label>
-                          <Input
-                            id="skipped-final-score"
-                            type="number"
-                            min="0"
-                            max="100"
-                            value={finalScore}
-                            disabled={Boolean(pending) || !reviewAllowed}
-                            onChange={(event) => setFinalScore(event.target.value)}
-                          />
-                        </div>
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            disabled={Boolean(pending)}
-                            onClick={() => setShowSkippedAiRecheck(false)}
-                          >
-                            取消
-                          </Button>
-                          <Button
-                            type="button"
-                            disabled={
-                              Boolean(pending) ||
-                              !reviewAllowed ||
-                              !allowed.has("confirm_final_ai_check") ||
-                              !finalScore
-                            }
-                            onClick={() => {
-                              void (async () => {
-                                const succeeded = await runAction(
-                                  "重新确认 AI-rate",
-                                  () =>
-                                    apiPut<TaskRecord>(
-                                      `${taskApi}/checks/final-ai`,
-                                      {
-                                        revision: task.revision ?? 0,
-                                        score: Number(finalScore),
-                                        report: "人工重新检查当前文章的 AI-rate。",
-                                        confirmed: true,
-                                      },
-                                    ),
-                                  "当前文章的 AI-rate 已更新。",
-                                );
-                                if (succeeded) setShowSkippedAiRecheck(false);
-                              })();
-                            }}
-                          >
-                            {pending === "重新确认 AI-rate" ? (
-                              <Loader2 className="animate-spin" />
-                            ) : (
-                              <CheckCircle2 />
-                            )}
-                            保存新结果
-                          </Button>
-                        </div>
+                    <div className="grid content-center gap-2 rounded-xl border px-4 py-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-muted-foreground">处理方式</span>
+                        <Badge variant="outline">
+                          {task.humanization_skipped ? "沿用初稿" : "人化后终检"}
+                        </Badge>
                       </div>
-                    ) : (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={Boolean(pending) || !reviewAllowed}
-                        onClick={() => setShowSkippedAiRecheck(true)}
-                      >
-                        <RefreshCw />
-                        重新检查 AI-rate
-                      </Button>
-                    )}
-                  </CardContent>
-                </Card>
-              ) : (
-              <Card>
-                <CardHeader className="border-b">
-                  <CardTitle>AI-rate 终检</CardTitle>
-                  <CardDescription>
-                    终检截图和分数绑定当前 Humanized Article。
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="grid gap-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-muted-foreground">截图凭证</span>
+                        <span className="text-sm font-medium">
+                          {task.final_ai_check?.screenshot_asset_id ? "已保存" : "待上传"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  {task.humanization_skipped && (
+                    <Alert>
+                      <ShieldCheck />
+                      <AlertTitle>初稿低于 30%，已跳过人化</AlertTitle>
+                      <AlertDescription>
+                        截图仍可在下方上传，并会作为当前文章的 AI-rate 凭证进入交付包。
+                      </AlertDescription>
+                    </Alert>
+                  )}
                   {humanizedDirty ? (
                     <Alert>
                       <AlertCircle />
@@ -1500,7 +1433,7 @@ export function ServerArticleWorkbench({
                         编辑内容或应用 SEO 修改后，请先保存人工审阅稿；旧 AI 率不会作为当前正文结果展示。
                       </AlertDescription>
                     </Alert>
-                  ) : (
+                  ) : !task.humanization_skipped ? (
                     task.final_ai_check?.provider === "zerogpt" &&
                     task.final_ai_check.article_hash ===
                       task.humanized_article_hash && (
@@ -1517,18 +1450,18 @@ export function ServerArticleWorkbench({
                         </AlertDescription>
                       </Alert>
                     )
-                  )}
+                  ) : null}
                   <div className="grid gap-2">
-                    <Label htmlFor="final-screenshot">终检图片</Label>
+                    <Label htmlFor="final-screenshot">AI-rate 截图</Label>
                     <div
                       role="group"
                       tabIndex={0}
-                      aria-label="粘贴或更换终检图片"
+                      aria-label="粘贴或更换 AI-rate 截图"
                       className={cn(
                         "grid min-h-32 gap-3 rounded-lg border border-dashed p-3 outline-none transition-colors",
                         "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]",
                         reviewAllowed && !pending
-                          ? "hover:bg-muted/40"
+                          ? "cursor-pointer hover:bg-muted/40"
                           : "cursor-not-allowed opacity-60",
                       )}
                       onClick={(event) => event.currentTarget.focus()}
@@ -1539,7 +1472,7 @@ export function ServerArticleWorkbench({
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img
                             src={finalScreenshotPreview}
-                            alt="待上传终检图片预览"
+                            alt="待上传 AI-rate 截图预览"
                             className="h-24 w-32 shrink-0 rounded-md border object-contain"
                           />
                           <div className="min-w-0">
@@ -1555,7 +1488,7 @@ export function ServerArticleWorkbench({
                         <div className="flex min-h-24 flex-col items-center justify-center gap-2 text-center">
                           <ClipboardPaste className="size-5" />
                           <p className="text-sm font-medium">
-                            在这里按 Ctrl+V 粘贴图片
+                            在这里按 Ctrl+V 粘贴截图
                           </p>
                           <p className="text-sm text-muted-foreground">
                             也可以点击选择；新图片会替换当前图片。
@@ -1574,8 +1507,8 @@ export function ServerArticleWorkbench({
                       >
                         <ImageIcon />
                         {finalScreenshot || task.final_ai_check?.screenshot_asset_id
-                          ? "更换图片"
-                          : "选择图片"}
+                          ? "更换截图"
+                          : "选择截图"}
                       </Button>
                     </div>
                     <Input
@@ -1592,7 +1525,7 @@ export function ServerArticleWorkbench({
                     />
                     {task.final_ai_check?.screenshot_asset_id && !finalScreenshot && (
                       <p className="text-sm text-muted-foreground">
-                        已保存一张终检图片；粘贴或选择新图片即可更换。
+                        已保存一张 AI-rate 截图；粘贴或选择新图片即可更换。
                       </p>
                     )}
                     <p className="text-xs text-muted-foreground">
@@ -1600,7 +1533,7 @@ export function ServerArticleWorkbench({
                     </p>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="final-score">AI-rate 分数（可选）</Label>
+                    <Label htmlFor="final-score">AI-rate（%）</Label>
                     <Input
                       id="final-score"
                       type="number"
@@ -1611,16 +1544,6 @@ export function ServerArticleWorkbench({
                       onChange={(event) => setFinalScore(event.target.value)}
                     />
                   </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="final-report">终检说明</Label>
-                    <Textarea
-                      id="final-report"
-                      value={finalReport}
-                      disabled={Boolean(pending) || !reviewAllowed}
-                      className="min-h-24 resize-y"
-                      onChange={(event) => setFinalReport(event.target.value)}
-                    />
-                  </div>
                   <Button
                     type="button"
                     className="min-h-11"
@@ -1628,13 +1551,16 @@ export function ServerArticleWorkbench({
                       Boolean(pending) ||
                       !reviewAllowed ||
                       !allowed.has("confirm_final_ai_check") ||
-                      (!finalScreenshot &&
+                      humanizedDirty ||
+                      !finalScore ||
+                      (!task.humanization_skipped &&
+                        !finalScreenshot &&
                         !task.final_ai_check?.screenshot_asset_id)
                     }
                     onClick={() => {
                       void (async () => {
                         const succeeded = await runAction(
-                          "确认终检",
+                          "保存 AI-rate 凭证",
                           async () => {
                             if (finalScreenshot) {
                               await uploadFinalScreenshot(finalScreenshot);
@@ -1643,8 +1569,10 @@ export function ServerArticleWorkbench({
                                 `${taskApi}/checks/final-ai`,
                                 {
                                   revision: latest.revision ?? 0,
-                                  score: finalScore ? Number(finalScore) : null,
-                                  report: finalReport,
+                                  score: Number(finalScore),
+                                  report:
+                                    task.final_ai_check?.report ||
+                                    "人工确认当前文章的 AI-rate。",
                                   confirmed: true,
                                 },
                               );
@@ -1654,88 +1582,68 @@ export function ServerArticleWorkbench({
                               `${taskApi}/checks/final-ai`,
                               {
                                 revision: task.revision ?? 0,
-                                score: finalScore ? Number(finalScore) : null,
-                                report: finalReport,
+                                score: Number(finalScore),
+                                report:
+                                  task.final_ai_check?.report ||
+                                  "人工确认当前文章的 AI-rate。",
                                 confirmed: true,
                               },
                             );
                           },
+                          "AI-rate 与截图凭证已保存。",
                         );
                         if (succeeded) setFinalScreenshot(null);
                       })();
                     }}
                   >
-                    {pending === "确认终检" ? (
+                    {pending === "保存 AI-rate 凭证" ? (
                       <Loader2 className="animate-spin" />
                     ) : (
                       <CheckCircle2 />
                     )}
-                    {task.final_ai_check?.confirmed
-                      ? "重新确认 AI-rate"
-                      : "上传并确认"}
+                    {finalScreenshot
+                      ? "上传截图并保存"
+                      : task.final_ai_check?.screenshot_asset_id
+                        ? "更新 AI-rate"
+                        : task.humanization_skipped
+                          ? "保存 AI-rate"
+                          : "上传截图并确认"}
                   </Button>
                 </CardContent>
               </Card>
-              )}
 
               <Card>
                 <CardHeader className="border-b">
-                  <CardTitle>知识库支撑率</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <BookOpenCheck className="size-5 text-sky-700 dark:text-sky-300" />
+                    <CardTitle>知识库支撑率</CardTitle>
+                  </div>
                   <CardDescription>
-                    按合格正文句计算；官网博客不进入证据比例。
+                    这里显示摘要；正文高亮、证据摘录和来源链接放在独立详情页。
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3">
                   {task.knowledge_coverage?.status === "available" ? (
-                    <>
-                      <div className="rounded-xl border bg-accent/35 px-4 py-5 text-center">
-                        <p className="text-sm text-muted-foreground">
-                          当前正文知识库支撑率
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                      <div className="rounded-xl border bg-emerald-50 px-4 py-4 dark:bg-emerald-950/30">
+                        <p className="text-sm text-emerald-800 dark:text-emerald-200">正文支撑率</p>
+                        <p className="mt-1 text-3xl font-semibold tabular-nums text-emerald-950 dark:text-emerald-50">
+                          {Math.round(task.knowledge_coverage.sentence_coverage * 100)}%
                         </p>
-                        <p className="mt-2 text-3xl font-semibold">
-                          {Math.round(
-                            task.knowledge_coverage.sentence_coverage * 100,
-                          )}
-                          %
-                        </p>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {task.knowledge_coverage.supported_sentences}/
-                          {task.knowledge_coverage.eligible_sentences} 句
+                        <p className="mt-1 text-sm text-emerald-800 dark:text-emerald-200">
+                          {task.knowledge_coverage.supported_sentences}/{task.knowledge_coverage.eligible_sentences} 句
                         </p>
                       </div>
-                      {task.knowledge_coverage.hard_fact_sentences > 0 && (
-                        <div
-                          className={cn(
-                            "rounded-lg border px-3 py-2 text-sm",
-                            task.knowledge_coverage.hard_fact_coverage === 1
-                              ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/35 dark:text-emerald-200"
-                              : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/35 dark:text-red-200",
-                          )}
-                        >
-                          硬事实证据：
-                          {task.knowledge_coverage.supported_hard_fact_sentences}/
-                          {task.knowledge_coverage.hard_fact_sentences} 句
-                        </div>
-                      )}
-                      <p className="text-sm leading-6 text-muted-foreground">
-                        {task.knowledge_coverage.message}
-                      </p>
-                      {task.knowledge_coverage.unsupported_sentence_examples
-                        .length > 0 && (
-                        <details className="rounded-lg border px-3 py-2 text-sm">
-                          <summary className="cursor-pointer font-medium">
-                            查看部分未支撑句子
-                          </summary>
-                          <ul className="mt-2 grid gap-2 pl-5 text-muted-foreground">
-                            {task.knowledge_coverage.unsupported_sentence_examples.map(
-                              (sentence, index) => (
-                                <li key={`${index}-${sentence}`}>{sentence}</li>
-                              ),
-                            )}
-                          </ul>
-                        </details>
-                      )}
-                    </>
+                      <div className="rounded-xl border px-4 py-4">
+                        <p className="text-sm text-muted-foreground">硬事实证据</p>
+                        <p className="mt-1 text-2xl font-semibold tabular-nums">
+                          {task.knowledge_coverage.supported_hard_fact_sentences}/{task.knowledge_coverage.hard_fact_sentences}
+                        </p>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          共 {task.knowledge_coverage.evidence_link_count} 条证据链接
+                        </p>
+                      </div>
+                    </div>
                   ) : (
                     <Alert>
                       <AlertCircle />
@@ -1752,34 +1660,41 @@ export function ServerArticleWorkbench({
                       </AlertDescription>
                     </Alert>
                   )}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="min-h-11 w-full"
-                    disabled={
-                      Boolean(pending) || !reviewAllowed || humanizedDirty
-                    }
-                    onClick={() =>
-                      void runAction(
-                        "检查知识库支撑率",
-                        () =>
-                          apiPut<TaskRecord>(
-                            `${taskApi}/checks/knowledge-coverage`,
-                            { revision: task.revision ?? 0 },
-                          ),
-                        "知识库支撑率已按当前正文句重新计算。",
-                      )
-                    }
-                  >
-                    {pending === "检查知识库支撑率" ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <RefreshCw />
-                    )}
-                    {task.knowledge_coverage?.status === "available"
-                      ? "重新检查知识库支撑率"
-                      : "检查知识库支撑率"}
-                  </Button>
+                  <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                    <Button
+                      nativeButton={false}
+                      className="min-h-11"
+                      render={<Link href={knowledgeCoverageHref} />}
+                    >
+                      <BookOpenCheck />
+                      查看逐句详情
+                      <ArrowRight />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="min-h-11"
+                      disabled={Boolean(pending) || !reviewAllowed || humanizedDirty}
+                      onClick={() =>
+                        void runAction(
+                          "检查知识库支撑率",
+                          () =>
+                            apiPut<TaskRecord>(
+                              `${taskApi}/checks/knowledge-coverage`,
+                              { revision: task.revision ?? 0 },
+                            ),
+                          "知识库支撑率已按当前正文句重新计算。",
+                        )
+                      }
+                    >
+                      {pending === "检查知识库支撑率" ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <RefreshCw />
+                      )}
+                      重新检查
+                    </Button>
+                  </div>
                   {humanizedDirty && (
                     <p className="text-xs text-muted-foreground">
                       请先保存正文，再检查当前版本的知识库支撑率。
