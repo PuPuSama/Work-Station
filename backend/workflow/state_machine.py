@@ -17,6 +17,7 @@ try:
         STATUS_TITLE_SELECTED,
         STATUS_TITLES_READY,
         AICheck,
+        KnowledgeCoverageCheck,
         LinkValidation,
         TaskRecord,
         TdkMetadata,
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - supports `import backend.workflow`
         STATUS_TITLE_SELECTED,
         STATUS_TITLES_READY,
         AICheck,
+        KnowledgeCoverageCheck,
         LinkValidation,
         TaskRecord,
         TdkMetadata,
@@ -355,7 +357,17 @@ def _clear_initial_and_after(task: TaskRecord) -> None:
     task.initial_ai_check = AICheck()
     task.source_links = []
     task.transition_added = False
+    task.knowledge_coverage = KnowledgeCoverageCheck()
     _clear_humanized_and_after(task)
+
+
+def _mark_knowledge_coverage_stale(task: TaskRecord) -> None:
+    if task.knowledge_coverage.status == "not_checked":
+        return
+    task.knowledge_coverage.status = "stale"
+    task.knowledge_coverage.message = (
+        "正文句子发生变化，请重新检查知识库支撑率。"
+    )
 
 
 def _clear_raw_and_after(task: TaskRecord) -> None:
@@ -461,6 +473,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
         task.transition_added = False
         _clear_humanized_and_after(task)
         task.article = task.initial_article or task.article
+        _mark_knowledge_coverage_stale(task)
         _keep_versions(task, 1)
         task.status = STATUS_DRAFT_READY
     elif stage in {"initial_ai_check", "initial_check"}:
@@ -477,6 +490,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
         task.final_ai_check = AICheck()
         _clear_links_and_images(task)
         task.article = task.humanized_article
+        _mark_knowledge_coverage_stale(task)
         _keep_versions(task, 2)
         task.status = STATUS_HUMANIZED_READY
     elif stage in {"final_ai_check", "final_check"}:

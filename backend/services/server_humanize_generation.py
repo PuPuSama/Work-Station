@@ -70,6 +70,7 @@ from services.server_task_commands import (
     ServerTaskCommandUnavailable,
 )
 from services.server_llm_settings import ServerLlmClientFactory
+from services.server_knowledge_coverage import ServerKnowledgeCoverageService
 from services.zerogpt import ZeroGPTDetectionResult
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
@@ -553,11 +554,13 @@ class ServerHumanizeGenerationHandler:
         *,
         provider: HumanizeGenerationProvider,
         ai_rate: HumanizeAiRateDetector | None = None,
+        knowledge_coverage: ServerKnowledgeCoverageService | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
         self._ai_rate = ai_rate
+        self._knowledge_coverage = knowledge_coverage
         self._audit = audit
 
     def __call__(
@@ -674,6 +677,13 @@ class ServerHumanizeGenerationHandler:
                     checked_at=checked_at,
                     article_hash=article_hash,
                 )
+        if self._knowledge_coverage is not None:
+            self._knowledge_coverage.evaluate_task(
+                task,
+                organization_id=organization_id,
+                user_id=requester,
+                project_id=project_id,
+            )
         if cancelled():
             raise JobCancelled(
                 "humanize cancelled before result commit"
@@ -694,6 +704,12 @@ class ServerHumanizeGenerationHandler:
                     "prompt_source": reference.source,
                     "prompt_version": reference.version,
                     "rehumanizing": rehumanizing,
+                    "knowledge_coverage_status": (
+                        task.knowledge_coverage.status
+                    ),
+                    "knowledge_supported_sentences": (
+                        task.knowledge_coverage.supported_sentences
+                    ),
                 },
             )
         except ProjectAccessDenied as exc:

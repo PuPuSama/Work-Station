@@ -68,9 +68,9 @@ from .contracts import (
     HardFactSentenceTarget,
     KnowledgeProject,
     KnowledgeSource,
-    ParagraphEvidenceTarget,
     RetrievalPlan,
     RetrievalScope,
+    SentenceEvidenceTarget,
 )
 from .evidence import calculate_knowledge_coverage
 from .evidence_repository import EvidenceRepositoryError
@@ -461,9 +461,11 @@ class EvidenceLinkResponse(EvidenceLinkWriteRequest):
     project_id: str
 
 
-class ParagraphCoverageInput(KnowledgeApiModel):
+class SentenceCoverageInput(KnowledgeApiModel):
     paragraph_id: str = Field(min_length=1, max_length=200)
+    sentence_id: str = Field(min_length=1, max_length=200)
     paragraph_hash: str = Field(min_length=64, max_length=64)
+    sentence_hash: str = Field(min_length=64, max_length=64)
     visible_words: int = Field(ge=0)
     eligible: bool = True
 
@@ -472,18 +474,19 @@ class HardFactCoverageInput(KnowledgeApiModel):
     paragraph_id: str = Field(min_length=1, max_length=200)
     sentence_id: str = Field(min_length=1, max_length=200)
     paragraph_hash: str = Field(min_length=64, max_length=64)
+    sentence_hash: str = Field(min_length=64, max_length=64)
 
 
 class KnowledgeCoverageRequest(KnowledgeApiModel):
-    paragraphs: list[ParagraphCoverageInput]
+    sentences: list[SentenceCoverageInput]
     hard_fact_sentences: list[HardFactCoverageInput] = Field(default_factory=list)
 
 
 class KnowledgeCoverageResponse(KnowledgeApiModel):
     article_id: str
-    eligible_paragraphs: int
-    supported_paragraphs: int
-    paragraph_coverage: float
+    eligible_sentences: int
+    supported_sentences: int
+    sentence_coverage: float
     hard_fact_sentences: int
     supported_hard_fact_sentences: int
     hard_fact_coverage: float
@@ -2155,20 +2158,23 @@ def calculate_article_knowledge_coverage(
         report = calculate_knowledge_coverage(
             project_id=project_id,
             article_id=article_id,
-            paragraphs=tuple(
-                ParagraphEvidenceTarget(
+            sentences=tuple(
+                SentenceEvidenceTarget(
                     paragraph_id=item.paragraph_id,
+                    sentence_id=item.sentence_id,
                     paragraph_hash=item.paragraph_hash,
+                    sentence_hash=item.sentence_hash,
                     visible_words=item.visible_words,
                     eligible=item.eligible,
                 )
-                for item in payload.paragraphs
+                for item in payload.sentences
             ),
             hard_fact_sentences=tuple(
                 HardFactSentenceTarget(
                     paragraph_id=item.paragraph_id,
                     sentence_id=item.sentence_id,
                     paragraph_hash=item.paragraph_hash,
+                    sentence_hash=item.sentence_hash,
                 )
                 for item in payload.hard_fact_sentences
             ),
@@ -2178,9 +2184,9 @@ def calculate_article_knowledge_coverage(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return KnowledgeCoverageResponse(
         article_id=article_id,
-        eligible_paragraphs=report.eligible_paragraphs,
-        supported_paragraphs=report.supported_paragraphs,
-        paragraph_coverage=report.paragraph_coverage,
+        eligible_sentences=report.eligible_sentences,
+        supported_sentences=report.supported_sentences,
+        sentence_coverage=report.sentence_coverage,
         hard_fact_sentences=report.hard_fact_sentences,
         supported_hard_fact_sentences=report.supported_hard_fact_sentences,
         hard_fact_coverage=report.hard_fact_coverage,

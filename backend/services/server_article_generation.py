@@ -97,6 +97,7 @@ from services.server_task_commands import (
     ServerTaskCommandUnavailable,
 )
 from services.server_llm_settings import ServerLlmClientFactory
+from services.server_knowledge_coverage import ServerKnowledgeCoverageService
 from services.zerogpt import ZeroGPTDetectionResult
 from storage import RevisionConflictError, content_hash, now_iso
 from workflow.state_machine import (
@@ -681,6 +682,7 @@ class ServerArticleGenerationHandler:
         ai_rate: ArticleAiRateDetector | None = None,
         context: PostgresPublishedGenerationContext | None = None,
         official_links: PostgresPublishedOfficialLinks | None = None,
+        knowledge_coverage: ServerKnowledgeCoverageService | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
@@ -692,6 +694,7 @@ class ServerArticleGenerationHandler:
         self._official_links = official_links or PostgresPublishedOfficialLinks(
             engine
         )
+        self._knowledge_coverage = knowledge_coverage
         self._audit = audit
 
     def __call__(
@@ -902,6 +905,13 @@ class ServerArticleGenerationHandler:
                     article_hash=content_hash(initial),
                 )
                 task.zero_gpt_report = task.initial_ai_check.report
+        if self._knowledge_coverage is not None:
+            self._knowledge_coverage.evaluate_task(
+                task,
+                organization_id=organization_id,
+                user_id=requester,
+                project_id=project_id,
+            )
         try:
             saved = PostgresAuditedTaskWriter(
                 self._engine,
@@ -924,6 +934,12 @@ class ServerArticleGenerationHandler:
                     "prompt_version": reference.version,
                     "raw_word_count": visible_word_count(raw),
                     "target_words": target_words,
+                    "knowledge_coverage_status": (
+                        task.knowledge_coverage.status
+                    ),
+                    "knowledge_supported_sentences": (
+                        task.knowledge_coverage.supported_sentences
+                    ),
                 },
             )
         except ProjectAccessDenied as exc:

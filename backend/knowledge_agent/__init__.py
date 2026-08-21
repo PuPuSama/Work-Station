@@ -21,8 +21,8 @@ from .contracts import (
     RetrievalQuery,
     SourceSnapshot,
     SourceCandidate,
-    ParagraphEvidenceTarget,
     KnowledgeCoverageReport,
+    SentenceEvidenceTarget,
     Vector,
     require_project_scope,
 )
@@ -428,7 +428,7 @@ __all__ = [
     "GapFillAttempt",
     "SnapshotAsset",
     "SourceCandidate",
-    "ParagraphEvidenceTarget",
+    "SentenceEvidenceTarget",
     "SourceDiscovery",
     "SnapshotActivationError",
     "SnapshotReviewAppendResult",

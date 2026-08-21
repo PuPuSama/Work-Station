@@ -16,7 +16,7 @@ from knowledge_agent import (  # noqa: E402
     EvidencePackRequest,
     HardFactSentenceTarget,
     KnowledgeChunk,
-    ParagraphEvidenceTarget,
+    SentenceEvidenceTarget,
     RetrievalHit,
     RetrievalPlan,
     RetrievalProvenance,
@@ -262,22 +262,30 @@ class KnowledgeCoverageTests(unittest.TestCase):
     def test_coverage_ignores_short_stale_and_non_sentence_fact_links(self) -> None:
         first_hash = digest("paragraph one")
         second_hash = digest("paragraph two")
+        first_sentence_hash = digest("sentence one")
+        second_sentence_hash = digest("sentence two")
         links = (
             EvidenceLink(
                 project_id="project-a",
                 evidence_link_id="link-1",
                 article_id="article-1",
                 paragraph_id="p1",
+                sentence_id="s1",
                 paragraph_hash=first_hash,
                 chunk_id="snapshot:0",
+                support_scope="sentence",
+                metadata={"sentence_hash": first_sentence_hash},
             ),
             EvidenceLink(
                 project_id="project-a",
                 evidence_link_id="link-2",
                 article_id="article-1",
                 paragraph_id="p2",
+                sentence_id="s2",
                 paragraph_hash=digest("old paragraph two"),
                 chunk_id="snapshot:1",
+                support_scope="sentence",
+                metadata={"sentence_hash": digest("old sentence two")},
             ),
             EvidenceLink(
                 project_id="project-a",
@@ -289,27 +297,42 @@ class KnowledgeCoverageTests(unittest.TestCase):
                 chunk_id="snapshot:0",
                 support_scope="sentence",
                 claim_type="hard_fact",
+                metadata={"sentence_hash": first_sentence_hash},
             ),
         )
 
         report = calculate_knowledge_coverage(
             project_id="project-a",
             article_id="article-1",
-            paragraphs=(
-                ParagraphEvidenceTarget("p1", first_hash, 10),
-                ParagraphEvidenceTarget("p2", second_hash, 12),
-                ParagraphEvidenceTarget("short", digest("short"), 4),
+            sentences=(
+                SentenceEvidenceTarget(
+                    "p1", "s1", first_hash, first_sentence_hash, 10
+                ),
+                SentenceEvidenceTarget(
+                    "p2", "s2", second_hash, second_sentence_hash, 12
+                ),
+                SentenceEvidenceTarget(
+                    "short",
+                    "short-sentence",
+                    digest("short"),
+                    digest("short sentence"),
+                    4,
+                ),
             ),
             hard_fact_sentences=(
-                HardFactSentenceTarget("p1", "s1", first_hash),
-                HardFactSentenceTarget("p2", "s2", second_hash),
+                HardFactSentenceTarget(
+                    "p1", "s1", first_hash, first_sentence_hash
+                ),
+                HardFactSentenceTarget(
+                    "p2", "s2", second_hash, second_sentence_hash
+                ),
             ),
             links=links,
         )
 
-        self.assertEqual(report.eligible_paragraphs, 2)
-        self.assertEqual(report.supported_paragraphs, 1)
-        self.assertEqual(report.paragraph_coverage, 0.5)
+        self.assertEqual(report.eligible_sentences, 2)
+        self.assertEqual(report.supported_sentences, 1)
+        self.assertEqual(report.sentence_coverage, 0.5)
         self.assertEqual(report.hard_fact_coverage, 0.5)
 
     def test_hard_fact_requires_sentence_level_link(self) -> None:

@@ -11,8 +11,8 @@ from .contracts import (
     EvidencePackRequest,
     HardFactSentenceTarget,
     KnowledgeCoverageReport,
-    ParagraphEvidenceTarget,
     RetrievalHit,
+    SentenceEvidenceTarget,
 )
 
 
@@ -134,16 +134,16 @@ def calculate_knowledge_coverage(
     *,
     project_id: str,
     article_id: str,
-    paragraphs: Sequence[ParagraphEvidenceTarget],
+    sentences: Sequence[SentenceEvidenceTarget],
     hard_fact_sentences: Sequence[HardFactSentenceTarget],
     links: Sequence[EvidenceLink],
 ) -> KnowledgeCoverageReport:
-    """Count only current-content links; stale paragraph hashes never carry over."""
+    """Count only current sentence links; stale sentence hashes never carry over."""
 
-    eligible_paragraphs = tuple(
-        paragraph
-        for paragraph in paragraphs
-        if paragraph.eligible and paragraph.visible_words >= 5
+    eligible_sentences = tuple(
+        sentence
+        for sentence in sentences
+        if sentence.eligible and sentence.visible_words >= 5
     )
     valid_links = tuple(
         link
@@ -153,12 +153,32 @@ def calculate_knowledge_coverage(
         and link.validation_status == "valid"
     )
 
-    supported_paragraph_ids = {
-        paragraph.paragraph_id
-        for paragraph in eligible_paragraphs
+    def matches_sentence(
+        link: EvidenceLink,
+        target: SentenceEvidenceTarget | HardFactSentenceTarget,
+    ) -> bool:
+        if (
+            link.support_scope != "sentence"
+            or link.sentence_id != target.sentence_id
+        ):
+            return False
+        linked_sentence_hash = str(
+            link.metadata.get("sentence_hash") or ""
+        ).lower()
+        if len(linked_sentence_hash) == 64:
+            return linked_sentence_hash == target.sentence_hash
+        # Legacy sentence links did not store a sentence hash. They remain
+        # usable only while their complete paragraph is unchanged.
+        return (
+            link.paragraph_id == target.paragraph_id
+            and link.paragraph_hash == target.paragraph_hash
+        )
+
+    supported_sentence_ids = {
+        sentence.sentence_id
+        for sentence in eligible_sentences
         if any(
-            link.paragraph_id == paragraph.paragraph_id
-            and link.paragraph_hash == paragraph.paragraph_hash
+            matches_sentence(link, sentence)
             for link in valid_links
         )
     }
@@ -166,18 +186,15 @@ def calculate_knowledge_coverage(
         (target.paragraph_id, target.sentence_id)
         for target in hard_fact_sentences
         if any(
-            link.paragraph_id == target.paragraph_id
-            and link.sentence_id == target.sentence_id
-            and link.paragraph_hash == target.paragraph_hash
-            and link.support_scope == "sentence"
+            matches_sentence(link, target)
             and link.claim_type == "hard_fact"
             for link in valid_links
         )
     }
 
     return KnowledgeCoverageReport(
-        eligible_paragraphs=len(eligible_paragraphs),
-        supported_paragraphs=len(supported_paragraph_ids),
+        eligible_sentences=len(eligible_sentences),
+        supported_sentences=len(supported_sentence_ids),
         hard_fact_sentences=len(hard_fact_sentences),
         supported_hard_fact_sentences=len(supported_hard_fact_keys),
     )

@@ -106,6 +106,32 @@ class AICheck(WorkflowModel):
     article_hash: str = ""
 
 
+KnowledgeCoverageStatus = Literal[
+    "not_checked",
+    "available",
+    "stale",
+    "unavailable",
+]
+
+
+class KnowledgeCoverageCheck(WorkflowModel):
+    """Sentence-level project-knowledge support bound to visible article copy."""
+
+    status: KnowledgeCoverageStatus = "not_checked"
+    eligible_sentences: int = Field(default=0, ge=0)
+    supported_sentences: int = Field(default=0, ge=0)
+    sentence_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    hard_fact_sentences: int = Field(default=0, ge=0)
+    supported_hard_fact_sentences: int = Field(default=0, ge=0)
+    hard_fact_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
+    evidence_link_count: int = Field(default=0, ge=0)
+    unsupported_sentence_examples: list[str] = Field(default_factory=list)
+    content_hash: str = ""
+    provider: str = ""
+    checked_at: str = ""
+    message: str = ""
+
+
 class SourceLink(WorkflowModel):
     anchor: str = ""
     url: str = ""
@@ -404,6 +430,9 @@ class TaskRecord(WorkflowModel):
 
     initial_ai_check: AICheck = Field(default_factory=AICheck)
     final_ai_check: AICheck = Field(default_factory=AICheck)
+    knowledge_coverage: KnowledgeCoverageCheck = Field(
+        default_factory=KnowledgeCoverageCheck
+    )
     source_links: list[SourceLink] = Field(default_factory=list)
     link_validation: LinkValidation = Field(default_factory=LinkValidation)
 

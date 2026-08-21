@@ -137,6 +137,10 @@ from services.server_humanize_generation import (
     ServerHumanizeGenerationHandler,
     ServerHumanizeGenerationRegistry,
 )
+from services.server_knowledge_coverage import (
+    LlmServerKnowledgeCoverageProvider,
+    ServerKnowledgeCoverageService,
+)
 from services.server_llm_settings import (
     PostgresServerLlmSettings,
     ServerLlmClientFactory,
@@ -347,6 +351,11 @@ async def app_lifespan(application: FastAPI):
         "server_article_generation",
         None,
     )
+    previous_server_knowledge_coverage = getattr(
+        application.state,
+        "server_knowledge_coverage",
+        None,
+    )
     previous_server_link_restoration = getattr(
         application.state,
         "server_link_restoration",
@@ -413,6 +422,7 @@ async def app_lifespan(application: FastAPI):
     server_outline_generation = None
     server_title_generation = None
     server_article_generation = None
+    server_knowledge_coverage = None
     server_link_restoration = None
     server_seo_review_generation = None
     server_humanize_generation = None
@@ -456,6 +466,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_outline_generation = None
     application.state.server_title_generation = None
     application.state.server_article_generation = None
+    application.state.server_knowledge_coverage = None
     application.state.server_link_restoration = None
     application.state.server_seo_review_generation = None
     application.state.server_humanize_generation = None
@@ -724,12 +735,24 @@ async def app_lifespan(application: FastAPI):
             cfg,
             llm_factory=server_llm_client_factory,
         )
+        coverage_provider = LlmServerKnowledgeCoverageProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
+        server_knowledge_coverage = ServerKnowledgeCoverageService(
+            server_engine,
+            provider=coverage_provider,
+        )
+        application.state.server_knowledge_coverage = (
+            server_knowledge_coverage
+        )
         zerogpt_client = ZeroGPTClient()
         article_handler = (
             ServerArticleGenerationHandler(
                 server_engine,
                 provider=article_provider,
                 ai_rate=zerogpt_client,
+                knowledge_coverage=server_knowledge_coverage,
             )
             if article_provider.ready
             else None
@@ -797,6 +820,7 @@ async def app_lifespan(application: FastAPI):
                 server_engine,
                 provider=humanize_provider,
                 ai_rate=zerogpt_client,
+                knowledge_coverage=server_knowledge_coverage,
             )
             if humanize_provider.ready
             else None
@@ -1140,6 +1164,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_article_generation = (
                 previous_server_article_generation
+            )
+            application.state.server_knowledge_coverage = (
+                previous_server_knowledge_coverage
             )
             application.state.server_link_restoration = (
                 previous_server_link_restoration

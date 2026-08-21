@@ -220,6 +220,7 @@ export function ServerArticleWorkbench({
   const [initialScore, setInitialScore] = useState("");
   const [finalScore, setFinalScore] = useState("");
   const [finalReport, setFinalReport] = useState("");
+  const [showSkippedAiRecheck, setShowSkippedAiRecheck] = useState(false);
   const [finalScreenshot, setFinalScreenshot] = useState<File | null>(null);
   const [finalScreenshotPreview, setFinalScreenshotPreview] = useState("");
   const [useEvidencePack, setUseEvidencePack] = useState(true);
@@ -314,6 +315,7 @@ export function ServerArticleWorkbench({
     setTask(null);
     setIsProjectOwner(false);
     setFinalScreenshot(null);
+    setShowSkippedAiRecheck(false);
     setPending("");
     setMessage("");
     setWritingSettingsDirty(false);
@@ -1403,8 +1405,82 @@ export function ServerArticleWorkbench({
                       </p>
                     </div>
                     <p className="text-sm leading-6 text-muted-foreground">
-                      已沿用初稿并跳过人化、终检；后续可直接恢复链接。
+                      已沿用初稿并跳过人化、第二次检测；如重新在
+                      ZeroGPT 检查，可在这里更新当前文章的 AI-rate。
                     </p>
+                    {showSkippedAiRecheck ? (
+                      <div className="grid gap-3 rounded-xl border p-3">
+                        <div className="grid gap-2">
+                          <Label htmlFor="skipped-final-score">
+                            重新检查后的 AI-rate（%）
+                          </Label>
+                          <Input
+                            id="skipped-final-score"
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={finalScore}
+                            disabled={Boolean(pending) || !reviewAllowed}
+                            onChange={(event) => setFinalScore(event.target.value)}
+                          />
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={Boolean(pending)}
+                            onClick={() => setShowSkippedAiRecheck(false)}
+                          >
+                            取消
+                          </Button>
+                          <Button
+                            type="button"
+                            disabled={
+                              Boolean(pending) ||
+                              !reviewAllowed ||
+                              !allowed.has("confirm_final_ai_check") ||
+                              !finalScore
+                            }
+                            onClick={() => {
+                              void (async () => {
+                                const succeeded = await runAction(
+                                  "重新确认 AI-rate",
+                                  () =>
+                                    apiPut<TaskRecord>(
+                                      `${taskApi}/checks/final-ai`,
+                                      {
+                                        revision: task.revision ?? 0,
+                                        score: Number(finalScore),
+                                        report: "人工重新检查当前文章的 AI-rate。",
+                                        confirmed: true,
+                                      },
+                                    ),
+                                  "当前文章的 AI-rate 已更新。",
+                                );
+                                if (succeeded) setShowSkippedAiRecheck(false);
+                              })();
+                            }}
+                          >
+                            {pending === "重新确认 AI-rate" ? (
+                              <Loader2 className="animate-spin" />
+                            ) : (
+                              <CheckCircle2 />
+                            )}
+                            保存新结果
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={Boolean(pending) || !reviewAllowed}
+                        onClick={() => setShowSkippedAiRecheck(true)}
+                      >
+                        <RefreshCw />
+                        重新检查 AI-rate
+                      </Button>
+                    )}
                   </CardContent>
                 </Card>
               ) : (
@@ -1594,11 +1670,123 @@ export function ServerArticleWorkbench({
                     ) : (
                       <CheckCircle2 />
                     )}
-                    上传并确认
+                    {task.final_ai_check?.confirmed
+                      ? "重新确认 AI-rate"
+                      : "上传并确认"}
                   </Button>
                 </CardContent>
               </Card>
               )}
+
+              <Card>
+                <CardHeader className="border-b">
+                  <CardTitle>知识库支撑率</CardTitle>
+                  <CardDescription>
+                    按合格正文句计算；官网博客不进入证据比例。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3">
+                  {task.knowledge_coverage?.status === "available" ? (
+                    <>
+                      <div className="rounded-xl border bg-accent/35 px-4 py-5 text-center">
+                        <p className="text-sm text-muted-foreground">
+                          当前正文知识库支撑率
+                        </p>
+                        <p className="mt-2 text-3xl font-semibold">
+                          {Math.round(
+                            task.knowledge_coverage.sentence_coverage * 100,
+                          )}
+                          %
+                        </p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {task.knowledge_coverage.supported_sentences}/
+                          {task.knowledge_coverage.eligible_sentences} 句
+                        </p>
+                      </div>
+                      {task.knowledge_coverage.hard_fact_sentences > 0 && (
+                        <div
+                          className={cn(
+                            "rounded-lg border px-3 py-2 text-sm",
+                            task.knowledge_coverage.hard_fact_coverage === 1
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/35 dark:text-emerald-200"
+                              : "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/35 dark:text-red-200",
+                          )}
+                        >
+                          硬事实证据：
+                          {task.knowledge_coverage.supported_hard_fact_sentences}/
+                          {task.knowledge_coverage.hard_fact_sentences} 句
+                        </div>
+                      )}
+                      <p className="text-sm leading-6 text-muted-foreground">
+                        {task.knowledge_coverage.message}
+                      </p>
+                      {task.knowledge_coverage.unsupported_sentence_examples
+                        .length > 0 && (
+                        <details className="rounded-lg border px-3 py-2 text-sm">
+                          <summary className="cursor-pointer font-medium">
+                            查看部分未支撑句子
+                          </summary>
+                          <ul className="mt-2 grid gap-2 pl-5 text-muted-foreground">
+                            {task.knowledge_coverage.unsupported_sentence_examples.map(
+                              (sentence, index) => (
+                                <li key={`${index}-${sentence}`}>{sentence}</li>
+                              ),
+                            )}
+                          </ul>
+                        </details>
+                      )}
+                    </>
+                  ) : (
+                    <Alert>
+                      <AlertCircle />
+                      <AlertTitle>
+                        {task.knowledge_coverage?.status === "stale"
+                          ? "正文已变化，结果已失效"
+                          : task.knowledge_coverage?.status === "unavailable"
+                            ? "本次检查未完成"
+                            : "尚未检查知识库支撑率"}
+                      </AlertTitle>
+                      <AlertDescription>
+                        {task.knowledge_coverage?.message ||
+                          "检查后会显示有项目知识支撑的正文句比例。"}
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="min-h-11 w-full"
+                    disabled={
+                      Boolean(pending) || !reviewAllowed || humanizedDirty
+                    }
+                    onClick={() =>
+                      void runAction(
+                        "检查知识库支撑率",
+                        () =>
+                          apiPut<TaskRecord>(
+                            `${taskApi}/checks/knowledge-coverage`,
+                            { revision: task.revision ?? 0 },
+                          ),
+                        "知识库支撑率已按当前正文句重新计算。",
+                      )
+                    }
+                  >
+                    {pending === "检查知识库支撑率" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <RefreshCw />
+                    )}
+                    {task.knowledge_coverage?.status === "available"
+                      ? "重新检查知识库支撑率"
+                      : "检查知识库支撑率"}
+                  </Button>
+                  {humanizedDirty && (
+                    <p className="text-xs text-muted-foreground">
+                      请先保存正文，再检查当前版本的知识库支撑率。
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
 
               <Card>
                 <CardHeader className="border-b">

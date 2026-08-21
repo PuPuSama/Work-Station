@@ -105,6 +105,7 @@ from services.server_humanize_generation import (
     HumanizeGenerationUnavailable,
     ServerHumanizeGenerationRegistry,
 )
+from services.server_knowledge_coverage import ServerKnowledgeCoverageService
 from services.server_seo_review_settings import (
     ServerSeoReviewSettingsError,
     apply_server_seo_review_settings,
@@ -1210,6 +1211,22 @@ def _article_generation(
             detail="Server article generation is not available.",
         )
     return registry
+
+
+def _knowledge_coverage(
+    request: Request,
+) -> ServerKnowledgeCoverageService:
+    service = getattr(
+        request.app.state,
+        "server_knowledge_coverage",
+        None,
+    )
+    if not isinstance(service, ServerKnowledgeCoverageService):
+        raise HTTPException(
+            status_code=503,
+            detail="Server knowledge coverage is not available.",
+        )
+    return service
 
 
 def _link_restoration(
@@ -3772,6 +3789,12 @@ def save_project_task_humanized_article(
                     checked_at=checked_at,
                     article_hash=article_hash,
                 )
+    _knowledge_coverage(request).evaluate_task(
+        task,
+        organization_id=authorized.actor.organization_id,
+        user_id=authorized.actor.user_id,
+        project_id=authorized.project_id,
+    )
     return _save_audited_task(
         request,
         authorized,
@@ -3780,6 +3803,68 @@ def save_project_task_humanized_article(
         action="article.humanized.updated",
         details={
             "humanized_word_count": visible_word_count(candidate),
+        },
+    )
+
+
+@router.put(
+    "/{project}/tasks/{task_id}/checks/knowledge-coverage",
+    response_model=TaskRecord,
+)
+def recheck_project_task_knowledge_coverage(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> TaskRecord:
+    del project
+    authorized = _require_project_permission(
+        request,
+        authorized,
+        "article.review",
+    )
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Task was not found in the requested project.",
+        ) from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(
+                RevisionConflictError(
+                    task.id,
+                    payload.revision,
+                    task.revision,
+                )
+            ),
+        )
+    report = _knowledge_coverage(request).evaluate_task(
+        task,
+        organization_id=authorized.actor.organization_id,
+        user_id=authorized.actor.user_id,
+        project_id=authorized.project_id,
+    )
+    return _save_audited_task(
+        request,
+        authorized,
+        task,
+        expected_revision=payload.revision,
+        action="article.knowledge_coverage.checked",
+        details={
+            "status": report.status,
+            "eligible_sentences": report.eligible_sentences,
+            "supported_sentences": report.supported_sentences,
+            "hard_fact_sentences": report.hard_fact_sentences,
+            "supported_hard_fact_sentences": (
+                report.supported_hard_fact_sentences
+            ),
         },
     )
 
@@ -3986,16 +4071,31 @@ def confirm_project_task_final_ai(
     except WorkflowActionNotAllowed as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     previous = task.final_ai_check
-    if payload.confirmed and not previous.screenshot_asset_id.strip():
+    if (
+        payload.confirmed
+        and not previous.screenshot_asset_id.strip()
+        and not task.humanization_skipped
+    ):
         raise HTTPException(
             status_code=409,
             detail="Upload the final AI-rate screenshot before confirming.",
+        )
+    if (
+        payload.confirmed
+        and task.humanization_skipped
+        and payload.score is None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="AI-rate score is required when reconfirming a skipped article.",
         )
     task.final_ai_check = AICheck(
         confirmed=payload.confirmed,
         deferred=payload.deferred,
         score=payload.score,
         report=payload.report,
+        provider=previous.provider,
+        checked_at=previous.checked_at,
         screenshot_path="",
         screenshot_asset_id=previous.screenshot_asset_id,
         screenshot_content_hash=previous.screenshot_content_hash,

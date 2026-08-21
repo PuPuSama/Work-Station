@@ -798,20 +798,25 @@ class EvidenceLink:
 
 
 @dataclass(frozen=True, slots=True)
-class ParagraphEvidenceTarget:
+class SentenceEvidenceTarget:
     paragraph_id: str
+    sentence_id: str
     paragraph_hash: str
+    sentence_hash: str
     visible_words: int
     eligible: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "paragraph_id", _require(self.paragraph_id, "paragraph_id"))
-        normalized_hash = _require(self.paragraph_hash, "paragraph_hash").lower()
-        if len(normalized_hash) != 64 or any(
-            character not in "0123456789abcdef" for character in normalized_hash
-        ):
-            raise ValueError("paragraph_hash must be a SHA-256 hex digest")
-        object.__setattr__(self, "paragraph_hash", normalized_hash)
+        object.__setattr__(self, "sentence_id", _require(self.sentence_id, "sentence_id"))
+        for name in ("paragraph_hash", "sentence_hash"):
+            normalized_hash = _require(getattr(self, name), name).lower()
+            if len(normalized_hash) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in normalized_hash
+            ):
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+            object.__setattr__(self, name, normalized_hash)
         if (
             isinstance(self.visible_words, bool)
             or not isinstance(self.visible_words, int)
@@ -827,47 +832,50 @@ class HardFactSentenceTarget:
     paragraph_id: str
     sentence_id: str
     paragraph_hash: str
+    sentence_hash: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "paragraph_id", _require(self.paragraph_id, "paragraph_id"))
         object.__setattr__(self, "sentence_id", _require(self.sentence_id, "sentence_id"))
-        normalized_hash = _require(self.paragraph_hash, "paragraph_hash").lower()
-        if len(normalized_hash) != 64 or any(
-            character not in "0123456789abcdef" for character in normalized_hash
-        ):
-            raise ValueError("paragraph_hash must be a SHA-256 hex digest")
-        object.__setattr__(self, "paragraph_hash", normalized_hash)
+        for name in ("paragraph_hash", "sentence_hash"):
+            normalized_hash = _require(getattr(self, name), name).lower()
+            if len(normalized_hash) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in normalized_hash
+            ):
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+            object.__setattr__(self, name, normalized_hash)
 
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeCoverageReport:
-    eligible_paragraphs: int
-    supported_paragraphs: int
+    eligible_sentences: int
+    supported_sentences: int
     hard_fact_sentences: int
     supported_hard_fact_sentences: int
 
     def __post_init__(self) -> None:
         for name in (
-            "eligible_paragraphs",
-            "supported_paragraphs",
+            "eligible_sentences",
+            "supported_sentences",
             "hard_fact_sentences",
             "supported_hard_fact_sentences",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
-        if self.supported_paragraphs > self.eligible_paragraphs:
-            raise ValueError("supported_paragraphs exceeds eligible_paragraphs")
+        if self.supported_sentences > self.eligible_sentences:
+            raise ValueError("supported_sentences exceeds eligible_sentences")
         if self.supported_hard_fact_sentences > self.hard_fact_sentences:
             raise ValueError(
                 "supported_hard_fact_sentences exceeds hard_fact_sentences"
             )
 
     @property
-    def paragraph_coverage(self) -> float:
-        if self.eligible_paragraphs == 0:
+    def sentence_coverage(self) -> float:
+        if self.eligible_sentences == 0:
             return 1.0
-        return self.supported_paragraphs / self.eligible_paragraphs
+        return self.supported_sentences / self.eligible_sentences
 
     @property
     def hard_fact_coverage(self) -> float:

@@ -489,7 +489,7 @@ def server_http_route_available(method: str, path: str) -> bool:
         and parts[4] == "tasks"
         and bool(parts[5])
         and parts[6] == "checks"
-        and parts[7] in {"final-ai", "initial-ai"}
+        and parts[7] in {"final-ai", "initial-ai", "knowledge-coverage"}
     ):
         return True
     if (

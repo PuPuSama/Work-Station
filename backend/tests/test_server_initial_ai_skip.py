@@ -8,7 +8,9 @@ from pydantic import ValidationError
 
 from models import TaskRecord
 from server_project_http import (
+    FinalAiCheckUpdateRequest,
     InitialAiCheckUpdateRequest,
+    confirm_project_task_final_ai,
     confirm_project_task_initial_ai,
 )
 from services.access_control import ActorIdentity
@@ -100,6 +102,40 @@ class ServerInitialAiSkipTests(unittest.TestCase):
     def test_confirmed_initial_ai_rate_requires_a_score(self) -> None:
         with self.assertRaises(ValidationError):
             InitialAiCheckUpdateRequest(revision=0, confirmed=True)
+
+    def test_skipped_article_can_reconfirm_ai_rate_without_screenshot(self) -> None:
+        task = self._confirm(_task("recheck-task"), 12.5)
+
+        with (
+            patch(
+                "server_project_http._require_project_permission",
+                return_value=self.authorized,
+            ),
+            patch(
+                "server_project_http._task_store",
+                return_value=FakeTaskStore(task),
+            ),
+            patch(
+                "server_project_http._save_audited_task",
+                return_value=task,
+            ),
+        ):
+            updated = confirm_project_task_final_ai(
+                "example.com",
+                task.id,
+                FinalAiCheckUpdateRequest(
+                    revision=task.revision,
+                    score=18,
+                    report="Manual recheck.",
+                    confirmed=True,
+                ),
+                self.request,
+                authorized=self.authorized,
+            )
+
+        self.assertEqual(updated.final_ai_check.score, 18)
+        self.assertTrue(updated.final_ai_check.confirmed)
+        self.assertEqual(updated.final_ai_check.screenshot_asset_id, "")
 
 
 if __name__ == "__main__":

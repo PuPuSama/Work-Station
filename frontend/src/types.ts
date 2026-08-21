@@ -51,6 +51,22 @@ export type AiCheckRecord = {
   confirmed_at: string;
 };
 
+export type KnowledgeCoverageCheckRecord = {
+  status: "not_checked" | "available" | "stale" | "unavailable";
+  eligible_sentences: number;
+  supported_sentences: number;
+  sentence_coverage: number;
+  hard_fact_sentences: number;
+  supported_hard_fact_sentences: number;
+  hard_fact_coverage: number;
+  evidence_link_count: number;
+  unsupported_sentence_examples: string[];
+  content_hash: string;
+  provider: string;
+  checked_at: string;
+  message: string;
+};
+
 export type ArticleLink = {
   anchor: string;
   url: string;
@@ -376,6 +392,7 @@ export type TaskRecord = {
   compression?: CompressionRecord;
   initial_ai_check?: AiCheckRecord;
   final_ai_check?: AiCheckRecord;
+  knowledge_coverage?: KnowledgeCoverageCheckRecord;
   source_links?: ArticleLink[];
   link_validation?: LinkValidation;
   product_candidate_ids?: string[];
