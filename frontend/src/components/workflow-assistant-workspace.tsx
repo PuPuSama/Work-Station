@@ -101,6 +101,11 @@ const stepStatusLabels: Record<string, string> = {
   cancelled: "已取消",
 };
 
+// Planning can legitimately exceed the shared four-minute API timeout when
+// the selected model performs deep reasoning over several projects. Keep a
+// finite browser guard, but do not abort a healthy server-side planning call.
+const WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS = 30 * 60 * 1000;
+
 function localId(prefix: string) {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   return `${prefix}-${random}`.replace(/[^A-Za-z0-9._:-]/g, "-");
@@ -241,6 +246,13 @@ export function WorkflowAssistantWorkspace() {
   const loadedConversationRef = useRef<string | null>(null);
   const lastEventSequenceRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
+  const pendingMessageDispatchRef = useRef<{
+    conversationId: string;
+    content: string;
+    scopeKey: string;
+    requestId: string;
+    idempotencyKey: string;
+  } | null>(null);
 
   const refreshAttention = useCallback(async () => {
     const [countResponse, listResponse] = await Promise.all([
@@ -543,16 +555,38 @@ export function WorkflowAssistantWorkspace() {
         setConversations((current) => [conversation as WorkflowAssistantConversation, ...current]);
         setSelectedConversation(conversation);
       }
+      const scopeKey = JSON.stringify({
+        projectIds: selectedProjectIds,
+        articleTaskIds: selectedTaskIds,
+      });
+      let dispatchIdentity = pendingMessageDispatchRef.current;
+      if (
+        !dispatchIdentity
+        || dispatchIdentity.conversationId !== conversation.conversation_id
+        || dispatchIdentity.content !== content
+        || dispatchIdentity.scopeKey !== scopeKey
+      ) {
+        dispatchIdentity = {
+          conversationId: conversation.conversation_id,
+          content,
+          scopeKey,
+          requestId: localId("request"),
+          idempotencyKey: localId("message"),
+        };
+        pendingMessageDispatchRef.current = dispatchIdentity;
+      }
       const response = await apiPost<WorkflowAssistantDispatch>(
         `/api/workflow-assistant/conversations/${encodeURIComponent(conversation.conversation_id)}/messages`,
-          {
-            content,
-            request_id: localId("request"),
-            idempotency_key: localId("message"),
-            project_ids: selectedProjectIds,
-            article_task_ids: selectedTaskIds.length ? selectedTaskIds : null,
-          },
+        {
+          content,
+          request_id: dispatchIdentity.requestId,
+          idempotency_key: dispatchIdentity.idempotencyKey,
+          project_ids: selectedProjectIds,
+          article_task_ids: selectedTaskIds.length ? selectedTaskIds : null,
+        },
+        WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
+      pendingMessageDispatchRef.current = null;
       setPlan(response.plan);
       void refreshAttention().catch(() => undefined);
       setDraft("");
@@ -643,6 +677,7 @@ export function WorkflowAssistantWorkspace() {
           plan_hash: plan.plan_hash,
           natural_language_request: request,
         },
+        WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
       setPlan(next);
       setRevisionDraft("");

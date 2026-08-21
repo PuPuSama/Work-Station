@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Iterator
 from datetime import datetime
@@ -67,6 +68,9 @@ from .tools import (
     WorkflowToolRegistry,
     build_read_only_tool_handlers,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -1126,12 +1130,37 @@ def append_message(
                 project_ids=context.project_ids,
             )
         planner = _planner(request)
-        plan = planner.plan(
-            actor=actor,
-            request=payload.content,
-            context=context,
-            selected_project_ids=context.project_ids,
-            selected_task_ids=selected_task_ids,
+        planner_started_at = time.monotonic()
+        LOGGER.info(
+            "workflow assistant planner request started: request_id=%s "
+            "project_count=%s selected_task_count=%s",
+            payload.request_id,
+            len(context.project_ids),
+            len(selected_task_ids),
+        )
+        try:
+            plan = planner.plan(
+                actor=actor,
+                request=payload.content,
+                context=context,
+                selected_project_ids=context.project_ids,
+                selected_task_ids=selected_task_ids,
+            )
+        except Exception as exc:
+            LOGGER.exception(
+                "workflow assistant planner request failed: request_id=%s "
+                "duration_seconds=%.3f error_type=%s",
+                payload.request_id,
+                time.monotonic() - planner_started_at,
+                type(exc).__name__,
+            )
+            raise
+        LOGGER.info(
+            "workflow assistant planner request completed: request_id=%s "
+            "duration_seconds=%.3f step_count=%s",
+            payload.request_id,
+            time.monotonic() - planner_started_at,
+            len(plan.steps),
         )
         planner_model_identity = planner.consume_model_identity()
         usage = estimate_planner_usage(

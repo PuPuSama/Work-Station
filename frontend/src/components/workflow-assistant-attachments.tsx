@@ -411,7 +411,9 @@ export function WorkflowAssistantAttachments({
       }
     };
     source.onerror = () => {
-      activityRef.current?.("附件 SSE 暂时断开，浏览器会自动重连。");
+      // The server intentionally closes this bounded stream after 30 seconds.
+      // EventSource reconnects automatically; treating that normal hand-off as
+      // an error would flood the shared execution timeline with false alarms.
     };
     return () => {
       disposed = true;
