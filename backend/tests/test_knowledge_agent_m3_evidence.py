@@ -184,6 +184,44 @@ class RetrievalPlanGenerationTests(unittest.TestCase):
             changed_task.retrieval_plan_id,
         )
 
+    def test_plan_tracks_h3_claims_and_product_ids(self) -> None:
+        plan = self._plan(
+            outline=(
+                "## Compare Storage Options\n"
+                "### Capacity and Power Specifications\n"
+                "### Procurement Selection Logic\n"
+                "## FAQ\n"
+                "### What should buyers confirm?"
+            ),
+            products=(
+                {
+                    "product_id": "product-a",
+                    "name": "OakShield Pro",
+                    "url": "https://example.test/products/oakshield-pro",
+                    "article_role": "primary_solution",
+                },
+            ),
+            article_brief={
+                "brief_id": "brief-a",
+                "input_hash": "a" * 64,
+                "knowledge_snapshot_fingerprint": "b" * 64,
+            },
+        )
+        section = plan.scopes[0]
+        requirements = section.metadata["claim_requirements"]
+        self.assertEqual(len(requirements), 2)
+        self.assertTrue(requirements[0]["require_hard_fact"])
+        self.assertEqual(
+            next(scope for scope in plan.scopes if scope.scope_key == "faq").scope_type,
+            "faq",
+        )
+        product_scope = next(
+            scope for scope in plan.scopes if scope.scope_type == "product_fact"
+        )
+        self.assertEqual(product_scope.filters["product_ids"], ["product-a"])
+        self.assertEqual(plan.metadata["article_brief"]["brief_id"], "brief-a")
+        self.assertFalse(plan.metadata["product_coverage"][0]["mentioned_in_outline"])
+
 
 class EvidencePackBuilderTests(unittest.TestCase):
     def setUp(self) -> None:

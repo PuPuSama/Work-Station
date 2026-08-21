@@ -142,6 +142,16 @@ export function ServerArticleProductSelection({
     [task?.product_candidate_ids],
   );
   const recommendationReasons = task?.product_candidate_reasons || {};
+  const recommendationDetails = useMemo(
+    () =>
+      Object.fromEntries(
+        (task?.product_candidate_details || []).map((detail) => [
+          detail.product_id,
+          detail,
+        ]),
+      ),
+    [task?.product_candidate_details],
+  );
   const savedReasons = useMemo(
     () =>
       Object.fromEntries(
@@ -370,6 +380,7 @@ export function ServerArticleProductSelection({
                   recommendationReasons[product.product_id] ||
                   savedReasons[product.product_id] ||
                   "";
+                const detail = recommendationDetails[product.product_id];
                 return (
                   <label
                     key={product.product_id}
@@ -400,6 +411,21 @@ export function ServerArticleProductSelection({
                         <span className="mt-3 block rounded-lg bg-accent/55 px-3 py-2 text-sm leading-6">
                           <span className="font-medium">推荐理由：</span>
                           {reason}
+                        </span>
+                      )}
+                      {detail && (
+                        <span className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                          <Badge variant="outline">
+                            {detail.article_role || "article role"}
+                          </Badge>
+                          <Badge variant="outline">
+                            证据：{detail.evidence_status || "unknown"}
+                          </Badge>
+                          {detail.suggested_section && (
+                            <span className="rounded-md bg-muted px-2 py-1">
+                              建议章节：{detail.suggested_section}
+                            </span>
+                          )}
                         </span>
                       )}
                     </span>

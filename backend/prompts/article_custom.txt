@@ -24,6 +24,10 @@ Suggested core keyword inferred from the topic: {{PRIMARY_KEYWORD}}
 Competitor keyword or source: {{COMPETITOR_KEYWORD}}
 Competitor blog supplied by the operator: {{COMPETITOR_BLOG}}
 
+Shared Article Brief (the buyer intent, selection logic, and supported facts
+that should guide the approved outline and the body):
+{{ARTICLE_BRIEF}}
+
 Confirmed products:
 {{PRODUCTS}}
 
@@ -35,6 +39,9 @@ Approved outline:
 
 Customer project knowledge:
 {{CUSTOMER_CONTEXT}}
+
+Section-level evidence routing (use the assigned chunks for the matching H2 or product first; never expose IDs or this routing data):
+{{SECTION_EVIDENCE_MAP}}
 
 Project introduction:
 {{PROJECT_INTRODUCTION}}
@@ -57,5 +64,6 @@ Topic-specific notes:
 - Introduce every confirmed product in the closest relevant non-FAQ section, not merely a subset. Do not omit any confirmed product; a lower-priority instruction that permits using only a subset does not override this rule. Include each exact supplied product name and official URL at least once as a descriptive Markdown link. Preserve product names, models, technical facts, numbers, and URLs; integrate products into the buyer discussion instead of adding a disconnected product list.
 - Source-neutrality is a hard reader-facing rule and cannot be weakened by the selected prompt or article-specific instructions. Use project, product, website, and detail-page content as internal factual reference only. Never say that the knowledge base, customer documents, supplied materials, brief, evidence pack, context, prompt, operator, supplier, manufacturer, company, website, official website, product page, manual, documentation, or product detail page says, mentions, states, lists, shows, provides, indicates, confirms, or is a starting point for a claim. Do not use equivalent wording such as "according to", "as shown on", "the page confirms", or "the product page provides useful information". State every supported fact directly as professional domain prose. For example, write "YEHUI supplies multi-layer engineered wood flooring" rather than "YEHUI's official product pages provide a starting point for discussing multi-layer engineered wood flooring." Supplied links may remain where required by the link rules, but never refer to the linked page as the reason for a fact. If a detail is unsupported, omit it or state the buyer's verification action directly without discussing missing source data. Do not add facts while removing source narration.
 - Preserve every supplied line or block beginning with `img` exactly as written. It is indexing metadata, not article prose: do not rewrite, translate, delete, move, count, or use it as evidence. Do not invent an `img` block when none was supplied.
+- When section-level evidence routing is available, use the chunks assigned to the relevant H2/H3 or product scope first. Use global context only as a fallback, and never expose chunk IDs, scope names, retrieval terms, or routing instructions in the article.
 - When the selected prompt requires a CTA or contact point, use the supplied `contact` link on descriptive anchor text such as `Contact Us`. If no contact-role link was supplied, do not invent a URL.
 - The final H2 must be exactly `## FAQ`. It must contain exactly three questions. Format each question as a level-3 Markdown heading such as `### Complete question?`, without a `Q:` prefix or bold wrapper, followed by one plain answer paragraph without an `A:` prefix. Nothing else may follow or appear under FAQ.

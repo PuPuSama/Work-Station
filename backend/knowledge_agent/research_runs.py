@@ -309,7 +309,7 @@ class PostgresResearchRunRepository:
                 max_gap_fill_rounds=requested.max_gap_fill_rounds,
                 discovery_queries_used=0,
                 max_discovery_queries=requested.max_discovery_queries,
-                evidence_pack_ids=[],
+                evidence_pack_ids=list(request.initial_evidence_pack_ids),
                 warnings=[],
                 error_code=None,
                 error_message=None,

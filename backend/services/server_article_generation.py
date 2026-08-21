@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 import uuid
@@ -20,6 +21,7 @@ from knowledge_agent.schema import (
     knowledge_sources,
     research_graph_runs,
     retrieval_plans,
+    retrieval_scopes,
 )
 from models import (
     AICheck,
@@ -90,6 +92,7 @@ from services.server_outline_generation import (
     load_pinned_project_prompt,
     published_generation_context_text,
 )
+from services.server_article_brief import article_brief_for_prompt
 from services.server_official_links import PostgresPublishedOfficialLinks
 from services.server_project_prompts import PostgresProjectPromptService
 from services.server_task_commands import (
@@ -115,11 +118,58 @@ ARTICLE_GENERATION_OPERATIONS = (
     ARTICLE_REWRITE_OPERATION,
 )
 MAX_GENERATED_ARTICLE_CHARACTERS = 200_000
-MAX_ARTICLE_CONTEXT_CHUNKS = 6
+# Evidence is still bounded by a safety ceiling, but no longer collapsed to a
+# six-chunk global top-K. Round-robin pack ordering keeps later H2/product
+# scopes represented before the prompt character budget is applied.
+MAX_ARTICLE_CONTEXT_CHUNKS = 128
+MAX_ARTICLE_CONTEXT_CHARACTERS = 120_000
 
 
 class ArticleGenerationUnavailable(RuntimeError):
     """The scoped article runner or provider cannot safely complete work."""
+
+
+@dataclass(frozen=True, slots=True)
+class SectionEvidenceRoute:
+    scope_id: str
+    scope_type: str
+    title: str
+    chunk_ids: tuple[str, ...]
+    product_id: str = ""
+    h3_titles: tuple[str, ...] = ()
+    requirement_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SectionEvidenceMap:
+    """Private, deterministic routing from outline scopes to evidence chunks."""
+
+    global_context: tuple[str, ...]
+    sections: tuple[SectionEvidenceRoute, ...]
+    product_facts: Mapping[str, tuple[str, ...]]
+    warnings: tuple[str, ...] = ()
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "global_context": list(self.global_context),
+            "sections": [
+                {
+                    "scope_id": route.scope_id,
+                    "scope_type": route.scope_type,
+                    "title": route.title,
+                    "chunk_ids": list(route.chunk_ids),
+                    "product_id": route.product_id,
+                    "h3_titles": list(route.h3_titles),
+                    "requirement_ids": list(route.requirement_ids),
+                }
+                for route in self.sections
+            ],
+            "product_facts": {
+                product_id: list(chunk_ids)
+                for product_id, chunk_ids in self.product_facts.items()
+            },
+            "warnings": list(self.warnings),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +178,7 @@ class _ResearchArticleContext:
     retrieval_plan_id: str
     evidence_pack_ids: tuple[str, ...]
     chunk_ids: tuple[str, ...]
+    evidence_map: SectionEvidenceMap
 
 
 def _article_research_identity(task: TaskRecord) -> tuple[str, int, str]:
@@ -155,20 +206,60 @@ def _research_chunk_ids(
     outline_version: int,
     evidence_pack_ids: Sequence[str],
 ) -> tuple[str, ...]:
+    return _research_evidence_map(
+        connection,
+        project_id=project_id,
+        retrieval_plan_id=retrieval_plan_id,
+        article_id=article_id,
+        outline_version=outline_version,
+        evidence_pack_ids=evidence_pack_ids,
+    ).global_context
+
+
+def _research_evidence_map(
+    connection: sa.Connection,
+    *,
+    project_id: str,
+    retrieval_plan_id: str,
+    article_id: str,
+    outline_version: int,
+    evidence_pack_ids: Sequence[str],
+) -> SectionEvidenceMap:
+    """Build deterministic section/product routing from immutable evidence packs.
+
+    The browser only receives this map as a job input.  The worker rebuilds it
+    from PostgreSQL and compares the submitted value before generation, so a
+    client cannot redirect a section to unrelated project knowledge.
+    """
     pack_ids = tuple(evidence_pack_ids)
     if len(set(pack_ids)) != len(pack_ids):
         raise JobConflict("article evidence identity is invalid")
     if not pack_ids:
-        return ()
+        return SectionEvidenceMap((), (), {})
     packs = connection.execute(
         sa.select(
             evidence_packs.c.evidence_pack_id,
             evidence_packs.c.retrieval_plan_id,
             evidence_packs.c.article_id,
             evidence_packs.c.outline_version,
+            evidence_packs.c.scope_id,
+            retrieval_scopes.c.scope_type,
+            retrieval_scopes.c.title,
+            retrieval_scopes.c.metadata.label("scope_metadata"),
         ).where(
             evidence_packs.c.project_id == project_id,
             evidence_packs.c.evidence_pack_id.in_(pack_ids),
+        ).select_from(
+            evidence_packs.join(
+                retrieval_scopes,
+                sa.and_(
+                    retrieval_scopes.c.project_id
+                    == evidence_packs.c.project_id,
+                    retrieval_scopes.c.retrieval_plan_id
+                    == evidence_packs.c.retrieval_plan_id,
+                    retrieval_scopes.c.scope_id == evidence_packs.c.scope_id,
+                ),
+            )
         )
     ).mappings().all()
     if len(packs) != len(pack_ids) or any(
@@ -178,6 +269,9 @@ def _research_chunk_ids(
         for row in packs
     ):
         raise JobConflict("article evidence context changed")
+    by_pack: dict[str, list[tuple[int, str]]] = {
+        pack_id: [] for pack_id in pack_ids
+    }
     hit_rows = connection.execute(
         sa.select(
             evidence_pack_hits.c.evidence_pack_id,
@@ -212,9 +306,6 @@ def _research_chunk_ids(
             knowledge_sources.c.source_kind != "official_blog",
         )
     ).mappings().all()
-    by_pack: dict[str, list[tuple[int, str]]] = {
-        pack_id: [] for pack_id in pack_ids
-    }
     for row in hit_rows:
         by_pack[str(row["evidence_pack_id"])].append(
             (int(row["rank"]), str(row["chunk_id"]))
@@ -229,7 +320,142 @@ def _research_chunk_ids(
         for pack_id in pack_ids
         if rank < len(ranked[pack_id])
     )
-    return tuple(dict.fromkeys(ordered))[:MAX_ARTICLE_CONTEXT_CHUNKS]
+    global_context = tuple(dict.fromkeys(ordered))[:MAX_ARTICLE_CONTEXT_CHUNKS]
+    pack_rows = {str(row["evidence_pack_id"]): row for row in packs}
+    routes: list[SectionEvidenceRoute] = []
+    product_facts: dict[str, tuple[str, ...]] = {}
+    warnings: list[str] = []
+    for pack_id in pack_ids:
+        row = pack_rows[pack_id]
+        chunk_ids = tuple(dict.fromkeys(ranked[pack_id]))
+        scope_type = str(row["scope_type"])
+        scope_id = str(row["scope_id"])
+        title = str(row["title"])
+        metadata = dict(row["scope_metadata"] or {})
+        product_id = str(metadata.get("product_id") or "").strip()
+        raw_requirements = metadata.get("claim_requirements") or []
+        requirements = tuple(
+            item for item in raw_requirements if isinstance(item, Mapping)
+        ) if isinstance(raw_requirements, Sequence) and not isinstance(
+            raw_requirements, (str, bytes)
+        ) else ()
+        h3_titles = tuple(
+            str(item.get("h3_title") or "").strip()
+            for item in requirements
+            if str(item.get("h3_title") or "").strip()
+        )
+        requirement_ids = tuple(
+            str(item.get("requirement_id") or "").strip()
+            for item in requirements
+            if str(item.get("requirement_id") or "").strip()
+        )
+        routes.append(
+            SectionEvidenceRoute(
+                scope_id=scope_id,
+                scope_type=scope_type,
+                title=title,
+                chunk_ids=chunk_ids,
+                product_id=product_id,
+                h3_titles=h3_titles,
+                requirement_ids=requirement_ids,
+            )
+        )
+        if not chunk_ids:
+            warnings.append(f"no_supported_chunks:{scope_id}")
+        if scope_type == "product_fact":
+            if product_id:
+                product_facts[product_id] = chunk_ids
+            else:
+                warnings.append(f"product_scope_missing_product_id:{scope_id}")
+    return SectionEvidenceMap(
+        global_context=global_context,
+        sections=tuple(routes),
+        product_facts=product_facts,
+        warnings=tuple(warnings),
+    )
+
+
+def _section_evidence_map_from_mapping(
+    value: object,
+) -> SectionEvidenceMap:
+    """Validate the private job routing payload before comparing it."""
+
+    if not isinstance(value, Mapping):
+        raise JobConflict("article section evidence identity is invalid")
+
+    def string_sequence(raw: object, *, field: str) -> tuple[str, ...]:
+        if (
+            isinstance(raw, (str, bytes))
+            or not isinstance(raw, Sequence)
+            or any(not isinstance(item, str) or not item.strip() for item in raw)
+        ):
+            raise JobConflict(f"article section evidence {field} is invalid")
+        items = tuple(item.strip() for item in raw)
+        if len(set(items)) != len(items):
+            raise JobConflict(f"article section evidence {field} is invalid")
+        return items
+
+    global_context = string_sequence(
+        value.get("global_context", []),
+        field="global_context",
+    )
+    raw_sections = value.get("sections", [])
+    if (
+        isinstance(raw_sections, (str, bytes))
+        or not isinstance(raw_sections, Sequence)
+    ):
+        raise JobConflict("article section evidence sections are invalid")
+    routes: list[SectionEvidenceRoute] = []
+    seen_scope_ids: set[str] = set()
+    for raw_route in raw_sections:
+        if not isinstance(raw_route, Mapping):
+            raise JobConflict("article section evidence route is invalid")
+        scope_id = str(raw_route.get("scope_id") or "").strip()
+        scope_type = str(raw_route.get("scope_type") or "").strip()
+        title = str(raw_route.get("title") or "").strip()
+        product_id = str(raw_route.get("product_id") or "").strip()
+        if not scope_id or not scope_type or not title or scope_id in seen_scope_ids:
+            raise JobConflict("article section evidence route is invalid")
+        seen_scope_ids.add(scope_id)
+        routes.append(
+            SectionEvidenceRoute(
+                scope_id=scope_id,
+                scope_type=scope_type,
+                title=title,
+                chunk_ids=string_sequence(
+                    raw_route.get("chunk_ids", []),
+                    field="route chunk_ids",
+                ),
+                product_id=product_id,
+                h3_titles=string_sequence(
+                    raw_route.get("h3_titles", []),
+                    field="route h3_titles",
+                ),
+                requirement_ids=string_sequence(
+                    raw_route.get("requirement_ids", []),
+                    field="route requirement_ids",
+                ),
+            )
+        )
+    raw_product_facts = value.get("product_facts", {})
+    if not isinstance(raw_product_facts, Mapping):
+        raise JobConflict("article section evidence product_facts are invalid")
+    product_facts: dict[str, tuple[str, ...]] = {}
+    for raw_product_id, raw_chunk_ids in raw_product_facts.items():
+        product_id = str(raw_product_id or "").strip()
+        if not product_id:
+            raise JobConflict("article section evidence product_facts are invalid")
+        product_facts[product_id] = string_sequence(
+            raw_chunk_ids,
+            field="product_facts",
+        )
+    warnings = string_sequence(value.get("warnings", []), field="warnings")
+    return SectionEvidenceMap(
+        global_context=global_context,
+        sections=tuple(routes),
+        product_facts=product_facts,
+        warnings=warnings,
+    )
 
 
 def _latest_completed_research_context(
@@ -283,18 +509,20 @@ def _latest_completed_research_context(
                 continue
             pack_ids = tuple(str(value) for value in row["evidence_pack_ids"])
             retrieval_plan_id = str(row["retrieval_plan_id"])
+            evidence_map = _research_evidence_map(
+                connection,
+                project_id=project_id,
+                retrieval_plan_id=retrieval_plan_id,
+                article_id=article_id,
+                outline_version=outline_version,
+                evidence_pack_ids=pack_ids,
+            )
             return _ResearchArticleContext(
                 thread_id=str(row["thread_id"]),
                 retrieval_plan_id=retrieval_plan_id,
                 evidence_pack_ids=pack_ids,
-                chunk_ids=_research_chunk_ids(
-                    connection,
-                    project_id=project_id,
-                    retrieval_plan_id=retrieval_plan_id,
-                    article_id=article_id,
-                    outline_version=outline_version,
-                    evidence_pack_ids=pack_ids,
-                ),
+                chunk_ids=evidence_map.global_context,
+                evidence_map=evidence_map,
             )
     return None
 
@@ -309,6 +537,7 @@ def _validate_pinned_research_context(
     retrieval_plan_id: str,
     evidence_pack_ids: Sequence[str],
     chunk_ids: Sequence[str],
+    section_evidence_map: Mapping[str, object] | None = None,
 ) -> None:
     article_id, outline_version, outline_hash = _article_research_identity(task)
     with engine.connect() as connection:
@@ -349,7 +578,7 @@ def _validate_pinned_research_context(
             or metadata.get("generated_from") != "confirmed_task_outline"
         ):
             raise JobConflict("article evidence context changed")
-        current_chunk_ids = _research_chunk_ids(
+        current_evidence_map = _research_evidence_map(
             connection,
             project_id=project_id,
             retrieval_plan_id=retrieval_plan_id,
@@ -357,8 +586,14 @@ def _validate_pinned_research_context(
             outline_version=outline_version,
             evidence_pack_ids=stored_pack_ids,
         )
-    if current_chunk_ids != tuple(chunk_ids):
+    if current_evidence_map.global_context != tuple(chunk_ids):
         raise JobConflict("article evidence context changed")
+    if section_evidence_map is not None:
+        submitted_map = _section_evidence_map_from_mapping(
+            section_evidence_map
+        )
+        if submitted_map.to_mapping() != current_evidence_map.to_mapping():
+            raise JobConflict("article evidence routing changed")
 
 
 class ArticleLlmClient(Protocol):
@@ -440,6 +675,7 @@ def build_server_article_prompt(
             task.competitor_keyword or "Not supplied"
         ),
         "COMPETITOR_BLOG": task.competitor_blog or "Not supplied",
+        "ARTICLE_BRIEF": article_brief_for_prompt(task.article_brief),
         "PRODUCTS": products_for_prompt(task.products),
         "OFFICIAL_LINKS": official_links_for_prompt(task.official_links),
         "OUTLINE": sanitize_outline_keyword_directives(
@@ -447,7 +683,11 @@ def build_server_article_prompt(
             task,
         ),
         "CUSTOMER_CONTEXT": published_generation_context_text(
-            context_chunks
+            context_chunks,
+            maximum_characters=MAX_ARTICLE_CONTEXT_CHARACTERS,
+        ),
+        "SECTION_EVIDENCE_MAP": _section_evidence_map_prompt_value(
+            getattr(task, "section_evidence_map", None)
         ),
         "PROJECT_INTRODUCTION": generation_context_value(
             task.project_introduction,
@@ -474,6 +714,15 @@ def build_server_article_prompt(
         ).replace("\r", "\n").strip()
         return render_prompt("article_custom", **values)
     return render_prompt("article", **values)
+
+
+def _section_evidence_map_prompt_value(value: object) -> str:
+    if not isinstance(value, Mapping) or not value:
+        return "[No section-level evidence routing is available.]"
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "[No section-level evidence routing is available.]"
 
 
 class LlmServerArticleProvider:
@@ -753,6 +1002,15 @@ class ServerArticleGenerationHandler:
             )
         ):
             raise JobConflict("article reference identity is invalid")
+        raw_section_evidence_map = request.get("section_evidence_map")
+        section_evidence_map: dict[str, object] | None = None
+        if raw_section_evidence_map is not None:
+            if not isinstance(raw_section_evidence_map, Mapping):
+                raise JobConflict("article section evidence identity is invalid")
+            if raw_section_evidence_map:
+                section_evidence_map = _section_evidence_map_from_mapping(
+                    raw_section_evidence_map
+                ).to_mapping()
         raw_official_links = request.get("official_links") or []
         if (
             isinstance(raw_official_links, (str, bytes))
@@ -772,6 +1030,7 @@ class ServerArticleGenerationHandler:
             or raw_chunk_ids
             or raw_pack_ids
             or raw_reference_chunk_ids
+            or section_evidence_map
         ):
             raise JobConflict("article context source is invalid")
         if cancelled():
@@ -815,6 +1074,7 @@ class ServerArticleGenerationHandler:
                 ),
                 evidence_pack_ids=cast(Sequence[str], raw_pack_ids),
                 chunk_ids=cast(Sequence[str], raw_chunk_ids),
+                section_evidence_map=section_evidence_map,
             )
         elif context_source not in {"legacy", "broad_search", "none"}:
             raise JobConflict("article context source is invalid")
@@ -828,6 +1088,7 @@ class ServerArticleGenerationHandler:
         context_chunks = self._context.load_current(
             project_id=project_id,
             chunk_ids=cast(Sequence[str], raw_chunk_ids),
+            max_chunks=MAX_ARTICLE_CONTEXT_CHUNKS,
         )
         blog_reference_chunks = (
             self._context.load_current(
@@ -843,27 +1104,37 @@ class ServerArticleGenerationHandler:
             raise JobCancelled(
                 "Article generation cancelled before provider call."
             )
+        if section_evidence_map:
+            if task.__pydantic_extra__ is None:
+                task.__pydantic_extra__ = {}
+            task.__pydantic_extra__["section_evidence_map"] = (
+                section_evidence_map
+            )
         generate_for_organization = getattr(
             self._provider,
             "generate_for_organization",
             None,
         )
-        if callable(generate_for_organization):
-            raw_article = generate_for_organization(
-                task,
-                organization_id=organization_id,
-                user_id=requester,
-                target_words=target_words,
-                prompt_snapshot=prompt_snapshot,
-                context_chunks=context_chunks,
-            )
-        else:
-            raw_article = self._provider.generate(
-                task,
-                target_words=target_words,
-                prompt_snapshot=prompt_snapshot,
-                context_chunks=context_chunks,
-            )
+        try:
+            if callable(generate_for_organization):
+                raw_article = generate_for_organization(
+                    task,
+                    organization_id=organization_id,
+                    user_id=requester,
+                    target_words=target_words,
+                    prompt_snapshot=prompt_snapshot,
+                    context_chunks=context_chunks,
+                )
+            else:
+                raw_article = self._provider.generate(
+                    task,
+                    target_words=target_words,
+                    prompt_snapshot=prompt_snapshot,
+                    context_chunks=context_chunks,
+                )
+        finally:
+            if task.__pydantic_extra__ is not None:
+                task.__pydantic_extra__.pop("section_evidence_map", None)
         if cancelled():
             raise JobCancelled(
                 "Article generation cancelled before result commit."
@@ -1264,6 +1535,11 @@ class ServerArticleGenerationRegistry:
                         research_context.retrieval_plan_id
                         if research_context is not None
                         else ""
+                    ),
+                    "section_evidence_map": (
+                        research_context.evidence_map.to_mapping()
+                        if research_context is not None
+                        else {}
                     ),
                     "target_words": self._target_words,
                     "official_links": [

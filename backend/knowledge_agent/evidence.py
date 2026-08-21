@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from .contracts import (
     EVIDENCE_SOURCE_KINDS,
@@ -70,6 +70,8 @@ class DefaultEvidencePackBuilder:
         self,
         request: EvidencePackRequest,
         hits: Sequence[RetrievalHit],
+        *,
+        claim_requirements: Sequence[Mapping[str, object]] = (),
     ) -> EvidencePack:
         ordered_hits = tuple(
             hit
@@ -111,6 +113,55 @@ class DefaultEvidencePackBuilder:
             )
         if self._require_hard_fact and not hard_fact_chunk_ids:
             gap_reasons.append("requires hard-fact evidence")
+
+        # Hit count is only a coarse guard. A section can have several nearly
+        # duplicate chunks while still missing the specific H3 claim it needs.
+        # ScopeEvidenceService supplies the immutable requirement metadata from
+        # the confirmed outline plan; direct legacy callers may omit it.
+        for requirement in claim_requirements:
+            requirement_id = str(
+                requirement.get("requirement_id") or "claim"
+            ).strip()
+            raw_queries = requirement.get("query_variants") or ()
+            query_variants = {
+                str(value).strip()
+                for value in raw_queries
+                if isinstance(value, str) and value.strip()
+            }
+            supported_hits = tuple(
+                hit
+                for hit in ordered_hits
+                if query_variants.intersection(
+                    {
+                        str(value).strip()
+                        for value in (
+                            hit.explanation.get("matched_query_variants", ())
+                            if isinstance(hit.explanation, Mapping)
+                            else ()
+                        )
+                        if isinstance(value, str) and value.strip()
+                    }
+                )
+            )
+            try:
+                minimum_support = max(
+                    1,
+                    int(requirement.get("minimum_support") or 1),
+                )
+            except (TypeError, ValueError):
+                minimum_support = 1
+            if len(supported_hits) < minimum_support:
+                gap_reasons.append(
+                    f"claim requirement {requirement_id} lacks "
+                    f"{minimum_support} matched evidence hit(s)"
+                )
+            if bool(requirement.get("require_hard_fact")) and not any(
+                hit.chunk.chunk_id in hard_fact_chunk_ids
+                for hit in supported_hits
+            ):
+                gap_reasons.append(
+                    f"claim requirement {requirement_id} requires hard-fact evidence"
+                )
 
         if not ordered_hits:
             sufficiency = "missing"

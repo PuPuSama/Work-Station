@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from pathlib import Path
 import re
 from urllib import parse
@@ -203,6 +204,7 @@ def build_outline_prompt(
         CUSTOMER=task.customer,
         TOPIC=task.topic,
         PRIMARY_KEYWORD=primary_keyword(task),
+        ARTICLE_BRIEF=_article_brief_prompt_value(task),
         COMPETITOR_KEYWORD=task.competitor_keyword or "Not supplied",
         COMPETITOR_BLOG=task.competitor_blog or "Not supplied",
         TARGET_WORDS=normalized_article_word_count(None, config.default_word_count),
@@ -295,12 +297,14 @@ def build_article_prompt(
         PRIMARY_KEYWORD=primary_keyword(task),
         COMPETITOR_KEYWORD=task.competitor_keyword or "Not supplied",
         COMPETITOR_BLOG=task.competitor_blog or "Not supplied",
+        ARTICLE_BRIEF=_article_brief_prompt_value(task),
         PRODUCTS=products_for_prompt(task.products),
         OFFICIAL_LINKS=official_links_for_prompt(
             getattr(task, "official_links", [])
         ),
         OUTLINE=outline,
         CUSTOMER_CONTEXT=collect_customer_context(config, task.customer),
+        SECTION_EVIDENCE_MAP=_section_evidence_map_prompt_value(task),
         PROJECT_INTRODUCTION=generation_context_value(
             getattr(task, "project_introduction", ""),
             include_project_introduction,
@@ -326,6 +330,34 @@ def generation_context_value(value: object, included: bool) -> str:
         return "[Not included for this generation by the operator.]"
     cleaned = str(value or "").replace("\r\n", "\n").strip()
     return cleaned or "[Not supplied.]"
+
+
+def _article_brief_prompt_value(task: TaskRecord) -> str:
+    """Keep legacy/local prompt callers compatible with the Server brief token."""
+
+    brief = getattr(task, "article_brief", None)
+    if brief is None:
+        return "[No current Article Brief is available.]"
+    try:
+        if hasattr(brief, "model_dump"):
+            payload = brief.model_dump(mode="json")
+        else:
+            payload = dict(brief)
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "[No current Article Brief is available.]"
+
+
+def _section_evidence_map_prompt_value(task: TaskRecord) -> str:
+    """Keep legacy/local prompt callers compatible with server routing."""
+
+    value = getattr(task, "section_evidence_map", None)
+    if not isinstance(value, dict) or not value:
+        return "[No section-level evidence routing is available.]"
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "[No section-level evidence routing is available.]"
 
 
 def custom_instruction_value(value: object) -> str:

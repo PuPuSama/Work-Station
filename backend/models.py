@@ -202,6 +202,49 @@ class TdkMetadata(WorkflowModel):
     prompt_version: str = "tdk-v1"
 
 
+class ArticleBriefFact(WorkflowModel):
+    """One model-summarized fact with server-validated source chunk IDs."""
+
+    fact: str = ""
+    chunk_ids: list[str] = Field(default_factory=list)
+
+
+class ArticleBrief(WorkflowModel):
+    """Shared article intent and knowledge context for downstream stages.
+
+    The brief is persisted inside the Server Task JSONB payload for the first
+    version of the workflow.  Its hashes make reuse explicit and invalidate it
+    when the title, operator notes, or published knowledge snapshot changes.
+    """
+
+    brief_id: str = ""
+    task_id: str = ""
+    title_hash: str = ""
+    input_hash: str = ""
+    knowledge_snapshot_fingerprint: str = ""
+    article_intent: str = ""
+    target_buyers: list[str] = Field(default_factory=list)
+    buyer_problems: list[str] = Field(default_factory=list)
+    required_capabilities: list[str] = Field(default_factory=list)
+    selection_dimensions: list[str] = Field(default_factory=list)
+    recommended_product_roles: list[str] = Field(default_factory=list)
+    available_facts: list[ArticleBriefFact] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    context_chunk_ids: list[str] = Field(default_factory=list)
+    created_at: str = ""
+
+
+class ProductCandidateDetail(WorkflowModel):
+    """Server-enriched explanation for one advisory product candidate."""
+
+    product_id: str = ""
+    reason: str = ""
+    article_role: str = ""
+    suggested_section: str = ""
+    evidence_status: str = "unknown"
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
+
+
 PromptKind = Literal["outline", "article", "review", "humanize"]
 
 
@@ -422,6 +465,10 @@ class TaskRecord(WorkflowModel):
 
     product_candidate_ids: list[str] = Field(default_factory=list)
     product_candidate_reasons: dict[str, str] = Field(default_factory=dict)
+    product_candidate_details: list[ProductCandidateDetail] = Field(
+        default_factory=list
+    )
+    article_brief: ArticleBrief | None = None
     products: list[Product] = Field(default_factory=list)
     official_links: list[OfficialLink] = Field(default_factory=list)
     hero_image: str = ""
