@@ -669,6 +669,12 @@ class FinalAiCheckUpdateRequest(BaseModel):
 class InitialAiCheckUpdateRequest(FinalAiCheckUpdateRequest):
     """Bind a manual initial AI review to the current first draft."""
 
+    @model_validator(mode="after")
+    def require_score_for_confirmation(self) -> "InitialAiCheckUpdateRequest":
+        if self.confirmed and self.score is None:
+            raise ValueError("AI-rate score is required when confirming")
+        return self
+
 
 class ReviewedHumanizedArticleRequest(BaseModel):
     """Save externally reviewed humanized Markdown under Task CAS."""
@@ -3537,16 +3543,12 @@ def confirm_project_task_initial_ai(
             detail="The initial article identity changed.",
         )
     previous = task.initial_ai_check
-    if payload.confirmed and not previous.screenshot_asset_id.strip():
-        raise HTTPException(
-            status_code=409,
-            detail="Upload the initial AI-rate screenshot before confirming.",
-        )
+    report = payload.report.strip() or previous.report
     task.initial_ai_check = AICheck(
         confirmed=payload.confirmed,
         deferred=payload.deferred,
         score=payload.score,
-        report=payload.report,
+        report=report,
         provider=previous.provider,
         checked_at=previous.checked_at,
         screenshot_path="",
@@ -3558,9 +3560,37 @@ def confirm_project_task_initial_ai(
         confirmed_at=now_iso() if payload.confirmed else "",
         article_hash=content_hash(initial),
     )
-    task.zero_gpt_report = payload.report
+    task.zero_gpt_report = report
     if payload.confirmed or payload.deferred:
         transition_task(task, STATUS_INITIAL_AI_CHECKED)
+    threshold = float(_server_app_config(request).ai_pass_threshold)
+    if (
+        payload.confirmed
+        and payload.score is not None
+        and payload.score < threshold
+    ):
+        task.humanized_article = initial
+        task.humanized_article_word_count = (
+            task.initial_article_word_count or visible_word_count(initial)
+        )
+        task.humanized_article_hash = content_hash(initial)
+        task.humanization_skipped = True
+        task.article = initial
+        task.final_ai_check = AICheck(
+            confirmed=True,
+            score=payload.score,
+            report=(
+                f"Initial AI rate {payload.score:g}% was below the "
+                f"{threshold:g}% threshold; humanization and the second "
+                "AI check were skipped."
+            ),
+            provider=task.initial_ai_check.provider,
+            checked_at=task.initial_ai_check.checked_at,
+            confirmed_at=task.initial_ai_check.confirmed_at,
+            article_hash=task.humanized_article_hash,
+        )
+        transition_task(task, STATUS_HUMANIZED_READY)
+        transition_task(task, STATUS_FINAL_AI_CHECKED)
     return _save_audited_task(
         request,
         authorized,
@@ -3571,6 +3601,7 @@ def confirm_project_task_initial_ai(
             "confirmed": payload.confirmed,
             "deferred": payload.deferred,
             "score_recorded": payload.score is not None,
+            "humanization_skipped": task.humanization_skipped,
         },
     )
 

@@ -170,6 +170,7 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
         {
             "confirmed",
             "deferred",
+            "humanization_skipped",
             "score_recorded",
         }
     ),

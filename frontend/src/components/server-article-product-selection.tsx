@@ -307,6 +307,39 @@ export function ServerArticleProductSelection({
           </Alert>
         )}
 
+        <div className="sticky top-4 z-10 flex flex-col gap-3 rounded-xl border bg-card/95 p-4 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-muted-foreground">
+            {selectionDirty || hasPendingRecommendation
+              ? "当前勾选尚未确认保存。"
+              : "当前勾选与服务器已保存选择一致。"}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              disabled={
+                pending ||
+                !editAllowed ||
+                !allowed.has("update_products") ||
+                selectedProductIds.length < 1 ||
+                (!selectionDirty && !hasPendingRecommendation)
+              }
+              onClick={() => void saveSelection()}
+            >
+              {pending ? <Loader2 className="animate-spin" /> : <Save />}
+              确认并保存 {selectedProductIds.length} 个产品
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending || !selectionDirty}
+              onClick={() => setSelectedProductIds(confirmedProductIds)}
+            >
+              <Undo2 />
+              恢复已保存选择
+            </Button>
+          </div>
+        </div>
+
         <Card>
           <CardHeader className="border-b">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -383,38 +416,6 @@ export function ServerArticleProductSelection({
           </CardContent>
         </Card>
 
-        <div className="sticky bottom-4 flex flex-col gap-3 rounded-xl border bg-card/95 p-4 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-sm text-muted-foreground">
-            {selectionDirty || hasPendingRecommendation
-              ? "当前勾选尚未确认保存。"
-              : "当前勾选与服务器已保存选择一致。"}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending || !selectionDirty}
-              onClick={() => setSelectedProductIds(confirmedProductIds)}
-            >
-              <Undo2 />
-              恢复已保存选择
-            </Button>
-            <Button
-              type="button"
-              disabled={
-                pending ||
-                !editAllowed ||
-                !allowed.has("update_products") ||
-                selectedProductIds.length < 1 ||
-                (!selectionDirty && !hasPendingRecommendation)
-              }
-              onClick={() => void saveSelection()}
-            >
-              {pending ? <Loader2 className="animate-spin" /> : <Save />}
-              保存 {selectedProductIds.length} 个产品
-            </Button>
-          </div>
-        </div>
       </div>
     </main>
   );

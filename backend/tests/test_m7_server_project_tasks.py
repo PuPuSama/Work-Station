@@ -3966,11 +3966,10 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         confirm_path,
                         json={
                             "revision": 0,
-                            "score": 12.5,
                             "report": "Reviewed initial AI result.",
                         },
                     ).status_code,
-                    409,
+                    422,
                 )
                 self.assertEqual(
                     client.post(
@@ -4036,7 +4035,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     confirm_path,
                     json={
                         "revision": 1,
-                        "score": 12.5,
+                        "score": 42.5,
                         "report": "Reviewed initial AI result.",
                         "confirmed": True,
                     },

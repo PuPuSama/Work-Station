@@ -106,6 +106,10 @@ class ServerDeliveryPackage:
         screenshot_deferred = (
             task.final_ai_check.deferred
             and not task.final_ai_check.confirmed
+        ) or (
+            task.humanization_skipped
+            and task.final_ai_check.confirmed
+            and not task.final_ai_check.screenshot_asset_id.strip()
         )
         if not task.final_ai_check.confirmed and not screenshot_deferred:
             raise ServerDeliveryPackageError(

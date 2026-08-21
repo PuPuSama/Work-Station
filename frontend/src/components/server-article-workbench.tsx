@@ -80,7 +80,7 @@ const STEPS: Array<{
 }> = [
   { id: "setup", label: "1. 内容准备", description: "标题、产品与本篇写作要求" },
   { id: "outline", label: "2. 大纲", description: "生成草稿并人工确认" },
-  { id: "draft", label: "3. 初稿", description: "正文生成与 AI-rate 初检" },
+  { id: "draft", label: "3. 初稿", description: "正文生成与 AI-rate" },
   { id: "review", label: "4. 审阅", description: "人化、终检和链接恢复" },
   { id: "delivery", label: "5. 图片与交付", description: "私有图片、Word、TDK、ZIP" },
 ];
@@ -91,7 +91,7 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
   title_selected: "待确认产品",
   outline_ready: "待审阅大纲",
   outline_confirmed: "待生成初稿",
-  draft_ready: "待初检",
+  draft_ready: "待填写 AI-rate",
   initial_ai_checked: "待人化",
   humanized_ready: "待终检",
   final_ai_checked: "待恢复链接",
@@ -218,8 +218,6 @@ export function ServerArticleWorkbench({
   const [outlineDraft, setOutlineDraft] = useState("");
   const [humanizedDraft, setHumanizedDraft] = useState("");
   const [initialScore, setInitialScore] = useState("");
-  const [initialReport, setInitialReport] = useState("");
-  const [initialScreenshot, setInitialScreenshot] = useState<File | null>(null);
   const [finalScore, setFinalScore] = useState("");
   const [finalReport, setFinalReport] = useState("");
   const [finalScreenshot, setFinalScreenshot] = useState<File | null>(null);
@@ -341,7 +339,6 @@ export function ServerArticleWorkbench({
           ? ""
           : String(task.initial_ai_check.score),
       );
-      setInitialReport(task.initial_ai_check?.report || "");
       setFinalScore(
         task.final_ai_check?.score === null ||
           task.final_ai_check?.score === undefined
@@ -507,12 +504,12 @@ export function ServerArticleWorkbench({
     if (completed) router.push(productSelectionHref);
   }
 
-  async function uploadScreenshot(kind: "initial" | "final", file: File) {
+  async function uploadFinalScreenshot(file: File) {
     if (!task) return;
     const form = new FormData();
     form.append("file", file);
     await apiUpload<TaskRecord>(
-      `${taskApi}/checks/${kind}-ai/screenshot?revision=${task.revision ?? 0}`,
+      `${taskApi}/checks/final-ai/screenshot?revision=${task.revision ?? 0}`,
       form,
     );
   }
@@ -1197,43 +1194,14 @@ export function ServerArticleWorkbench({
 
             <Card>
               <CardHeader className="border-b">
-                <CardTitle>AI-rate 初检</CardTitle>
+                <CardTitle>AI-rate</CardTitle>
                 <CardDescription>
-                  截图作为私有 Asset 保存，并与当前 Initial Article Hash 绑定。
+                  只需填写一次当前初稿的 AI-rate；低于 30% 时直接沿用初稿，跳过人化和第二次检测。
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
-                {task.initial_ai_check?.provider === "zerogpt" &&
-                  task.initial_ai_check.article_hash ===
-                    task.initial_article_hash && (
-                    <Alert>
-                      <ShieldCheck />
-                      <AlertTitle>
-                        {task.initial_ai_check.score == null
-                          ? "ZeroGPT 自动检测未完成"
-                          : `ZeroGPT 自动检测：${task.initial_ai_check.score}%`}
-                      </AlertTitle>
-                      <AlertDescription>
-                        {task.initial_ai_check.report ||
-                          "可继续上传截图，保留现有人工确认凭证。"}
-                      </AlertDescription>
-                    </Alert>
-                  )}
                 <div className="grid gap-2">
-                  <Label htmlFor="initial-screenshot">初检截图（PNG）</Label>
-                  <Input
-                    id="initial-screenshot"
-                    type="file"
-                    accept="image/png"
-                    className="h-11"
-                    disabled={Boolean(pending) || !reviewAllowed}
-                    onChange={(event) =>
-                      setInitialScreenshot(event.target.files?.[0] ?? null)
-                    }
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="initial-score">AI-rate 分数（可选）</Label>
+                  <Label htmlFor="initial-score">AI-rate（%）</Label>
                   <Input
                     id="initial-score"
                     type="number"
@@ -1243,16 +1211,12 @@ export function ServerArticleWorkbench({
                     disabled={Boolean(pending) || !reviewAllowed}
                     onChange={(event) => setInitialScore(event.target.value)}
                   />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="initial-report">初检说明</Label>
-                  <Textarea
-                    id="initial-report"
-                    value={initialReport}
-                    disabled={Boolean(pending) || !reviewAllowed}
-                    className="min-h-28 resize-y"
-                    onChange={(event) => setInitialReport(event.target.value)}
-                  />
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    {task.initial_ai_check?.provider === "zerogpt" &&
+                    task.initial_ai_check.score != null
+                      ? "已带入自动检测结果，请核对后确认。"
+                      : "请填写人工检测得到的 AI-rate。"}
+                  </p>
                 </div>
                 <Button
                   type="button"
@@ -1261,37 +1225,33 @@ export function ServerArticleWorkbench({
                     Boolean(pending) ||
                     !reviewAllowed ||
                     !allowed.has("confirm_initial_ai_check") ||
-                    (!initialScreenshot &&
-                      !task.initial_ai_check?.screenshot_asset_id)
+                    !initialScore
                   }
-                  onClick={() =>
-                    void runAction("确认初检", async () => {
-                      if (initialScreenshot) {
-                        await uploadScreenshot("initial", initialScreenshot);
-                        const latest = await apiGet<TaskRecord>(taskApi);
-                        await apiPut<TaskRecord>(`${taskApi}/checks/initial-ai`, {
-                          revision: latest.revision ?? 0,
-                          score: initialScore ? Number(initialScore) : null,
-                          report: initialReport,
-                          confirmed: true,
-                        });
-                        return;
-                      }
-                      await apiPut<TaskRecord>(`${taskApi}/checks/initial-ai`, {
-                        revision: task.revision ?? 0,
-                        score: initialScore ? Number(initialScore) : null,
-                        report: initialReport,
-                        confirmed: true,
-                      });
-                    })
-                  }
+                  onClick={() => {
+                    void (async () => {
+                      const succeeded = await runAction(
+                        "确认 AI-rate",
+                        () =>
+                          apiPut<TaskRecord>(`${taskApi}/checks/initial-ai`, {
+                            revision: task.revision ?? 0,
+                            score: Number(initialScore),
+                            report: "",
+                            confirmed: true,
+                          }),
+                        Number(initialScore) < 30
+                          ? "AI-rate 低于 30%，已跳过人化和第二次检测。"
+                          : "AI-rate 已确认，请继续处理人化稿。",
+                      );
+                      if (succeeded) setStep("review");
+                    })();
+                  }}
                 >
-                  {pending === "确认初检" ? (
+                  {pending === "确认 AI-rate" ? (
                     <Loader2 className="animate-spin" />
                   ) : (
                     <CheckCircle2 />
                   )}
-                  上传并确认
+                  确认 AI-rate
                 </Button>
               </CardContent>
             </Card>
@@ -1312,13 +1272,27 @@ export function ServerArticleWorkbench({
             <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(360px,0.7fr)]">
             <Card>
               <CardHeader className="border-b">
-                <CardTitle>Humanized Article</CardTitle>
+                <CardTitle>
+                  {task.humanization_skipped
+                    ? "Article（初稿已达标）"
+                    : "Humanized Article"}
+                </CardTitle>
                 <CardDescription>
-                  自动 Job 固定 Project Humanize Prompt；人工保存走独立 Version
-                  来源和结构事实门禁。
+                  {task.humanization_skipped
+                    ? "当前正文直接沿用已达标初稿；如手动修改，保存后会重新进入 AI-rate 检查。"
+                    : "自动 Job 固定 Project Humanize Prompt；人工保存走独立 Version 来源和结构事实门禁。"}
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
+                {task.humanization_skipped && (
+                  <Alert>
+                    <ShieldCheck />
+                    <AlertTitle>已跳过人化</AlertTitle>
+                    <AlertDescription>
+                      初稿 AI-rate 低于 30%，系统已直接采用该版本，并跳过第二次检测。
+                    </AlertDescription>
+                  </Alert>
+                )}
                 <Textarea
                   value={humanizedDraft}
                   onChange={(event) => setHumanizedDraft(event.target.value)}
@@ -1332,31 +1306,33 @@ export function ServerArticleWorkbench({
                   </p>
                 )}
                 <div className="flex flex-wrap justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="min-h-11"
-                    disabled={
-                      Boolean(pending) ||
-                      !editAllowed ||
-                      !allowed.has("humanize_article")
-                    }
-                    onClick={() =>
-                      void runJob(
-                        "自动人化",
-                        "humanize",
-                        {},
-                        "自动人化完成，已自动复检 AI 率并读取最新 Task Revision。",
-                      )
-                    }
-                  >
-                    {pending === "自动人化" ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <Sparkles />
-                    )}
-                    自动人化
-                  </Button>
+                  {!task.humanization_skipped && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="min-h-11"
+                      disabled={
+                        Boolean(pending) ||
+                        !editAllowed ||
+                        !allowed.has("humanize_article")
+                      }
+                      onClick={() =>
+                        void runJob(
+                          "自动人化",
+                          "humanize",
+                          {},
+                          "自动人化完成，已自动复检 AI 率并读取最新 Task Revision。",
+                        )
+                      }
+                    >
+                      {pending === "自动人化" ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <Sparkles />
+                      )}
+                      自动人化
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     className="min-h-11"
@@ -1394,13 +1370,44 @@ export function ServerArticleWorkbench({
                     ) : (
                       <Save />
                     )}
-                    保存人工审阅稿并复检
+                    {task.humanization_skipped
+                      ? "保存修改并重新检测"
+                      : "保存人工审阅稿并复检"}
                   </Button>
                 </div>
               </CardContent>
             </Card>
 
             <div className="grid gap-4">
+              {task.humanization_skipped ? (
+                <Card>
+                  <CardHeader className="border-b">
+                    <CardTitle>AI-rate</CardTitle>
+                    <CardDescription>
+                      初稿已低于 30%，因此没有第二次 AI-rate。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-3">
+                    <div className="rounded-xl border bg-accent/35 px-4 py-5 text-center">
+                      <p className="text-sm text-muted-foreground">
+                        当前文章 AI-rate
+                      </p>
+                      <p className="mt-2 text-3xl font-semibold">
+                        {task.final_ai_check?.score ??
+                          task.initial_ai_check?.score ??
+                          "—"}
+                        {task.final_ai_check?.score != null ||
+                        task.initial_ai_check?.score != null
+                          ? "%"
+                          : ""}
+                      </p>
+                    </div>
+                    <p className="text-sm leading-6 text-muted-foreground">
+                      已沿用初稿并跳过人化、终检；后续可直接恢复链接。
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
               <Card>
                 <CardHeader className="border-b">
                   <CardTitle>AI-rate 终检</CardTitle>
@@ -1554,7 +1561,7 @@ export function ServerArticleWorkbench({
                           "确认终检",
                           async () => {
                             if (finalScreenshot) {
-                              await uploadScreenshot("final", finalScreenshot);
+                              await uploadFinalScreenshot(finalScreenshot);
                               const latest = await apiGet<TaskRecord>(taskApi);
                               await apiPut<TaskRecord>(
                                 `${taskApi}/checks/final-ai`,
@@ -1591,6 +1598,7 @@ export function ServerArticleWorkbench({
                   </Button>
                 </CardContent>
               </Card>
+              )}
 
               <Card>
                 <CardHeader className="border-b">

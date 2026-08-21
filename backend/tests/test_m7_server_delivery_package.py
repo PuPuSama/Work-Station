@@ -242,6 +242,30 @@ class ServerDeliveryPackageTests(unittest.TestCase):
                 task=task,
             )
 
+    def test_skipped_humanization_does_not_require_a_second_screenshot(self) -> None:
+        task, objects = prepared()
+        task.humanization_skipped = True
+        task.final_ai_check = task.final_ai_check.model_copy(
+            update={
+                "score": 12.5,
+                "screenshot_asset_id": "",
+                "screenshot_content_hash": "",
+                "screenshot_filename": "",
+                "screenshot_width": None,
+                "screenshot_height": None,
+            }
+        )
+        objects.objects.pop("screenshot")
+
+        ServerDeliveryPackage(objects=objects).package(
+            actor=ActorIdentity("org-a", "editor-a"),
+            project_id="www.example.com",
+            task=task,
+        )
+
+        with ZipFile(BytesIO(objects.archive)) as archive:
+            self.assertNotIn("final-ai-rate.png", archive.namelist())
+
 
 if __name__ == "__main__":
     unittest.main()
