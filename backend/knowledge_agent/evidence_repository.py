@@ -112,10 +112,23 @@ def _plan_signature(plan: RetrievalPlan) -> tuple[object, ...]:
 
 
 def _pack_signature(pack: EvidencePack) -> tuple[object, ...]:
+    # Scores and explanations are persisted retrieval diagnostics. Provider
+    # vectors can vary slightly across an otherwise identical retry, so those
+    # fields must not turn the stable ordered chunk identity into a conflict.
+    # The remaining fields still reject a changed business evidence outcome.
+    hit_identities = tuple(
+        (
+            hit.chunk.project_id,
+            hit.chunk.chunk_id,
+            hit.chunk.source_id,
+            hit.chunk.snapshot_id,
+        )
+        for hit in pack.hits
+    )
     return (
         pack.evidence_pack_id,
         pack.request,
-        pack.hits,
+        hit_identities,
         pack.sufficiency,
         pack.gap_reasons,
         pack.hard_fact_chunk_ids,
