@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -26,6 +27,7 @@ from knowledge_agent import (  # noqa: E402
 from knowledge_agent.retrieval_plan_generation import (  # noqa: E402
     generate_retrieval_plan,
 )
+from knowledge_agent.evidence_repository import _pack_signature  # noqa: E402
 
 
 def digest(value: str) -> str:
@@ -261,6 +263,33 @@ class EvidencePackBuilderTests(unittest.TestCase):
         self.assertEqual(
             first.public_citation_urls,
             ("https://example.test/source-1",),
+        )
+
+    def test_pack_signature_ignores_volatile_retrieval_diagnostics(self) -> None:
+        original_hit = replace(
+            hit("snap-source-1:0", source_id="source-1"),
+            explanation={"vector_similarity": 0.81234},
+        )
+        retry_hit = replace(
+            original_hit,
+            score=0.80001,
+            explanation={"vector_similarity": 0.81237},
+        )
+        builder = DefaultEvidencePackBuilder(minimum_hits=1)
+
+        original = builder.build(self.request, (original_hit,))
+        retry = builder.build(self.request, (retry_hit,))
+
+        self.assertEqual(original.evidence_pack_id, retry.evidence_pack_id)
+        self.assertEqual(_pack_signature(original), _pack_signature(retry))
+        changed_outcome = replace(
+            retry,
+            sufficiency="weak",
+            gap_reasons=("stable business outcome changed",),
+        )
+        self.assertNotEqual(
+            _pack_signature(original),
+            _pack_signature(changed_outcome),
         )
 
     def test_builder_distinguishes_missing_and_weak(self) -> None:

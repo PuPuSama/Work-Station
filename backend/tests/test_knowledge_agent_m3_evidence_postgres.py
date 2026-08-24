@@ -260,8 +260,16 @@ class KnowledgeAgentM3EvidencePostgresTests(unittest.TestCase):
         )
         pack = builder.build(request, (retrieval_hit,))
         self.packs.save_evidence_pack(pack)
+        retry_hit = replace(
+            retrieval_hit,
+            score=retrieval_hit.score + 0.00001,
+            explanation={
+                **dict(retrieval_hit.explanation),
+                "vector_similarity": 0.90003,
+            },
+        )
         rebuilt = replace(
-            builder.build(request, (retrieval_hit,)),
+            builder.build(request, (retry_hit,)),
             created_at=pack.created_at + timedelta(seconds=1),
         )
         self.packs.save_evidence_pack(rebuilt)
