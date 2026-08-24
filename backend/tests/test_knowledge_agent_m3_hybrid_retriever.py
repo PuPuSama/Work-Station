@@ -30,10 +30,12 @@ from knowledge_agent import (  # noqa: E402
     PostgresProductCatalogRepository,
     ProductSourceEvidence,
     RetrievalHit,
+    RetrievalProvenance,
     RetrievalQuery,
     SourceSnapshot,
     create_knowledge_engine,
 )
+from knowledge_agent.hybrid_retriever import ContextualTokenReranker  # noqa: E402
 from knowledge_agent.schema import (  # noqa: E402
     knowledge_chunks,
     knowledge_product_source_evidence,
@@ -436,6 +438,41 @@ class BasicHybridRetrieverIntegrationTests(unittest.TestCase):
 
 
 class BasicHybridRetrieverContractTests(unittest.TestCase):
+    def test_contextual_reranker_accepts_private_source_without_url(self) -> None:
+        chunk = KnowledgeChunk(
+            project_id="project-a",
+            chunk_id="chunk-private",
+            source_id="source-private",
+            snapshot_id="snapshot-private",
+            text="Casting and molding use different production workflows.",
+            heading_path=("Manufacturing process",),
+        )
+        hit = RetrievalHit(
+            chunk=chunk,
+            score=0.8,
+            provenance=RetrievalProvenance(
+                project_id=chunk.project_id,
+                source_id=chunk.source_id,
+                snapshot_id=chunk.snapshot_id,
+                display_name="Private process guide",
+                source_kind="private_file",
+                trust_tier="hard_fact",
+                public_source=False,
+                canonical_url=None,
+            ),
+        )
+
+        scores = ContextualTokenReranker().rerank(
+            RetrievalQuery(
+                project_id=chunk.project_id,
+                text="casting production workflow",
+            ),
+            (hit,),
+        )
+
+        self.assertIn(chunk.chunk_id, scores)
+        self.assertGreater(scores[chunk.chunk_id], 0)
+
     def test_unknown_filter_is_rejected_before_database_access(self) -> None:
         provider = FakeEmbeddingProvider()
         engine = sa.create_engine("sqlite://")

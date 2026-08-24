@@ -77,7 +77,9 @@ class ContextualTokenReranker:
                     heading,
                     hit.chunk.text,
                     hit.provenance.display_name if hit.provenance else "",
-                    hit.provenance.canonical_url if hit.provenance else "",
+                    (hit.provenance.canonical_url or "")
+                    if hit.provenance
+                    else "",
                 )
             )
             tokens = self._tokens(searchable)
