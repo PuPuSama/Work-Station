@@ -34,6 +34,38 @@ export type Product = {
   asset_error?: string;
 };
 
+export type ArticleBriefFact = {
+  fact: string;
+  chunk_ids: string[];
+};
+
+export type ArticleBrief = {
+  brief_id: string;
+  task_id: string;
+  title_hash: string;
+  input_hash: string;
+  knowledge_snapshot_fingerprint: string;
+  article_intent: string;
+  target_buyers: string[];
+  buyer_problems: string[];
+  required_capabilities: string[];
+  selection_dimensions: string[];
+  recommended_product_roles: string[];
+  available_facts: ArticleBriefFact[];
+  missing_evidence: string[];
+  context_chunk_ids: string[];
+  created_at: string;
+};
+
+export type ProductCandidateDetail = {
+  product_id: string;
+  reason: string;
+  article_role: string;
+  suggested_section: string;
+  evidence_status: string;
+  evidence_summary: Record<string, unknown>;
+};
+
 export type AiCheckRecord = {
   confirmed: boolean;
   deferred?: boolean;
@@ -113,6 +145,35 @@ export type KnowledgeCoverageDetail = {
   evidence_link_count: number;
   content_hash: string;
   paragraphs: KnowledgeCoverageParagraphDetail[];
+};
+
+export type TargetedKnowledgeGap = {
+  gap_id: string;
+  sentence_id: string;
+  sentence_hash: string;
+  text: string;
+  claim_type: string;
+  hard_fact: boolean;
+  scope_id: string;
+  scope_title: string;
+  product_id: string;
+  reason: string;
+  query: string;
+  requirement_ids: string[];
+  h3_titles: string[];
+  query_variants: string[];
+  article_brief_id: string;
+  knowledge_snapshot_fingerprint: string;
+};
+
+export type TargetedGapRepairQueued = {
+  plan: KnowledgeRetrievalPlan;
+  gaps: TargetedKnowledgeGap[];
+  targeted_scope_ids: string[];
+  carried_evidence_pack_ids: string[];
+  run: ResearchRun;
+  queue_batch_id: string;
+  queue_job_id: string;
 };
 
 export type ArticleLink = {
@@ -445,6 +506,8 @@ export type TaskRecord = {
   link_validation?: LinkValidation;
   product_candidate_ids?: string[];
   product_candidate_reasons?: Record<string, string>;
+  product_candidate_details?: ProductCandidateDetail[];
+  article_brief?: ArticleBrief | null;
   products: Product[];
   hero_image?: string;
   images?: ArticleImage[];

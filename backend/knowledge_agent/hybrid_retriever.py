@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
+import re
 from typing import Mapping, Protocol, Sequence
 
 import sqlalchemy as sa
@@ -39,6 +40,58 @@ class HybridReranker(Protocol):
         query: RetrievalQuery,
         candidates: Sequence[RetrievalHit],
     ) -> Mapping[str, float]: ...
+
+
+class ContextualTokenReranker:
+    """Small dependency-free reranker for the already scoped candidate set.
+
+    It is deliberately not a source of new candidates: PostgreSQL project,
+    publication, snapshot, and product filters have already run.  Heading and
+    phrase overlap gives section/product queries a second signal after RRF,
+    while the hard-fact status remains available to the evidence gate.
+    """
+
+    _TOKEN_PATTERN = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
+
+    @classmethod
+    def _tokens(cls, value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in cls._TOKEN_PATTERN.findall(value)
+            if len(token.strip()) >= 2
+        }
+
+    def rerank(
+        self,
+        query: RetrievalQuery,
+        candidates: Sequence[RetrievalHit],
+    ) -> Mapping[str, float]:
+        query_tokens = self._tokens(query.text)
+        if not query_tokens:
+            return {hit.chunk.chunk_id: 0.0 for hit in candidates}
+        scores: dict[str, float] = {}
+        for hit in candidates:
+            heading = " ".join(hit.chunk.heading_path)
+            searchable = " ".join(
+                (
+                    heading,
+                    hit.chunk.text,
+                    hit.provenance.display_name if hit.provenance else "",
+                    hit.provenance.canonical_url if hit.provenance else "",
+                )
+            )
+            tokens = self._tokens(searchable)
+            overlap = len(query_tokens & tokens) / len(query_tokens)
+            phrase_bonus = 0.2 if query.text.casefold() in searchable.casefold() else 0.0
+            heading_tokens = self._tokens(heading)
+            heading_bonus = (
+                0.15 * len(query_tokens & heading_tokens) / len(query_tokens)
+            )
+            scores[hit.chunk.chunk_id] = min(
+                1.0,
+                max(0.0, overlap + phrase_bonus + heading_bonus),
+            )
+        return scores
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +519,7 @@ class BasicHybridRetriever:
 
 __all__ = [
     "BasicHybridRetriever",
+    "ContextualTokenReranker",
     "HybridReranker",
     "HybridRetrievalConfig",
     "HybridRetrievalConfigurationError",

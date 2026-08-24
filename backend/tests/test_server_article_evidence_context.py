@@ -39,11 +39,59 @@ from models import TaskRecord  # noqa: E402
 from services.job_queue import JobConflict  # noqa: E402
 from services.server_article_generation import (  # noqa: E402
     _latest_completed_research_context,
+    _section_evidence_map_from_mapping,
     _validate_pinned_research_context,
 )
 
 
 NOW = datetime(2026, 8, 10, tzinfo=timezone.utc)
+
+
+class SectionEvidenceRoutingValidationTests(unittest.TestCase):
+    def test_section_map_round_trips_h3_and_product_routes(self) -> None:
+        value = {
+            "global_context": ["chunk-a", "chunk-b"],
+            "sections": [
+                {
+                    "scope_id": "scope-facts",
+                    "scope_type": "h2_section",
+                    "title": "Materials",
+                    "chunk_ids": ["chunk-a"],
+                    "product_id": "",
+                    "h3_titles": ["Material choice"],
+                    "requirement_ids": ["materials-req-01"],
+                },
+                {
+                    "scope_id": "scope-product",
+                    "scope_type": "product_fact",
+                    "title": "Model A product facts",
+                    "chunk_ids": ["chunk-b"],
+                    "product_id": "product-a",
+                    "h3_titles": [],
+                    "requirement_ids": [],
+                },
+            ],
+            "product_facts": {"product-a": ["chunk-b"]},
+            "warnings": [],
+        }
+        self.assertEqual(
+            _section_evidence_map_from_mapping(value).to_mapping(),
+            value,
+        )
+
+    def test_section_map_rejects_duplicate_chunk_identity(self) -> None:
+        with self.assertRaisesRegex(
+            JobConflict,
+            "section evidence global_context is invalid",
+        ):
+            _section_evidence_map_from_mapping(
+                {
+                    "global_context": ["chunk-a", "chunk-a"],
+                    "sections": [],
+                    "product_facts": {},
+                    "warnings": [],
+                }
+            )
 
 
 class ServerArticleEvidenceContextTests(unittest.TestCase):
@@ -244,7 +292,7 @@ class ServerArticleEvidenceContextTests(unittest.TestCase):
         )
         assert context is not None
         self.assertEqual(context.evidence_pack_ids, (self.pack_id,))
-        self.assertEqual(context.chunk_ids, self.chunk_ids[:6])
+        self.assertEqual(context.chunk_ids, self.chunk_ids)
         _validate_pinned_research_context(
             self.engine,
             organization_id=self.organization_id,

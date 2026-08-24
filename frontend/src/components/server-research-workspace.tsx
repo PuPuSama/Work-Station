@@ -83,6 +83,20 @@ function taskLabel(task: TaskRecord) {
   return `topic_${String(task.topic_index).padStart(3, "0")} · ${task.topic}`;
 }
 
+function scopeRequirements(scope: KnowledgeRetrievalPlan["scopes"][number]) {
+  const raw = scope.metadata.claim_requirements;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === "object" && !Array.isArray(item),
+  );
+}
+
+function scopeProductId(scope: KnowledgeRetrievalPlan["scopes"][number]) {
+  const value = scope.metadata.product_id;
+  return typeof value === "string" ? value : "";
+}
+
 export function ServerResearchWorkspace({
   customer,
   embedded = false,
@@ -113,6 +127,9 @@ export function ServerResearchWorkspace({
   );
   const [evidencePack, setEvidencePack] =
     useState<KnowledgeEvidencePack | null>(null);
+  const [evidencePacks, setEvidencePacks] = useState<
+    Record<string, KnowledgeEvidencePack>
+  >({});
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [planPending, setPlanPending] = useState(false);
@@ -257,6 +274,49 @@ export function ServerResearchWorkspace({
   }, [embedded, queryString, router, selectedThreadId]);
 
   const detailStatus = detail?.status;
+  const selectedPlan = useMemo(
+    () => plans.find((plan) => plan.retrieval_plan_id === selectedPlanId) ?? null,
+    [plans, selectedPlanId],
+  );
+  const activePlan = useMemo(
+    () =>
+      plans.find((plan) => plan.retrieval_plan_id === detail?.retrieval_plan_id) ??
+      selectedPlan,
+    [detail?.retrieval_plan_id, plans, selectedPlan],
+  );
+  const evidencePackKey = detail?.evidence_pack_ids.join("|") ?? "";
+
+  useEffect(() => {
+    let active = true;
+    const packIds = detail?.evidence_pack_ids ?? [];
+    if (!packIds.length) {
+      setEvidencePacks({});
+      return () => {
+        active = false;
+      };
+    }
+    Promise.all(
+      packIds.map(async (packId) => {
+        try {
+          return await getEvidencePack(customer, packId);
+        } catch {
+          return null;
+        }
+      }),
+    ).then((packs) => {
+      if (!active) return;
+      setEvidencePacks(
+        Object.fromEntries(
+          packs
+            .filter((pack): pack is KnowledgeEvidencePack => pack !== null)
+            .map((pack) => [pack.evidence_pack_id, pack]),
+        ),
+      );
+    });
+    return () => {
+      active = false;
+    };
+  }, [customer, detail?.evidence_pack_ids, detail?.thread_id, evidencePackKey]);
 
   useEffect(() => {
     if (
@@ -446,7 +506,12 @@ export function ServerResearchWorkspace({
   async function openEvidencePack(evidencePackId: string) {
     setError("");
     try {
-      setEvidencePack(await getEvidencePack(customer, evidencePackId));
+      const next = await getEvidencePack(customer, evidencePackId);
+      setEvidencePack(next);
+      setEvidencePacks((current) => ({
+        ...current,
+        [next.evidence_pack_id]: next,
+      }));
     } catch (reason) {
       setError(errorMessage(reason));
     }
@@ -770,6 +835,146 @@ export function ServerResearchWorkspace({
               </CardContent>
             ) : null}
           </Card>
+
+          {detail ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>H2/H3 要求与 Section Evidence Map</CardTitle>
+                <CardDescription>
+                  按大纲 scope 查看每个 H3 的支撑要求、产品事实归属和当前 Evidence Pack；正文只会使用对应路由的片段。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-3">
+                {activePlan?.scopes.length ? (
+                  activePlan.scopes.map((scope) => {
+                    const requirements = scopeRequirements(scope);
+                    const productId = scopeProductId(scope);
+                    const pack = Object.values(evidencePacks).find(
+                      (candidate) =>
+                        candidate.retrieval_plan_id ===
+                          activePlan.retrieval_plan_id &&
+                        candidate.scope_id === scope.scope_id,
+                    );
+                    return (
+                      <div
+                        key={scope.scope_id}
+                        className="grid gap-3 rounded-xl border p-4"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="font-medium">{scope.title}</h3>
+                              <Badge variant="outline">{scope.scope_type}</Badge>
+                              {productId ? (
+                                <Badge variant="secondary">
+                                  产品 {productId}
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <p className="mt-1 break-all text-xs text-muted-foreground">
+                              scope · {scope.scope_id}
+                            </p>
+                          </div>
+                          <Badge
+                            variant={
+                              pack?.sufficiency === "sufficient"
+                                ? "default"
+                                : "outline"
+                            }
+                          >
+                            {pack
+                              ? `Pack ${pack.sufficiency}`
+                              : "尚未生成 Pack"}
+                          </Badge>
+                        </div>
+
+                        <div className="grid gap-2">
+                          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                            Claim Requirements
+                          </p>
+                          {requirements.length ? (
+                            requirements.map((requirement, index) => (
+                              <div
+                                key={
+                                  String(
+                                    requirement.requirement_id ||
+                                      `${scope.scope_id}-${index}`,
+                                  )
+                                }
+                                className="rounded-lg bg-muted/35 px-3 py-2 text-sm"
+                              >
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-medium">
+                                    {String(
+                                      requirement.h3_title ||
+                                        requirement.requirement_id ||
+                                        "未命名要求",
+                                    )}
+                                  </span>
+                                  {requirement.claim_type ? (
+                                    <Badge variant="outline">
+                                      {String(requirement.claim_type)}
+                                    </Badge>
+                                  ) : null}
+                                  {requirement.require_hard_fact === true ? (
+                                    <Badge variant="outline">需要硬事实</Badge>
+                                  ) : null}
+                                </div>
+                                <p className="mt-1 break-all text-xs text-muted-foreground">
+                                  {String(
+                                    requirement.requirement_id ||
+                                      "requirement 未命名",
+                                  )}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <p className="text-sm text-muted-foreground">
+                              当前 scope 没有可展示的 H3 要求。
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="grid gap-2 text-sm">
+                          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                            证据路由
+                          </p>
+                          <p className="text-muted-foreground">
+                            {pack
+                              ? `${pack.hits.length} 个当前片段 · ${pack.public_citation_urls.length} 个可公开引用`
+                              : "等待该 scope 的 Evidence Pack"}
+                          </p>
+                          {pack?.hits.length ? (
+                            <div className="flex flex-wrap gap-2">
+                              {pack.hits.slice(0, 8).map((hit) => (
+                                <Badge
+                                  key={hit.chunk_id}
+                                  variant="secondary"
+                                  className="max-w-full truncate"
+                                  title={hit.chunk_id}
+                                >
+                                  {hit.chunk_id}
+                                </Badge>
+                              ))}
+                              {pack.hits.length > 8 ? (
+                                <Badge variant="outline">
+                                  +{pack.hits.length - 8} 个片段
+                                </Badge>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    选择一个已生成的 Retrieval Plan 后查看 scope 路由。
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
 
           {detail ? (
             <section className="grid gap-4 xl:grid-cols-2">

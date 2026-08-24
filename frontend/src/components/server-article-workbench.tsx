@@ -965,6 +965,45 @@ export function ServerArticleWorkbench({
               </CardContent>
             </Card>
 
+            {task.article_brief && (
+              <Card className="xl:col-span-2">
+                <CardHeader className="border-b">
+                  <CardTitle className="flex items-center gap-2">
+                    <BookOpenCheck className="size-4" />
+                    Article Brief
+                  </CardTitle>
+                  <CardDescription>
+                    产品推荐和大纲生成共用的文章意图与已检索事实；标题或项目注意事项变化后会自动失效并重建。
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-4 lg:grid-cols-2">
+                  <div className="grid gap-3">
+                    <div>
+                      <p className="text-xs font-medium text-muted-foreground">采购意图</p>
+                      <p className="mt-1 text-sm leading-6">{task.article_brief.article_intent}</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      {task.article_brief.target_buyers.map((buyer) => (
+                        <Badge key={buyer} variant="secondary">{buyer}</Badge>
+                      ))}
+                      {task.article_brief.selection_dimensions.map((dimension) => (
+                        <Badge key={dimension} variant="outline">选型：{dimension}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid gap-2 rounded-lg border bg-muted/20 p-3 text-sm">
+                    <p>已绑定事实：{task.article_brief.available_facts.length} 条</p>
+                    <p>检索 Chunk：{task.article_brief.context_chunk_ids.length} 个</p>
+                    {task.article_brief.missing_evidence.length > 0 && (
+                      <p className="text-amber-700 dark:text-amber-300">
+                        待补资料：{task.article_brief.missing_evidence.join("；")}
+                      </p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             <ServerProductRediscoveryPanel
               key={`${customer}:${taskId}:product-rediscovery`}
               customer={customer}

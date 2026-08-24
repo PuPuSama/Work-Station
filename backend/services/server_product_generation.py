@@ -20,7 +20,7 @@ from knowledge_agent.schema import (
     knowledge_products,
     knowledge_sources,
 )
-from models import TaskRecord
+from models import ProductCandidateDetail, TaskRecord
 from server_schema import article_tasks, background_jobs
 from services.access_control import (
     ActorIdentity,
@@ -58,6 +58,11 @@ from services.server_task_commands import (
     ServerTaskCommandUnavailable,
 )
 from services.server_llm_settings import ServerLlmClientFactory
+from services.server_article_brief import (
+    ArticleBriefUnavailable,
+    ServerArticleBriefService,
+    article_brief_for_prompt,
+)
 from services.task_identity import normalized_customer
 from storage import RevisionConflictError
 from workflow.state_machine import (
@@ -194,6 +199,8 @@ class ProductGenerationRecommendation:
 
     product_id: str
     reason: str
+    article_role: str = ""
+    suggested_section: str = ""
 
 
 def _display_text(value: object, *, maximum: int) -> str:
@@ -550,6 +557,7 @@ def build_server_product_prompt(
             TOPIC=task.topic,
             SELECTED_TITLE=task.selected_title,
             PRIMARY_KEYWORD=primary_keyword(task),
+            ARTICLE_BRIEF=article_brief_for_prompt(task.article_brief),
             PROJECT_NOTES=generation_context_value(
                 task.project_notes,
                 task.include_project_notes,
@@ -608,7 +616,16 @@ def _parse_provider_product_recommendations(
         )
     normalized: list[ProductGenerationRecommendation] = []
     for value in values:
-        if set(value) != {"product_id", "reason"}:
+        allowed_keys = {
+            "product_id",
+            "reason",
+            "article_role",
+            "suggested_section",
+        }
+        if not set(value).issubset(allowed_keys) or not {
+            "product_id",
+            "reason",
+        }.issubset(value):
             raise ProductGenerationUnavailable(
                 "product provider returned an invalid result"
             )
@@ -623,10 +640,31 @@ def _parse_provider_product_recommendations(
             raise ProductGenerationUnavailable(
                 "product provider returned an invalid result"
             )
+        article_role = value.get("article_role", "")
+        suggested_section = value.get("suggested_section", "")
+        if not isinstance(article_role, str) or not isinstance(
+            suggested_section,
+            str,
+        ):
+            raise ProductGenerationUnavailable(
+                "product provider returned an invalid result"
+            )
+        article_role = " ".join(article_role.split())[:80]
+        suggested_section = " ".join(suggested_section.split())[:240]
+        if article_role and article_role not in {
+            "primary_solution",
+            "alternative",
+            "specialized",
+        }:
+            raise ProductGenerationUnavailable(
+                "product provider returned an invalid result"
+            )
         normalized.append(
             ProductGenerationRecommendation(
                 product_id=product_id,
                 reason=reason,
+                article_role=article_role,
+                suggested_section=suggested_section,
             )
         )
     if len({item.product_id for item in normalized}) != len(normalized):
@@ -730,6 +768,7 @@ def apply_generated_product_candidates(
     *,
     recommendations: Sequence[ProductGenerationRecommendation],
     allowed_product_ids: Sequence[str],
+    products: Sequence[ProductGenerationProduct] | None = None,
 ) -> tuple[str, ...]:
     """Validate advisory recommendations without changing confirmed products."""
 
@@ -737,6 +776,10 @@ def apply_generated_product_candidates(
         ProductGenerationRecommendation(
             product_id=str(value.product_id).strip(),
             reason=_recommendation_reason(value.reason),
+            article_role=" ".join(str(value.article_role or "").split())[:80],
+            suggested_section=" ".join(
+                str(value.suggested_section or "").split()
+            )[:240],
         )
         for value in recommendations
     )
@@ -758,6 +801,41 @@ def apply_generated_product_candidates(
     task.product_candidate_reasons = {
         value.product_id: value.reason for value in normalized
     }
+    product_by_id = {
+        product.binding.product_id: product
+        for product in (products or ())
+    }
+    default_roles = ("primary_solution", "alternative", "specialized")
+    task.product_candidate_details = [
+        ProductCandidateDetail(
+            product_id=value.product_id,
+            reason=value.reason,
+            article_role=value.article_role or default_roles[index],
+            suggested_section=value.suggested_section,
+            evidence_status=(
+                "ready"
+                if product_by_id.get(value.product_id)
+                and product_by_id[value.product_id].reference_facts
+                else "partial"
+                if product_by_id.get(value.product_id)
+                else "unknown"
+            ),
+            evidence_summary=(
+                {
+                    "reference_fact_count": len(
+                        product_by_id[value.product_id].reference_facts
+                    ),
+                    "hard_fact_available": bool(
+                        product_by_id[value.product_id].reference_facts
+                    ),
+                    "published_primary_detail": True,
+                }
+                if product_by_id.get(value.product_id)
+                else {}
+            ),
+        )
+        for index, value in enumerate(normalized)
+    ]
     return tuple(task.product_candidate_ids)
 
 
@@ -776,11 +854,13 @@ class ServerProductGenerationHandler:
         *,
         provider: ProductGenerationProvider,
         context: PostgresProductGenerationContext | None = None,
+        article_brief: ServerArticleBriefService | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
         self._context = context or PostgresProductGenerationContext(engine)
+        self._article_brief = article_brief
         self._audit = audit
 
     def __call__(
@@ -841,6 +921,17 @@ class ServerProductGenerationHandler:
             raise JobConflict(
                 "product generation is not allowed"
             ) from exc
+        if self._article_brief is not None:
+            try:
+                task.article_brief = self._article_brief.ensure_current(
+                    task,
+                    project_id=project_id,
+                    organization_id=organization_id,
+                    user_id=requester,
+                    cancelled=cancelled,
+                )
+            except ArticleBriefUnavailable as exc:
+                raise JobConflict("article brief is unavailable") from exc
         products = self._context.load_current(
             project_id=project_id,
             bindings=bindings,
@@ -869,6 +960,7 @@ class ServerProductGenerationHandler:
             allowed_product_ids=[
                 product.binding.product_id for product in products
             ],
+            products=products,
         )
         if cancelled():
             raise JobCancelled(

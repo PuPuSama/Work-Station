@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 
@@ -130,6 +130,11 @@ class ScopeEvidenceService:
                 outline_version=plan.outline_version,
             ),
             merged_hits,
+            claim_requirements=(
+                scope.metadata.get("claim_requirements", ())
+                if isinstance(scope.metadata, Mapping)
+                else ()
+            ),
         )
         self._packs.save_evidence_pack(pack)
         persisted = self._packs.get_evidence_pack(project_id, pack.evidence_pack_id)

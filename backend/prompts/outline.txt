@@ -8,6 +8,10 @@ Competitor keyword or source: {{COMPETITOR_KEYWORD}}
 Competitor blog supplied by the operator: {{COMPETITOR_BLOG}}
 Target article length: {{TARGET_WORDS}} English words
 
+Shared Article Brief (the buyer intent, problems, selection dimensions, and
+currently supported project facts to carry through the outline):
+{{ARTICLE_BRIEF}}
+
 Confirmed products to introduce and recommend:
 {{PRODUCTS}}
 

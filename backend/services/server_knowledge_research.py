@@ -89,6 +89,10 @@ from services.object_store import ObjectStore
 from services.server_knowledge_commands import (
     PostgresServerKnowledgeCommands,
 )
+from services.server_knowledge_gap_repair import (
+    ServerKnowledgeGapRepairService,
+    TargetedGapRepairResult,
+)
 from services.server_project_job_registry import (
     ProjectJobHandler,
     ServerProjectJobRegistry,
@@ -203,6 +207,30 @@ def _validate_plan_task(plan: RetrievalPlan, task: TaskRecord) -> None:
         or str(metadata.get("outline_hash") or "") != _outline_hash(task)
     ):
         raise JobConflict("confirmed outline changed after plan creation")
+
+
+def _research_scope_selection(
+    plan: RetrievalPlan,
+    *,
+    scope_ids: Sequence[str] = (),
+    initial_evidence_pack_ids: Sequence[str] = (),
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate the optional targeted-run subset against the immutable Plan."""
+
+    selected = tuple(dict.fromkeys(str(value).strip() for value in scope_ids))
+    carried = tuple(
+        dict.fromkeys(str(value).strip() for value in initial_evidence_pack_ids)
+    )
+    if any(not value or len(value) > 200 for value in (*selected, *carried)):
+        raise JobConflict("knowledge research scope selection is invalid")
+    plan_scope_ids = tuple(scope.scope_id for scope in plan.scopes)
+    if not selected:
+        selected = tuple(plan_scope_ids)
+    if set(selected) - set(plan_scope_ids):
+        raise JobConflict("knowledge research scope selection is invalid")
+    if len(selected) > 100 or len(carried) > 200:
+        raise JobConflict("knowledge research scope selection is invalid")
+    return selected, carried
 
 
 def _discard_replaced_task_plans(
@@ -345,6 +373,8 @@ class KnowledgeResearchCommand:
     retrieval_plan_id: str
     outline_version: int
     max_discovery_queries: int
+    scope_ids: tuple[str, ...] = ()
+    initial_evidence_pack_ids: tuple[str, ...] = ()
     approved_urls: tuple[str, ...] = ()
 
     @classmethod
@@ -365,6 +395,27 @@ class KnowledgeResearchCommand:
         except (TypeError, ValueError) as exc:
             raise JobConflict("knowledge research request is invalid") from exc
         if outline_version <= 0 or not 0 <= max_discovery_queries <= 20:
+            raise JobConflict("knowledge research request is invalid")
+        def normalized_list(field_name: str, maximum: int) -> tuple[str, ...]:
+            raw = value.get(field_name) or []
+            if not isinstance(raw, list):
+                raise JobConflict("knowledge research request is invalid")
+            normalized = tuple(
+                dict.fromkeys(str(item).strip() for item in raw)
+            )
+            if (
+                len(normalized) > maximum
+                or any(not item or len(item) > 200 for item in normalized)
+            ):
+                raise JobConflict("knowledge research request is invalid")
+            return normalized
+
+        scope_ids = normalized_list("scope_ids", 100)
+        initial_evidence_pack_ids = normalized_list(
+            "initial_evidence_pack_ids",
+            200,
+        )
+        if action == "resume" and (scope_ids or initial_evidence_pack_ids):
             raise JobConflict("knowledge research request is invalid")
         raw_urls = value.get("approved_urls")
         if raw_urls is None:
@@ -399,6 +450,8 @@ class KnowledgeResearchCommand:
             ),
             outline_version=outline_version,
             max_discovery_queries=max_discovery_queries,
+            scope_ids=scope_ids,
+            initial_evidence_pack_ids=initial_evidence_pack_ids,
             approved_urls=approved_urls,
         )
 
@@ -410,6 +463,10 @@ class KnowledgeResearchCommand:
             "retrieval_plan_id": self.retrieval_plan_id,
             "outline_version": self.outline_version,
             "max_discovery_queries": self.max_discovery_queries,
+            "scope_ids": list(self.scope_ids),
+            "initial_evidence_pack_ids": list(
+                self.initial_evidence_pack_ids
+            ),
             "approved_urls": list(self.approved_urls),
         }
 
@@ -593,11 +650,15 @@ def create_server_research_execution(
         library=library,
         embedding_provider=embedding_provider,
     )
-    from knowledge_agent.hybrid_retriever import BasicHybridRetriever
+    from knowledge_agent.hybrid_retriever import (
+        BasicHybridRetriever,
+        ContextualTokenReranker,
+    )
 
     retriever = BasicHybridRetriever(
         engine,
         embedding_provider,
+        reranker=ContextualTokenReranker(),
     )
     scope_evidence = ScopeEvidenceService(
         plans=plans,
@@ -723,6 +784,10 @@ class ServerKnowledgeResearchHandler:
                         thread_id=command.thread_id,
                         max_gap_fill_rounds=plan.max_gap_fill_rounds,
                         max_discovery_queries=command.max_discovery_queries,
+                        scope_ids=command.scope_ids,
+                        initial_evidence_pack_ids=(
+                            command.initial_evidence_pack_ids
+                        ),
                     )
                 )
             else:
@@ -768,6 +833,10 @@ class ServerKnowledgeResearchRegistry:
         self._audit = audit or PostgresAuditEventWriter()
         self._plans = PostgresRetrievalPlanRepository(engine)
         self._runs = PostgresResearchRunRepository(engine)
+        self._gap_repair = ServerKnowledgeGapRepairService(
+            engine,
+            plans=self._plans,
+        )
         handler: ProjectJobHandler | None = (
             None
             if execution is None
@@ -848,6 +917,11 @@ class ServerKnowledgeResearchRegistry:
                     products=[
                         product.model_dump() for product in task.products
                     ],
+                    article_brief=(
+                        task.article_brief.model_dump(mode="json")
+                        if task.article_brief is not None
+                        else None
+                    ),
                 )
                 replacement = _discard_replaced_task_plans(
                     connection,
@@ -908,6 +982,117 @@ class ServerKnowledgeResearchRegistry:
                 "retrieval plan could not be created"
             ) from exc
 
+    def create_targeted_gap_plan(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        task_id: str,
+        source_revision: int,
+        retrieval_plan_id: str,
+        sentence_ids: Sequence[str] = (),
+    ) -> TargetedGapRepairResult:
+        """Create a new repair Plan while retaining unaffected evidence Packs."""
+
+        self._access.require(actor, project_id, "knowledge.publish")
+        normalized_plan_id = _required_text(
+            retrieval_plan_id,
+            "retrieval_plan_id",
+            max_length=200,
+        )
+        if isinstance(source_revision, bool) or source_revision < 0:
+            raise JobConflict("source task revision is invalid")
+        requested_sentence_ids = tuple(
+            dict.fromkeys(str(value).strip() for value in sentence_ids)
+        )
+        if len(requested_sentence_ids) > 12 or any(
+            not value or len(value) > 200 for value in requested_sentence_ids
+        ):
+            raise JobConflict("targeted repair sentence identity is invalid")
+        try:
+            with self._engine.begin() as connection:
+                self._lock_access(
+                    connection,
+                    actor,
+                    project_id,
+                    "knowledge.publish",
+                )
+                task = self._lock_task(
+                    connection,
+                    actor=actor,
+                    project_id=project_id,
+                    task_id=task_id,
+                )
+                if task.revision != source_revision:
+                    raise JobConflict("source task revision changed")
+                if not _confirmed_outline_ready(task):
+                    raise JobConflict(
+                        "confirm the outline before targeted repair"
+                    )
+                active_job = connection.execute(
+                    sa.select(background_jobs.c.job_id)
+                    .where(
+                        background_jobs.c.organization_id
+                        == actor.organization_id,
+                        background_jobs.c.project_id == project_id,
+                        background_jobs.c.task_id == task.id,
+                        background_jobs.c.status.in_(ACTIVE_JOB_STATUSES),
+                    )
+                    .with_for_update()
+                ).first()
+                if active_job is not None:
+                    raise JobConflict(
+                        "wait for the active task job before targeted repair"
+                    )
+                base_plan = self._plans.get_retrieval_plan_in_transaction(
+                    connection,
+                    project_id,
+                    normalized_plan_id,
+                )
+                if base_plan is None:
+                    raise KeyError(normalized_plan_id)
+                _validate_plan_task(base_plan, task)
+                result = self._gap_repair.create_in_transaction(
+                    connection,
+                    project_id=project_id,
+                    task=task,
+                    base_plan=base_plan,
+                    sentence_ids=requested_sentence_ids,
+                )
+                self._append_audit(
+                    connection,
+                    actor=actor,
+                    project_id=project_id,
+                    action="knowledge.retrieval_plan.targeted_repair_created",
+                    target_type="retrieval_plan",
+                    target_id=result.plan.retrieval_plan_id,
+                    details={
+                        "task_id": task.id,
+                        "repair_of_plan_id": base_plan.retrieval_plan_id,
+                        "gap_count": len(result.gaps),
+                        "targeted_scope_count": len(
+                            result.targeted_scope_ids
+                        ),
+                        "carried_evidence_pack_count": len(
+                            result.carried_evidence_pack_ids
+                        ),
+                    },
+                )
+                return result
+        except (
+            EvidenceRepositoryError,
+            IntegrityError,
+            JobConflict,
+            KeyError,
+            ProjectAccessDenied,
+            ValueError,
+        ):
+            raise
+        except (RuntimeError, SQLAlchemyError) as exc:
+            raise ServerKnowledgeResearchUnavailable(
+                "targeted knowledge repair Plan could not be created"
+            ) from exc
+
     def enqueue_start(
         self,
         *,
@@ -916,6 +1101,8 @@ class ServerKnowledgeResearchRegistry:
         retrieval_plan_id: str,
         request_id: str,
         max_discovery_queries: int,
+        scope_ids: Sequence[str] = (),
+        initial_evidence_pack_ids: Sequence[str] = (),
     ) -> dict[str, object]:
         normalized_request_id = _required_text(
             request_id,
@@ -959,6 +1146,38 @@ class ServerKnowledgeResearchRegistry:
                 )
                 if plan is None:
                     raise KeyError(normalized_plan_id)
+                plan_metadata = dict(plan.metadata)
+                requested_scope_ids = tuple(scope_ids)
+                requested_initial_pack_ids = tuple(initial_evidence_pack_ids)
+                if not requested_scope_ids and plan_metadata.get(
+                    "targeted_scope_ids"
+                ):
+                    raw_targeted_scope_ids = plan_metadata.get(
+                        "targeted_scope_ids"
+                    )
+                    if isinstance(raw_targeted_scope_ids, Sequence) and not isinstance(
+                        raw_targeted_scope_ids, (str, bytes)
+                    ):
+                        requested_scope_ids = tuple(
+                            str(value) for value in raw_targeted_scope_ids
+                        )
+                if not requested_initial_pack_ids and plan_metadata.get(
+                    "carried_evidence_pack_ids"
+                ):
+                    raw_carried_pack_ids = plan_metadata.get(
+                        "carried_evidence_pack_ids"
+                    )
+                    if isinstance(raw_carried_pack_ids, Sequence) and not isinstance(
+                        raw_carried_pack_ids, (str, bytes)
+                    ):
+                        requested_initial_pack_ids = tuple(
+                            str(value) for value in raw_carried_pack_ids
+                        )
+                selected_scope_ids, carried_pack_ids = _research_scope_selection(
+                    plan,
+                    scope_ids=requested_scope_ids,
+                    initial_evidence_pack_ids=requested_initial_pack_ids,
+                )
                 task_id = _required_text(
                     plan.metadata.get("task_id"),
                     "retrieval plan task_id",
@@ -996,6 +1215,8 @@ class ServerKnowledgeResearchRegistry:
                     thread_id=thread_id,
                     max_gap_fill_rounds=plan.max_gap_fill_rounds,
                     max_discovery_queries=max_discovery_queries,
+                    scope_ids=selected_scope_ids,
+                    initial_evidence_pack_ids=carried_pack_ids,
                 )
                 run = self._runs.create_run_in_transaction(
                     connection,
@@ -1005,6 +1226,18 @@ class ServerKnowledgeResearchRegistry:
                         "task_id": task.id,
                         "request_id": normalized_request_id,
                         "requested_by_user_id": actor.user_id,
+                        "generated_from": plan.metadata.get(
+                            "generated_from",
+                            "confirmed_task_outline",
+                        ),
+                        "outline_hash": plan.metadata.get(
+                            "outline_hash",
+                            _outline_hash(task),
+                        ),
+                        "targeted_repair": plan.metadata.get(
+                            "repair_type"
+                        )
+                        == "targeted_knowledge_gap",
                     },
                 )
                 self._runs.append_event_in_transaction(
@@ -1022,6 +1255,8 @@ class ServerKnowledgeResearchRegistry:
                     retrieval_plan_id=plan.retrieval_plan_id,
                     outline_version=plan.outline_version,
                     max_discovery_queries=max_discovery_queries,
+                    scope_ids=selected_scope_ids,
+                    initial_evidence_pack_ids=carried_pack_ids,
                 )
                 job = self._create_job(
                     connection,

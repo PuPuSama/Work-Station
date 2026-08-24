@@ -5,6 +5,7 @@ import type {
   ResearchRun,
   ResearchRunDetail,
   ResearchRunQueued,
+  TargetedGapRepairQueued,
   WorkflowAssistantGapFillRequest,
   WorkflowAssistantGapFillResponse,
 } from "@/types";
@@ -33,6 +34,25 @@ export function listResearchPlans(projectId: string) {
 export function createTaskResearchPlan(projectId: string, taskId: string) {
   return apiPost<KnowledgeRetrievalPlan>(
     `${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/retrieval-plan`,
+  );
+}
+
+export type TargetedGapRepairRequest = {
+  revision: number;
+  request_id: string;
+  retrieval_plan_id: string;
+  sentence_ids: string[];
+  max_discovery_queries: number;
+};
+
+export function startTargetedGapRepair(
+  projectId: string,
+  taskId: string,
+  request: TargetedGapRepairRequest,
+) {
+  return apiPost<TargetedGapRepairQueued>(
+    `${projectPath(projectId)}/tasks/${encodeURIComponent(taskId)}/knowledge-gap-repair`,
+    request,
   );
 }
 

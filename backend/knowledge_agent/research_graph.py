@@ -61,6 +61,8 @@ class ResearchGraphRequest:
     thread_id: str
     max_gap_fill_rounds: int = 2
     max_discovery_queries: int = 2
+    scope_ids: tuple[str, ...] = ()
+    initial_evidence_pack_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -92,6 +94,16 @@ class ResearchGraphRequest:
             or self.max_discovery_queries < 0
         ):
             raise ValueError("max_discovery_queries must be non-negative")
+        for name in ("scope_ids", "initial_evidence_pack_ids"):
+            values = tuple(getattr(self, name))
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in values
+            ):
+                raise ValueError(f"{name} must contain non-empty strings")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} must contain unique values")
+            object.__setattr__(self, name, values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,7 +414,7 @@ class BoundedResearchGraph:
             "outline_version": request.outline_version,
             "retrieval_plan_id": request.retrieval_plan_id,
             "thread_id": request.thread_id,
-            "scope_ids": [],
+            "scope_ids": list(request.scope_ids),
             "scope_index": 0,
             "current_scope_id": "",
             "current_node": "start",
@@ -417,7 +429,7 @@ class BoundedResearchGraph:
             "discovered_candidates": [],
             "approved_candidate_urls": [],
             "published_source_ids": [],
-            "evidence_pack_ids": [],
+            "evidence_pack_ids": list(request.initial_evidence_pack_ids),
             "warnings": [],
             "status": "running",
         }
@@ -470,7 +482,7 @@ class BoundedResearchGraph:
         self,
         state: ResearchGraphState,
     ) -> Mapping[str, object]:
-        scope_ids = list(
+        all_scope_ids = tuple(
             self._plans.scope_ids(
                 project_id=state["project_id"],
                 retrieval_plan_id=state["retrieval_plan_id"],
@@ -478,8 +490,15 @@ class BoundedResearchGraph:
                 outline_version=state["outline_version"],
             )
         )
-        if not scope_ids:
+        if not all_scope_ids:
             raise ValueError("retrieval plan must contain at least one scope")
+        requested_scope_ids = tuple(state["scope_ids"])
+        if requested_scope_ids:
+            if set(requested_scope_ids) - set(all_scope_ids):
+                raise ValueError("research scope selection is invalid")
+            scope_ids = list(requested_scope_ids)
+        else:
+            scope_ids = list(all_scope_ids)
         return {
             "scope_ids": scope_ids,
             "scope_index": 0,

@@ -387,6 +387,8 @@ def reset_for_full_rewrite(task: TaskRecord) -> TaskRecord:
     task.manual_completed_by = ""
     task.product_candidate_ids = []
     task.product_candidate_reasons = {}
+    task.product_candidate_details = []
+    task.article_brief = None
     task.products = []
     task.outline = ""
     task.outline_draft = ""
@@ -426,6 +428,8 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
         task.selected_title = ""
         task.product_candidate_ids = []
         task.product_candidate_reasons = {}
+        task.product_candidate_details = []
+        task.article_brief = None
         task.outline = ""
         task.outline_draft = ""
         _clear_raw_and_after(task)
@@ -435,6 +439,8 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
     elif stage in {"selected_title", "title"}:
         task.product_candidate_ids = []
         task.product_candidate_reasons = {}
+        task.product_candidate_details = []
+        task.article_brief = None
         task.outline = ""
         task.outline_draft = ""
         _clear_raw_and_after(task)
@@ -444,6 +450,7 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
     elif stage in {"products", "product"}:
         task.product_candidate_ids = []
         task.product_candidate_reasons = {}
+        task.product_candidate_details = []
         task.outline = ""
         task.outline_draft = ""
         _clear_raw_and_after(task)

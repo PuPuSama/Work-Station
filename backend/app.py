@@ -103,6 +103,10 @@ from services.server_product_generation import (
     ServerProductGenerationHandler,
     ServerProductGenerationRegistry,
 )
+from services.server_article_brief import (
+    LlmServerArticleBriefProvider,
+    ServerArticleBriefService,
+)
 from services.server_knowledge_research import (
     ServerKnowledgeResearchRegistry,
     create_server_research_execution,
@@ -462,6 +466,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_confirmed_product_selection = None
     application.state.server_product_rediscovery = None
     application.state.server_product_generation = None
+    application.state.server_article_brief = None
     application.state.server_knowledge_research = None
     application.state.server_outline_generation = None
     application.state.server_title_generation = None
@@ -670,10 +675,20 @@ async def app_lifespan(application: FastAPI):
             cfg,
             llm_factory=server_llm_client_factory,
         )
+        article_brief_provider = LlmServerArticleBriefProvider(
+            cfg,
+            llm_factory=server_llm_client_factory,
+        )
+        article_brief_service = ServerArticleBriefService(
+            server_engine,
+            provider=article_brief_provider,
+        )
+        application.state.server_article_brief = article_brief_service
         product_handler = (
             ServerProductGenerationHandler(
                 server_engine,
                 provider=product_provider,
+                article_brief=article_brief_service,
             )
             if product_provider.ready
             else None
@@ -696,6 +711,7 @@ async def app_lifespan(application: FastAPI):
             ServerOutlineGenerationHandler(
                 server_engine,
                 provider=outline_provider,
+                article_brief=article_brief_service,
             )
             if outline_provider.ready
             else None

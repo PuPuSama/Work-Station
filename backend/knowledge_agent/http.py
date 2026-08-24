@@ -510,6 +510,16 @@ class ResearchRunCreateRequest(KnowledgeApiModel):
     max_discovery_queries: int = Field(default=2, ge=0, le=20)
 
 
+class TargetedGapRepairRequest(KnowledgeApiModel):
+    revision: int = Field(ge=0)
+    request_id: str = Field(min_length=1, max_length=200)
+    retrieval_plan_id: str = Field(min_length=1, max_length=200)
+    sentence_ids: list[
+        Annotated[str, Field(min_length=1, max_length=200)]
+    ] = Field(default_factory=list, max_length=12)
+    max_discovery_queries: int = Field(default=2, ge=0, le=20)
+
+
 class ResearchRunResumeRequest(KnowledgeApiModel):
     request_id: str | None = Field(default=None, max_length=200)
     approved_candidate_ids: list[
@@ -591,6 +601,35 @@ class ResearchRunDetailResponse(ResearchRunResponse):
 
 
 class ResearchRunQueuedResponse(KnowledgeApiModel):
+    run: ResearchRunResponse
+    queue_batch_id: str
+    queue_job_id: str
+
+
+class TargetedGapResponse(KnowledgeApiModel):
+    gap_id: str
+    sentence_id: str
+    sentence_hash: str
+    text: str
+    claim_type: str
+    hard_fact: bool
+    scope_id: str
+    scope_title: str
+    product_id: str
+    reason: str
+    query: str
+    requirement_ids: list[str] = Field(default_factory=list)
+    h3_titles: list[str] = Field(default_factory=list)
+    query_variants: list[str] = Field(default_factory=list)
+    article_brief_id: str = ""
+    knowledge_snapshot_fingerprint: str = ""
+
+
+class TargetedGapRepairQueuedResponse(KnowledgeApiModel):
+    plan: RetrievalPlanResponse
+    gaps: list[TargetedGapResponse]
+    targeted_scope_ids: list[str]
+    carried_evidence_pack_ids: list[str]
     run: ResearchRunResponse
     queue_batch_id: str
     queue_job_id: str
@@ -1461,6 +1500,72 @@ def create_task_retrieval_plan(
     except ServerKnowledgeResearchUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return _plan_response(plan)
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/knowledge-gap-repair",
+    response_model=TargetedGapRepairQueuedResponse,
+    status_code=202,
+)
+def create_targeted_knowledge_gap_repair(
+    project: str,
+    task_id: str,
+    payload: TargetedGapRepairRequest,
+    request: Request,
+) -> TargetedGapRepairQueuedResponse:
+    """Run only the scopes affected by confirmed sentence coverage gaps."""
+
+    actor, project_id = _server_knowledge_context(request, project)
+    try:
+        repair = _server_research(request).create_targeted_gap_plan(
+            actor=actor,
+            project_id=project_id,
+            task_id=task_id,
+            source_revision=payload.revision,
+            retrieval_plan_id=payload.retrieval_plan_id,
+            sentence_ids=payload.sentence_ids,
+        )
+        queued = _server_research(request).enqueue_start(
+            actor=actor,
+            project_id=project_id,
+            retrieval_plan_id=repair.plan.retrieval_plan_id,
+            request_id=payload.request_id,
+            max_discovery_queries=payload.max_discovery_queries,
+            scope_ids=repair.targeted_scope_ids,
+            initial_evidence_pack_ids=repair.carried_evidence_pack_ids,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Task or retrieval plan was not found.",
+        ) from exc
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except (
+        ActiveJobError,
+        EvidenceRepositoryError,
+        JobConflict,
+        ResearchRunConflictError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ServerKnowledgeResearchUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return TargetedGapRepairQueuedResponse(
+        plan=_plan_response(repair.plan),
+        gaps=[
+            TargetedGapResponse.model_validate(gap.to_mapping())
+            for gap in repair.gaps
+        ],
+        targeted_scope_ids=list(repair.targeted_scope_ids),
+        carried_evidence_pack_ids=list(repair.carried_evidence_pack_ids),
+        run=_research_run_response(queued["run"]),
+        queue_batch_id=str(queued["batch_id"]),
+        queue_job_id=str(queued["job_id"]),
+    )
 
 
 @router.post(
