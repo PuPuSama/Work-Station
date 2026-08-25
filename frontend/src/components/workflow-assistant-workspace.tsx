@@ -5,6 +5,7 @@
 import {
   AlertCircle,
   Check,
+  ChevronDown,
   CircleDot,
   Download,
   Loader2,
@@ -237,6 +238,9 @@ const artifactDownloadEndpoints = {
 
 type ScopedTask = TaskRecord & { project_id: string };
 
+type AssistantRequestPhase = "idle" | "sending" | "waiting_reply" | "refreshing";
+type PendingUserMessage = { conversationId: string; content: string };
+
 export function WorkflowAssistantWorkspace() {
   const [projects, setProjects] = useState<AccessibleProject[]>([]);
   const [tasks, setTasks] = useState<ScopedTask[]>([]);
@@ -249,6 +253,9 @@ export function WorkflowAssistantWorkspace() {
   const [revisionDraft, setRevisionDraft] = useState("");
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
+  const [requestPhase, setRequestPhase] = useState<AssistantRequestPhase>("idle");
+  const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
+  const [planPreviewExpanded, setPlanPreviewExpanded] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
   const [artifactPending, setArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
@@ -492,6 +499,7 @@ export function WorkflowAssistantWorkspace() {
   }, [plan?.plan_id, refreshAttention]);
 
   const conversationMessages = selectedConversation?.messages || [];
+  const showPendingUserMessage = pendingUserMessage?.conversationId === selectedConversation?.conversation_id;
   const selectedProjects = useMemo(
     () => projects.filter((project) => selectedProjectIds.includes(project.project_id)),
     [projects, selectedProjectIds],
@@ -556,6 +564,7 @@ export function WorkflowAssistantWorkspace() {
       setConversations((current) => [created, ...current]);
       setSelectedConversation(created);
       setPlan(null);
+      setPlanPreviewExpanded(false);
     } catch (nextError) {
       setError(messageText(nextError));
     } finally {
@@ -567,6 +576,8 @@ export function WorkflowAssistantWorkspace() {
     const content = draft.trim();
     if (!content || pending) return;
     setPending(true);
+    setRequestPhase("sending");
+    setPlanPreviewExpanded(false);
     setError("");
     try {
       let conversation = selectedConversation;
@@ -598,6 +609,8 @@ export function WorkflowAssistantWorkspace() {
         };
         pendingMessageDispatchRef.current = dispatchIdentity;
       }
+      setPendingUserMessage({ conversationId: conversation.conversation_id, content });
+      setRequestPhase("waiting_reply");
       const response = await apiPost<WorkflowAssistantDispatch>(
         `/api/workflow-assistant/conversations/${encodeURIComponent(conversation.conversation_id)}/messages`,
         {
@@ -610,18 +623,25 @@ export function WorkflowAssistantWorkspace() {
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
       pendingMessageDispatchRef.current = null;
-      if (response.plan) setPlan(response.plan);
+      setRequestPhase("refreshing");
+      if (response.plan) {
+        setPlan(response.plan);
+        setPlanPreviewExpanded(false);
+      }
       void refreshAttention().catch(() => undefined);
       setDraft("");
       const refreshed = await apiGet<WorkflowAssistantConversation>(
         `/api/workflow-assistant/conversations/${encodeURIComponent(conversation.conversation_id)}`,
       );
+      setPendingUserMessage(null);
       setSelectedConversation(refreshed);
       setConversations((current) => current.map((item) => item.conversation_id === refreshed.conversation_id ? refreshed : item));
     } catch (nextError) {
+      setPendingUserMessage(null);
       setError(messageText(nextError));
     } finally {
       setPending(false);
+      setRequestPhase("idle");
     }
   }
 
@@ -703,6 +723,7 @@ export function WorkflowAssistantWorkspace() {
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
       setPlan(next);
+      setPlanPreviewExpanded(false);
       setRevisionDraft("");
       void refreshAttention().catch(() => undefined);
     } catch (nextError) {
@@ -745,6 +766,7 @@ export function WorkflowAssistantWorkspace() {
         `/api/workflow-assistant/plans/${encodeURIComponent(nextPlan.plan_id)}`,
       );
       setPlan(freshPlan);
+      setPlanPreviewExpanded(false);
       try {
         const conversation = await apiGet<WorkflowAssistantConversation>(
           `/api/workflow-assistant/conversations/${encodeURIComponent(nextPlan.conversation_id)}`,
@@ -840,11 +862,17 @@ export function WorkflowAssistantWorkspace() {
             </div>
             <ScrollArea className="min-h-0 flex-1 rounded-xl border bg-background p-4">
               <div className="grid gap-3">
-                {conversationMessages.length ? conversationMessages.map((message) => (
-                  <div key={message.message_id} className={`max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2.5 text-sm leading-6 ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}>
-                    <MessageContent content={message.content} />
-                  </div>
-                )) : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
+                {conversationMessages.length || showPendingUserMessage ? <>
+                  {conversationMessages.map((message) => (
+                    <div key={message.message_id} className={`max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2.5 text-sm leading-6 ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}>
+                      <MessageContent content={message.content} />
+                    </div>
+                  ))}
+                  {pendingUserMessage && showPendingUserMessage && <div className="ml-auto flex max-w-[92%] items-start gap-2 rounded-xl bg-primary/80 px-3 py-2.5 text-sm leading-6 text-primary-foreground" aria-label="已发送，等待助手回复">
+                    <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
+                    <Loader2 className="mt-1 size-4 shrink-0 animate-spin" />
+                  </div>}
+                </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
               </div>
             </ScrollArea>
             {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>助手暂时无法继续</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
@@ -857,8 +885,13 @@ export function WorkflowAssistantWorkspace() {
                   onActivity={(message) => setTimeline((current) => [...current, message].slice(-50))}
                 />
               )}
+              {requestPhase !== "idle" && <div className="flex min-h-11 items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm" role="status" aria-live="polite">
+                <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+                <span className="font-medium">{requestPhase === "sending" ? "正在发送请求" : requestPhase === "waiting_reply" ? "已发送，等待助手回复" : "回复已收到，正在更新计划"}</span>
+                <span className="text-muted-foreground">{requestPhase === "sending" ? "正在提交当前项目和文章范围。" : requestPhase === "waiting_reply" ? "助手正在处理请求，页面不会重复提交。" : "正在刷新会话和计划预览。"}</span>
+              </div>}
               <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="直接聊天、查询所选项目的知识库，或描述要执行的工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
-              <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="animate-spin" /> : <Send />}发送</Button></div>
+              <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="animate-spin" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新计划" : pending ? "处理中" : "发送"}</Button></div>
             </div>
           </CardContent>
         </Card>
@@ -891,10 +924,12 @@ export function WorkflowAssistantWorkspace() {
             </CardContent>
           </Card>}
           <Card className="gap-0 py-0">
-            <CardHeader className="border-b px-4 py-4"><div className="flex items-center justify-between gap-3"><div><CardTitle className="text-base">计划预览</CardTitle><CardDescription className="mt-1">确认后才会进入写操作队列。</CardDescription></div>{plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}</div></CardHeader>
-            <CardContent className="px-4 py-4">
+            <CardHeader className="border-b px-4 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-base">计划预览</CardTitle><CardDescription className="mt-1">确认后才会进入写操作队列。</CardDescription></div><div className="flex items-center gap-2">{plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}{plan && <Button type="button" variant="outline" size="sm" className="min-h-9" aria-expanded={planPreviewExpanded} aria-controls="workflow-plan-details" onClick={() => setPlanPreviewExpanded((current) => !current)}><ChevronDown className={`size-4 transition-transform duration-200 ${planPreviewExpanded ? "rotate-180" : ""}`} />{planPreviewExpanded ? "收起步骤" : `展开 ${plan.steps.length} 个步骤`}</Button>}</div></div></CardHeader>
+            <CardContent id="workflow-plan-details" className="px-4 py-4">
               {plan ? <div className="grid gap-4">
-                <div><p className="font-medium">{plan.title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">计划 Revision {plan.revision} · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}</p></div>
+                <div><p className="font-medium">{plan.title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}</p></div>
+                {!planPreviewExpanded && <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">步骤详情已收起；当前计划包含 {plan.steps.length} 个步骤。点击上方“展开步骤”查看执行顺序和每一步的状态。</div>}
+                {planPreviewExpanded && <div className="max-h-[min(60vh,720px)] overflow-auto rounded-lg border bg-muted/10 p-2">
                 <ol className="grid gap-2">
                   {plan.steps.map((step) => {
                     const artifactKind = typeof step.output_summary.artifact_kind === "string" ? step.output_summary.artifact_kind : "";
@@ -975,6 +1010,7 @@ export function WorkflowAssistantWorkspace() {
                     <AlertDescription>队列状态：{status}。研究完成后，原计划会继续执行未完成步骤。</AlertDescription>
                   </Alert>
                 ))}
+                </div>}
                 {plan.status === "awaiting_confirmation" && <Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button>}
                 {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
                 {plan.status === "queued" || plan.status === "running" ? <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}><Pause />暂停</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div> : null}
