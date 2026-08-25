@@ -47,6 +47,10 @@ import {
   startResearchRun,
 } from "@/lib/research-api";
 import {
+  notifyTaskCompletion,
+  prepareTaskCompletionReminders,
+} from "@/lib/task-completion-reminder";
+import {
   formatResearchDate,
   newResearchRequestId,
   researchStatusLabel,
@@ -141,6 +145,9 @@ export function ServerResearchWorkspace({
   const cursors = useRef<Record<string, number>>({});
   const startRequestId = useRef("");
   const resumeRequestId = useRef("");
+  const observedResearchStatuses = useRef<
+    Record<string, ResearchRun["status"]>
+  >({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -319,6 +326,26 @@ export function ServerResearchWorkspace({
   }, [customer, detail?.evidence_pack_ids, detail?.thread_id, evidencePackKey]);
 
   useEffect(() => {
+    if (!detail) return;
+    const previousStatus = observedResearchStatuses.current[detail.thread_id];
+    observedResearchStatuses.current[detail.thread_id] = detail.status;
+    if (
+      !previousStatus ||
+      previousStatus === detail.status ||
+      (detail.status !== "completed" &&
+        detail.status !== "completed_with_warnings")
+    ) {
+      return;
+    }
+    void notifyTaskCompletion({
+      kind: "research",
+      taskId: detail.thread_id,
+      title: "大纲资料研究完成",
+      body: `${detail.article_id} 的 Evidence Pack 研究已完成，可以继续生成正文。`,
+    });
+  }, [detail]);
+
+  useEffect(() => {
     if (
       !selectedThreadId ||
       (detailStatus && TERMINAL_RESEARCH_STATUSES.has(detailStatus))
@@ -454,6 +481,7 @@ export function ServerResearchWorkspace({
     setError("");
     setMessage("");
     try {
+      await prepareTaskCompletionReminders();
       const queued = await startResearchRun(customer, {
         request_id:
           startRequestId.current ||
@@ -479,6 +507,7 @@ export function ServerResearchWorkspace({
     setError("");
     setMessage("");
     try {
+      await prepareTaskCompletionReminders();
       await resumeResearchRun(customer, detail.thread_id, {
         request_id:
           resumeRequestId.current ||
