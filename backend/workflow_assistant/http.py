@@ -1595,6 +1595,37 @@ def resume_plan(plan_id: str, payload: PlanCommandRequest, request: Request, act
     return _change_plan_status(plan_id, payload, request, actor, "running")
 
 
+@router.post("/plans/{plan_id}/retry", response_model=WorkflowPlanResponse)
+def retry_plan(plan_id: str, payload: PlanCommandRequest, request: Request, actor: ActorIdentity = Depends(require_server_actor)) -> WorkflowPlanResponse:
+    _feature_enabled(request)
+    if not payload.plan_hash:
+        raise HTTPException(status_code=422, detail="plan_hash is required for retry")
+    try:
+        repository = _repository(request)
+        plan = repository.get_plan(actor=actor, plan_id=plan_id)
+        _authorized_plan_scope(
+            request,
+            actor=actor,
+            project_ids=plan.project_ids,
+            step_project_ids=tuple(step.project_id for step in plan.steps),
+        )
+        plan = repository.retry_failed_steps(
+            actor=actor,
+            plan_id=plan_id,
+            expected_revision=payload.revision,
+            expected_plan_hash=payload.plan_hash,
+        )
+        runner = getattr(request.app.state, "workflow_assistant_runner", None)
+        wake = getattr(runner, "wake", None)
+        if callable(wake):
+            wake()
+        return _plan_response(plan)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
 @router.post("/plans/{plan_id}/cancel", response_model=WorkflowPlanResponse)
 def cancel_plan(plan_id: str, payload: PlanCommandRequest, request: Request, actor: ActorIdentity = Depends(require_server_actor)) -> WorkflowPlanResponse:
     return _change_plan_status(plan_id, payload, request, actor, "cancelled")

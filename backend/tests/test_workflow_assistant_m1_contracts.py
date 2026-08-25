@@ -2157,6 +2157,12 @@ A: It affects support.
                 "/api/workflow-assistant/plans/plan-1/events/stream",
             )
         )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/workflow-assistant/plans/plan-1/retry",
+            )
+        )
         self.assertFalse(
             server_http_route_available(
                 "DELETE",

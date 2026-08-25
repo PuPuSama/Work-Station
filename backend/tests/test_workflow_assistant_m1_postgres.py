@@ -673,6 +673,107 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
         self.assertEqual(resumed.steps[0].status, "waiting_review")
         self.assertFalse(resumed.steps[0].human_gate_confirmed)
 
+    def test_retry_failed_steps_preserves_completed_steps(self) -> None:
+        repository = PostgresWorkflowAssistantRepository(self.engine)
+        conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Retry failed steps",
+            project_ids=(self.project_a,),
+        )
+        plan = repository.create_plan(
+            actor=self.actor,
+            conversation_id=conversation.conversation_id,
+            plan=PlanDraft(
+                title="Retry article workflow",
+                natural_language_request="Write and export the article",
+                project_ids=[self.project_a],
+                steps=[
+                    PlanStep(
+                        step_id="completed-step",
+                        sequence=1,
+                        action_kind="generate_titles",
+                        project_id=self.project_a,
+                    ),
+                    PlanStep(
+                        step_id="failed-step",
+                        sequence=2,
+                        action_kind="generate_outline",
+                        project_id=self.project_a,
+                    ),
+                ],
+            ),
+        )
+        plan = repository.confirm_plan(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            expected_plan_hash=plan.plan_hash,
+        )
+        plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="running",
+        )
+        self.assertTrue(
+            repository.claim_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="completed-step",
+            )
+        )
+        self.assertTrue(
+            repository.finish_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="completed-step",
+                status="succeeded",
+                output_summary={"title": "kept"},
+            )
+        )
+        self.assertTrue(
+            repository.claim_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="failed-step",
+            )
+        )
+        self.assertTrue(
+            repository.finish_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="failed-step",
+                status="failed",
+                output_summary={"provider": "failed"},
+                standardized_error_code="provider_failed",
+                background_job_id="failed-job",
+            )
+        )
+        failed_plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="failed",
+        )
+
+        retried = repository.retry_failed_steps(
+            actor=self.actor,
+            plan_id=failed_plan.plan_id,
+            expected_revision=failed_plan.revision,
+            expected_plan_hash=failed_plan.plan_hash,
+        )
+
+        self.assertEqual(retried.status, "queued")
+        completed = retried.steps[0]
+        failed = retried.steps[1]
+        self.assertEqual(completed.status, "succeeded")
+        self.assertEqual(completed.output_summary, {"title": "kept"})
+        self.assertEqual(failed.status, "pending")
+        self.assertEqual(failed.retry_count, 1)
+        self.assertIsNone(failed.background_job_id)
+        self.assertEqual(failed.output_summary, {})
+        self.assertIsNone(failed.standardized_error_code)
+
     def test_gap_fill_release_binds_resume_job_and_is_idempotent(self) -> None:
         repository = PostgresWorkflowAssistantRepository(self.engine)
         conversation = repository.create_conversation(

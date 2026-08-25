@@ -13,6 +13,7 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCcw,
   Send,
   Sparkles,
   Square,
@@ -269,6 +270,7 @@ export function WorkflowAssistantWorkspace() {
   const [gapFillSelections, setGapFillSelections] = useState<Record<string, string[]>>({});
   const [gapFillPending, setGapFillPending] = useState<string | null>(null);
   const [gapFillQueueStatus, setGapFillQueueStatus] = useState<Record<string, string>>({});
+  const [timelineExpanded, setTimelineExpanded] = useState(false);
   const gapFillRequestIdsRef = useRef<Record<string, string>>({});
   const eventSourceRef = useRef<EventSource | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
@@ -383,6 +385,7 @@ export function WorkflowAssistantWorkspace() {
         current?.conversation_id === conversationId ? current : null
       ));
       setTimeline([]);
+      setTimelineExpanded(false);
       lastEventSequenceRef.current = 0;
     }
   }, [projects, selectedConversation?.conversation_id, selectedConversationProjectIds]);
@@ -427,6 +430,7 @@ export function WorkflowAssistantWorkspace() {
     if (activePlanIdRef.current !== planId) {
       activePlanIdRef.current = planId;
       setTimeline([]);
+      setTimelineExpanded(false);
       lastEventSequenceRef.current = 0;
     }
     eventSourceRef.current?.close();
@@ -456,7 +460,7 @@ export function WorkflowAssistantWorkspace() {
             ? ` · 新增 ${diff.added_step_ids?.length ?? 0} · 变更 ${diff.changed_step_ids?.length ?? 0} · 移除 ${diff.removed_step_ids?.length ?? 0}`
             : "";
           const item = `${sequence || ""} · ${data.event_kind ?? "计划更新"}${diffText}`;
-          return current.includes(item) ? current : [...current, item];
+          return current.includes(item) ? current : [...current, item].slice(-50);
         });
         void apiGet<WorkflowAssistantPlan>(
           `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
@@ -646,7 +650,7 @@ export function WorkflowAssistantWorkspace() {
   }
 
   async function changePlan(
-    action: "confirm" | "pause" | "resume" | "cancel",
+    action: "confirm" | "pause" | "resume" | "retry" | "cancel",
     projectIds?: string[],
   ) {
     if (!plan || pending) return;
@@ -1016,11 +1020,12 @@ export function WorkflowAssistantWorkspace() {
                 {plan.status === "queued" || plan.status === "running" ? <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}><Pause />暂停</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div> : null}
                 {(plan.status === "queued" || plan.status === "running" || plan.status === "waiting_review") && plan.project_ids.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed p-3"><span className="text-xs font-medium text-muted-foreground">项目执行通道</span><div className="flex flex-wrap gap-2">{plan.project_ids.map((projectId) => { const paused = plan.paused_project_ids.includes(projectId); return <Button key={projectId} type="button" size="sm" variant="outline" onClick={() => void changePlan(paused ? "resume" : "pause", [projectId])} disabled={pending}>{paused ? <Play /> : <Pause />}{paused ? `恢复 ${projectId}` : `暂停 ${projectId}`}</Button>; })}</div></div>}
                 {plan.status === "paused" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("resume")} disabled={pending}><Play />恢复</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
+                {plan.status === "failed" && <div className="grid gap-2 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3"><div className="text-sm text-muted-foreground">已完成的步骤不会重复执行，只会重新排队失败步骤及其后续未完成步骤。</div><Button type="button" variant="outline" className="justify-self-start" onClick={() => void changePlan("retry")} disabled={pending}><RotateCcw />重试失败步骤</Button></div>}
                 {["draft", "awaiting_confirmation", "paused", "waiting_review", "failed"].includes(plan.status) && <div className="grid gap-2 rounded-lg border border-dashed p-3"><Label htmlFor="workflow-plan-revision">调整未完成步骤</Label><Textarea id="workflow-plan-revision" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} placeholder="例如：保留已完成步骤，只把未完成正文改成面向采购团队。" rows={3} disabled={revisionPending || pending} /><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">会生成新的 Revision，并要求重新确认。</span><Button type="button" variant="outline" onClick={() => void revisePlan()} disabled={revisionPending || pending || !revisionDraft.trim()}>{revisionPending ? <Loader2 className="animate-spin" /> : <Workflow />}生成修订预览</Button></div></div>}
               </div> : <div className="py-10 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
             </CardContent>
           </Card>
-          <Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><CardTitle className="text-base">执行时间线</CardTitle><CardDescription>SSE 事件只展示公开状态，不展示思维链。</CardDescription></CardHeader><CardContent className="px-4 py-4">{timeline.length ? <ol className="grid gap-2 text-sm">{timeline.map((item) => <li key={item} className="flex items-center gap-2"><CircleDot className="size-3 text-primary" />{item}</li>)}</ol> : <p className="text-sm text-muted-foreground">计划确认后会在这里显示状态事件。</p>}</CardContent></Card>
+          <Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-base">执行时间线</CardTitle><CardDescription>{timeline.length ? `已记录 ${timeline.length} 条公开状态事件。` : "SSE 事件只展示公开状态，不展示思维链。"}</CardDescription></div><Button type="button" variant="outline" size="sm" className="min-h-9" aria-expanded={timelineExpanded} aria-controls="workflow-timeline-details" onClick={() => setTimelineExpanded((current) => !current)}><ChevronDown className={`size-4 transition-transform duration-200 ${timelineExpanded ? "rotate-180" : ""}`} />{timelineExpanded ? "收起事件" : "展开事件"}</Button></div></CardHeader><CardContent id="workflow-timeline-details" className="px-4 py-4">{timelineExpanded ? (timeline.length ? <ol className="max-h-72 overflow-auto rounded-lg border bg-muted/10 p-3 text-sm">{timeline.map((item) => <li key={item} className="flex items-center gap-2 py-1"><CircleDot className="size-3 shrink-0 text-primary" />{item}</li>)}</ol> : <p className="text-sm text-muted-foreground">计划确认后会在这里显示状态事件。</p>) : <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">时间线已收起{timeline.length ? `，共 ${timeline.length} 条事件` : "，暂无事件"}。点击“展开事件”查看公开执行记录。</div>}</CardContent></Card>
         </div>
       </div>
     </main>

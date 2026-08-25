@@ -1504,6 +1504,123 @@ class PostgresWorkflowAssistantRepository:
             event_payload={},
         )
 
+    def retry_failed_steps(
+        self,
+        *,
+        actor: ActorIdentity,
+        plan_id: str,
+        expected_revision: int,
+        expected_plan_hash: str | None = None,
+    ) -> WorkflowPlan:
+        """Requeue only failed steps while preserving completed work.
+
+        A failed plan is a durable stop boundary. Retrying therefore needs a
+        single transaction that checks the same revision the UI displayed,
+        clears failed-step execution state, and moves the plan back to the
+        queue. Completed and skipped steps remain immutable and are never
+        replayed.
+        """
+
+        plan_id = _required(plan_id, "plan_id")
+        with self._engine.begin() as connection:
+            existing = self._lock_plan(connection, actor, plan_id)
+            if existing is None:
+                raise WorkflowAssistantNotFound("plan not found")
+            current_revision = int(existing["revision"])
+            current_plan_hash = str(existing["plan_hash"])
+            if current_revision != expected_revision:
+                raise WorkflowAssistantConflict(
+                    "plan revision conflict",
+                    code="plan_revision_conflict",
+                    current_revision=current_revision,
+                    current_plan_hash=current_plan_hash,
+                    current_steps=_current_plan_steps(
+                        connection,
+                        organization_id=actor.organization_id,
+                        plan_id=plan_id,
+                    ),
+                )
+            if expected_plan_hash is not None and current_plan_hash != expected_plan_hash:
+                raise WorkflowAssistantConflict(
+                    "plan hash conflict",
+                    code="plan_hash_conflict",
+                    current_revision=current_revision,
+                    current_plan_hash=current_plan_hash,
+                    current_steps=_current_plan_steps(
+                        connection,
+                        organization_id=actor.organization_id,
+                        plan_id=plan_id,
+                    ),
+                )
+            if str(existing["status"]) != "failed":
+                raise WorkflowAssistantConflict(
+                    "only a failed plan can be retried"
+                )
+            if str(existing["approved_by"] or "") != actor.user_id:
+                raise WorkflowAssistantConflict(
+                    "plan has not been confirmed by this actor"
+                )
+            failed_step_ids = list(
+                connection.execute(
+                    sa.select(workflow_plan_steps.c.step_id)
+                    .where(
+                        workflow_plan_steps.c.organization_id == actor.organization_id,
+                        workflow_plan_steps.c.plan_id == plan_id,
+                        workflow_plan_steps.c.status == "failed",
+                    )
+                    .order_by(workflow_plan_steps.c.sequence)
+                ).scalars()
+            )
+            if not failed_step_ids:
+                raise WorkflowAssistantConflict("failed plan has no retryable steps")
+            connection.execute(
+                workflow_plan_steps.update()
+                .where(
+                    workflow_plan_steps.c.organization_id == actor.organization_id,
+                    workflow_plan_steps.c.plan_id == plan_id,
+                    workflow_plan_steps.c.status == "failed",
+                )
+                .values(
+                    status="pending",
+                    background_job_id=None,
+                    output_summary={},
+                    standardized_error_code=None,
+                    retry_count=workflow_plan_steps.c.retry_count + 1,
+                    updated_at=sa.func.now(),
+                )
+            )
+            next_revision = expected_revision + 1
+            connection.execute(
+                workflow_plans.update()
+                .where(
+                    workflow_plans.c.organization_id == actor.organization_id,
+                    workflow_plans.c.plan_id == plan_id,
+                    workflow_plans.c.revision == expected_revision,
+                )
+                .values(
+                    status="queued",
+                    revision=next_revision,
+                    attention_state="none",
+                    updated_at=sa.func.now(),
+                )
+            )
+            self._insert_event(
+                connection,
+                actor=actor,
+                plan_id=plan_id,
+                event_kind="plan_retry",
+                public_payload={
+                    "failed_step_ids": failed_step_ids,
+                    "reset_step_count": len(failed_step_ids),
+                    "revision": next_revision,
+                    "status": "queued",
+                },
+            )
+            result = self._get_plan_in_connection(connection, actor, plan_id)
+            if result is None:
+                raise WorkflowAssistantRepositoryError("plan disappeared during retry")
+            return result
+
     def set_projects_paused(
         self,
         *,
