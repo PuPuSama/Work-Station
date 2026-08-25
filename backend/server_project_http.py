@@ -32,6 +32,7 @@ from models import (
     TaskRecord,
 )
 from services.article_validation import visible_word_count
+from services.ai_rate_policy import apply_ai_rate_humanization_skip
 from services.access_control import (
     ActorIdentity,
     ProjectAccessDenied,
@@ -3641,34 +3642,10 @@ def confirm_project_task_initial_ai(
     task.zero_gpt_report = report
     if payload.confirmed or payload.deferred:
         transition_task(task, STATUS_INITIAL_AI_CHECKED)
-    threshold = float(_server_app_config(request).ai_pass_threshold)
-    if (
-        payload.confirmed
-        and payload.score is not None
-        and payload.score < threshold
-    ):
-        task.humanized_article = initial
-        task.humanized_article_word_count = (
-            task.initial_article_word_count or visible_word_count(initial)
-        )
-        task.humanized_article_hash = content_hash(initial)
-        task.humanization_skipped = True
-        task.article = initial
-        task.final_ai_check = AICheck(
-            confirmed=True,
-            score=payload.score,
-            report=(
-                f"Initial AI rate {payload.score:g}% was below the "
-                f"{threshold:g}% threshold; humanization and the second "
-                "AI check were skipped."
-            ),
-            provider=task.initial_ai_check.provider,
-            checked_at=task.initial_ai_check.checked_at,
-            confirmed_at=task.initial_ai_check.confirmed_at,
-            article_hash=task.humanized_article_hash,
-        )
-        transition_task(task, STATUS_HUMANIZED_READY)
-        transition_task(task, STATUS_FINAL_AI_CHECKED)
+    apply_ai_rate_humanization_skip(
+        task,
+        threshold=float(_server_app_config(request).ai_pass_threshold),
+    )
     return _save_audited_task(
         request,
         authorized,

@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from models import (  # noqa: E402
+    AICheck,
     PromptSnapshot,
     SeoReviewChange,
     SeoReviewRisk,
@@ -71,6 +72,7 @@ from workflow_assistant.planner import (  # noqa: E402
     PlannerOutputError,
     StructuredWorkflowPlanner,
     parse_planner_output,
+    request_skips_review,
 )
 from workflow_assistant.policy import (  # noqa: E402
     AssistantPolicyError,
@@ -136,6 +138,119 @@ def make_plan(*, project_id: str = "project-a", action_kind: str = "list_tasks")
 
 
 class WorkflowAssistantContractTests(unittest.TestCase):
+    def test_natural_language_skip_review_removes_review_step_server_side(self) -> None:
+        output = json.dumps(
+            {
+                "title": "Write article without review",
+                "natural_language_request": "ignored",
+                "project_ids": ["project-a"],
+                "steps": [
+                    {
+                        "step_id": "review-1",
+                        "sequence": 1,
+                        "action_kind": "review",
+                        "project_id": "project-a",
+                        "article_task_id": "task-a",
+                    },
+                    {
+                        "step_id": "read-1",
+                        "sequence": 2,
+                        "action_kind": "list_tasks",
+                        "project_id": "project-a",
+                    },
+                ],
+            }
+        )
+        actor = ActorIdentity("org-a", "user-a")
+        plan = parse_planner_output(
+            output,
+            request="这篇不用复检",
+            actor=actor,
+            access=FakeAccess({"project-a"}),  # type: ignore[arg-type]
+            accessible_project_ids=["project-a"],
+        )
+
+        self.assertTrue(request_skips_review("不用复检"))
+        self.assertTrue(request_skips_review("skip SEO review"))
+        self.assertFalse(request_skips_review("不要跳过复检"))
+        self.assertEqual([step.action_kind for step in plan.steps], ["list_tasks"])
+        self.assertEqual([step.sequence for step in plan.steps], [1])
+
+    def test_assistant_skips_humanize_when_initial_ai_rate_is_below_threshold(self) -> None:
+        article = "# Article\n\nA short initial article."
+        task = TaskRecord(
+            id="task-a",
+            week_folder="server",
+            customer="project-a",
+            topic_index=1,
+            topic="Article topic",
+            status="draft_ready",
+            task_dir="/server/task-a",
+            initial_article=article,
+            initial_article_hash=content_hash(article),
+            initial_ai_check=AICheck(
+                score=12.5,
+                provider="zerogpt",
+                checked_at="2026-08-25T00:00:00",
+                article_hash=content_hash(article),
+            ),
+            created_at="2026-08-25T00:00:00",
+            updated_at="2026-08-25T00:00:00",
+        )
+
+        class Store:
+            def get(self, task_id: str) -> TaskRecord:
+                if task_id != task.id:
+                    raise KeyError(task_id)
+                return task
+
+        class Writer:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def put(self, value: TaskRecord, **kwargs: object) -> TaskRecord:
+                self.calls.append(dict(kwargs))
+                value.revision += 1
+                return value
+
+        writer = Writer()
+        runtime = SimpleNamespace(store=Store(), audited_writer=writer)
+        factory = SimpleNamespace(create=lambda _authorized: runtime)
+        humanize_service = SimpleNamespace(
+            enqueue=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("low AI-rate articles must not enqueue humanize")
+            )
+        )
+        adapter = WorkflowAssistantServiceAdapters(
+            engine=object(),  # type: ignore[arg-type]
+            config=SimpleNamespace(ai_pass_threshold=30),
+            task_factory=factory,  # type: ignore[arg-type]
+            humanize_generation=humanize_service,
+        )
+
+        result = adapter._queue_generation(
+            WorkflowToolInvocation(
+                actor=ActorIdentity("org-a", "user-a"),
+                plan_id="plan-a",
+                step_id="humanize-1",
+                action_kind="humanize",
+                project_id="project-a",
+                article_task_id=task.id,
+                expected_task_revision=0,
+                input_summary={},
+                pinned_prompt_version={},
+                pinned_knowledge_snapshot={},
+                confirmed=True,
+            )
+        )
+
+        self.assertEqual(result["_workflow_status"], "skipped")
+        self.assertEqual(result["result_revision"], 1)
+        self.assertTrue(result["humanization_skipped"])
+        self.assertEqual(len(writer.calls), 1)
+        self.assertEqual(task.status, "final_ai_checked")
+        self.assertTrue(task.final_ai_check.confirmed)
+
     def test_natural_language_project_notes_change_is_previewed_and_executed(self) -> None:
         class NotesLlm:
             ready = True

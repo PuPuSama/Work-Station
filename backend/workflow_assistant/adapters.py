@@ -31,6 +31,7 @@ from models import (
 )
 from server_schema import background_jobs
 from services.access_control import ActorIdentity
+from services.ai_rate_policy import apply_ai_rate_humanization_skip
 from services.server_article_generation import (
     ARTICLE_GENERATION_OPERATION,
     ARTICLE_REWRITE_OPERATION,
@@ -859,6 +860,40 @@ class WorkflowAssistantServiceAdapters:
             raise WorkflowToolError("task revision is required")
         if action == "humanize":
             runtime, task = self._task(invocation)
+            already_skipped = task.humanization_skipped
+            if apply_ai_rate_humanization_skip(
+                task,
+                threshold=float(getattr(self._config, "ai_pass_threshold", 30)),
+                automatic=True,
+            ):
+                if not already_skipped:
+                    try:
+                        task = runtime.audited_writer.put(
+                            task,
+                            expected_revision=source_revision,
+                            actor=invocation.actor,
+                            action="article.initial_ai_check.updated",
+                            details={
+                                "confirmed": True,
+                                "deferred": False,
+                                "score_recorded": (
+                                    task.initial_ai_check.score is not None
+                                ),
+                                "humanization_skipped": True,
+                            },
+                        )
+                    except Exception as exc:
+                        raise WorkflowToolError(
+                            "automatic AI-rate humanization skip could not be saved"
+                        ) from exc
+                return {
+                    "task_id": task.id,
+                    "result_revision": task.revision,
+                    "humanization_skipped": True,
+                    "initial_ai_rate": task.initial_ai_check.score,
+                    "skip_reason": "initial_ai_rate_below_threshold",
+                    "_workflow_status": "skipped",
+                }
             if task.status == STATUS_DRAFT_READY:
                 task.initial_ai_check = task.initial_ai_check.model_copy(
                     update={

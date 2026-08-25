@@ -80,10 +80,20 @@ def create_knowledge_runtime(
     *,
     database_url: str,
     artifact_root: Path,
+    database_pool_size: int = 20,
+    database_max_overflow: int = 20,
+    database_pool_timeout: int = 60,
+    database_pool_recycle: int = 300,
     embedding_provider: EmbeddingProvider | None = None,
     answer_provider: ResearchAnswerProvider | None = None,
 ) -> KnowledgeAgentRuntime:
-    engine = create_knowledge_engine(database_url)
+    engine = create_knowledge_engine(
+        database_url,
+        pool_size=database_pool_size,
+        max_overflow=database_max_overflow,
+        pool_timeout=database_pool_timeout,
+        pool_recycle=database_pool_recycle,
+    )
     repository = PostgresKnowledgeRepository(engine)
     asset_repository = PostgresKnowledgeAssetRepository(engine)
     artifact_store = LocalKnowledgeArtifactStore(artifact_root)

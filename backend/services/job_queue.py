@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 ACTIVE_JOB_STATUSES = ("queued", "running", "retry_wait")
@@ -152,14 +156,41 @@ class BatchJobRunner:
         )
 
     def _dispatch_loop(self) -> None:
+        retry_delay = 0.5
         while not self._stop.is_set():
-            with self._guard:
-                self._futures = {future for future in self._futures if not future.done()}
-                available = self.concurrency - len(self._futures)
-            for job in self.queue.claim_jobs(available, self.operations):
-                future = self._executor.submit(self._run_job, job)
+            try:
                 with self._guard:
-                    self._futures.add(future)
+                    self._futures = {
+                        future
+                        for future in self._futures
+                        if not future.done()
+                    }
+                    available = self.concurrency - len(self._futures)
+                for job in self.queue.claim_jobs(available, self.operations):
+                    future = self._executor.submit(self._run_job, job)
+                    with self._guard:
+                        self._futures.add(future)
+            except Exception as exc:
+                # A transient PostgreSQL/connection-pool failure must not
+                # terminate the only dispatcher thread. Jobs already claimed
+                # by the database remain durable and will be recovered by the
+                # normal queue/restart boundary.
+                if self._stop.is_set():
+                    break
+                LOGGER.warning(
+                    "job dispatcher poll failed; retrying in %.1fs (%s)",
+                    retry_delay,
+                    type(exc).__name__,
+                )
+                LOGGER.debug(
+                    "job dispatcher poll failure details",
+                    exc_info=True,
+                )
+                self._wake.wait(retry_delay)
+                self._wake.clear()
+                retry_delay = min(retry_delay * 2, 10.0)
+                continue
+            retry_delay = 0.5
             self._wake.wait(self.poll_seconds)
             self._wake.clear()
 

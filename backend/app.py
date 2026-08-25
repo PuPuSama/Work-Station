@@ -498,6 +498,10 @@ async def app_lifespan(application: FastAPI):
         server_engine = sa.create_engine(
             database_url,
             pool_pre_ping=True,
+            pool_size=cfg.database_pool_size,
+            max_overflow=cfg.database_max_overflow,
+            pool_timeout=cfg.database_pool_timeout_seconds,
+            pool_recycle=cfg.database_pool_recycle_seconds,
         )
         server_access_repository = PostgresProjectAccessRepository(
             server_engine
@@ -864,6 +868,10 @@ async def app_lifespan(application: FastAPI):
                     str(ROOT_DIR / "workspace" / "knowledge-agent"),
                 )
             ),
+            database_pool_size=cfg.database_pool_size,
+            database_max_overflow=cfg.database_max_overflow,
+            database_pool_timeout=cfg.database_pool_timeout_seconds,
+            database_pool_recycle=cfg.database_pool_recycle_seconds,
             embedding_provider=OpenAICompatibleEmbeddingProvider.from_settings(
                 knowledge_settings
             ),

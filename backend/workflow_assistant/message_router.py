@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol
 from services.access_control import ActorIdentity
 
 from .context import AssistantWorkspaceContext
+from .planner import request_skips_review
 from .policy import AssistantPolicyError, sanitize_message
 
 
@@ -81,7 +82,7 @@ _KNOWLEDGE_HINT = re.compile(
 
 
 def _fallback_intent(request: str, context: AssistantWorkspaceContext) -> AssistantMessageIntent:
-    if _STRONG_WORKFLOW.search(request):
+    if _STRONG_WORKFLOW.search(request) or request_skips_review(request):
         return AssistantMessageIntent("workflow")
     if _KNOWLEDGE_HINT.search(request):
         project_id = context.project_ids[0] if len(context.project_ids) == 1 else None
@@ -207,6 +208,8 @@ class AssistantMessageRouter:
         ):
             return AssistantMessageIntent("chat")
         if _STRONG_WORKFLOW.search(request):
+            return AssistantMessageIntent("workflow")
+        if request_skips_review(request):
             return AssistantMessageIntent("workflow")
         try:
             client = self._client(actor)

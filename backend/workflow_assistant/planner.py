@@ -76,6 +76,21 @@ class PlannerClientFactory(Protocol):
 
 
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_REVIEW_SKIP_REQUEST = re.compile(
+    r"(?:跳过|略过|省略|免去|不用|无需|不需要|不做|不想要)"
+    r"\s*(?:seo\s*)?(?:复检|复审|检查|review|audit|recheck)"
+    r"|(?:skip|omit|without|no)\s+(?:the\s+)?"
+    r"(?:seo\s+)?(?:review|audit|recheck)",
+    re.IGNORECASE,
+)
+_REVIEW_SKIP_NEGATION = re.compile(
+    r"(?:不要|别|不应|不可以|不能)\s*(?:跳过|略过|省略)\s*"
+    r"(?:seo\s*)?(?:复检|复审|检查)"
+    r"|(?:do\s+not|don't|must\s+not)\s+(?:skip|omit)\s+"
+    r"(?:the\s+)?(?:seo\s+)?(?:review|audit|recheck)"
+    r"|(?:需要|必须|保留|进行)\s*(?:seo\s*)?(?:复检|复审|检查)",
+    re.IGNORECASE,
+)
 _CHINESE_COUNTS = {
     "一": 1,
     "二": 2,
@@ -183,6 +198,15 @@ def _planned_article_counts(plan: PlanDraft) -> dict[str, int]:
     return {project_id: len(values) for project_id, values in chains.items()}
 
 
+def request_skips_review(request: str) -> bool:
+    """Return true only for an explicit request to omit SEO review."""
+
+    normalized = sanitize_message(request)
+    if _REVIEW_SKIP_NEGATION.search(normalized):
+        return False
+    return bool(_REVIEW_SKIP_REQUEST.search(normalized))
+
+
 def planner_system_prompt() -> str:
     return (
         "You are the Article Agent Workflow Assistant planner. Return only "
@@ -221,7 +245,9 @@ def planner_system_prompt() -> str:
         " Every delivery workflow must place prepare_images after "
         "restore_links and before export_docx; image preparation selects "
         "only current published product evidence from that project. Place "
-        "review immediately after generate_article and before humanize; the "
+        "review immediately after generate_article and before humanize "
+        "unless the user explicitly asks to skip SEO review (for example, "
+        "不用复检 or skip review); in that case omit the review step. The "
         "confirmed plan applies only safe review suggestions and rejects "
         "suggestions that require a separate risk confirmation."
         " For a natural-language project-notes change, emit exactly one "
@@ -408,14 +434,19 @@ def parse_planner_output(
     normalized_data = dict(data)
     raw_steps = normalized_data.get("steps")
     if isinstance(raw_steps, list):
+        skip_review = request_skips_review(request)
         known_step_actions = {
             str(item.get("step_id") or "").strip(): item.get("action_kind")
             for item in raw_steps
             if isinstance(item, Mapping)
         }
         normalized_steps: list[object] = []
-        for sequence, raw_step in enumerate(raw_steps, start=1):
+        sequence = 0
+        for raw_step in raw_steps:
             if isinstance(raw_step, Mapping):
+                if skip_review and raw_step.get("action_kind") == "review":
+                    continue
+                sequence += 1
                 normalized_step = dict(raw_step)
                 # Sequence is a server-owned presentation/execution order.
                 # Multi-chain model output commonly restarts numbering for
@@ -810,4 +841,5 @@ __all__ = [
     "estimate_planner_usage",
     "parse_planner_output",
     "planner_system_prompt",
+    "request_skips_review",
 ]

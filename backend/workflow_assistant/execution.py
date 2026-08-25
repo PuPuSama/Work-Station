@@ -328,7 +328,7 @@ class WorkflowExecutionCoordinator:
                             )
                         )
                         continue
-                    if result.status == "succeeded":
+                    if result.status in {"succeeded", "skipped"}:
                         self._advance_task_chain_revision(
                             actor=actor,
                             plan=plan,
@@ -341,7 +341,11 @@ class WorkflowExecutionCoordinator:
                         event_kind=(
                             "step_waiting_job"
                             if result.status == "waiting_job"
-                            else "step_succeeded"
+                            else (
+                                "step_skipped"
+                                if result.status == "skipped"
+                                else "step_succeeded"
+                            )
                         ),
                         public_payload={
                             "step_id": step.step_id,
@@ -792,7 +796,7 @@ class WorkflowExecutionCoordinator:
         except WorkflowToolError as exc:
             raise WorkflowExecutionError(str(exc)) from exc
         workflow_status = str(output.get("_workflow_status") or "succeeded")
-        if workflow_status not in {"succeeded", "waiting_job"}:
+        if workflow_status not in {"succeeded", "waiting_job", "skipped"}:
             raise WorkflowExecutionError("workflow tool returned an invalid step status")
         background_job_id = output.get("job_id")
         public_output = {

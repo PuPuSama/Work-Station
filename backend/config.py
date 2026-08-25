@@ -94,6 +94,10 @@ class AppConfig:
     workflow_assistant_gap_fill_enabled: bool
     workflow_assistant_max_concurrency: int
     workflow_assistant_soft_budget_tokens: int
+    database_pool_size: int = 20
+    database_max_overflow: int = 20
+    database_pool_timeout_seconds: int = 60
+    database_pool_recycle_seconds: int = 300
 
     @property
     def current_week_folder(self) -> str:
@@ -220,6 +224,30 @@ def load_config() -> AppConfig:
             int(workflow_assistant.get("soft_budget_warning_tokens", 24000)),
             minimum=1000,
             maximum=1_000_000,
+        ),
+        database_pool_size=_environment_int(
+            "ARTICLE_AGENT_DB_POOL_SIZE",
+            20,
+            minimum=5,
+            maximum=100,
+        ),
+        database_max_overflow=_environment_int(
+            "ARTICLE_AGENT_DB_MAX_OVERFLOW",
+            20,
+            minimum=0,
+            maximum=100,
+        ),
+        database_pool_timeout_seconds=_environment_int(
+            "ARTICLE_AGENT_DB_POOL_TIMEOUT_SECONDS",
+            60,
+            minimum=5,
+            maximum=300,
+        ),
+        database_pool_recycle_seconds=_environment_int(
+            "ARTICLE_AGENT_DB_POOL_RECYCLE_SECONDS",
+            300,
+            minimum=60,
+            maximum=3600,
         ),
     )
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from threading import Event, Thread
 
 from services.access_control import ActorIdentity
+from services.job_queue import is_retryable_error
 
 from .execution import WorkflowExecutionCoordinator
 from .graph import WorkflowAssistantGraph
@@ -13,6 +15,9 @@ from .repository import (
     WorkflowAssistantConflict,
     WorkflowExecutionCandidate,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,24 +92,42 @@ class WorkflowAssistantRunner:
         return report
 
     def _run(self) -> None:
-        if self._database_url:
-            from langgraph.checkpoint.postgres import PostgresSaver
-
-            connection_url = self._database_url.replace(
-                "postgresql+psycopg://",
-                "postgresql://",
-                1,
-            )
-            with PostgresSaver.from_conn_string(connection_url) as checkpointer:
-                self._graph = WorkflowAssistantGraph(
-                    self._coordinator
-                ).compile(checkpointer=checkpointer)
-                try:
-                    self._poll()
-                finally:
-                    self._graph = None
+        if not self._database_url:
+            self._poll()
             return
-        self._poll()
+
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        connection_url = self._database_url.replace(
+            "postgresql+psycopg://",
+            "postgresql://",
+            1,
+        )
+        retry_delay = 0.5
+        while not self._stop.is_set():
+            try:
+                with PostgresSaver.from_conn_string(connection_url) as checkpointer:
+                    self._graph = WorkflowAssistantGraph(
+                        self._coordinator
+                    ).compile(checkpointer=checkpointer)
+                    self._poll()
+                return
+            except Exception as exc:
+                self._graph = None
+                if self._stop.is_set():
+                    return
+                LOGGER.warning(
+                    "workflow assistant checkpointer failed; retrying in %.1fs (%s)",
+                    retry_delay,
+                    type(exc).__name__,
+                )
+                LOGGER.debug(
+                    "workflow assistant checkpointer failure details",
+                    exc_info=True,
+                )
+                self._wake_event.wait(retry_delay)
+                self._wake_event.clear()
+                retry_delay = min(retry_delay * 2, 10.0)
 
     def _poll(self) -> None:
         while not self._stop.is_set():
@@ -198,6 +221,13 @@ class WorkflowAssistantRunner:
                 error_code=type(exc).__name__,
             )
         except Exception as exc:
+            if is_retryable_error(exc):
+                LOGGER.warning(
+                    "workflow assistant dispatch temporarily unavailable; "
+                    "plan will be retried (%s)",
+                    type(exc).__name__,
+                )
+                return
             self._mark_failed(
                 actor=actor,
                 plan_id=candidate.plan_id,
