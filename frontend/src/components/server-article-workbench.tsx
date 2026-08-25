@@ -6,6 +6,8 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  Bell,
+  BellRing,
   BookOpenCheck,
   CheckCircle2,
   Download,
@@ -55,6 +57,12 @@ import { ServerTaskResetPanel } from "@/components/server-task-reset-panel";
 import { ServerWritingRequirementsPanel } from "@/components/server-writing-requirements-panel";
 import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
 import { sameProjectId } from "@/lib/project-id";
+import {
+  getTaskCompletionReminderStatus,
+  notifyTaskCompletion,
+  prepareTaskCompletionReminders,
+  type TaskCompletionReminderStatus,
+} from "@/lib/task-completion-reminder";
 import { cn } from "@/lib/utils";
 import type {
   AccessibleProject,
@@ -109,6 +117,16 @@ const TERMINAL_JOB_STATUSES = new Set([
   "canceled",
   "conflict",
 ]);
+
+const COMPLETION_REMINDER_BY_ENDPOINT: Record<
+  string,
+  { kind: "outline" | "article" | "review"; title: string }
+> = {
+  outline: { kind: "outline", title: "大纲生成完成" },
+  article: { kind: "article", title: "正文生成完成" },
+  "article/rewrite": { kind: "article", title: "正文重写完成" },
+  "seo-reviews": { kind: "review", title: "复检完成" },
+};
 
 function isWorkbenchStep(value: string | undefined): value is WorkbenchStep {
   return STEPS.some((step) => step.id === value);
@@ -216,6 +234,8 @@ export function ServerArticleWorkbench({
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [reminderStatus, setReminderStatus] =
+    useState<TaskCompletionReminderStatus>("unsupported");
   const [customTitleDraft, setCustomTitleDraft] = useState("");
   const [outlineDraft, setOutlineDraft] = useState("");
   const [humanizedDraft, setHumanizedDraft] = useState("");
@@ -254,6 +274,10 @@ export function ServerArticleWorkbench({
       }
     };
   }, [workbenchScope]);
+
+  useEffect(() => {
+    setReminderStatus(getTaskCompletionReminderStatus());
+  }, []);
 
   useEffect(() => {
     if (!finalScreenshot) {
@@ -451,6 +475,7 @@ export function ServerArticleWorkbench({
   ): Promise<boolean> {
     if (!task) return false;
     const jobScope = workbenchScope;
+    const completionReminder = COMPLETION_REMINDER_BY_ENDPOINT[endpoint];
     if (
       (writingSettingsDirty || writingSettingsPromptBlocked) &&
       (endpoint === "outline" ||
@@ -465,7 +490,10 @@ export function ServerArticleWorkbench({
       );
       return false;
     }
-    return runAction(
+    if (completionReminder) {
+      setReminderStatus(await prepareTaskCompletionReminders());
+    }
+    const succeeded = await runAction(
       label,
       async () => {
         const queued = await apiPost<ServerProjectJob>(`${taskApi}/${endpoint}`, {
@@ -493,6 +521,29 @@ export function ServerArticleWorkbench({
       },
       successMessage,
     );
+    if (
+      succeeded &&
+      completionReminder &&
+      activeWorkbenchScopeRef.current === jobScope
+    ) {
+      await notifyTaskCompletion({
+        kind: completionReminder.kind,
+        taskId,
+        title: completionReminder.title,
+        body: `文章“${task.selected_title || task.topic}”的${
+          completionReminder.kind === "outline"
+            ? "大纲"
+            : completionReminder.kind === "article"
+              ? "正文"
+              : "SEO 复检"
+        }已完成。`,
+      });
+    }
+    return succeeded;
+  }
+
+  async function enableCompletionReminders() {
+    setReminderStatus(await prepareTaskCompletionReminders());
   }
 
   async function recommendProducts() {
@@ -692,16 +743,41 @@ export function ServerArticleWorkbench({
                 {task.topic}
               </p>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              className="min-h-11"
-              disabled={loading || Boolean(pending)}
-              onClick={() => void load()}
-            >
-              {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              刷新
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="min-h-11"
+                disabled={
+                  reminderStatus !== "default" || Boolean(pending)
+                }
+                title={
+                  reminderStatus === "denied"
+                    ? "请在浏览器网站设置中允许通知"
+                    : undefined
+                }
+                onClick={() => void enableCompletionReminders()}
+              >
+                {reminderStatus === "granted" ? <BellRing /> : <Bell />}
+                {reminderStatus === "granted"
+                  ? "完成提醒已开启"
+                  : reminderStatus === "denied"
+                    ? "通知已被阻止"
+                    : reminderStatus === "unsupported"
+                      ? "浏览器不支持通知"
+                      : "开启完成提醒"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="min-h-11"
+                disabled={loading || Boolean(pending)}
+                onClick={() => void load()}
+              >
+                {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                刷新
+              </Button>
+            </div>
           </div>
         </div>
       </header>
