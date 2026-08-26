@@ -8,6 +8,7 @@ from services.server_knowledge_coverage import (
     CoverageEvidenceChunk,
     SentenceSupportDecision,
     ServerKnowledgeCoverageService,
+    _select_product_context_rows,
     extract_article_sentences,
     sentence_content_hash,
 )
@@ -116,6 +117,46 @@ class SentenceExtractionTests(unittest.TestCase):
         self.assertEqual(before[0].sentence_hash, after[0].sentence_hash)
         self.assertNotEqual(before[0].paragraph_hash, after[0].paragraph_hash)
         self.assertNotEqual(sentence_content_hash(before), sentence_content_hash(after))
+
+
+class ProductCoverageContextTests(unittest.TestCase):
+    def test_product_fact_rows_are_selected_per_product(self) -> None:
+        rows = [
+            {
+                "product_id": "product-a",
+                "chunk_id": "a-title",
+                "ordinal": 0,
+                "text": "Product A",
+            },
+            {
+                "product_id": "product-a",
+                "chunk_id": "a-size",
+                "ordinal": 7,
+                "text": "Size:1210*165*15mm/other",
+            },
+            {
+                "product_id": "product-b",
+                "chunk_id": "b-width",
+                "ordinal": 5,
+                "text": "Width:92mm",
+            },
+            {
+                "product_id": "product-c",
+                "chunk_id": "c-size",
+                "ordinal": 8,
+                "text": "400x400/500x500/600x600mm",
+            },
+        ]
+
+        selected = _select_product_context_rows(
+            rows,
+            ("product-a", "product-b", "product-c"),
+        )
+
+        self.assertEqual(
+            [row["chunk_id"] for row in selected],
+            ["a-size", "a-title", "b-width", "c-size"],
+        )
 
 
 class KnowledgeCoverageServiceTests(unittest.TestCase):
