@@ -65,7 +65,12 @@ _FAQ_CONTEXT_PATTERN = re.compile(
 )
 _GALLERY_CONTEXT_PATTERN = re.compile(
     r"(?:woocommerce[\s_-]?product[\s_-]?gallery|product[\s_-]?(?:image|images|gallery|"
-    r"thumbnails?|slider)|(?:^|[\s_-])gallery(?:$|[\s_-])|flex[\s_-]?viewport)",
+    r"thumbnails?|slider)|(?:^|[\s_-])gallery(?:$|[\s_-])|flex[\s_-]?viewport|"
+    r"uc[\s_-]?compact[\s_-]?image[\s_-]?theme)",
+    re.IGNORECASE,
+)
+_RESPONSIVE_PRODUCT_GALLERY_PATTERN = re.compile(
+    r"(?:^|[\s_-])uc[\s_-]?compact[\s_-]?image[\s_-]?theme(?:$|[\s_-])",
     re.IGNORECASE,
 )
 _SPEC_CONTEXT_PATTERN = re.compile(
@@ -325,6 +330,35 @@ def _is_blocked(element: Any) -> bool:
         if _BLOCKED_CONTEXT_PATTERN.search(_context_text(node)):
             return True
     return False
+
+
+def _is_responsive_product_gallery_image(element: Any) -> bool:
+    """Allow a known JS-responsive product gallery fallback.
+
+    Elementor/Unlimited Elements can render the mobile and desktop gallery
+    wrappers with ``display:none`` in the server HTML and reveal one of them
+    in JavaScript.  Static ingestion must still be able to use the lazy image
+    URLs, but the exception must not weaken the related-product, ``noscript``,
+    or other hidden-content filters.
+    """
+
+    if _has_ancestor_tag(element, {"noscript"}):
+        return False
+    if any(
+        _BLOCKED_CONTEXT_PATTERN.search(_context_text(node))
+        for node in _element_and_ancestors(element)
+    ):
+        return False
+    return any(
+        _is_explicitly_hidden(node)
+        and _RESPONSIVE_PRODUCT_GALLERY_PATTERN.search(_context_text(node))
+        and "uc-items-wrapper"
+        in {
+            value.casefold()
+            for value in _normalise_space(node.get("class", "")).split()
+        }
+        for node in element.iterancestors()
+    )
 
 
 def _is_faq_context(element: Any) -> bool:
@@ -998,7 +1032,10 @@ def _extract_dom_images(
     gallery: list[ProductImageAsset] = []
     body: list[ProductImageAsset] = []
     for image in main.iter("img"):
-        if _is_blocked(image) or _is_faq_context(image):
+        if (
+            _is_blocked(image)
+            and not _is_responsive_product_gallery_image(image)
+        ) or _is_faq_context(image):
             continue
         if _looks_like_other_product_link(image, product_url, canonical_url):
             continue

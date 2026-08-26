@@ -275,6 +275,41 @@ class ProductAssetParsingTests(unittest.TestCase):
             ],
         )
 
+    def test_hidden_responsive_elementor_gallery_lazy_images_are_product_evidence(self) -> None:
+        html = f"""
+        <html><head><link rel="canonical" href="{PRODUCT_URL}"></head><body>
+          <main class="elementor elementor-location-single">
+            <h1>Sanitary Pump 900</h1>
+            <div id="uc_uc_compact_image_theme_elementor_61a6cf5"
+                 class="uc-items-wrapper" style="display:none; margin:0 auto;">
+              <img src="data:image/svg+xml,placeholder"
+                   data-lazy-src="/media/pump-900-front.webp"
+                   alt="Sanitary Pump 900 front">
+              <noscript>
+                <img src="/media/pump-900-front.webp" alt="Sanitary Pump 900 front">
+              </noscript>
+            </div>
+            <section class="related-products">
+              <a href="/products/pump-800/"><img src="/media/pump-800.webp"></a>
+            </section>
+            <div style="display:none"><img src="/media/hidden-template.webp"></div>
+          </main>
+        </body></html>
+        """
+
+        parsed = parse_product_page(PRODUCT_URL, html, "pump-900")
+
+        self.assertEqual(
+            [asset.source_url for asset in parsed.main_gallery],
+            ["https://shop.example.com/media/pump-900-front.webp"],
+        )
+        self.assertFalse(
+            any("pump-800" in asset.source_url for asset in parsed.body_images)
+        )
+        self.assertFalse(
+            any("hidden-template" in asset.source_url for asset in parsed.body_images)
+        )
+
     def test_empty_main_falls_back_to_sibling_product_detail_with_lazy_images(self) -> None:
         html = """
         <html><head><link rel="canonical" href="/self-tapping-screw/"></head><body>
