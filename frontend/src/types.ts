@@ -743,6 +743,7 @@ export type ProjectAssetDownload = {
   asset_id: string;
   url: string;
   expires_seconds: number;
+  filename?: string | null;
 };
 
 export type ServerCatalogProduct = {

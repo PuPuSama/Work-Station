@@ -225,6 +225,7 @@ class ProjectAssetDownload(BaseModel):
     asset_id: str
     url: str
     expires_seconds: int
+    filename: str | None = None
 
 
 class ProjectCatalogProductResponse(BaseModel):
@@ -3988,6 +3989,10 @@ def create_project_task_initial_ai_screenshot_download(
             ),
             width=task.initial_ai_check.screenshot_width or 0,
             height=task.initial_ai_check.screenshot_height or 0,
+            filename=(
+                task.initial_ai_check.screenshot_filename
+                or "initial-ai-rate.png"
+            ),
             expires_seconds=expires_seconds,
         )
     except ProjectAccessDenied as exc:
@@ -4009,6 +4014,10 @@ def create_project_task_initial_ai_screenshot_download(
         asset_id=asset_id,
         url=url,
         expires_seconds=expires_seconds,
+        filename=(
+            task.initial_ai_check.screenshot_filename
+            or "initial-ai-rate.png"
+        ),
     )
 
 
@@ -4241,6 +4250,10 @@ def create_project_task_final_ai_screenshot_download(
                 ),
                 width=task.final_ai_check.screenshot_width,
                 height=task.final_ai_check.screenshot_height,
+                filename=(
+                    task.final_ai_check.screenshot_filename
+                    or "final-ai-rate.png"
+                ),
                 expires_seconds=expires_seconds,
             )
         )
@@ -4263,6 +4276,10 @@ def create_project_task_final_ai_screenshot_download(
         asset_id=asset_id,
         url=url,
         expires_seconds=expires_seconds,
+        filename=(
+            task.final_ai_check.screenshot_filename
+            or "final-ai-rate.png"
+        ),
     )
 
 
@@ -4529,6 +4546,7 @@ def create_project_task_docx_download(
                 actor=authorized.actor,
                 project_id=authorized.project_id,
                 asset_id=asset_id,
+                filename=task.docx_filename or "article.docx",
                 expires_seconds=expires_seconds,
             )
         )
@@ -4551,6 +4569,7 @@ def create_project_task_docx_download(
         asset_id=asset_id,
         url=url,
         expires_seconds=expires_seconds,
+        filename=task.docx_filename or "article.docx",
     )
 
 
@@ -4678,6 +4697,7 @@ def create_project_task_tdk_download(
                 actor=authorized.actor,
                 project_id=authorized.project_id,
                 asset_id=asset_id,
+                filename=task.tdk_filename or "D.docx",
                 expires_seconds=expires_seconds,
             )
         )
@@ -4700,6 +4720,7 @@ def create_project_task_tdk_download(
         asset_id=asset_id,
         url=url,
         expires_seconds=expires_seconds,
+        filename=task.tdk_filename or "D.docx",
     )
 
 
@@ -4834,6 +4855,9 @@ def create_project_task_delivery_download(
                 project_id=authorized.project_id,
                 asset_id=asset_id,
                 content_hash=task.delivery_package_content_hash,
+                filename=(
+                    task.delivery_package_filename or "delivery.zip"
+                ),
                 expires_seconds=expires_seconds,
             )
         )
@@ -4856,6 +4880,9 @@ def create_project_task_delivery_download(
         asset_id=asset_id,
         url=url,
         expires_seconds=expires_seconds,
+        filename=(
+            task.delivery_package_filename or "delivery.zip"
+        ),
     )
 
 

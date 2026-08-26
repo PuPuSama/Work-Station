@@ -22,6 +22,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { apiGet, apiPost } from "@/lib/api";
+import { triggerBrowserDownload } from "@/lib/browser-download";
 import { sameProjectId } from "@/lib/project-id";
 import { cn } from "@/lib/utils";
 import type { AccessibleProject, ProjectAssetDownload, TaskRecord } from "@/types";
@@ -171,9 +172,15 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
     setError("");
     setMessage("");
     try {
-      const download = await apiGet<ProjectAssetDownload>(path);
+      const download = await apiGet<ProjectAssetDownload>(path, 30_000);
       if (!download.url) throw new Error("服务器没有返回可用的短期下载地址。");
-      window.location.assign(download.url);
+      const fallback = path.endsWith("/tdk/download")
+        ? task.tdk_filename || "D.docx"
+        : path.endsWith("/delivery-package/download")
+          ? task.delivery_package_filename || "delivery.zip"
+          : task.docx_filename || "article.docx";
+      triggerBrowserDownload(download.url, download.filename || fallback);
+      setMessage(`${task.id}：${label}已开始`);
     } catch (downloadError) {
       setError(errorMessage(downloadError));
     } finally {

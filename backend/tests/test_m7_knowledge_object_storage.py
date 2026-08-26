@@ -47,6 +47,7 @@ class FakeStore:
     def __init__(self) -> None:
         self.put_calls: list[dict[str, object]] = []
         self.signed: list[tuple[str, int]] = []
+        self.sign_options: list[dict[str, object]] = []
         self.objects: dict[str, bytes] = {}
 
     def check_ready(self):
@@ -73,8 +74,21 @@ class FakeStore:
     def get(self, key, *, max_bytes):
         return self.objects[key][: max_bytes + 1]
 
-    def create_download_url(self, key, *, expires_seconds):
+    def create_download_url(
+        self,
+        key,
+        *,
+        expires_seconds,
+        response_content_type=None,
+        response_content_disposition=None,
+    ):
         self.signed.append((key, expires_seconds))
+        self.sign_options.append(
+            {
+                "response_content_type": response_content_type,
+                "response_content_disposition": response_content_disposition,
+            }
+        )
         return f"https://signed.example.test/{key}"
 
     def delete(self, key):
@@ -330,9 +344,20 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             actor=self.actor,
             project_id="project-a",
             asset_id=docx.asset_id,
+            filename="Buyer Guide.docx",
             expires_seconds=90,
         )
         self.assertTrue(docx_url.startswith("https://signed.example.test/"))
+        self.assertEqual(
+            self.store.sign_options[-1],
+            {
+                "response_content_type": ARTICLE_DOCX_CONTENT_TYPE,
+                "response_content_disposition": (
+                    'attachment; filename="Buyer Guide.docx"; '
+                    "filename*=UTF-8''Buyer%20Guide.docx"
+                ),
+            },
+        )
         self.assertEqual(
             self.access.calls[-1][2],
             "article.deliver",
@@ -362,10 +387,18 @@ class KnowledgeObjectStorageTests(unittest.TestCase):
             project_id="project-a",
             asset_id=delivery_zip.asset_id,
             content_hash=delivery_zip.content_hash,
+            filename="yehui-topic_001",
             expires_seconds=90,
         )
         self.assertTrue(
             delivery_url.startswith("https://signed.example.test/")
+        )
+        self.assertEqual(
+            self.store.sign_options[-1]["response_content_disposition"],
+            (
+                'attachment; filename="yehui-topic_001.zip"; '
+                "filename*=UTF-8''yehui-topic_001.zip"
+            ),
         )
         self.assertEqual(
             self.access.calls[-1][2],

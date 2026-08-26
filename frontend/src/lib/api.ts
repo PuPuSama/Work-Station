@@ -75,10 +75,13 @@ async function fetchWithTimeout(
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
+export async function apiGet<T>(
+  path: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
   const response = await fetchWithTimeout(`${API_BASE}${path}`, {
     cache: "no-store",
-  });
+  }, timeoutMs);
   return readJson<T>(response);
 }
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Mapping
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from services.access_control import (
     ActorIdentity,
@@ -32,6 +34,39 @@ class KnowledgeObjectNotFound(LookupError):
 
 class KnowledgeObjectIntegrityError(ObjectStoreError):
     """Stored bytes no longer match their immutable database identity."""
+
+
+def _download_content_disposition(
+    filename: str,
+    *,
+    fallback: str,
+    extension: str,
+) -> str:
+    """Build a safe attachment header for a signed object-store URL."""
+
+    normalized = unicodedata.normalize("NFKC", str(filename or "")).strip()
+    normalized = re.sub(r"[\x00-\x1f\x7f\"/\\;]+", "-", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" .")
+    normalized = normalized or fallback
+    if not normalized.casefold().endswith(extension.casefold()):
+        normalized = f"{normalized}{extension}"
+
+    ascii_fallback = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_fallback = re.sub(r"[^A-Za-z0-9._ -]+", "-", ascii_fallback)
+    ascii_fallback = re.sub(r"\s+", " ", ascii_fallback).strip(" .")
+    if not ascii_fallback or not ascii_fallback.casefold().endswith(
+        extension.casefold()
+    ):
+        ascii_fallback = fallback
+
+    encoded = quote(normalized, safe="!#$&+-.^_`|~")
+    disposition = (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{encoded}"
+    )
+    return disposition if len(disposition) <= 500 else (
+        f'attachment; filename="{ascii_fallback}"'
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,6 +541,7 @@ class ProjectKnowledgeObjectService:
         actor: ActorIdentity,
         project_id: str,
         asset_id: str,
+        filename: str = "",
         expires_seconds: int = 300,
     ) -> str:
         """Sign one DOCX only after a fresh article.deliver decision."""
@@ -527,6 +563,12 @@ class ProjectKnowledgeObjectService:
         return self._store.create_download_url(
             key,
             expires_seconds=expires_seconds,
+            response_content_type=ARTICLE_DOCX_CONTENT_TYPE,
+            response_content_disposition=_download_content_disposition(
+                filename,
+                fallback="article.docx",
+                extension=".docx",
+            ),
         )
 
     def create_tdk_docx_download_url(
@@ -535,6 +577,7 @@ class ProjectKnowledgeObjectService:
         actor: ActorIdentity,
         project_id: str,
         asset_id: str,
+        filename: str = "",
         expires_seconds: int = 300,
     ) -> str:
         """Sign one TDK DOCX only after a fresh article.deliver decision."""
@@ -556,6 +599,12 @@ class ProjectKnowledgeObjectService:
         return self._store.create_download_url(
             key,
             expires_seconds=expires_seconds,
+            response_content_type=ARTICLE_DOCX_CONTENT_TYPE,
+            response_content_disposition=_download_content_disposition(
+                filename,
+                fallback="D.docx",
+                extension=".docx",
+            ),
         )
 
     def create_final_ai_screenshot_download_url(
@@ -567,6 +616,7 @@ class ProjectKnowledgeObjectService:
         content_hash: str,
         width: int | None,
         height: int | None,
+        filename: str = "",
         expires_seconds: int = 300,
     ) -> str:
         """Sign a final-review screenshot after fresh review permission."""
@@ -590,6 +640,12 @@ class ProjectKnowledgeObjectService:
         return self._store.create_download_url(
             key,
             expires_seconds=expires_seconds,
+            response_content_type="image/png",
+            response_content_disposition=_download_content_disposition(
+                filename,
+                fallback="final-ai-rate.png",
+                extension=".png",
+            ),
         )
 
     def create_initial_ai_screenshot_download_url(
@@ -601,6 +657,7 @@ class ProjectKnowledgeObjectService:
         content_hash: str,
         width: int,
         height: int,
+        filename: str = "",
         expires_seconds: int = 300,
     ) -> str:
         """Sign an initial-review screenshot after fresh review permission."""
@@ -625,6 +682,12 @@ class ProjectKnowledgeObjectService:
         return self._store.create_download_url(
             key,
             expires_seconds=expires_seconds,
+            response_content_type="image/png",
+            response_content_disposition=_download_content_disposition(
+                filename,
+                fallback="initial-ai-rate.png",
+                extension=".png",
+            ),
         )
 
     def create_delivery_zip_download_url(
@@ -634,6 +697,7 @@ class ProjectKnowledgeObjectService:
         project_id: str,
         asset_id: str,
         content_hash: str,
+        filename: str = "",
         expires_seconds: int = 300,
     ) -> str:
         """Sign one complete archive after a fresh delivery decision."""
@@ -656,6 +720,12 @@ class ProjectKnowledgeObjectService:
         return self._store.create_download_url(
             key,
             expires_seconds=expires_seconds,
+            response_content_type="application/zip",
+            response_content_disposition=_download_content_disposition(
+                filename,
+                fallback="delivery.zip",
+                extension=".zip",
+            ),
         )
 
 

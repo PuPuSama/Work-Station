@@ -412,7 +412,14 @@ class FakeDownloadStore:
     def get(self, key, *, max_bytes):
         return self.objects[key][: max_bytes + 1]
 
-    def create_download_url(self, key, *, expires_seconds):
+    def create_download_url(
+        self,
+        key,
+        *,
+        expires_seconds,
+        response_content_type=None,
+        response_content_disposition=None,
+    ):
         self.signed.append((key, expires_seconds))
         return f"https://signed.example.test/{key}"
 

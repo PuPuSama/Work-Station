@@ -37,6 +37,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { WorkflowAssistantAttachments } from "@/components/workflow-assistant-attachments";
 import { ApiError, apiFileUrl, apiGet, apiPost } from "@/lib/api";
+import { triggerBrowserDownload } from "@/lib/browser-download";
 import {
   gapFillWorkflowAssistantPlan,
   getResearchRun,
@@ -856,9 +857,15 @@ export function WorkflowAssistantWorkspace() {
     try {
       const download = await apiGet<ProjectAssetDownload>(
         `/api/projects/${encodeURIComponent(step.project_id)}/tasks/${encodeURIComponent(step.article_task_id)}/${artifact.endpoint}`,
+        30_000,
       );
       if (!download.url) throw new Error("服务器没有返回可用的短期下载地址。");
-      window.location.assign(download.url);
+      const fallback = artifactKind === "tdk"
+        ? "D.docx"
+        : artifactKind === "delivery_package"
+          ? "delivery.zip"
+          : "article.docx";
+      triggerBrowserDownload(download.url, download.filename || fallback);
     } catch (nextError) {
       setError(messageText(nextError));
     } finally {

@@ -56,6 +56,7 @@ import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
 import { ServerTaskResetPanel } from "@/components/server-task-reset-panel";
 import { ServerWritingRequirementsPanel } from "@/components/server-writing-requirements-panel";
 import { apiGet, apiPost, apiPut, apiUpload } from "@/lib/api";
+import { triggerBrowserDownload } from "@/lib/browser-download";
 import { sameProjectId } from "@/lib/project-id";
 import {
   getTaskCompletionReminderStatus,
@@ -595,11 +596,33 @@ export function ServerArticleWorkbench({
   }
 
   async function download(label: string, endpoint: string) {
-    await runAction(label, async () => {
-      const asset = await apiGet<ProjectAssetDownload>(`${taskApi}/${endpoint}`);
+    const actionScope = workbenchScope;
+    if (activeWorkbenchScopeRef.current !== actionScope) return;
+    setPending(label);
+    setError("");
+    setMessage("");
+    try {
+      const asset = await apiGet<ProjectAssetDownload>(
+        `${taskApi}/${endpoint}`,
+        30_000,
+      );
       if (!asset.url) throw new Error("Server 未返回可用的短期下载地址。");
-      window.location.assign(asset.url);
-    });
+      if (activeWorkbenchScopeRef.current !== actionScope) return;
+      const fallback = endpoint.includes("delivery-package")
+        ? "delivery.zip"
+        : endpoint.includes("tdk/")
+          ? "D.docx"
+          : endpoint.includes("screenshot")
+            ? "ai-rate.png"
+            : "article.docx";
+      triggerBrowserDownload(asset.url, asset.filename || fallback);
+      setMessage(`${label}已开始，请查看浏览器下载列表。`);
+    } catch (reason) {
+      if (activeWorkbenchScopeRef.current !== actionScope) return;
+      setError(errorMessage(reason));
+    } finally {
+      if (activeWorkbenchScopeRef.current === actionScope) setPending("");
+    }
   }
 
   const confirmedProducts = useMemo(() => catalog?.products || [], [catalog]);
@@ -2079,7 +2102,11 @@ export function ServerArticleWorkbench({
                     disabled={Boolean(pending) || !task.docx_asset_id}
                     onClick={() => void download("下载 Word", "docx/download")}
                   >
-                    <Download />
+                    {pending === "下载 Word" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Download />
+                    )}
                     Word
                   </Button>
                   <Button
@@ -2089,7 +2116,11 @@ export function ServerArticleWorkbench({
                     disabled={Boolean(pending) || !task.tdk_asset_id}
                     onClick={() => void download("下载 TDK", "tdk/download")}
                   >
-                    <Download />
+                    {pending === "下载 TDK" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Download />
+                    )}
                     TDK
                   </Button>
                   <Button
@@ -2106,7 +2137,11 @@ export function ServerArticleWorkbench({
                       )
                     }
                   >
-                    <Download />
+                    {pending === "下载交付 ZIP" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Download />
+                    )}
                     ZIP
                   </Button>
                 </div>
