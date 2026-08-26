@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ from storage import RevisionConflictError, content_hash, now_iso
 
 
 SEO_REVIEW_OPERATION = "seo_review"
+LOGGER = logging.getLogger(__name__)
 
 
 class SeoReviewGenerationUnavailable(RuntimeError):
@@ -243,6 +245,16 @@ class LlmServerSeoReviewProvider:
             )
         except SeoReviewGenerationUnavailable:
             raise
+        except SeoReviewError as exc:
+            LOGGER.warning(
+                "SEO review provider result validation failed: %s",
+                type(exc).__name__,
+            )
+            detail = str(exc).strip()[:240]
+            raise SeoReviewGenerationUnavailable(
+                "SEO review provider returned an invalid result"
+                + (f": {detail}" if detail else "")
+            ) from exc
         except Exception as exc:
             raise SeoReviewGenerationUnavailable(
                 "SEO review provider returned an invalid result"

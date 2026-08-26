@@ -113,8 +113,18 @@ button:disabled {
   *::before,
   *::after {
     scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /*
+   * Loading indicators communicate live progress rather than decoration.
+   * Keep them moving even when the OS requests reduced motion; otherwise a
+   * pending request looks frozen and users cannot distinguish it from a
+   * stalled page.
+   */
+  .animate-spin,
+  .workflow-assistant-spinner {
+    animation-duration: 0.9s !important;
+    animation-iteration-count: infinite !important;
   }
 }

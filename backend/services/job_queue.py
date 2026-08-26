@@ -81,6 +81,7 @@ def is_retryable_error(error: BaseException) -> bool:
         "connection aborted",
         "connection error",
         "failed to fetch",
+        "invalid result",
         "timed out",
         "timeout",
     )

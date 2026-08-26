@@ -14,6 +14,7 @@ import httpx
 
 from services.external_identity import (
     ExternalActorSessionService,
+    ExternalIdentityNotAuthorized,
     ExternalIdentityRepository,
 )
 from services.oidc_identity import (

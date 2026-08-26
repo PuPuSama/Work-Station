@@ -25,7 +25,10 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.access_control import ActorIdentity  # noqa: E402
-from services.external_identity import ResolvedExternalActor  # noqa: E402
+from services.external_identity import (  # noqa: E402
+    ExternalIdentityNotAuthorized,
+    ResolvedExternalActor,
+)
 from services.oidc_identity import (  # noqa: E402
     OidcConfigurationError,
     OidcDiscoveryDocument,
@@ -48,6 +51,9 @@ from services.server_auth import (  # noqa: E402
 )
 from services.server_request_security import (  # noqa: E402
     ServerRequestSecurity,
+)
+from services.workspace_invitations import (  # noqa: E402
+    WorkspaceInvitationDenied,
 )
 
 
@@ -182,12 +188,19 @@ class FakeIdentityRepository:
 
 
 class FakeInvitationRedeemer:
-    def __init__(self, actor: ResolvedExternalActor) -> None:
+    def __init__(
+        self,
+        actor: ResolvedExternalActor,
+        error: Exception | None = None,
+    ) -> None:
         self.actor = actor
+        self.error = error
         self.calls = []
 
     def redeem(self, *, invitation_token, identity, event_id):
         self.calls.append((invitation_token, identity, event_id))
+        if self.error is not None:
+            raise self.error
         return self.actor
 
 
@@ -574,6 +587,49 @@ class OidcTokenVerificationTests(unittest.TestCase):
 
 
 class OidcLoginHttpTests(unittest.TestCase):
+    def test_denied_invitation_is_returned_as_auth_failure(self) -> None:
+        fake = FakeOidcProvider()
+        private_key, public_jwk = make_key("denied-invitation-key")
+        fake.keys = [public_jwk]
+        http_client = httpx.Client(transport=fake.transport())
+        redeemer = FakeInvitationRedeemer(
+            ResolvedExternalActor(
+                ActorIdentity("org-denied", "user-denied"),
+                session_version=1,
+            ),
+            error=WorkspaceInvitationDenied(
+                "invitation does not authorize this identity"
+            ),
+        )
+        service = OidcLoginService.create(
+            settings=settings(),
+            identities=FakeIdentityRepository(None),
+            codec=ServerActorSessionCodec(b"d" * 32),
+            invitations=redeemer,
+            client=http_client,
+        )
+        try:
+            attempt = service.begin(invitation_token="denied-token")
+            query = parse_qs(urlsplit(attempt.authorization_url).query)
+            fake.id_token = encode_id_token(
+                private_key,
+                key_id="denied-invitation-key",
+                nonce=query["nonce"][0],
+            )
+            with self.assertRaisesRegex(
+                ExternalIdentityNotAuthorized,
+                "external identity is not authorized",
+            ):
+                service.complete(
+                    code="denied-code",
+                    state=query["state"][0],
+                    state_cookie=attempt.state_cookie,
+                    invitation_token="denied-token",
+                )
+        finally:
+            service.close()
+            http_client.close()
+
     def test_invitation_token_is_http_only_state_bound_and_redeemed(
         self,
     ) -> None:

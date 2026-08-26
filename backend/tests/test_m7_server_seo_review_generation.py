@@ -12,7 +12,10 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from models import PromptSnapshot, TaskRecord  # noqa: E402
-from services.job_queue import JobConflict  # noqa: E402
+from services.job_queue import (  # noqa: E402
+    JobConflict,
+    is_retryable_error,
+)
 from services.server_outline_generation import (  # noqa: E402
     PublishedGenerationContextChunk,
 )
@@ -184,13 +187,14 @@ class ServerSeoReviewGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             SeoReviewGenerationUnavailable,
             "invalid result",
-        ):
+        ) as raised:
             invalid.generate(
                 task(),
                 article=ARTICLE,
                 prompt_snapshot=snapshot(),
                 context_chunks=(),
             )
+        self.assertTrue(is_retryable_error(raised.exception))
 
     def test_apply_appends_open_run_without_applying_changes(self) -> None:
         current = task()
