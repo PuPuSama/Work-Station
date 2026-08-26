@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
@@ -1713,7 +1714,7 @@ def revise_plan(plan_id: str, payload: PlanRevisionRequest, request: Request, ac
 
 
 @router.get("/plans/{plan_id}/events/stream")
-def stream_plan_events(
+async def stream_plan_events(
     plan_id: str,
     request: Request,
     after_sequence: int = Query(default=0, ge=0),
@@ -1721,39 +1722,78 @@ def stream_plan_events(
 ) -> StreamingResponse:
     _feature_enabled(request)
 
-    def iterator() -> Iterator[str]:
-        try:
-            plan = _repository(request).get_plan(actor=actor, plan_id=plan_id)
-            _reauthorize_plan_read(request, actor=actor, plan=plan)
-            events = _repository(request).list_events(
-                actor=actor,
-                plan_id=plan_id,
-                after_sequence=after_sequence,
-            )
-        except Exception as exc:
-            error = _error(exc)
-            payload = json.dumps({"detail": error.detail}, ensure_ascii=False)
-            yield f"event: error\ndata: {payload}\n\n"
-            return
-        for event in events:
-            payload = json.dumps(
-                {
-                    "sequence": event.sequence,
-                    "event_kind": event.event_kind,
-                    "public_payload": event.public_payload,
-                    "created_at": _iso(event.created_at),
-                },
-                ensure_ascii=False,
-            )
-            # Use one stable SSE event name so browser clients can subscribe
-            # without exposing internal event kinds as routing metadata.
-            yield f"id: {event.sequence}\nevent: workflow-assistant\ndata: {payload}\n\n"
-        yield ": keep-alive\n\n"
+    repository = _repository(request)
+
+    def load_plan() -> WorkflowPlan:
+        plan = repository.get_plan(actor=actor, plan_id=plan_id)
+        _reauthorize_plan_read(request, actor=actor, plan=plan)
+        return plan
+
+    # Validate the plan before opening a long-lived response. This keeps a
+    # missing or unauthorized plan as a normal HTTP error instead of making
+    # the browser retry an SSE stream that can never succeed.
+    try:
+        await asyncio.to_thread(load_plan)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+    async def iterator() -> AsyncIterator[str]:
+        cursor = after_sequence
+        last_heartbeat = time.monotonic()
+        # Emit an initial comment so reverse proxies flush the stream even
+        # when the plan has not produced a new event yet.
+        yield ": connected\n\n"
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                events = await asyncio.to_thread(
+                    repository.list_events,
+                    actor=actor,
+                    plan_id=plan_id,
+                    after_sequence=cursor,
+                )
+                plan = await asyncio.to_thread(load_plan)
+            except Exception as exc:
+                error = _error(exc)
+                payload = json.dumps({"detail": error.detail}, ensure_ascii=False)
+                yield f"event: error\ndata: {payload}\n\n"
+                return
+            for event in events:
+                cursor = max(cursor, event.sequence)
+                payload = json.dumps(
+                    {
+                        "sequence": event.sequence,
+                        "event_kind": event.event_kind,
+                        "public_payload": event.public_payload,
+                        "created_at": _iso(event.created_at),
+                    },
+                    ensure_ascii=False,
+                )
+                # Use one stable SSE event name so browser clients can
+                # subscribe without exposing internal event kinds as routing
+                # metadata.
+                yield f"id: {event.sequence}\nevent: workflow-assistant\ndata: {payload}\n\n"
+            if plan.status in {"completed", "failed", "cancelled"}:
+                yield (
+                    "event: done\ndata: "
+                    + json.dumps({"status": plan.status}, ensure_ascii=False)
+                    + "\n\n"
+                )
+                return
+            if time.monotonic() - last_heartbeat >= 15:
+                yield ": keep-alive\n\n"
+                last_heartbeat = time.monotonic()
+            await asyncio.sleep(1)
 
     return StreamingResponse(
         iterator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

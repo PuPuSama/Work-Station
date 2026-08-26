@@ -108,10 +108,65 @@ const stepStatusLabels: Record<string, string> = {
 // the selected model performs deep reasoning over several projects. Keep a
 // finite browser guard, but do not abort a healthy server-side planning call.
 const WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS = 30 * 60 * 1000;
+const WORKFLOW_ASSISTANT_DISPATCH_RECOVERY_INTERVAL_MS = 2000;
 
 function localId(prefix: string) {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   return `${prefix}-${random}`.replace(/[^A-Za-z0-9._:-]/g, "-");
+}
+
+function isDispatchConnectionFailure(error: unknown): boolean {
+  if (error instanceof ApiError) return error.status >= 500;
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /socket hang up|network|fetch failed|timed out|timeout|connection/i.test(message);
+}
+
+async function recoverDispatchResult(
+  conversationId: string,
+  content: string,
+  previousPlanId: string | null,
+): Promise<{
+  conversation: WorkflowAssistantConversation;
+  plan: WorkflowAssistantPlan | null;
+} | null> {
+  const deadline = Date.now() + WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const [latestPlan, conversation] = await Promise.all([
+        apiGet<WorkflowAssistantPlan | null>(
+          `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
+        ),
+        apiGet<WorkflowAssistantConversation>(
+          `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
+        ),
+      ]);
+      const planMatchesRequest = Boolean(
+        latestPlan
+        && latestPlan.natural_language_request.trim() === content
+        && (latestPlan.plan_id !== previousPlanId || previousPlanId === null),
+      );
+      const lastUserIndex = [...conversation.messages]
+        .map((message, index) => ({ message, index }))
+        .reverse()
+        .find(({ message }) => message.role === "user" && message.content.trim() === content)
+        ?.index;
+      const hasAssistantReply = lastUserIndex !== undefined
+        && conversation.messages.slice(lastUserIndex + 1).some(
+          (message) => message.role === "assistant",
+        );
+      if (planMatchesRequest || hasAssistantReply) {
+        return { conversation, plan: planMatchesRequest ? latestPlan : null };
+      }
+    } catch {
+      // A proxy reconnect can briefly make both status reads fail. Keep the
+      // request in the waiting state and try again without showing a false
+      // planning error to the user.
+    }
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, WORKFLOW_ASSISTANT_DISPATCH_RECOVERY_INTERVAL_MS);
+    });
+  }
+  return null;
 }
 
 function researchThreadId(step: WorkflowAssistantStep): string {
@@ -278,6 +333,7 @@ export function WorkflowAssistantWorkspace() {
   const loadedConversationRef = useRef<string | null>(null);
   const lastEventSequenceRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
   const pendingMessageDispatchRef = useRef<{
     conversationId: string;
     content: string;
@@ -387,6 +443,7 @@ export function WorkflowAssistantWorkspace() {
       setTimeline([]);
       setTimelineExpanded(false);
       lastEventSequenceRef.current = 0;
+      reconnectAttemptRef.current = 0;
     }
   }, [projects, selectedConversation?.conversation_id, selectedConversationProjectIds]);
 
@@ -432,6 +489,7 @@ export function WorkflowAssistantWorkspace() {
       setTimeline([]);
       setTimelineExpanded(false);
       lastEventSequenceRef.current = 0;
+      reconnectAttemptRef.current = 0;
     }
     eventSourceRef.current?.close();
     if (reconnectTimerRef.current !== null) {
@@ -439,6 +497,7 @@ export function WorkflowAssistantWorkspace() {
       reconnectTimerRef.current = null;
     }
     let disposed = false;
+    let streamFinished = false;
     const handleEvent = (event: MessageEvent<string>) => {
       try {
         const data = JSON.parse(event.data) as {
@@ -475,18 +534,29 @@ export function WorkflowAssistantWorkspace() {
         // Keep the timeline usable if a proxy emits a non-JSON keepalive.
       }
     };
+    const handleDone = () => {
+      streamFinished = true;
+      eventSourceRef.current?.close();
+    };
     const connect = () => {
-      if (disposed) return;
+      if (disposed || streamFinished) return;
       const source = new EventSource(
         `${apiFileUrl(`/api/workflow-assistant/plans/${encodeURIComponent(planId)}/events/stream?after_sequence=${lastEventSequenceRef.current}`)}`,
         { withCredentials: true },
       );
+      source.onopen = () => {
+        reconnectAttemptRef.current = 0;
+      };
       source.onmessage = handleEvent;
       source.addEventListener("workflow-assistant", handleEvent as EventListener);
+      source.addEventListener("done", handleDone);
       source.onerror = () => {
         source.close();
-        if (!disposed) {
-          reconnectTimerRef.current = window.setTimeout(connect, 1000);
+        if (!disposed && !streamFinished) {
+          const attempt = reconnectAttemptRef.current;
+          reconnectAttemptRef.current = Math.min(attempt + 1, 6);
+          const delay = Math.min(30_000, 1000 * (2 ** attempt));
+          reconnectTimerRef.current = window.setTimeout(connect, delay);
         }
       };
       eventSourceRef.current = source;
@@ -583,6 +653,8 @@ export function WorkflowAssistantWorkspace() {
     setRequestPhase("sending");
     setPlanPreviewExpanded(false);
     setError("");
+    let dispatchConversation: WorkflowAssistantConversation | null = selectedConversation;
+    let previousPlanId: string | null = null;
     try {
       let conversation = selectedConversation;
       if (!conversation) {
@@ -593,6 +665,10 @@ export function WorkflowAssistantWorkspace() {
         setConversations((current) => [conversation as WorkflowAssistantConversation, ...current]);
         setSelectedConversation(conversation);
       }
+      dispatchConversation = conversation;
+      previousPlanId = plan?.conversation_id === conversation.conversation_id
+        ? plan.plan_id
+        : null;
       const scopeKey = JSON.stringify({
         projectIds: selectedProjectIds,
         articleTaskIds: selectedTaskIds,
@@ -641,6 +717,33 @@ export function WorkflowAssistantWorkspace() {
       setSelectedConversation(refreshed);
       setConversations((current) => current.map((item) => item.conversation_id === refreshed.conversation_id ? refreshed : item));
     } catch (nextError) {
+      if (dispatchConversation && isDispatchConnectionFailure(nextError)) {
+        setRequestPhase("waiting_reply");
+        setError("与服务器的连接暂时中断，计划可能仍在后台生成，正在自动同步……");
+        const recovered = await recoverDispatchResult(
+          dispatchConversation.conversation_id,
+          content,
+          previousPlanId,
+        );
+        if (recovered) {
+          pendingMessageDispatchRef.current = null;
+          setError("");
+          if (recovered.plan) {
+            setPlan(recovered.plan);
+            setPlanPreviewExpanded(false);
+          }
+          setDraft("");
+          setPendingUserMessage(null);
+          setSelectedConversation(recovered.conversation);
+          setConversations((current) => current.map((item) => (
+            item.conversation_id === recovered.conversation.conversation_id
+              ? recovered.conversation
+              : item
+          )));
+          void refreshAttention().catch(() => undefined);
+          return;
+        }
+      }
       setPendingUserMessage(null);
       setError(messageText(nextError));
     } finally {
@@ -874,7 +977,7 @@ export function WorkflowAssistantWorkspace() {
                   ))}
                   {pendingUserMessage && showPendingUserMessage && <div className="ml-auto flex max-w-[92%] items-start gap-2 rounded-xl bg-primary/80 px-3 py-2.5 text-sm leading-6 text-primary-foreground" aria-label="已发送，等待助手回复">
                     <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
-                    <Loader2 className="mt-1 size-4 shrink-0 animate-spin" />
+                    <Loader2 className="workflow-assistant-spinner mt-1 size-4 shrink-0" />
                   </div>}
                 </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
               </div>
@@ -890,12 +993,12 @@ export function WorkflowAssistantWorkspace() {
                 />
               )}
               {requestPhase !== "idle" && <div className="flex min-h-11 items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm" role="status" aria-live="polite">
-                <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+                <Loader2 className="workflow-assistant-spinner size-4 shrink-0 text-primary" />
                 <span className="font-medium">{requestPhase === "sending" ? "正在发送请求" : requestPhase === "waiting_reply" ? "已发送，等待助手回复" : "回复已收到，正在更新计划"}</span>
                 <span className="text-muted-foreground">{requestPhase === "sending" ? "正在提交当前项目和文章范围。" : requestPhase === "waiting_reply" ? "助手正在处理请求，页面不会重复提交。" : "正在刷新会话和计划预览。"}</span>
               </div>}
               <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="直接聊天、查询所选项目的知识库，或描述要执行的工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
-              <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="animate-spin" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新计划" : pending ? "处理中" : "发送"}</Button></div>
+              <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="workflow-assistant-spinner" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新计划" : pending ? "处理中" : "发送"}</Button></div>
             </div>
           </CardContent>
         </Card>

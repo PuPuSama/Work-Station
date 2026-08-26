@@ -80,6 +80,22 @@ body {
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
+@keyframes workflow-assistant-spinner {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.workflow-assistant-spinner {
+  animation: workflow-assistant-spinner 0.9s linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
 button {
   cursor: pointer;
 }
