@@ -2511,15 +2511,16 @@ class PostgresWorkflowAssistantRepository:
                 )
                 .limit(limit)
             ).scalars().all()
+
+            # Batch load all plans at once instead of N+1 queries
+            plan_ids = [str(plan_id) for plan_id in rows]
+            plans_dict = self._batch_load_plans(connection, actor, plan_ids)
+
+            # Return in original order, filtering out any that failed to load
             return tuple(
-                plan
-                for plan_id in rows
-                if (plan := self._get_plan_in_connection(
-                    connection,
-                    actor,
-                    str(plan_id),
-                ))
-                is not None
+                plans_dict[plan_id]
+                for plan_id in plan_ids
+                if plan_id in plans_dict
             )
 
     def mark_plan_seen(
@@ -2945,6 +2946,78 @@ class PostgresWorkflowAssistantRepository:
             event_kind=event_kind,
             public_payload=copy.deepcopy(safe_payload),
         )
+
+    def _batch_load_plans(
+        self,
+        connection: Connection,
+        actor: ActorIdentity,
+        plan_ids: Sequence[str],
+    ) -> dict[str, WorkflowPlan]:
+        """Batch load multiple plans with their steps in 2 queries instead of N.
+
+        This dramatically improves performance for list operations by avoiding N+1 queries.
+        """
+        if not plan_ids:
+            return {}
+
+        # Load all plan rows in one query
+        plan_rows = connection.execute(
+            sa.select(workflow_plans)
+            .where(
+                workflow_plans.c.organization_id == actor.organization_id,
+                workflow_plans.c.plan_id.in_(plan_ids),
+            )
+        ).mappings().all()
+
+        # Load all step rows in one query
+        step_rows = connection.execute(
+            sa.select(workflow_plan_steps)
+            .where(
+                workflow_plan_steps.c.organization_id == actor.organization_id,
+                workflow_plan_steps.c.plan_id.in_(plan_ids),
+            )
+            .order_by(
+                workflow_plan_steps.c.plan_id,
+                workflow_plan_steps.c.sequence,
+            )
+        ).mappings().all()
+
+        # Group steps by plan_id
+        steps_by_plan: dict[str, list[RowMapping]] = {}
+        for step in step_rows:
+            steps_by_plan.setdefault(str(step["plan_id"]), []).append(step)
+
+        # Build WorkflowPlan objects
+        result = {}
+        for row in plan_rows:
+            plan_id = str(row["plan_id"])
+            steps = steps_by_plan.get(plan_id, [])
+
+            # Build the plan with its steps
+            plan = WorkflowPlan(
+                plan_id=plan_id,
+                organization_id=str(row["organization_id"]),
+                conversation_id=str(row["conversation_id"]),
+                creator_user_id=str(row["creator_user_id"]),
+                title=str(row["title"]),
+                natural_language_request=str(row["natural_language_request"]),
+                plan_hash=str(row["plan_hash"]),
+                revision=int(row["revision"]),
+                status=str(row["status"]),
+                project_ids=tuple(_json_list(row["project_ids"])),
+                paused_project_ids=tuple(_json_list(row["paused_project_ids"])),
+                steps=tuple(self._step_from_row(step) for step in steps),
+                concurrency_limit=int(row["concurrency_limit"]),
+                budget_warning=bool(row["budget_warning"]),
+                attention_state=str(row["attention_state"]),
+                approved_by=(str(row["approved_by"]) if row["approved_by"] else None),
+                approved_at=row["approved_at"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            result[plan_id] = plan
+
+        return result
 
     def _get_plan_in_connection(
         self,

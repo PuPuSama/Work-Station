@@ -1242,6 +1242,10 @@ app = FastAPI(
     version="0.3.0",
     lifespan=app_lifespan,
 )
+
+# Add GZip compression middleware for performance
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.include_router(knowledge_agent_router)
 app.include_router(server_project_router)
 app.include_router(server_admin_router)

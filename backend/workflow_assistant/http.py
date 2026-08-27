@@ -28,6 +28,7 @@ from .contracts import (
     AssistantMessageResponse,
     AttentionCountResponse,
     PlanCommandRequest,
+    WorkflowPlanSummary,
     PlanDraft,
     PlanRevisionRequest,
     PlanStep,
@@ -111,7 +112,7 @@ class AssistantEventResponse(BaseModel):
 
 
 class AssistantAttentionListResponse(BaseModel):
-    plans: list[WorkflowPlanResponse]
+    plans: list[WorkflowPlanSummary]
 
 
 def _feature_enabled(request: Request) -> None:
@@ -282,6 +283,33 @@ def _conversation_response(
         updated_at=_iso(conversation.updated_at),
         expires_at=_iso(conversation.expires_at),
         messages=[_message_response(message) for message in conversation.messages],
+    )
+
+
+def _plan_summary(plan: WorkflowPlan) -> WorkflowPlanSummary:
+    """Lightweight plan summary without full steps and knowledge snapshots.
+
+    Used for attention lists to avoid transferring megabytes of repeated
+    knowledge snapshots and step details when only displaying plan cards.
+    """
+    pending_count = sum(1 for step in plan.steps if step.status == "pending")
+    return WorkflowPlanSummary(
+        plan_id=plan.plan_id,
+        conversation_id=plan.conversation_id,
+        title=plan.title,
+        natural_language_request=plan.natural_language_request,
+        plan_hash=plan.plan_hash,
+        revision=plan.revision,
+        status=plan.status,
+        project_ids=list(plan.project_ids),
+        paused_project_ids=list(plan.paused_project_ids),
+        step_count=len(plan.steps),
+        pending_step_count=pending_count,
+        concurrency_limit=plan.concurrency_limit,
+        budget_warning=plan.budget_warning,
+        attention_state=plan.attention_state,
+        approved_by=plan.approved_by,
+        approved_at=_iso(plan.approved_at) if plan.approved_at else None,
     )
 
 
@@ -2149,7 +2177,7 @@ def attention(
             ),
             limit=limit,
         )
-        visible: list[WorkflowPlanResponse] = []
+        visible: list[WorkflowPlanSummary] = []
         for plan in plans:
             try:
                 _reauthorize_plan_read(request, actor=actor, plan=plan)
@@ -2160,7 +2188,7 @@ def attention(
                 }:
                     continue
                 raise
-            visible.append(_plan_response(plan))
+            visible.append(_plan_summary(plan))
         return AssistantAttentionListResponse(plans=visible)
     except Exception as exc:
         raise _error(exc) from exc

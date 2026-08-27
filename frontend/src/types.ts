@@ -1412,12 +1412,40 @@ export type WorkflowAssistantConversationList = {
   conversations: WorkflowAssistantConversation[];
 };
 
+export type WorkflowAssistantPlanSummary = {
+  plan_id: string;
+  conversation_id: string;
+  title: string;
+  natural_language_request: string;
+  plan_hash: string;
+  revision: number;
+  status:
+    | "draft"
+    | "awaiting_confirmation"
+    | "queued"
+    | "running"
+    | "waiting_review"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  project_ids: string[];
+  paused_project_ids: string[];
+  step_count: number;
+  pending_step_count: number;
+  concurrency_limit: number;
+  budget_warning: boolean;
+  attention_state: string;
+  approved_by: string | null;
+  approved_at: string | null;
+};
+
 export type WorkflowAssistantAttentionCount = {
   count: number;
 };
 
 export type WorkflowAssistantAttentionList = {
-  plans: WorkflowAssistantPlan[];
+  plans: WorkflowAssistantPlanSummary[];
 };
 
 export type WorkflowAssistantAttachmentStatus =

@@ -260,6 +260,29 @@ class AttentionCountResponse(BaseModel):
     count: int = Field(ge=0)
 
 
+class WorkflowPlanSummary(BaseModel):
+    """Lightweight plan summary for attention lists, without full steps and snapshots."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    plan_id: str
+    conversation_id: str
+    title: str
+    natural_language_request: str
+    plan_hash: str
+    revision: int
+    status: PlanStatus
+    project_ids: list[str]
+    paused_project_ids: list[str] = Field(default_factory=list)
+    step_count: int = Field(ge=0)
+    pending_step_count: int = Field(ge=0)
+    concurrency_limit: int
+    budget_warning: bool
+    attention_state: str
+    approved_by: str | None = None
+    approved_at: str | None = None
+
+
 PlanDraft.model_rebuild()
 AssistantConversationResponse.model_rebuild()
 
@@ -276,4 +299,5 @@ __all__ = [
     "PlanRevisionRequest",
     "PlanStep",
     "WorkflowPlanResponse",
+    "WorkflowPlanSummary",
 ]

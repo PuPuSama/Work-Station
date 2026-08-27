@@ -55,6 +55,7 @@ import type {
   WorkflowAssistantAttentionList,
   WorkflowAssistantGapFillResponse,
   WorkflowAssistantPlan,
+  WorkflowAssistantPlanSummary,
   WorkflowAssistantStep,
 } from "@/types";
 
@@ -337,8 +338,13 @@ export function WorkflowAssistantWorkspace() {
   const [revisionPending, setRevisionPending] = useState(false);
   const [artifactPending, setArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
-  const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlan[]>([]);
+  const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlanSummary[]>([]);
   const [attentionPlanPendingId, setAttentionPlanPendingId] = useState<string | null>(null);
+
+  // Debounce refresh to prevent request storms during SSE history replay
+  const refreshTimeoutRef = useRef<number | null>(null);
+  const refreshPendingRef = useRef(false);
+  const planRefreshTimeoutRef = useRef<number | null>(null);
   const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
   const [projectChangesEnabled, setProjectChangesEnabled] = useState(false);
   const [gapFillEnabled, setGapFillEnabled] = useState(false);
@@ -377,6 +383,16 @@ export function WorkflowAssistantWorkspace() {
     setAttentionCount(countResponse.count);
     setAttentionPlans(listResponse.plans);
   }, []);
+
+  const debouncedRefreshAttention = useCallback(() => {
+    if (refreshTimeoutRef.current !== null) {
+      window.clearTimeout(refreshTimeoutRef.current);
+    }
+    refreshTimeoutRef.current = window.setTimeout(() => {
+      refreshTimeoutRef.current = null;
+      void refreshAttention().catch(() => {});
+    }, 500);
+  }, [refreshAttention]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -521,6 +537,26 @@ export function WorkflowAssistantWorkspace() {
     }
     let disposed = false;
     let streamFinished = false;
+    let eventBatchTimeout: number | null = null;
+    let batchedEventCount = 0;
+
+    const debouncedRefreshPlan = () => {
+      // Clear any existing plan refresh timeout
+      if (planRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(planRefreshTimeoutRef.current);
+      }
+
+      // Schedule plan refresh after 300ms of inactivity
+      planRefreshTimeoutRef.current = window.setTimeout(() => {
+        planRefreshTimeoutRef.current = null;
+        void apiGet<WorkflowAssistantPlan>(
+          `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
+        ).then(setPlan).catch(() => {
+          // The next SSE event or a manual reload will retry the projection.
+        });
+      }, 300);
+    };
+
     const handleEvent = (event: MessageEvent<string>) => {
       try {
         const data = JSON.parse(event.data) as {
@@ -544,15 +580,24 @@ export function WorkflowAssistantWorkspace() {
           const item = `${sequence || ""} · ${data.event_kind ?? "计划更新"}${diffText}`;
           return current.includes(item) ? current : [...current, item].slice(-50);
         });
-        void apiGet<WorkflowAssistantPlan>(
-          `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
-        ).then(setPlan).catch(() => {
-          // The next SSE event or a manual reload will retry the projection.
-        });
-        void refreshAttention().catch(() => {
-          // Plan progress remains usable if the inbox refresh is transiently
-          // unavailable; the next event or page reload will retry it.
-        });
+
+        // Batch events: increment counter and schedule debounced refresh
+        batchedEventCount++;
+        debouncedRefreshPlan();
+
+        // Clear existing batch timeout
+        if (eventBatchTimeout !== null) {
+          window.clearTimeout(eventBatchTimeout);
+        }
+
+        // After 1 second of receiving events, refresh attention once
+        eventBatchTimeout = window.setTimeout(() => {
+          eventBatchTimeout = null;
+          if (batchedEventCount > 0) {
+            batchedEventCount = 0;
+            debouncedRefreshAttention();
+          }
+        }, 1000);
       } catch {
         // Keep the timeline usable if a proxy emits a non-JSON keepalive.
       }
@@ -592,8 +637,16 @@ export function WorkflowAssistantWorkspace() {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
+      if (eventBatchTimeout !== null) {
+        window.clearTimeout(eventBatchTimeout);
+        eventBatchTimeout = null;
+      }
+      if (planRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(planRefreshTimeoutRef.current);
+        planRefreshTimeoutRef.current = null;
+      }
     };
-  }, [plan?.plan_id, refreshAttention]);
+  }, [plan?.plan_id, debouncedRefreshAttention]);
 
   const conversationMessages = selectedConversation?.messages || [];
   const showPendingUserMessage = pendingUserMessage?.conversationId === selectedConversation?.conversation_id;
@@ -937,7 +990,7 @@ export function WorkflowAssistantWorkspace() {
     }
   }
 
-  async function openAttentionPlan(nextPlan: WorkflowAssistantPlan) {
+  async function openAttentionPlan(nextPlan: WorkflowAssistantPlanSummary) {
     setError("");
     setAttentionPlanPendingId(nextPlan.plan_id);
     try {
