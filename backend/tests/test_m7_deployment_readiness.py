@@ -15,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 from services.deployment_readiness import (  # noqa: E402
     CURRENT_SERVER_CUTOVER_CAPABILITIES,
     DatabaseReadiness,
+    EXPECTED_ALEMBIC_HEAD,
     ServerCutoverCapabilities,
     postgres_database_probe,
     run_deployment_preflight,
@@ -316,7 +317,7 @@ class DeploymentReadinessTests(unittest.TestCase):
             readiness = postgres_database_probe(engine)
         finally:
             engine.dispose()
-        self.assertEqual(readiness.revision, "20260820_0032")
+        self.assertEqual(readiness.revision, EXPECTED_ALEMBIC_HEAD)
         self.assertTrue(readiness.vector_extension)
 
 

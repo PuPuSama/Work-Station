@@ -35,6 +35,7 @@ from services.audit_log import AuditEvent  # noqa: E402
 from services.object_orphan_reconciliation import (  # noqa: E402
     ProjectObjectOrphanReconciler,
 )
+from services.deployment_readiness import EXPECTED_ALEMBIC_HEAD  # noqa: E402
 from services.object_store import (  # noqa: E402
     ObjectMetadata,
     ObjectStoreError,
@@ -270,7 +271,7 @@ class ObjectOrphanReconciliationTests(unittest.TestCase):
                     )
                 ).scalars()
             )
-        self.assertEqual(revision, "20260820_0032")
+        self.assertEqual(revision, EXPECTED_ALEMBIC_HEAD)
         self.assertTrue(
             {
                 "pk_object_orphan_observations",
