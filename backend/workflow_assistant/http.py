@@ -66,6 +66,7 @@ from .repository import (
     AssistantMessage,
     PostgresWorkflowAssistantRepository,
     WorkflowAssistantConflict,
+    WorkflowAssistantDispatch,
     WorkflowAssistantNotFound,
     WorkflowPlan,
 )
@@ -88,8 +89,14 @@ router = APIRouter(
 class AssistantMessageDispatchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    message: AssistantMessageResponse
+    # Workflow planning is acknowledged before the model call starts.  Chat
+    # and knowledge answers still return a message immediately; a queued
+    # workflow returns the durable dispatch identity instead.
+    message: AssistantMessageResponse | None = None
     plan: WorkflowPlanResponse | None = None
+    dispatch_id: str | None = None
+    dispatch_status: str | None = None
+    dispatch_error_code: str | None = None
 
 
 class AssistantConversationListResponse(BaseModel):
@@ -883,6 +890,307 @@ def _record_planner_usage(
             continue
 
 
+def _planning_dispatch_response(
+    request: Request,
+    *,
+    actor: ActorIdentity,
+    dispatch: WorkflowAssistantDispatch,
+) -> AssistantMessageDispatchResponse:
+    """Project a planning lease without exposing its request internals."""
+
+    repository = _repository(request)
+    plan = repository.get_plan_by_idempotency(
+        actor=actor,
+        conversation_id=dispatch.conversation_id,
+        source_idempotency_key=dispatch.idempotency_key,
+    )
+    if plan is not None:
+        _reauthorize_plan_read(request, actor=actor, plan=plan)
+    message = None
+    try:
+        conversation = repository.get_conversation(
+            actor=actor,
+            conversation_id=dispatch.conversation_id,
+        )
+        assistant_key = _assistant_identity(
+            dispatch.idempotency_key,
+            prefix="asst",
+        )
+        assistant = next(
+            (
+                item
+                for item in conversation.messages
+                if item.idempotency_key == assistant_key
+            ),
+            None,
+        )
+        if assistant is not None:
+            message = _message_response(assistant)
+    except WorkflowAssistantNotFound:
+        # The dispatch is still private to the actor; a short-lived message
+        # retention cleanup must not make its status endpoint leak anything.
+        pass
+    return AssistantMessageDispatchResponse(
+        message=message,
+        plan=_plan_response(plan) if plan is not None else None,
+        dispatch_id=dispatch.dispatch_id,
+        dispatch_status=dispatch.status,
+        dispatch_error_code=dispatch.error_code,
+    )
+
+
+def _planner_recent_messages(
+    conversation: AssistantConversation,
+) -> tuple[dict[str, str], ...]:
+    """Expose only bounded, visible conversation text to the planner."""
+
+    return tuple(
+        {
+            "role": message.role,
+            "content": message.content[:2_000],
+        }
+        for message in conversation.messages[-8:]
+        if message.role in {"user", "assistant"} and message.content.strip()
+    )
+
+
+def _planner_plan_summary(plan: WorkflowPlan | None) -> dict[str, Any]:
+    """Build a compact, non-authoritative view of the latest plan.
+
+    The planner uses this only to understand short follow-ups such as
+    "继续". Step state, task identity, and authorization remain owned by the
+    PostgreSQL plan and are checked again by the normal execution path.
+    """
+
+    if plan is None:
+        return {}
+    return {
+        "plan_id": plan.plan_id,
+        "title": plan.title,
+        "status": plan.status,
+        "revision": plan.revision,
+        "project_ids": list(plan.project_ids),
+        "step_count": len(plan.steps),
+        "steps": [
+            {
+                "sequence": step.sequence,
+                "action_kind": step.action_kind,
+                "project_id": step.project_id,
+                "article_task_id": step.article_task_id,
+                "status": step.status,
+            }
+            for step in plan.steps[:120]
+        ],
+    }
+
+
+def process_planning_dispatch(
+    request: Request,
+    *,
+    dispatch: WorkflowAssistantDispatch,
+    worker_id: str,
+) -> None:
+    """Run one durable planning dispatch from a server worker.
+
+    This is intentionally separate from the HTTP handler.  It can be called
+    after a proxy timeout, after a browser restart, or by a different web
+    process that claimed the same PostgreSQL lease.  All plan creation and
+    assistant-message writes remain idempotent on the original key.
+    """
+
+    repository = _repository(request)
+    actor = ActorIdentity(
+        dispatch.organization_id,
+        dispatch.creator_user_id,
+    )
+    try:
+        existing_plan = repository.get_plan_by_idempotency(
+            actor=actor,
+            conversation_id=dispatch.conversation_id,
+            source_idempotency_key=dispatch.idempotency_key,
+        )
+        if existing_plan is not None:
+            _reauthorize_plan_read(request, actor=actor, plan=existing_plan)
+            if (
+                not requires_confirmation(existing_plan)
+                and existing_plan.status != "completed"
+            ):
+                # A provider/database retry can arrive after a read-only plan
+                # was persisted but before its tool outputs were committed.
+                # Re-run that durable read projection instead of acknowledging
+                # an unfinished plan as if it had completed.
+                existing_context = _context(request).resolve(
+                    actor=actor,
+                    project_ids=list(existing_plan.project_ids),
+                )
+                existing_plan, outputs = _run_and_complete_read_only_plan(
+                    request,
+                    actor=actor,
+                    context=existing_context,
+                    plan=existing_plan,
+                    repository=repository,
+                )
+                assistant_content = _read_only_message(outputs)
+            else:
+                assistant_content = _assistant_content_for_plan(existing_plan)
+            assistant_message = repository.append_message(
+                actor=actor,
+                conversation_id=dispatch.conversation_id,
+                role="assistant",
+                content=assistant_content,
+                request_id=_assistant_identity(
+                    dispatch.request_id,
+                    prefix="asst_req",
+                ),
+                idempotency_key=_assistant_identity(
+                    dispatch.idempotency_key,
+                    prefix="asst",
+                ),
+            )
+            del assistant_message
+            repository.complete_planning_dispatch(
+                dispatch=dispatch,
+                worker_id=worker_id,
+                plan_id=existing_plan.plan_id,
+            )
+            return
+
+        context = _context(request).resolve(
+            actor=actor,
+            project_ids=list(dispatch.project_ids),
+        )
+        selected_task_ids = tuple(dispatch.article_task_ids)
+        task_projects: dict[str, set[str]] = {}
+        for project in context.projects:
+            for task in project.tasks:
+                task_projects.setdefault(task.task_id, set()).add(project.project_id)
+        if any(
+            task_id not in task_projects or len(task_projects[task_id]) != 1
+            for task_id in selected_task_ids
+        ):
+            raise AssistantContextError(
+                "selected article task is outside or ambiguous in the project context"
+            )
+        conversation = repository.get_conversation(
+            actor=actor,
+            conversation_id=dispatch.conversation_id,
+        )
+        latest_plan = repository.get_latest_plan_for_conversation(
+            actor=actor,
+            conversation_id=dispatch.conversation_id,
+        )
+        recent_messages = _planner_recent_messages(conversation)
+        active_plan_summary = _planner_plan_summary(latest_plan)
+        planner = _planner(request)
+        planner_started_at = time.monotonic()
+        LOGGER.info(
+            "workflow assistant durable planner started: dispatch_id=%s "
+            "project_count=%s selected_task_count=%s",
+            dispatch.dispatch_id,
+            len(context.project_ids),
+            len(selected_task_ids),
+        )
+        plan = planner.plan(
+            actor=actor,
+            request=dispatch.content,
+            context=context,
+            selected_project_ids=context.project_ids,
+            selected_task_ids=selected_task_ids,
+            recent_messages=recent_messages,
+            active_plan_summary=active_plan_summary,
+        )
+        LOGGER.info(
+            "workflow assistant durable planner completed: dispatch_id=%s "
+            "duration_seconds=%.3f step_count=%s",
+            dispatch.dispatch_id,
+            time.monotonic() - planner_started_at,
+            len(plan.steps),
+        )
+        planner_model_identity = planner.consume_model_identity()
+        usage = estimate_planner_usage(
+            dispatch.content,
+            context,
+            selected_project_ids=context.project_ids,
+            selected_task_ids=selected_task_ids,
+            plan=plan,
+            recent_messages=recent_messages,
+            active_plan_summary=active_plan_summary,
+        )
+        plan = bind_plan_context(
+            plan,
+            context=context,
+            selected_task_ids=(
+                selected_task_ids
+                if dispatch.article_task_selection_locked
+                else None
+            ),
+        )
+        plan = _apply_execution_limits(request, plan)
+        authorization_snapshot = _authorized_plan_scope(
+            request,
+            actor=actor,
+            project_ids=plan.project_ids,
+            step_project_ids=tuple(step.project_id for step in plan.steps),
+        )
+        persisted_plan = repository.create_plan(
+            actor=actor,
+            conversation_id=dispatch.conversation_id,
+            plan=plan,
+            authorization_snapshot=authorization_snapshot,
+            source_idempotency_key=dispatch.idempotency_key,
+        )
+        _record_planner_usage(
+            request,
+            actor=actor,
+            plan=persisted_plan,
+            request_id=dispatch.request_id,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            model_identity=planner_model_identity,
+        )
+        if requires_confirmation(plan):
+            final_plan = persisted_plan
+            assistant_content = _assistant_content_for_plan(persisted_plan)
+        else:
+            final_plan, outputs = _run_and_complete_read_only_plan(
+                request,
+                actor=actor,
+                context=context,
+                plan=persisted_plan,
+                repository=repository,
+            )
+            assistant_content = _read_only_message(outputs)
+        repository.append_message(
+            actor=actor,
+            conversation_id=dispatch.conversation_id,
+            role="assistant",
+            content=assistant_content,
+            request_id=_assistant_identity(
+                dispatch.request_id,
+                prefix="asst_req",
+            ),
+            idempotency_key=_assistant_identity(
+                dispatch.idempotency_key,
+                prefix="asst",
+            ),
+        )
+        if not repository.complete_planning_dispatch(
+            dispatch=dispatch,
+            worker_id=worker_id,
+            plan_id=final_plan.plan_id,
+        ):
+            LOGGER.info(
+                "planning dispatch lease changed before completion: dispatch_id=%s",
+                dispatch.dispatch_id,
+            )
+    except Exception:
+        LOGGER.exception(
+            "workflow assistant durable planner failed: dispatch_id=%s",
+            dispatch.dispatch_id,
+        )
+        raise
+
+
 @router.post(
     "/conversations",
     response_model=AssistantConversationResponse,
@@ -1015,6 +1323,65 @@ def get_latest_conversation_plan(
                 plan_id=plan.plan_id,
             )
         return _plan_response(plan)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get(
+    "/conversations/{conversation_id}/dispatches/{dispatch_id}",
+    response_model=AssistantMessageDispatchResponse,
+)
+def get_planning_dispatch(
+    conversation_id: str,
+    dispatch_id: str,
+    request: Request,
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> AssistantMessageDispatchResponse:
+    """Poll the durable planning hand-off after the POST has returned."""
+
+    _feature_enabled(request)
+    try:
+        repository = _repository(request)
+        dispatch = repository.get_planning_dispatch(
+            actor=actor,
+            dispatch_id=dispatch_id,
+        )
+        if dispatch.conversation_id != conversation_id:
+            raise WorkflowAssistantNotFound("planning dispatch not found")
+        return _planning_dispatch_response(
+            request,
+            actor=actor,
+            dispatch=dispatch,
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get(
+    "/conversations/{conversation_id}/dispatches",
+    response_model=AssistantMessageDispatchResponse,
+)
+def get_planning_dispatch_by_idempotency(
+    conversation_id: str,
+    request: Request,
+    idempotency_key: str = Query(..., min_length=1, max_length=128),
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> AssistantMessageDispatchResponse:
+    """Recover a planning hand-off when the original POST response was lost."""
+
+    _feature_enabled(request)
+    try:
+        repository = _repository(request)
+        dispatch = repository.get_planning_dispatch_by_idempotency(
+            actor=actor,
+            conversation_id=conversation_id,
+            idempotency_key=idempotency_key,
+        )
+        return _planning_dispatch_response(
+            request,
+            actor=actor,
+            dispatch=dispatch,
+        )
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -1197,11 +1564,28 @@ def append_message(
                 conversation_id=conversation_id,
                 project_ids=context.project_ids,
             )
+        get_latest_plan = getattr(
+            repository,
+            "get_latest_plan_for_conversation",
+            None,
+        )
+        latest_plan = (
+            get_latest_plan(
+                actor=actor,
+                conversation_id=conversation_id,
+            )
+            if callable(get_latest_plan)
+            else None
+        )
         message_router = _message_router(request)
         intent = message_router.route(
             actor=actor,
             request=payload.content,
             context=context,
+            has_active_plan=(
+                latest_plan is not None
+                and latest_plan.status not in {"completed", "cancelled"}
+            ),
         )
         LOGGER.info(
             "workflow assistant message routed: request_id=%s kind=%s project_id=%s",
@@ -1276,99 +1660,29 @@ def append_message(
                 message=_message_response(assistant_message),
                 plan=None,
             )
-        planner = _planner(request)
-        planner_started_at = time.monotonic()
-        LOGGER.info(
-            "workflow assistant planner request started: request_id=%s "
-            "project_count=%s selected_task_count=%s",
-            payload.request_id,
-            len(context.project_ids),
-            len(selected_task_ids),
-        )
-        try:
-            plan = planner.plan(
-                actor=actor,
-                request=payload.content,
-                context=context,
-                selected_project_ids=context.project_ids,
-                selected_task_ids=selected_task_ids,
-            )
-        except Exception as exc:
-            LOGGER.exception(
-                "workflow assistant planner request failed: request_id=%s "
-                "duration_seconds=%.3f error_type=%s",
-                payload.request_id,
-                time.monotonic() - planner_started_at,
-                type(exc).__name__,
-            )
-            raise
-        LOGGER.info(
-            "workflow assistant planner request completed: request_id=%s "
-            "duration_seconds=%.3f step_count=%s",
-            payload.request_id,
-            time.monotonic() - planner_started_at,
-            len(plan.steps),
-        )
-        planner_model_identity = planner.consume_model_identity()
-        usage = estimate_planner_usage(
-            payload.content,
-            context,
-            selected_project_ids=context.project_ids,
-            selected_task_ids=selected_task_ids,
-            plan=plan,
-        )
-        plan = bind_plan_context(
-            plan,
-            context=context,
-            selected_task_ids=(
-                selected_task_ids if payload.article_task_ids is not None else None
-            ),
-        )
-        plan = _apply_execution_limits(request, plan)
-        authorization_snapshot = _authorized_plan_scope(
-            request,
-            actor=actor,
-            project_ids=plan.project_ids,
-            step_project_ids=tuple(step.project_id for step in plan.steps),
-        )
-        persisted_plan = repository.create_plan(
+        # Do not hold the message HTTP request open while the planner makes
+        # several model calls.  The durable runner will resolve the context,
+        # create the immutable plan, and append the assistant acknowledgement.
+        dispatch = repository.enqueue_planning_dispatch(
             actor=actor,
             conversation_id=conversation_id,
-            plan=plan,
-            authorization_snapshot=authorization_snapshot,
-            source_idempotency_key=payload.idempotency_key,
-        )
-        _record_planner_usage(
-            request,
-            actor=actor,
-            plan=persisted_plan,
+            content=payload.content,
             request_id=payload.request_id,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            model_identity=planner_model_identity,
+            idempotency_key=payload.idempotency_key,
+            project_ids=context.project_ids,
+            article_task_ids=selected_task_ids,
+            article_task_selection_locked=payload.article_task_ids is not None,
         )
-        if requires_confirmation(plan):
-            assistant_content = _assistant_content_for_plan(persisted_plan)
-        else:
-            persisted_plan, outputs = _run_and_complete_read_only_plan(
-                request,
-                actor=actor,
-                context=context,
-                plan=persisted_plan,
-                repository=repository,
-            )
-            assistant_content = _read_only_message(outputs)
-        assistant_message = repository.append_message(
-            actor=actor,
-            conversation_id=conversation_id,
-            role="assistant",
-            content=assistant_content,
-            request_id=_assistant_identity(payload.request_id, prefix="asst_req"),
-            idempotency_key=_assistant_identity(payload.idempotency_key, prefix="asst"),
-        )
+        runner = getattr(request.app.state, "workflow_assistant_runner", None)
+        wake = getattr(runner, "wake", None)
+        if callable(wake):
+            wake()
         return AssistantMessageDispatchResponse(
-            message=_message_response(assistant_message),
-            plan=_plan_response(persisted_plan),
+            message=None,
+            plan=None,
+            dispatch_id=dispatch.dispatch_id,
+            dispatch_status=dispatch.status,
+            dispatch_error_code=dispatch.error_code,
         )
     except Exception as exc:
         raise _error(exc) from exc

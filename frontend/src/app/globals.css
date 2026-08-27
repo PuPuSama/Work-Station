@@ -96,6 +96,14 @@ body {
   will-change: transform;
 }
 
+/* Keep every shared Loader2 indicator animated, including deployments where
+ * the utility layer was generated without Tailwind's default spin keyframe. */
+.animate-spin {
+  animation: workflow-assistant-spinner 0.9s linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
 button {
   cursor: pointer;
 }

@@ -126,21 +126,42 @@ async function recoverDispatchResult(
   conversationId: string,
   content: string,
   previousPlanId: string | null,
+  dispatchId: string | null = null,
+  idempotencyKey: string | null = null,
 ): Promise<{
   conversation: WorkflowAssistantConversation;
   plan: WorkflowAssistantPlan | null;
+  error?: string;
 } | null> {
   const deadline = Date.now() + WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      const [latestPlan, conversation] = await Promise.all([
-        apiGet<WorkflowAssistantPlan | null>(
-          `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
-        ),
+      const dispatchUrl = dispatchId
+        ? `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/dispatches/${encodeURIComponent(dispatchId)}`
+        : idempotencyKey
+          ? `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/dispatches?idempotency_key=${encodeURIComponent(idempotencyKey)}`
+          : null;
+      const [dispatch, conversation, fallbackPlan] = await Promise.all([
+        dispatchUrl
+          ? apiGet<WorkflowAssistantDispatch>(dispatchUrl).catch(() => null)
+          : Promise.resolve<WorkflowAssistantDispatch | null>(null),
         apiGet<WorkflowAssistantConversation>(
           `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
         ),
+        apiGet<WorkflowAssistantPlan | null>(
+          `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
+        ).catch(() => null),
       ]);
+      if (dispatch?.dispatch_status === "failed") {
+        return {
+          conversation,
+          plan: dispatch.plan,
+          error: dispatch.dispatch_error_code
+            ? `计划生成失败（${dispatch.dispatch_error_code}），可以重新发送请求重试。`
+            : "计划生成失败，可以重新发送请求重试。",
+        };
+      }
+      const latestPlan = dispatch?.plan || fallbackPlan || null;
       const planMatchesRequest = Boolean(
         latestPlan
         && latestPlan.natural_language_request.trim() === content
@@ -155,8 +176,8 @@ async function recoverDispatchResult(
         && conversation.messages.slice(lastUserIndex + 1).some(
           (message) => message.role === "assistant",
         );
-      if (planMatchesRequest || hasAssistantReply) {
-        return { conversation, plan: planMatchesRequest ? latestPlan : null };
+      if (dispatch?.dispatch_status === "succeeded" || planMatchesRequest || hasAssistantReply) {
+        return { conversation, plan: planMatchesRequest ? latestPlan : dispatch?.plan || null };
       }
     } catch {
       // A proxy reconnect can briefly make both status reads fail. Keep the
@@ -317,6 +338,7 @@ export function WorkflowAssistantWorkspace() {
   const [artifactPending, setArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlan[]>([]);
+  const [attentionPlanPendingId, setAttentionPlanPendingId] = useState<string | null>(null);
   const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
   const [projectChangesEnabled, setProjectChangesEnabled] = useState(false);
   const [gapFillEnabled, setGapFillEnabled] = useState(false);
@@ -703,6 +725,46 @@ export function WorkflowAssistantWorkspace() {
         },
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
+      if (
+        response.dispatch_id
+        && (response.dispatch_status === "queued" || response.dispatch_status === "running")
+      ) {
+        const recovered = await recoverDispatchResult(
+          conversation.conversation_id,
+          content,
+          previousPlanId,
+          response.dispatch_id,
+          dispatchIdentity.idempotencyKey,
+        );
+        if (!recovered) {
+          throw new Error("计划仍在后台生成，请稍后刷新助手页面查看结果。");
+        }
+        if (recovered.error) {
+          throw new Error(recovered.error);
+        }
+        pendingMessageDispatchRef.current = null;
+        if (recovered.plan) {
+          setPlan(recovered.plan);
+          setPlanPreviewExpanded(false);
+        }
+        setDraft("");
+        setPendingUserMessage(null);
+        setSelectedConversation(recovered.conversation);
+        setConversations((current) => current.map((item) => (
+          item.conversation_id === recovered.conversation.conversation_id
+            ? recovered.conversation
+            : item
+        )));
+        void refreshAttention().catch(() => undefined);
+        return;
+      }
+      if (response.dispatch_status === "failed") {
+        throw new Error(
+          response.dispatch_error_code
+            ? `计划生成失败（${response.dispatch_error_code}），可以重新发送请求重试。`
+            : "计划生成失败，可以重新发送请求重试。",
+        );
+      }
       pendingMessageDispatchRef.current = null;
       setRequestPhase("refreshing");
       if (response.plan) {
@@ -725,6 +787,8 @@ export function WorkflowAssistantWorkspace() {
           dispatchConversation.conversation_id,
           content,
           previousPlanId,
+          null,
+          pendingMessageDispatchRef.current?.idempotencyKey || null,
         );
         if (recovered) {
           pendingMessageDispatchRef.current = null;
@@ -875,16 +939,26 @@ export function WorkflowAssistantWorkspace() {
 
   async function openAttentionPlan(nextPlan: WorkflowAssistantPlan) {
     setError("");
+    setAttentionPlanPendingId(nextPlan.plan_id);
     try {
-      const freshPlan = await apiGet<WorkflowAssistantPlan>(
-        `/api/workflow-assistant/plans/${encodeURIComponent(nextPlan.plan_id)}`,
-      );
+      const [freshPlan, conversation] = await Promise.all([
+        apiGet<WorkflowAssistantPlan>(
+          `/api/workflow-assistant/plans/${encodeURIComponent(nextPlan.plan_id)}`,
+        ),
+        apiGet<WorkflowAssistantConversation>(
+          `/api/workflow-assistant/conversations/${encodeURIComponent(nextPlan.conversation_id)}`,
+        ).catch(() => null),
+      ]);
+      // Set the refs before React effects observe the new conversation. This
+      // prevents the conversation loader from clearing the plan or showing a
+      // stale session while an inbox item is being opened.
+      activeConversationIdRef.current = freshPlan.conversation_id;
+      loadedConversationRef.current = freshPlan.conversation_id;
+      activePlanIdRef.current = freshPlan.plan_id;
       setPlan(freshPlan);
       setPlanPreviewExpanded(false);
       try {
-        const conversation = await apiGet<WorkflowAssistantConversation>(
-          `/api/workflow-assistant/conversations/${encodeURIComponent(nextPlan.conversation_id)}`,
-        );
+        if (!conversation) throw new Error("conversation expired");
         setSelectedConversation(conversation);
         setConversations((current) => current.map((item) => (
           item.conversation_id === conversation.conversation_id ? conversation : item
@@ -897,6 +971,8 @@ export function WorkflowAssistantWorkspace() {
       await refreshAttention();
     } catch (nextError) {
       setError(messageText(nextError));
+    } finally {
+      setAttentionPlanPendingId(null);
     }
   }
 
@@ -1022,13 +1098,16 @@ export function WorkflowAssistantWorkspace() {
                   key={attentionPlan.plan_id}
                   type="button"
                   onClick={() => void openAttentionPlan(attentionPlan)}
+                  disabled={attentionPlanPendingId === attentionPlan.plan_id}
                   className="rounded-lg border px-3 py-2 text-left transition-colors hover:bg-muted"
                 >
                   <span className="flex items-center justify-between gap-2 text-sm font-medium">
                     <span className="truncate">{attentionPlan.title}</span>
-                    <Badge variant={statusVariant(attentionPlan.status)}>
+                    {attentionPlanPendingId === attentionPlan.plan_id
+                      ? <Loader2 className="size-4 shrink-0 animate-spin" />
+                      : <Badge variant={statusVariant(attentionPlan.status)}>
                       {statusLabels[attentionPlan.status]}
-                    </Badge>
+                      </Badge>}
                   </span>
                   <span className="mt-1 block truncate text-xs text-muted-foreground">
                     {attentionPlan.project_ids.join("、")} · {attentionPlan.attention_state}

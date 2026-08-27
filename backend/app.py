@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import (
     FastAPI,
@@ -184,7 +185,10 @@ from workflow_assistant.attachment_repository import PostgresAttachmentRepositor
 from workflow_assistant.attachment_retention import AttachmentRetentionRunner
 from workflow_assistant.attachments import AttachmentService
 from workflow_assistant.execution import WorkflowExecutionCoordinator
-from workflow_assistant.http import router as workflow_assistant_router
+from workflow_assistant.http import (
+    process_planning_dispatch,
+    router as workflow_assistant_router,
+)
 from workflow_assistant.planner import StructuredWorkflowPlanner
 from workflow_assistant.repository import PostgresWorkflowAssistantRepository
 from workflow_assistant.retention import prune_expired_assistant_conversations
@@ -986,6 +990,11 @@ async def app_lifespan(application: FastAPI):
                 repository=workflow_assistant_repository,
                 coordinator=workflow_assistant_coordinator,
                 database_url=database_url,
+                planning_dispatcher=lambda dispatch, worker_id: process_planning_dispatch(
+                    SimpleNamespace(app=application),
+                    dispatch=dispatch,
+                    worker_id=worker_id,
+                ),
             )
             application.state.workflow_assistant_adapters = (
                 workflow_assistant_adapters

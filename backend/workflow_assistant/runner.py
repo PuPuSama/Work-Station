@@ -4,6 +4,8 @@ import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from threading import Event, Thread
+from typing import Callable
+from uuid import uuid4
 
 from services.access_control import ActorIdentity
 from services.job_queue import is_retryable_error
@@ -13,6 +15,7 @@ from .graph import WorkflowAssistantGraph
 from .repository import (
     PostgresWorkflowAssistantRepository,
     WorkflowAssistantConflict,
+    WorkflowAssistantDispatch,
     WorkflowExecutionCandidate,
 )
 
@@ -41,6 +44,8 @@ class WorkflowAssistantRunner:
         coordinator: WorkflowExecutionCoordinator,
         database_url: str | None = None,
         poll_interval_seconds: float = 1.0,
+        planning_dispatcher: Callable[[WorkflowAssistantDispatch, str], None]
+        | None = None,
     ) -> None:
         if not 0.1 <= poll_interval_seconds <= 60.0:
             raise ValueError("poll_interval_seconds must be between 0.1 and 60")
@@ -48,6 +53,8 @@ class WorkflowAssistantRunner:
         self._coordinator = coordinator
         self._database_url = str(database_url or "").strip()
         self._poll_interval_seconds = float(poll_interval_seconds)
+        self._worker_id = f"workflow-assistant-{uuid4().hex}"
+        self._planning_dispatcher = planning_dispatcher
         self._stop = Event()
         self._wake_event = Event()
         self._thread: Thread | None = None
@@ -96,14 +103,21 @@ class WorkflowAssistantRunner:
             self._poll()
             return
 
-        from langgraph.checkpoint.postgres import PostgresSaver
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+        except ImportError:
+            LOGGER.warning(
+                "LangGraph Postgres checkpointer is unavailable; "
+                "using the PostgreSQL workflow state machine directly"
+            )
+            self._poll()
+            return
 
         connection_url = self._database_url.replace(
             "postgresql+psycopg://",
             "postgresql://",
             1,
         )
-        retry_delay = 0.5
         while not self._stop.is_set():
             try:
                 with PostgresSaver.from_conn_string(connection_url) as checkpointer:
@@ -117,17 +131,22 @@ class WorkflowAssistantRunner:
                 if self._stop.is_set():
                     return
                 LOGGER.warning(
-                    "workflow assistant checkpointer failed; retrying in %.1fs (%s)",
-                    retry_delay,
+                    "workflow assistant checkpointer unavailable; "
+                    "using PostgreSQL state machine fallback (%s)",
                     type(exc).__name__,
                 )
                 LOGGER.debug(
                     "workflow assistant checkpointer failure details",
                     exc_info=True,
                 )
-                self._wake_event.wait(retry_delay)
-                self._wake_event.clear()
-                retry_delay = min(retry_delay * 2, 10.0)
+                # LangGraph is an execution checkpoint enhancement. The
+                # PostgreSQL plan/step CAS state machine remains authoritative
+                # and can safely continue when a checkpointer extension is
+                # unavailable (for example, an un-migrated local database).
+                # This also prevents a missing checkpointer table from
+                # stopping all confirmed plans forever.
+                self._poll()
+                return
 
     def _poll(self) -> None:
         while not self._stop.is_set():
@@ -136,16 +155,78 @@ class WorkflowAssistantRunner:
             self._wake_event.clear()
 
     def _drain_once(self) -> None:
+        self._drain_planning_dispatches()
         try:
             candidates = self._repository.list_execution_candidates()
-        except Exception:
+        except Exception as exc:
             # A transient database failure must not kill the dispatcher. The
             # next wake/poll will rediscover the durable plan.
+            LOGGER.warning(
+                "workflow assistant execution candidate scan failed: type=%s",
+                type(exc).__name__,
+            )
             return
         for candidate in candidates:
             if self._stop.is_set():
                 return
             self._run_candidate(candidate)
+
+    def _drain_planning_dispatches(self) -> None:
+        dispatcher = self._planning_dispatcher
+        if dispatcher is None:
+            return
+        try:
+            candidates = self._repository.list_planning_dispatches(limit=20)
+        except Exception as exc:
+            # The normal plan dispatcher must continue to be useful when a
+            # migration is being applied or the database briefly refuses a
+            # connection. The next poll will retry the planning inbox.
+            LOGGER.warning(
+                "workflow assistant planning dispatch scan failed: type=%s",
+                type(exc).__name__,
+            )
+            return
+        for candidate in candidates:
+            if self._stop.is_set():
+                return
+            try:
+                claimed = self._repository.claim_planning_dispatch(
+                    dispatch_id=candidate.dispatch_id,
+                    worker_id=self._worker_id,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "workflow assistant planning dispatch claim failed: "
+                    "dispatch_id=%s type=%s",
+                    candidate.dispatch_id,
+                    type(exc).__name__,
+                )
+                continue
+            if claimed is None:
+                continue
+            try:
+                dispatcher(claimed, self._worker_id)
+            except Exception as exc:
+                # Planner implementations already perform short provider
+                # retries. Keep the durable hand-off retryable across a
+                # proxy timeout, worker restart, or transient pool failure.
+                try:
+                    self._repository.fail_planning_dispatch(
+                        dispatch=claimed,
+                        worker_id=self._worker_id,
+                        error_code=type(exc).__name__,
+                        retry_delay_seconds=min(
+                            30,
+                            2 ** max(0, claimed.attempts - 1),
+                        ),
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "workflow assistant planning failure could not be persisted: "
+                        "dispatch_id=%s",
+                        claimed.dispatch_id,
+                        exc_info=True,
+                    )
 
     def _run_candidate(self, candidate: WorkflowExecutionCandidate) -> None:
         actor = ActorIdentity(
@@ -163,9 +244,15 @@ class WorkflowAssistantRunner:
                 if not acquired:
                     return
                 self._run_candidate_under_lock(candidate=candidate, actor=actor)
-        except Exception:
+        except Exception as exc:
             # A transient lock connection failure does not change durable
             # plan state. Another poll or process can safely retry.
+            LOGGER.warning(
+                "workflow assistant plan dispatch guard failed: "
+                "plan_id=%s type=%s",
+                candidate.plan_id,
+                type(exc).__name__,
+            )
             return
 
     def _run_candidate_under_lock(
@@ -224,10 +311,17 @@ class WorkflowAssistantRunner:
             if is_retryable_error(exc):
                 LOGGER.warning(
                     "workflow assistant dispatch temporarily unavailable; "
-                    "plan will be retried (%s)",
+                    "plan will be retried: plan_id=%s type=%s",
+                    candidate.plan_id,
                     type(exc).__name__,
                 )
                 return
+            LOGGER.warning(
+                "workflow assistant plan execution failed: "
+                "plan_id=%s type=%s",
+                candidate.plan_id,
+                type(exc).__name__,
+            )
             self._mark_failed(
                 actor=actor,
                 plan_id=candidate.plan_id,
@@ -257,10 +351,16 @@ class WorkflowAssistantRunner:
                 expected_revision=plan.revision,
                 new_status="failed",
             )
-        except Exception:
+        except Exception as exc:
             # The original failure is already represented by the durable Job
             # or step where possible. Never let error reporting crash the
             # process-wide dispatcher.
+            LOGGER.warning(
+                "workflow assistant plan failure could not be persisted: "
+                "plan_id=%s type=%s",
+                plan_id,
+                type(exc).__name__,
+            )
             return
 
     def _invoke_graph(

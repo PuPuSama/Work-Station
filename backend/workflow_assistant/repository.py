@@ -20,6 +20,7 @@ from server_schema import (
     assistant_messages,
     assistant_usage_events,
     background_jobs,
+    workflow_assistant_dispatches,
     workflow_plan_events,
     workflow_plan_projects,
     workflow_plan_steps,
@@ -111,6 +112,32 @@ class AssistantConversation:
     updated_at: datetime | None = None
     expires_at: datetime | None = None
     messages: tuple[AssistantMessage, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowAssistantDispatch:
+    """Durable inbox item for a natural-language planning request."""
+
+    organization_id: str
+    dispatch_id: str
+    creator_user_id: str
+    conversation_id: str
+    request_id: str
+    idempotency_key: str
+    content: str
+    project_ids: tuple[str, ...]
+    article_task_ids: tuple[str, ...]
+    article_task_selection_locked: bool
+    status: Literal["queued", "running", "succeeded", "failed"]
+    plan_id: str | None
+    attempts: int
+    max_attempts: int
+    error_code: str | None
+    available_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,6 +555,364 @@ class PostgresWorkflowAssistantRepository:
                 )
             ).mappings().one()
             return self._message_from_row(row)
+
+    def enqueue_planning_dispatch(
+        self,
+        *,
+        actor: ActorIdentity,
+        conversation_id: str,
+        content: str,
+        request_id: str,
+        idempotency_key: str,
+        project_ids: Sequence[str],
+        article_task_ids: Sequence[str] = (),
+        article_task_selection_locked: bool = False,
+        max_attempts: int = 3,
+    ) -> WorkflowAssistantDispatch:
+        """Persist one planning request for the durable assistant worker.
+
+        Planning can involve several model calls and must not occupy the
+        browser's message request.  The message itself is persisted by the
+        caller first; this row is the retryable hand-off to the server
+        runner.  Reusing the same idempotency key is safe and requeues a
+        terminal planning failure instead of creating duplicate plans.
+        """
+
+        conversation_id = _required(conversation_id, "conversation_id")
+        content = sanitize_message(content)
+        request_id = _required(request_id, "request_id", max_length=128)
+        idempotency_key = _required(
+            idempotency_key,
+            "idempotency_key",
+            max_length=128,
+        )
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be greater than zero")
+        normalized_projects = tuple(
+            dict.fromkeys(
+                _required(str(project_id), "project_id")
+                for project_id in project_ids
+            )
+        )
+        if not normalized_projects:
+            raise ValueError("at least one project is required")
+        normalized_tasks = tuple(
+            dict.fromkeys(
+                _required(str(task_id), "article_task_id")
+                for task_id in article_task_ids
+            )
+        )
+        with self._engine.begin() as connection:
+            conversation = self._lock_conversation(
+                connection,
+                actor,
+                conversation_id,
+            )
+            if conversation is None:
+                raise WorkflowAssistantNotFound("conversation not found")
+            existing = connection.execute(
+                sa.select(workflow_assistant_dispatches)
+                .where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == actor.organization_id,
+                    workflow_assistant_dispatches.c.conversation_id
+                    == conversation_id,
+                    workflow_assistant_dispatches.c.idempotency_key
+                    == idempotency_key,
+                )
+                .with_for_update()
+            ).mappings().one_or_none()
+            if existing is not None:
+                if (
+                    str(existing["creator_user_id"]) != actor.user_id
+                    or str(existing["request_id"]) != request_id
+                    or str(existing["content"]) != content
+                    or _json_list(existing["project_ids"])
+                    != normalized_projects
+                    or _json_list(existing["article_task_ids"])
+                    != normalized_tasks
+                    or bool(existing["article_task_selection_locked"])
+                    != article_task_selection_locked
+                ):
+                    raise WorkflowAssistantConflict(
+                        "planning dispatch idempotency key already has different content"
+                    )
+                if str(existing["status"]) == "failed":
+                    connection.execute(
+                        workflow_assistant_dispatches.update()
+                        .where(
+                            workflow_assistant_dispatches.c.organization_id
+                            == actor.organization_id,
+                            workflow_assistant_dispatches.c.dispatch_id
+                            == str(existing["dispatch_id"]),
+                        )
+                        .values(
+                            status="queued",
+                            max_attempts=max_attempts,
+                            available_at=sa.func.now(),
+                            worker_id=None,
+                            lease_expires_at=None,
+                            error_code=None,
+                            finished_at=None,
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                row = connection.execute(
+                    sa.select(workflow_assistant_dispatches).where(
+                        workflow_assistant_dispatches.c.organization_id
+                        == actor.organization_id,
+                        workflow_assistant_dispatches.c.dispatch_id
+                        == str(existing["dispatch_id"]),
+                    )
+                ).mappings().one()
+                return self._dispatch_from_row(row)
+
+            dispatch_id = f"wad_{uuid.uuid4().hex}"
+            connection.execute(
+                workflow_assistant_dispatches.insert().values(
+                    organization_id=actor.organization_id,
+                    dispatch_id=dispatch_id,
+                    creator_user_id=actor.user_id,
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    content=content,
+                    project_ids=list(normalized_projects),
+                    article_task_ids=list(normalized_tasks),
+                    article_task_selection_locked=article_task_selection_locked,
+                    status="queued",
+                    max_attempts=max_attempts,
+                )
+            )
+            row = connection.execute(
+                sa.select(workflow_assistant_dispatches).where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == actor.organization_id,
+                    workflow_assistant_dispatches.c.dispatch_id == dispatch_id,
+                )
+            ).mappings().one()
+            return self._dispatch_from_row(row)
+
+    def get_planning_dispatch(
+        self,
+        *,
+        actor: ActorIdentity,
+        dispatch_id: str,
+    ) -> WorkflowAssistantDispatch:
+        dispatch_id = _required(dispatch_id, "dispatch_id")
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(workflow_assistant_dispatches).where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == actor.organization_id,
+                    workflow_assistant_dispatches.c.creator_user_id
+                    == actor.user_id,
+                    workflow_assistant_dispatches.c.dispatch_id == dispatch_id,
+                )
+            ).mappings().one_or_none()
+            if row is None:
+                raise WorkflowAssistantNotFound("planning dispatch not found")
+            return self._dispatch_from_row(row)
+
+    def get_planning_dispatch_by_idempotency(
+        self,
+        *,
+        actor: ActorIdentity,
+        conversation_id: str,
+        idempotency_key: str,
+    ) -> WorkflowAssistantDispatch:
+        """Find a private planning dispatch after the POST response was lost.
+
+        The browser creates the idempotency key before sending the message. If
+        a proxy disconnects after the server accepts the request, it may never
+        receive ``dispatch_id``.  Looking up that same key lets the browser
+        observe the durable dispatch's terminal failure instead of waiting for
+        the full recovery timeout.
+        """
+
+        conversation_id = _required(conversation_id, "conversation_id")
+        idempotency_key = _required(
+            idempotency_key,
+            "idempotency_key",
+            max_length=128,
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(workflow_assistant_dispatches).where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == actor.organization_id,
+                    workflow_assistant_dispatches.c.creator_user_id
+                    == actor.user_id,
+                    workflow_assistant_dispatches.c.conversation_id
+                    == conversation_id,
+                    workflow_assistant_dispatches.c.idempotency_key
+                    == idempotency_key,
+                )
+            ).mappings().one_or_none()
+            if row is None:
+                raise WorkflowAssistantNotFound("planning dispatch not found")
+            return self._dispatch_from_row(row)
+
+    def list_planning_dispatches(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[WorkflowAssistantDispatch, ...]:
+        """List queued or expired planning leases for any organization."""
+
+        if limit <= 0:
+            return ()
+        now = datetime.now(timezone.utc)
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(workflow_assistant_dispatches)
+                .where(
+                    sa.or_(
+                        sa.and_(
+                            workflow_assistant_dispatches.c.status == "queued",
+                            workflow_assistant_dispatches.c.available_at <= now,
+                        ),
+                        sa.and_(
+                            workflow_assistant_dispatches.c.status == "running",
+                            workflow_assistant_dispatches.c.lease_expires_at <= now,
+                        ),
+                    )
+                )
+                .order_by(
+                    workflow_assistant_dispatches.c.available_at,
+                    workflow_assistant_dispatches.c.created_at,
+                    workflow_assistant_dispatches.c.dispatch_id,
+                )
+                .limit(limit)
+            ).mappings().all()
+            return tuple(self._dispatch_from_row(row) for row in rows)
+
+    def claim_planning_dispatch(
+        self,
+        *,
+        dispatch_id: str,
+        worker_id: str,
+        lease_seconds: int = 15 * 60,
+    ) -> WorkflowAssistantDispatch | None:
+        """Claim one planning row with a PostgreSQL-safe lease."""
+
+        dispatch_id = _required(dispatch_id, "dispatch_id")
+        worker_id = _required(worker_id, "worker_id")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+        now = datetime.now(timezone.utc)
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                sa.select(workflow_assistant_dispatches)
+                .where(
+                    workflow_assistant_dispatches.c.dispatch_id == dispatch_id,
+                    sa.or_(
+                        sa.and_(
+                            workflow_assistant_dispatches.c.status == "queued",
+                            workflow_assistant_dispatches.c.available_at <= now,
+                        ),
+                        sa.and_(
+                            workflow_assistant_dispatches.c.status == "running",
+                            workflow_assistant_dispatches.c.lease_expires_at <= now,
+                        ),
+                    ),
+                )
+                .with_for_update(skip_locked=True)
+            ).mappings().one_or_none()
+            if row is None:
+                return None
+            attempts = int(row["attempts"]) + 1
+            result = connection.execute(
+                workflow_assistant_dispatches.update()
+                .where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == str(row["organization_id"]),
+                    workflow_assistant_dispatches.c.dispatch_id == dispatch_id,
+                )
+                .values(
+                    status="running",
+                    attempts=attempts,
+                    worker_id=worker_id,
+                    lease_expires_at=now + timedelta(seconds=lease_seconds),
+                    started_at=sa.func.coalesce(
+                        workflow_assistant_dispatches.c.started_at,
+                        now,
+                    ),
+                    updated_at=now,
+                )
+                .returning(workflow_assistant_dispatches)
+            ).mappings().one()
+            return self._dispatch_from_row(result)
+
+    def complete_planning_dispatch(
+        self,
+        *,
+        dispatch: WorkflowAssistantDispatch,
+        worker_id: str,
+        plan_id: str | None,
+    ) -> bool:
+        worker_id = _required(worker_id, "worker_id")
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                workflow_assistant_dispatches.update()
+                .where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == dispatch.organization_id,
+                    workflow_assistant_dispatches.c.dispatch_id
+                    == dispatch.dispatch_id,
+                    workflow_assistant_dispatches.c.status == "running",
+                    workflow_assistant_dispatches.c.worker_id == worker_id,
+                )
+                .values(
+                    status="succeeded",
+                    plan_id=plan_id,
+                    worker_id=None,
+                    lease_expires_at=None,
+                    finished_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            return result.rowcount == 1
+
+    def fail_planning_dispatch(
+        self,
+        *,
+        dispatch: WorkflowAssistantDispatch,
+        worker_id: str,
+        error_code: str,
+        retry_delay_seconds: int = 5,
+    ) -> bool:
+        worker_id = _required(worker_id, "worker_id")
+        error_code = _required(error_code, "error_code", max_length=160)
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must not be negative")
+        retry = dispatch.attempts < dispatch.max_attempts
+        values: dict[str, Any] = {
+            "status": "queued" if retry else "failed",
+            "worker_id": None,
+            "lease_expires_at": None,
+            "error_code": error_code,
+            "finished_at": None if retry else sa.func.now(),
+            "updated_at": sa.func.now(),
+        }
+        if retry:
+            values["available_at"] = datetime.now(timezone.utc) + timedelta(
+                seconds=retry_delay_seconds
+            )
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                workflow_assistant_dispatches.update()
+                .where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == dispatch.organization_id,
+                    workflow_assistant_dispatches.c.dispatch_id
+                    == dispatch.dispatch_id,
+                    workflow_assistant_dispatches.c.status == "running",
+                    workflow_assistant_dispatches.c.worker_id == worker_id,
+                )
+                .values(**values)
+            )
+            return result.rowcount == 1
 
     def get_message_by_idempotency(
         self,
@@ -2658,6 +3043,38 @@ class PostgresWorkflowAssistantRepository:
         )
 
     @staticmethod
+    def _dispatch_from_row(row: RowMapping) -> WorkflowAssistantDispatch:
+        status = str(row["status"])
+        if status not in {"queued", "running", "succeeded", "failed"}:
+            raise WorkflowAssistantRepositoryError(
+                "planning dispatch has an unsupported status"
+            )
+        return WorkflowAssistantDispatch(
+            organization_id=str(row["organization_id"]),
+            dispatch_id=str(row["dispatch_id"]),
+            creator_user_id=str(row["creator_user_id"]),
+            conversation_id=str(row["conversation_id"]),
+            request_id=str(row["request_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            content=str(row["content"]),
+            project_ids=_json_list(row["project_ids"]),
+            article_task_ids=_json_list(row["article_task_ids"]),
+            article_task_selection_locked=bool(
+                row["article_task_selection_locked"]
+            ),
+            status=status,  # type: ignore[arg-type]
+            plan_id=(str(row["plan_id"]) if row["plan_id"] else None),
+            attempts=int(row["attempts"]),
+            max_attempts=int(row["max_attempts"]),
+            error_code=(str(row["error_code"]) if row["error_code"] else None),
+            available_at=row["available_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
     def _step_from_row(row: RowMapping) -> WorkflowPlanStep:
         return WorkflowPlanStep(
             step_id=str(row["step_id"]),
@@ -2708,6 +3125,7 @@ class PostgresWorkflowAssistantRepository:
 __all__ = [
     "AssistantConversation",
     "AssistantMessage",
+    "WorkflowAssistantDispatch",
     "AssistantUsageEvent",
     "PostgresWorkflowAssistantRepository",
     "WorkflowAssistantConflict",

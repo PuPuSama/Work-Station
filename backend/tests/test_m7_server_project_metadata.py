@@ -26,6 +26,7 @@ from server_schema import (  # noqa: E402
     organizations,
     project_memberships,
     project_ownership,
+    team_memberships,
     teams,
     workspace_users,
 )
@@ -202,6 +203,12 @@ class ServerProjectMetadataTests(unittest.TestCase):
                 )
             )
             connection.execute(
+                team_memberships.delete().where(
+                    team_memberships.c.organization_id
+                    == self.organization_id
+                )
+            )
+            connection.execute(
                 teams.delete().where(
                     teams.c.organization_id == self.organization_id
                 )
@@ -266,6 +273,44 @@ class ServerProjectMetadataTests(unittest.TestCase):
                 owning_team_id=None,
                 event_id=f"forbidden-{uuid.uuid4().hex}",
             )
+
+    def test_team_lead_creator_becomes_project_owner_by_default(self) -> None:
+        team_lead_id = f"{self.organization_id}-lead"
+        with self.engine.begin() as connection:
+            connection.execute(
+                workspace_users.insert().values(
+                    organization_id=self.organization_id,
+                    user_id=team_lead_id,
+                    display_name="Team Lead",
+                    organization_role="member",
+                )
+            )
+            connection.execute(
+                team_memberships.insert().values(
+                    organization_id=self.organization_id,
+                    team_id=self.team_id,
+                    user_id=team_lead_id,
+                    role="team_lead",
+                    granted_by_user_id=self.admin_id,
+                )
+            )
+
+        created = self.service.create(
+            actor=ActorIdentity(self.organization_id, team_lead_id),
+            customer_name="Lead Created Project",
+            official_domain=f"lead-{self.new_project_id}",
+            owning_team_id=self.team_id,
+            event_id=f"lead-create-{uuid.uuid4().hex}",
+        )
+
+        self.assertEqual(created.owner_user_id, team_lead_id)
+        with self.engine.connect() as connection:
+            owner = connection.execute(
+                sa.select(project_ownership.c.owner_user_id).where(
+                    project_ownership.c.project_id == created.project_id
+                )
+            ).scalar_one()
+        self.assertEqual(owner, team_lead_id)
 
     def test_update_uses_revision_and_redacted_atomic_audit(self) -> None:
         before = self.service.get(

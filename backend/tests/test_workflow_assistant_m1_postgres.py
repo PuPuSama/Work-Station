@@ -25,6 +25,7 @@ from server_schema import (  # noqa: E402
     project_ownership,
     project_topics,
     task_store_state,
+    workflow_assistant_dispatches,
     workflow_plan_events,
     workflow_plan_projects,
     workflow_plan_steps,
@@ -168,6 +169,12 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
             connection.execute(
                 job_batches.delete().where(
                     job_batches.c.organization_id == self.organization_id
+                )
+            )
+            connection.execute(
+                workflow_assistant_dispatches.delete().where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == self.organization_id
                 )
             )
             connection.execute(
@@ -322,6 +329,37 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
             repository.get_conversation(
                 actor=self.other_actor,
                 conversation_id=conversation.conversation_id,
+            )
+
+    def test_planning_dispatch_can_be_recovered_by_private_idempotency_key(self) -> None:
+        repository = PostgresWorkflowAssistantRepository(self.engine)
+        conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Recover planning dispatch",
+            project_ids=(self.project_a,),
+        )
+        dispatch = repository.enqueue_planning_dispatch(
+            actor=self.actor,
+            conversation_id=conversation.conversation_id,
+            content="Write two articles",
+            request_id="request-dispatch-1",
+            idempotency_key="message-dispatch-1",
+            project_ids=(self.project_a,),
+        )
+
+        recovered = repository.get_planning_dispatch_by_idempotency(
+            actor=self.actor,
+            conversation_id=conversation.conversation_id,
+            idempotency_key="message-dispatch-1",
+        )
+
+        self.assertEqual(recovered.dispatch_id, dispatch.dispatch_id)
+        self.assertEqual(recovered.status, "queued")
+        with self.assertRaises(WorkflowAssistantNotFound):
+            repository.get_planning_dispatch_by_idempotency(
+                actor=self.other_actor,
+                conversation_id=conversation.conversation_id,
+                idempotency_key="message-dispatch-1",
             )
 
     def test_plan_execution_advisory_lock_is_global_across_connections(self) -> None:

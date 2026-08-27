@@ -1517,6 +1517,9 @@ export type WorkflowAssistantAttachmentReviewResponse = {
 };
 
 export type WorkflowAssistantDispatch = {
-  message: WorkflowAssistantMessage;
+  message: WorkflowAssistantMessage | null;
   plan: WorkflowAssistantPlan | null;
+  dispatch_id?: string | null;
+  dispatch_status?: "queued" | "running" | "succeeded" | "failed" | null;
+  dispatch_error_code?: string | null;
 };

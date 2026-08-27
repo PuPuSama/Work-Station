@@ -8,6 +8,9 @@ from services.server_knowledge_coverage import (
     CoverageEvidenceChunk,
     SentenceSupportDecision,
     ServerKnowledgeCoverageService,
+    _coverage_chunk_from_row,
+    _fact_tokens,
+    _select_exact_product_fact_chunks,
     _select_product_context_rows,
     extract_article_sentences,
     sentence_content_hash,
@@ -158,6 +161,118 @@ class ProductCoverageContextTests(unittest.TestCase):
             ["a-size", "a-title", "b-width", "c-size"],
         )
 
+    def test_product_value_chunk_keeps_the_table_label_and_identity(self) -> None:
+        rows = [
+            {
+                "product_id": "product-tang-yun",
+                "product_name": "Parquet Flooring-Tang Yun | YEHUI",
+                "source_id": "source-tang-yun",
+                "snapshot_id": "snapshot-tang-yun",
+                "chunk_id": "snapshot-tang-yun:000006",
+                "ordinal": 6,
+                "text": "Size",
+            },
+            {
+                "product_id": "product-tang-yun",
+                "product_name": "Parquet Flooring-Tang Yun | YEHUI",
+                "source_id": "source-tang-yun",
+                "snapshot_id": "snapshot-tang-yun",
+                "chunk_id": "snapshot-tang-yun:000007",
+                "ordinal": 7,
+                "text": "400×400/500×500/600x600mm",
+            },
+        ]
+
+        selected = _select_product_context_rows(rows, ("product-tang-yun",))
+        chunk = _coverage_chunk_from_row(
+            {
+                **selected[0],
+                "heading_path": ("Product details",),
+                "source_kind": "product_detail",
+                "trust_tier": "hard_fact",
+                "public_source": True,
+                "canonical_url": "https://example.test/tang-yun",
+            }
+        )
+
+        self.assertEqual(chunk.product_name, "Parquet Flooring-Tang Yun | YEHUI")
+        self.assertEqual(chunk.context_text, "Size: 400×400/500×500/600x600mm")
+        self.assertEqual(
+            _fact_tokens(chunk.context_text),
+            frozenset(
+                {
+                    "400x400",
+                    "500x500",
+                    "600x600",
+                }
+            ),
+        )
+
+    def test_exact_product_fact_selection_covers_split_rows_not_first_three(self) -> None:
+        article = (
+            "# Title\n\n"
+            "JY8103 is available in a 92 mm width, a 510 mm length, and a "
+            "15 mm thickness for this specification."
+        )
+        sentences = extract_article_sentences(article)
+        chunks = (
+            CoverageEvidenceChunk(
+                chunk_id="jy:material",
+                text="Material: solid walnut top layer",
+                heading_path=("Product details",),
+                source_kind="product_detail",
+                trust_tier="hard_fact",
+                public_source=True,
+                canonical_url="https://example.test/jy8103",
+                product_id="product-jy8103",
+                product_name="Chevron Flooring | Multilayer JY8103 | YEHUI",
+            ),
+            CoverageEvidenceChunk(
+                chunk_id="jy:width",
+                text="Width: 92mm",
+                heading_path=("Product details",),
+                source_kind="product_detail",
+                trust_tier="hard_fact",
+                public_source=True,
+                canonical_url="https://example.test/jy8103",
+                product_id="product-jy8103",
+                product_name="Chevron Flooring | Multilayer JY8103 | YEHUI",
+            ),
+            CoverageEvidenceChunk(
+                chunk_id="jy:length",
+                text="Lenght: 510mm",
+                heading_path=("Product details",),
+                source_kind="product_detail",
+                trust_tier="hard_fact",
+                public_source=True,
+                canonical_url="https://example.test/jy8103",
+                product_id="product-jy8103",
+                product_name="Chevron Flooring | Multilayer JY8103 | YEHUI",
+            ),
+            CoverageEvidenceChunk(
+                chunk_id="jy:thickness",
+                text="Thickness: 15mm",
+                heading_path=("Product details",),
+                source_kind="product_detail",
+                trust_tier="hard_fact",
+                public_source=True,
+                canonical_url="https://example.test/jy8103",
+                product_id="product-jy8103",
+                product_name="Chevron Flooring | Multilayer JY8103 | YEHUI",
+            ),
+        )
+
+        selected = _select_exact_product_fact_chunks(
+            sentences[0],
+            sentences,
+            chunks,
+        )
+
+        self.assertEqual(
+            [chunk.chunk_id for chunk in selected],
+            ["jy:width", "jy:length", "jy:thickness"],
+        )
+
 
 class KnowledgeCoverageServiceTests(unittest.TestCase):
     hard_fact_chunk = CoverageEvidenceChunk(
@@ -258,6 +373,108 @@ class KnowledgeCoverageServiceTests(unittest.TestCase):
 
         self.assertEqual(report.supported_sentences, 0)
         self.assertEqual(report.hard_fact_sentences, 1)
+        self.assertEqual(report.hard_fact_coverage, 0.0)
+
+    def test_exact_confirmed_product_dimensions_are_used_when_llm_undercalls(self) -> None:
+        article = (
+            "# Title\n\n"
+            "Parquet Flooring-Tang Yun | YEHUI provides a distinctive parquet format. "
+            "Size references include 400 × 400, 500 × 500, and 600 × 600 mm, "
+            "with 12, 14, or 15 mm thickness options."
+        )
+        record = task(article)
+        sentences = extract_article_sentences(article)
+        links = FakeLinks()
+        chunk = CoverageEvidenceChunk(
+            chunk_id="snapshot-tang-yun:000007",
+            text="400×400/500×500/600x600mm; 12mm / 14mm / 15mm as per project requirements",
+            heading_path=("Product details",),
+            source_kind="product_detail",
+            trust_tier="hard_fact",
+            public_source=True,
+            canonical_url="https://example.test/tang-yun",
+            product_id="product-tang-yun",
+            product_name="Parquet Flooring-Tang Yun | YEHUI",
+            source_id="source-tang-yun",
+            snapshot_id="snapshot-tang-yun",
+            context_text=(
+                "Size: 400×400/500×500/600x600mm; "
+                "Thickness Levels: 12mm / 14mm / 15mm as per project requirements"
+            ),
+        )
+        decisions = tuple(
+            SentenceSupportDecision(
+                sentence_id=sentence.sentence_id,
+                supported=False,
+                chunk_ids=(),
+                hard_fact=False,
+            )
+            for sentence in sentences
+        )
+        service = ServerKnowledgeCoverageService(
+            object(),  # type: ignore[arg-type]
+            provider=FakeProvider(decisions),
+            context=FakeContext((chunk,)),  # type: ignore[arg-type]
+            links=links,  # type: ignore[arg-type]
+        )
+
+        report = service.evaluate_task(
+            record,
+            organization_id="org-a",
+            user_id="user-a",
+            project_id="example.com",
+        )
+
+        self.assertEqual(report.status, "available")
+        self.assertEqual(report.supported_sentences, 1)
+        self.assertEqual(report.hard_fact_sentences, 1)
+        self.assertEqual(report.supported_hard_fact_sentences, 1)
+        self.assertEqual(report.evidence_link_count, 1)
+        self.assertEqual(links.saved[0].chunk_id, chunk.chunk_id)
+        self.assertEqual(links.saved[0].claim_type, "hard_fact")
+        self.assertEqual(links.saved[0].support_type, "direct")
+
+    def test_product_dimension_without_product_identity_is_not_auto_supported(self) -> None:
+        article = "# Title\n\nThe shipment uses 400 × 400 mm cartons."
+        record = task(article)
+        sentence = extract_article_sentences(article)[0]
+        service = ServerKnowledgeCoverageService(
+            object(),  # type: ignore[arg-type]
+            provider=FakeProvider(
+                (
+                    SentenceSupportDecision(
+                        sentence_id=sentence.sentence_id,
+                        supported=False,
+                        chunk_ids=(),
+                    ),
+                )
+            ),
+            context=FakeContext(
+                (
+                    CoverageEvidenceChunk(
+                        chunk_id="snapshot-tang-yun:000007",
+                        text="400×400/500×500/600x600mm",
+                        heading_path=("Product details",),
+                        source_kind="product_detail",
+                        trust_tier="hard_fact",
+                        public_source=True,
+                        canonical_url="https://example.test/tang-yun",
+                        product_id="product-tang-yun",
+                        product_name="Parquet Flooring-Tang Yun | YEHUI",
+                    ),
+                )
+            ),  # type: ignore[arg-type]
+            links=FakeLinks(),  # type: ignore[arg-type]
+        )
+
+        report = service.evaluate_task(
+            record,
+            organization_id="org-a",
+            user_id="user-a",
+            project_id="example.com",
+        )
+
+        self.assertEqual(report.supported_sentences, 0)
         self.assertEqual(report.hard_fact_coverage, 0.0)
 
     def test_missing_evidence_pack_is_unavailable_not_zero_percent(self) -> None:

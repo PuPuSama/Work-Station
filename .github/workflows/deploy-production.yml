@@ -61,7 +61,6 @@ jobs:
       - name: Upgrade knowledge database
         run: |
           python -m alembic -c backend/alembic.ini upgrade head
-          python -m alembic -c backend/alembic.ini upgrade head
 
       - name: Prepare LangGraph checkpoint schema
         env:

@@ -160,6 +160,32 @@ class WorkflowAssistantMessageRouterTests(unittest.TestCase):
         self.assertEqual(intent.kind, "workflow")
         self.assertEqual(client.calls, [])
 
+    def test_short_follow_up_uses_active_plan_context(self) -> None:
+        client = FakeClient([])
+        router = AssistantMessageRouter(FakeFactory(client))
+
+        intent = router.route(
+            actor=self.actor,
+            request="继续",
+            context=_context("soropower.com"),
+            has_active_plan=True,
+        )
+
+        self.assertEqual(intent.kind, "workflow")
+        self.assertEqual(client.calls, [])
+
+    def test_short_follow_up_without_active_plan_can_stay_chat(self) -> None:
+        client = FakeClient([json.dumps({"kind": "chat", "project_id": None})])
+        router = AssistantMessageRouter(FakeFactory(client))
+
+        intent = router.route(
+            actor=self.actor,
+            request="继续",
+            context=_context("soropower.com"),
+        )
+
+        self.assertEqual(intent.kind, "chat")
+
     def test_knowledge_fallback_uses_only_selected_project(self) -> None:
         router = AssistantMessageRouter(None)
 

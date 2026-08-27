@@ -74,6 +74,12 @@ _STRONG_WORKFLOW = re.compile(
     r"select|recommend|retry|cancel)\b",
     re.IGNORECASE,
 )
+_ACTIVE_PLAN_FOLLOW_UP = re.compile(
+    r"^\s*(?:继续|接着|按刚才(?:的计划)?|照刚才(?:的计划)?|"
+    r"继续执行|继续写|继续生成|重试|恢复|resume|continue|retry)"
+    r"\s*[?？。.!！]*\s*$",
+    re.IGNORECASE,
+)
 _KNOWLEDGE_HINT = re.compile(
     r"(?:知识库|资料|证据|产品参数|技术参数|规格|说明书|手册|官网资料|产品信息|"
     r"knowledge\s*base|manual|datasheet|specification|product\s+data|evidence)",
@@ -199,6 +205,7 @@ class AssistantMessageRouter:
         actor: ActorIdentity,
         request: str,
         context: AssistantWorkspaceContext,
+        has_active_plan: bool = False,
     ) -> AssistantMessageIntent:
         request = sanitize_message(request)
         if (
@@ -210,6 +217,12 @@ class AssistantMessageRouter:
         if _STRONG_WORKFLOW.search(request):
             return AssistantMessageIntent("workflow")
         if request_skips_review(request):
+            return AssistantMessageIntent("workflow")
+        # A short follow-up such as "继续" is ambiguous in a new chat, but it
+        # is an actionable workflow continuation when this conversation has a
+        # current plan.  Keep this deterministic so it does not depend on the
+        # classifier model guessing what the UI already knows.
+        if has_active_plan and _ACTIVE_PLAN_FOLLOW_UP.fullmatch(request):
             return AssistantMessageIntent("workflow")
         try:
             client = self._client(actor)

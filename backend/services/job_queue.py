@@ -68,7 +68,6 @@ class JobQueueBackend(Protocol):
 
 
 def is_retryable_error(error: BaseException) -> bool:
-    text = str(error).casefold()
     retry_signals = (
         "429",
         "502",
@@ -85,7 +84,30 @@ def is_retryable_error(error: BaseException) -> bool:
         "timed out",
         "timeout",
     )
-    return any(signal in text for signal in retry_signals)
+    retryable_exception_names = frozenset(
+        {
+            "BrokenPipeError",
+            "ConnectionAbortedError",
+            "ConnectionRefusedError",
+            "ConnectionResetError",
+            "IncompleteRead",
+            "RemoteDisconnected",
+            "TimeoutError",
+        }
+    )
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError)):
+            return True
+        if type(current).__name__ in retryable_exception_names:
+            return True
+        text = str(current).casefold()
+        if any(signal in text for signal in retry_signals):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class BatchJobRunner:

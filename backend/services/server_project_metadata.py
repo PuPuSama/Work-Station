@@ -306,8 +306,12 @@ class PostgresServerProjectMetadata:
                     and actor_membership["role"] == "team_lead"
                 )
                 if normalized_owner_user_id is None and not is_admin:
-                    if not actor_is_lead:
-                        normalized_owner_user_id = actor.user_id
+                    # A team lead is also a valid project editor.  Leaving
+                    # projects created by a lead unassigned makes the normal
+                    # create flow land in the manual assignment screen even
+                    # though the creator is already the only responsible
+                    # operator for that project.
+                    normalized_owner_user_id = actor.user_id
                 if normalized_owner_user_id is not None:
                     target_membership = connection.execute(
                         sa.select(team_memberships.c.role)

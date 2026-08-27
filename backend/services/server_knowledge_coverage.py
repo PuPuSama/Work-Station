@@ -56,6 +56,7 @@ MAX_COVERAGE_CONTEXT_CHUNKS = 48
 MAX_COVERAGE_PACK_CHUNKS = 24
 MAX_COVERAGE_PRODUCT_CHUNKS_PER_PRODUCT = 8
 MAX_COVERAGE_CHUNK_CHARACTERS = 1800
+MAX_COVERAGE_PARAGRAPH_CHARACTERS = 2400
 MAX_UNSUPPORTED_EXAMPLES = 5
 SUPPORT_TYPES = frozenset({"direct", "paraphrase", "contextual"})
 TABLE_SEPARATOR_PATTERN = re.compile(
@@ -100,6 +101,23 @@ PRODUCT_DIMENSION_VALUE_PATTERN = re.compile(
     r"(?<!\w)\d+(?:\s*[x×*]\s*\d+)+(?:\s*(?:mm|cm|m))\b",
     re.IGNORECASE,
 )
+DIMENSION_GROUP_PATTERN = re.compile(
+    r"(?<!\w)\d+(?:\s*[x×*]\s*\d+){1,3}",
+    re.IGNORECASE,
+)
+MEASUREMENT_UNIT_PATTERN = (
+    r"(?:%|mm|cm|km|m|g|kg|lb|lbs|w|kw|mw|v|a|ah|wh|kwh|hz|rpm|"
+    r"pa|kpa|mpa|bar|psi|°c|°f|hours?|days?|years?)"
+)
+MEASUREMENT_PATTERN = re.compile(
+    rf"(?<![\w.])\d+(?:[.,]\d+)?\s*{MEASUREMENT_UNIT_PATTERN}\b",
+    re.IGNORECASE,
+)
+INHERITED_UNIT_LIST_PATTERN = re.compile(
+    rf"(?<![\w.])(?P<values>\d+(?:[.,]\d+)?(?:(?:\s*(?:[,/]|or|and|to|[-–—])\s*)+"
+    rf"\d+(?:[.,]\d+)?)+)\s*(?P<unit>{MEASUREMENT_UNIT_PATTERN})\b",
+    re.IGNORECASE,
+)
 
 
 class KnowledgeCoverageUnavailable(RuntimeError):
@@ -136,6 +154,14 @@ class CoverageEvidenceChunk:
     trust_tier: str
     public_source: bool
     canonical_url: str | None
+    # Product metadata is present only for confirmed product-detail chunks.
+    # Defaults keep the value object compatible with outline Evidence Pack
+    # callers and existing persisted-task fixtures.
+    product_id: str = ""
+    product_name: str = ""
+    source_id: str = ""
+    snapshot_id: str = ""
+    context_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,7 +472,75 @@ def _coverage_chunk_from_row(row: Mapping[str, object]) -> CoverageEvidenceChunk
             if row["canonical_url"] is not None
             else None
         ),
+        product_id=str(row.get("product_id") or "").strip(),
+        product_name=str(row.get("product_name") or "").strip(),
+        source_id=str(row.get("source_id") or "").strip(),
+        snapshot_id=str(row.get("snapshot_id") or "").strip(),
+        context_text=str(row.get("context_text") or "").strip(),
     )
+
+
+def _row_text(row: Mapping[str, object]) -> str:
+    return " ".join(str(row.get("text") or "").split()).strip()
+
+
+def _row_ordinal(row: Mapping[str, object]) -> int:
+    try:
+        return int(row.get("ordinal") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_product_specification_label(text: str) -> bool:
+    normalized = " ".join(text.split()).strip()
+    return bool(
+        normalized
+        and len(normalized) <= 120
+        and not HARD_FACT_PATTERN.search(normalized)
+        and not PRODUCT_DIMENSION_VALUE_PATTERN.search(normalized)
+        and bool(PRODUCT_FACT_LABEL_PATTERN.search(normalized))
+    )
+
+
+def _product_context_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    """Attach a nearby table label to a product-detail value chunk.
+
+    The HTML parser intentionally keeps each table cell as a separate chunk.
+    A coverage auditor needs the semantic pair (for example, ``Size: 400x400``)
+    even when only the value chunk is selected for the bounded context.
+    """
+
+    groups: dict[tuple[str, str, str], list[Mapping[str, object]]] = {}
+    for row in rows:
+        key = (
+            str(row.get("product_id") or "").strip(),
+            str(row.get("source_id") or "").strip(),
+            str(row.get("snapshot_id") or "").strip(),
+        )
+        groups.setdefault(key, []).append(row)
+
+    enriched: list[Mapping[str, object]] = []
+    for group_rows in groups.values():
+        ordered = sorted(
+            group_rows,
+            key=lambda row: (_row_ordinal(row), str(row.get("chunk_id") or "")),
+        )
+        for index, row in enumerate(ordered):
+            current_text = _row_text(row)
+            context_text = str(row.get("context_text") or "").strip()
+            if not context_text and index:
+                previous_text = _row_text(ordered[index - 1])
+                if _is_product_specification_label(previous_text):
+                    context_text = f"{previous_text}: {current_text}"
+            if context_text:
+                copied = dict(row)
+                copied["context_text"] = context_text
+                enriched.append(copied)
+            else:
+                enriched.append(row)
+    return tuple(enriched)
 
 
 def _select_product_context_rows(
@@ -463,7 +557,7 @@ def _select_product_context_rows(
     """
 
     rows_by_product: dict[str, list[Mapping[str, object]]] = {}
-    for row in rows:
+    for row in _product_context_rows(rows):
         product_id = str(row["product_id"] or "").strip()
         if product_id:
             rows_by_product.setdefault(product_id, []).append(row)
@@ -477,15 +571,15 @@ def _select_product_context_rows(
             key=lambda row: (
                 0
                 if (
-                    HARD_FACT_PATTERN.search(str(row["text"]))
-                    or PRODUCT_DIMENSION_VALUE_PATTERN.search(str(row["text"]))
+                    HARD_FACT_PATTERN.search(_row_text(row))
+                    or PRODUCT_DIMENSION_VALUE_PATTERN.search(_row_text(row))
                 )
                 else (
                     1
-                    if PRODUCT_FACT_LABEL_PATTERN.search(str(row["text"]))
+                    if PRODUCT_FACT_LABEL_PATTERN.search(_row_text(row))
                     else 2
                 ),
-                int(row["ordinal"]),
+                _row_ordinal(row),
                 str(row["chunk_id"]),
             )
         )
@@ -619,7 +713,10 @@ class PostgresKnowledgeCoverageContext:
                 product_rows = connection.execute(
                     sa.select(
                         knowledge_product_source_evidence.c.product_id,
+                        knowledge_products.c.name.label("product_name"),
                         knowledge_chunks.c.chunk_id,
+                        knowledge_chunks.c.source_id,
+                        knowledge_chunks.c.snapshot_id,
                         knowledge_chunks.c.ordinal,
                         knowledge_chunks.c.heading_path,
                         knowledge_chunks.c.text,
@@ -876,6 +973,153 @@ def _parse_decisions(
     return tuple(decisions)
 
 
+def _normalize_fact_token(value: str) -> str:
+    return re.sub(
+        r"\s+",
+        "",
+        value.casefold()
+        .replace("×", "x")
+        .replace("*", "x")
+        .replace("–", "-")
+        .replace("—", "-"),
+    )
+
+
+def _fact_tokens(text: str) -> frozenset[str]:
+    """Extract exact, unit-bearing facts for a conservative product fallback."""
+
+    dimension_matches = tuple(DIMENSION_GROUP_PATTERN.finditer(text))
+    tokens: set[str] = {
+        _normalize_fact_token(match.group(0)) for match in dimension_matches
+    }
+    for match in INHERITED_UNIT_LIST_PATTERN.finditer(text):
+        unit = match.group("unit")
+        for number in re.findall(r"\d+(?:[.,]\d+)?", match.group("values")):
+            tokens.add(_normalize_fact_token(f"{number}{unit}"))
+    for match in MEASUREMENT_PATTERN.finditer(text):
+        # In ``600 x 600 mm``, the trailing ``600 mm`` is the unit-bearing
+        # tail of the dimension, not a second independent fact.
+        if any(
+            dimension.start() <= match.start() < dimension.end()
+            for dimension in dimension_matches
+        ):
+            continue
+        tokens.add(_normalize_fact_token(match.group(0)))
+    return frozenset(token for token in tokens if token)
+
+
+def _coverage_chunk_text(chunk: CoverageEvidenceChunk) -> str:
+    context = " ".join(chunk.context_text.split()).strip()
+    text = " ".join(chunk.text.split()).strip()
+    if context and context != text:
+        return f"{context} | {text}"
+    return context or text
+
+
+def _compact_product_identity(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _product_identity_aliases(product_name: str) -> tuple[str, ...]:
+    candidates = [product_name, product_name.split("|", 1)[0]]
+    candidates.extend(re.split(r"[|,:()/\-]+", product_name))
+    candidates.extend(
+        re.findall(r"\b[A-Z]{1,8}\d{2,}[A-Z0-9-]*\b", product_name)
+    )
+    aliases = {
+        compact
+        for candidate in candidates
+        if (compact := _compact_product_identity(candidate))
+        and len(compact) >= 6
+    }
+    return tuple(sorted(aliases, key=lambda value: (-len(value), value)))
+
+
+def _paragraph_mentions_product(paragraph_text: str, product_name: str) -> bool:
+    paragraph_identity = _compact_product_identity(paragraph_text)
+    return bool(
+        paragraph_identity
+        and any(
+            alias in paragraph_identity
+            for alias in _product_identity_aliases(product_name)
+        )
+    )
+
+
+def _select_exact_product_fact_chunks(
+    sentence: ArticleSentence,
+    sentences: Sequence[ArticleSentence],
+    chunks: Sequence[CoverageEvidenceChunk],
+) -> tuple[CoverageEvidenceChunk, ...]:
+    """Find current product-detail chunks that exactly cover a sentence's facts.
+
+    This is deliberately narrower than semantic retrieval: the article must
+    mention the product in the same paragraph, the source must be a confirmed
+    product-detail hard-fact chunk, and every extracted unit-bearing fact must
+    occur in the selected product's current detail snapshot.
+    """
+
+    article_facts = _fact_tokens(sentence.text)
+    if not article_facts:
+        return ()
+    paragraph_text = " ".join(
+        item.text for item in sentences if item.paragraph_id == sentence.paragraph_id
+    )
+    chunks_by_product: dict[str, list[CoverageEvidenceChunk]] = {}
+    for chunk in chunks:
+        if (
+            not chunk.product_id
+            or not chunk.product_name
+            or chunk.source_kind != "product_detail"
+            or chunk.trust_tier != "hard_fact"
+            or not _paragraph_mentions_product(paragraph_text, chunk.product_name)
+        ):
+            continue
+        if _fact_tokens(_coverage_chunk_text(chunk)) & article_facts:
+            chunks_by_product.setdefault(chunk.product_id, []).append(chunk)
+
+    for product_chunks in chunks_by_product.values():
+        available_facts = frozenset(
+            fact
+            for chunk in product_chunks
+            for fact in _fact_tokens(_coverage_chunk_text(chunk))
+        )
+        if not article_facts.issubset(available_facts):
+            continue
+
+        # A sentence can combine facts stored in separate table rows (for
+        # example width, length, and thickness).  Select the smallest useful
+        # set greedily by remaining fact coverage instead of assuming the
+        # first three ranked rows cover every fact.
+        remaining_facts = set(article_facts)
+        selected: list[CoverageEvidenceChunk] = []
+        candidates = list(product_chunks)
+        while remaining_facts and candidates and len(selected) < 3:
+            best_index, best_chunk = max(
+                enumerate(candidates),
+                key=lambda item: (
+                    len(
+                        _fact_tokens(_coverage_chunk_text(item[1]))
+                        & remaining_facts
+                    ),
+                    -len(item[1].heading_path),
+                    -len(item[1].chunk_id),
+                ),
+            )
+            covered = (
+                _fact_tokens(_coverage_chunk_text(best_chunk))
+                & remaining_facts
+            )
+            if not covered:
+                break
+            selected.append(best_chunk)
+            remaining_facts.difference_update(covered)
+            candidates.pop(best_index)
+        if not remaining_facts:
+            return tuple(selected)
+    return ()
+
+
 class LlmServerKnowledgeCoverageProvider:
     """Validate sentence-to-evidence support without changing article copy."""
 
@@ -917,16 +1161,39 @@ class LlmServerKnowledgeCoverageProvider:
             raise KnowledgeCoverageUnavailable(
                 "knowledge coverage provider is not configured"
             )
+        paragraph_payload: list[dict[str, str]] = []
+        paragraph_seen: set[str] = set()
+        for item in sentences:
+            if item.paragraph_id in paragraph_seen:
+                continue
+            paragraph_seen.add(item.paragraph_id)
+            paragraph_text = " ".join(
+                sibling.text
+                for sibling in sentences
+                if sibling.paragraph_id == item.paragraph_id
+            )
+            paragraph_payload.append(
+                {
+                    "paragraph_id": item.paragraph_id,
+                    "text": paragraph_text[:MAX_COVERAGE_PARAGRAPH_CHARACTERS],
+                }
+            )
         sentence_payload = [
-            {"sentence_id": item.sentence_id, "text": item.text}
+            {
+                "sentence_id": item.sentence_id,
+                "paragraph_id": item.paragraph_id,
+                "text": item.text,
+            }
             for item in sentences
         ]
         chunk_payload = [
             {
                 "chunk_id": item.chunk_id,
+                "product_id": item.product_id,
+                "product_name": item.product_name,
                 "heading": " > ".join(item.heading_path),
                 "trust_tier": item.trust_tier,
-                "text": item.text[:MAX_COVERAGE_CHUNK_CHARACTERS],
+                "text": _coverage_chunk_text(item)[:MAX_COVERAGE_CHUNK_CHARACTERS],
             }
             for item in chunks
         ]
@@ -939,7 +1206,11 @@ class LlmServerKnowledgeCoverageProvider:
             "snapshot are authoritative for that product's specifications. Match "
             "equivalent dimension notation such as x, ×, or *, tolerate spacing and "
             "source-label typos such as 'Lenght', and combine multiple selected "
-            "chunks when one sentence lists several product facts. "
+            "chunks when one sentence lists several product facts. A product name "
+            "may appear in one sentence while its specification appears in a later "
+            "sentence in the same paragraph; use paragraph_id and PARAGRAPHS to "
+            "resolve that context. Product-detail label/value chunks may be combined "
+            "as one fact, such as 'Size: 400x400/500x500mm'. "
             "Mark hard_fact=true for product/company specifications, dimensions, "
             "materials, certifications, performance figures, capacity, delivery, "
             "warranty, or other externally checkable concrete claims. For a hard fact, "
@@ -949,6 +1220,7 @@ class LlmServerKnowledgeCoverageProvider:
             "(maximum 3), support_type (direct, paraphrase, or contextual), and "
             "hard_fact. Do not omit supplied sentence IDs and do not invent IDs.\n\n"
             f"SENTENCES={json.dumps(sentence_payload, ensure_ascii=False)}\n\n"
+            f"PARAGRAPHS={json.dumps(paragraph_payload, ensure_ascii=False)}\n\n"
             f"CHUNKS={json.dumps(chunk_payload, ensure_ascii=False)}"
         )
         try:
@@ -1079,7 +1351,7 @@ class ServerKnowledgeCoverageService:
             sentence = by_sentence[decision.sentence_id]
             hard_fact = decision.hard_fact or bool(
                 HARD_FACT_PATTERN.search(sentence.text)
-            )
+            ) or bool(_fact_tokens(sentence.text))
             selected_chunks = [
                 by_chunk[chunk_id]
                 for chunk_id in decision.chunk_ids
@@ -1099,7 +1371,17 @@ class ServerKnowledgeCoverageService:
                     for chunk in selected_chunks
                     if chunk.trust_tier == "hard_fact"
                 ]
-            if not decision.supported or not selected_chunks:
+            exact_product_chunks = _select_exact_product_fact_chunks(
+                sentence,
+                sentences,
+                chunks,
+            )
+            if exact_product_chunks:
+                selected_chunks = list(
+                    dict.fromkeys((*exact_product_chunks, *selected_chunks))
+                )[:3]
+            supported = decision.supported or bool(exact_product_chunks)
+            if not supported or not selected_chunks:
                 continue
             claim_type = "hard_fact" if hard_fact else "reference"
             for chunk in selected_chunks[:3]:
@@ -1126,7 +1408,9 @@ class ServerKnowledgeCoverageService:
                     chunk_id=chunk.chunk_id,
                     support_scope="sentence",
                     claim_type=claim_type,
-                    support_type=decision.support_type,
+                    support_type=(
+                        "direct" if exact_product_chunks else decision.support_type
+                    ),
                     visible_words=sentence.visible_words,
                     public_citation_url=(
                         chunk.canonical_url if chunk.public_source else None

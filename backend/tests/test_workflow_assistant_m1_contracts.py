@@ -71,6 +71,9 @@ from workflow_assistant.planner import (  # noqa: E402
     PlannerModelIdentity,
     PlannerOutputError,
     StructuredWorkflowPlanner,
+    _planned_action_counts,
+    _planner_max_tokens,
+    _requested_article_counts,
     parse_planner_output,
     request_skips_review,
 )
@@ -138,6 +141,45 @@ def make_plan(*, project_id: str = "project-a", action_kind: str = "list_tasks")
 
 
 class WorkflowAssistantContractTests(unittest.TestCase):
+    def test_batch_quantity_parser_supports_single_project_chinese_request(self) -> None:
+        self.assertEqual(
+            _requested_article_counts(
+                "随机选择5个YEHUI B2B话题并撰写五篇文章",
+                ("yehui.com",),
+            ),
+            {"yehui.com": 5},
+        )
+        self.assertEqual(
+            _planner_max_tokens({"yehui.com": 10}),
+            20_000,
+        )
+
+    def test_batch_quantity_requires_a_generate_article_chain(self) -> None:
+        plan = PlanDraft(
+            title="Batch",
+            natural_language_request="write two articles",
+            project_ids=["project-a"],
+            steps=[
+                PlanStep(
+                    step_id="research-1",
+                    sequence=1,
+                    action_kind="start_research",
+                    project_id="project-a",
+                    article_task_id="task-1",
+                ),
+                PlanStep(
+                    step_id="article-1",
+                    sequence=2,
+                    action_kind="generate_article",
+                    project_id="project-a",
+                    article_task_id="task-1",
+                    input_summary={"use_evidence_pack": True},
+                ),
+            ],
+        )
+
+        self.assertEqual(_planned_action_counts(plan, "generate_article"), {"project-a": 1})
+
     def test_natural_language_skip_review_removes_review_step_server_side(self) -> None:
         output = json.dumps(
             {
@@ -1229,24 +1271,56 @@ A: It affects support.
                 del temperature, max_tokens
                 self.calls += 1
                 count = 1 if self.calls == 1 else 2
-                return json.dumps(
-                    {
-                        "title": "Create requested articles",
-                        "natural_language_request": "ignored",
-                        "project_ids": ["project-a"],
-                        "steps": [
+                steps = []
+                sequence = 0
+                for index in range(1, count + 1):
+                    create_step_id = f"create-{index}"
+                    research_step_id = f"research-{index}"
+                    article_step_id = f"article-{index}"
+                    steps.extend(
+                        [
                             {
-                                "step_id": f"create-{index}",
-                                "sequence": index,
+                                "step_id": create_step_id,
+                                "sequence": sequence + 1,
                                 "action_kind": "create_task",
                                 "project_id": "project-a",
                                 "input_summary": {
                                     "published_topic_id": f"topic-{index}",
                                     "topic": f"Topic {index}",
+                                    "bind_step_ids": [
+                                        research_step_id,
+                                        article_step_id,
+                                    ],
                                 },
-                            }
-                            for index in range(1, count + 1)
-                        ],
+                            },
+                            {
+                                "step_id": research_step_id,
+                                "sequence": sequence + 2,
+                                "action_kind": "start_research",
+                                "project_id": "project-a",
+                                "input_summary": {
+                                    "create_task_step_id": create_step_id,
+                                },
+                            },
+                            {
+                                "step_id": article_step_id,
+                                "sequence": sequence + 3,
+                                "action_kind": "generate_article",
+                                "project_id": "project-a",
+                                "input_summary": {
+                                    "create_task_step_id": create_step_id,
+                                    "use_evidence_pack": True,
+                                },
+                            },
+                        ]
+                    )
+                    sequence += 3
+                return json.dumps(
+                    {
+                        "title": "Create requested articles",
+                        "natural_language_request": "ignored",
+                        "project_ids": ["project-a"],
+                        "steps": steps,
                     }
                 )
 
@@ -1279,7 +1353,8 @@ A: It affects support.
         )
 
         self.assertEqual(llm.calls, 2)
-        self.assertEqual(len(plan.steps), 2)
+        self.assertEqual(len(plan.steps), 6)
+        self.assertEqual(_planned_action_counts(plan, "generate_article"), {"project-a": 2})
 
     def test_planner_receives_and_validates_selected_article_range(self) -> None:
         class CaptureLlm:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import unittest
+from http.client import RemoteDisconnected
 from pathlib import Path
 
 
@@ -10,7 +11,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from services.job_queue import BatchJobRunner  # noqa: E402
+from services.job_queue import BatchJobRunner, is_retryable_error  # noqa: E402
 
 
 class FlakyQueue:
@@ -49,6 +50,14 @@ class FlakyQueue:
 
 
 class JobQueueResilienceTests(unittest.TestCase):
+    def test_transport_disconnect_is_retryable_even_without_error_text(self) -> None:
+        self.assertTrue(is_retryable_error(RemoteDisconnected()))
+        wrapped = RuntimeError("planner failed")
+        wrapped.__cause__ = RemoteDisconnected()
+        self.assertTrue(
+            is_retryable_error(wrapped)
+        )
+
     def test_dispatcher_survives_transient_claim_failure(self) -> None:
         queue = FlakyQueue()
         runner = BatchJobRunner(
