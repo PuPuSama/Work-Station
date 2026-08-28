@@ -66,6 +66,11 @@
 - 安全边界：同一篇文章仍不能同时拥有两个活动 Job；并发上限只减少不必要的串行等待，不取消 PostgreSQL 队列、重授权和 revision/CAS 保护。
 - 影响：标题、产品、大纲、正文/重写、降 AI、SEO 复检、链接恢复、产品再发现和知识研究均接入统一并发配置；Workflow Assistant 自身的 `WORKFLOW_ASSISTANT_MAX_CONCURRENCY` 仍独立控制计划步骤并发。
 
+## 2026-08-28：基础设施命名
+
+- 决策：Docker Compose 项目、应用容器和共享网络统一使用 `work-station`；业务产品名 Article Agent、环境变量前缀、数据库名和 PostgreSQL/MinIO 数据卷名保持不变。
+- 原因：只改部署命名即可统一本地与服务器运行环境，同时避免新建空数据卷或影响已有数据连接。
+
 ## 4. Claude/Codex 并行开发规约
 
 1. 开始任务先运行 git status --short，再查看目标文件的 git diff；把已有修改视为用户资产。

@@ -1,9 +1,11 @@
+name: work-station
+
 services:
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: article-backend
+    container_name: work-station-backend
     restart: unless-stopped
     mem_limit: 2g
     memswap_limit: 2560m
@@ -17,7 +19,7 @@ services:
     volumes:
       - ${ARTICLE_WORKSPACE_PATH:-./workspace}:/app/workspace
     networks:
-      - article-network
+      - work-station-network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 30s
@@ -29,7 +31,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    container_name: article-frontend
+    container_name: work-station-frontend
     restart: unless-stopped
     mem_limit: 768m
     memswap_limit: 1g
@@ -43,7 +45,7 @@ services:
     ports:
       - "3012:3000"
     networks:
-      - article-network
+      - work-station-network
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
       interval: 15s
@@ -52,5 +54,6 @@ services:
       start_period: 20s
 
 networks:
-  article-network:
+  work-station-network:
+    name: work-station-network
     driver: bridge

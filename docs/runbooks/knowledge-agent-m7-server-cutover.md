@@ -429,7 +429,7 @@ cd backend
 For reverse-proxied MinIO, keep `ARTICLE_AGENT_OBJECT_STORE_ENDPOINT` on the
 browser-reachable HTTPS origin and set
 `ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT` to the private service origin,
-for example `http://article-object-store:9000`. Backend object API operations
+for example `http://work-station-object-store:9000`. Backend object API operations
 use the internal endpoint; presigned browser downloads continue to use the
 public endpoint. Omitting the internal override preserves the legacy
 single-endpoint behavior.

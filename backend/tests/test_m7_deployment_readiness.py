@@ -247,7 +247,7 @@ class DeploymentReadinessTests(unittest.TestCase):
             environment={
                 **COMPLETE_ENVIRONMENT,
                 "ARTICLE_AGENT_OBJECT_STORE_INTERNAL_ENDPOINT": (
-                    "http://article-object-store:9000"
+                    "http://work-station-object-store:9000"
                 ),
             },
             database_probe=lambda: DatabaseReadiness(

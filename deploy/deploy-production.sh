@@ -7,7 +7,7 @@ release_root="/home/ubuntu/.cache/article-agent-deploy"
 release_directory="$release_root/$target_commit"
 workspace="$repository/workspace"
 environment_file="$repository/.env"
-compose_project="article"
+compose_project="work-station"
 replacement_started=0
 docker_command=(sudo -n env "ARTICLE_WORKSPACE_PATH=$workspace" "ARTICLE_ENV_FILE=$environment_file" docker)
 

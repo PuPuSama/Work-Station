@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: article-${{ github.ref }}
+  group: work-station-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
