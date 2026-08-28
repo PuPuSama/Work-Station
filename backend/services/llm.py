@@ -7,9 +7,7 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib import request
 
-from dotenv import load_dotenv
-
-from config import AppConfig, ROOT_DIR
+from config import AppConfig
 
 
 LLM_TIMEOUT_SECONDS = 240
@@ -28,8 +26,6 @@ class LLMClient:
     ):
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        load_dotenv(ROOT_DIR / ".env")
-        load_dotenv(ROOT_DIR / "backend" / ".env")
         self.config = config
         self.api_key = (
             os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")

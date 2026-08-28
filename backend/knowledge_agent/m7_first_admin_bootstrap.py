@@ -7,8 +7,7 @@ import sys
 from typing import Mapping, Sequence
 from urllib.parse import parse_qs, quote, urlsplit
 
-from dotenv import load_dotenv
-
+from config import initialize_environment
 from knowledge_agent.database import create_knowledge_engine
 from services.first_admin_bootstrap import (
     FirstAdminBootstrapError,
@@ -16,10 +15,6 @@ from services.first_admin_bootstrap import (
     FirstAdminBootstrapService,
 )
 from services.oidc_identity import OidcProviderSettings
-
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT_DIR / "data"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,10 +58,10 @@ def _frontend_base_url(value: str) -> str:
     return normalized
 
 
-def _invitation_path(organization_id: str) -> Path:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = (DATA_DIR / f"first-admin-invitation-{organization_id}.txt").resolve()
-    data_root = DATA_DIR.resolve()
+def _invitation_path(organization_id: str, *, data_dir: Path) -> Path:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = (data_dir / f"first-admin-invitation-{organization_id}.txt").resolve()
+    data_root = data_dir.resolve()
     if not path.is_relative_to(data_root):
         raise ValueError("invitation output must stay inside the data directory")
     return path
@@ -121,11 +116,12 @@ def main(
 ) -> int:
     args = build_parser().parse_args(argv)
     if environment is None:
-        load_dotenv(ROOT_DIR / ".env")
-        load_dotenv(ROOT_DIR / "backend" / ".env")
+        effective_root = initialize_environment()
         source: Mapping[str, str] = os.environ
     else:
-        source = environment
+        loaded_environment = dict(environment)
+        effective_root = initialize_environment(loaded_environment)
+        source = loaded_environment
     database_url = source.get("ARTICLE_AGENT_DATABASE_URL", "").strip()
     if not database_url:
         raise ValueError("ARTICLE_AGENT_DATABASE_URL is required")
@@ -136,7 +132,10 @@ def main(
     engine = create_knowledge_engine(database_url)
     try:
         service = FirstAdminBootstrapService(engine)
-        output_path = _invitation_path(args.organization_id)
+        output_path = _invitation_path(
+            args.organization_id,
+            data_dir=effective_root / "data",
+        )
         _, invitation_token = _load_or_create_invitation(
             path=output_path,
             frontend_base_url=frontend_base_url,

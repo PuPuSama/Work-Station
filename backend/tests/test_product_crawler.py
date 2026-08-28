@@ -353,6 +353,53 @@ class ProductPageClassificationTests(unittest.TestCase):
             )
         )
 
+    def test_oem_and_live_entry_pages_are_not_product_detail_fallbacks(self) -> None:
+        html = """
+        <html><head>
+          <title>BGVE OEM ODM Beauty Manufacturer</title>
+          <meta name="description" content="Custom formula development, sustainable packaging, production, shipment and support for beauty brands and global buyers.">
+          <meta property="og:image" content="https://www.example.com/media/factory.jpg">
+        </head><body><main>
+          <h1>OEM / ODM</h1>
+          <p>Our team provides custom colors, bottle design, labeling, manufacturing and shipping services for private label products.</p>
+          <img src="/media/factory.jpg" width="620" height="340">
+        </main></body></html>
+        """
+
+        for slug in ("oem", "odm", "live"):
+            with self.subTest(slug=slug):
+                parser = crawler.parse_html(html)
+                self.assertFalse(
+                    crawler.is_product_detail_page(
+                        f"https://www.example.com/{slug}/",
+                        parser,
+                        [slug, "beauty", "manufacturer"],
+                    )
+                )
+
+    def test_reserved_entry_slug_under_product_route_can_still_be_a_product(self) -> None:
+        parser = crawler.parse_html(
+            """
+            <html><head>
+              <title>Live Cuticle Oil</title>
+              <meta name="description" content="Official product information for a nourishing cuticle oil with botanical ingredients, usage guidance and wholesale packaging options for beauty buyers.">
+              <meta property="og:image" content="https://www.example.com/media/live-cuticle-oil.jpg">
+            </head><body><main>
+              <h1>Live Cuticle Oil</h1>
+              <img src="/media/live-cuticle-oil.jpg" width="620" height="620">
+              <p>Apply around the nail edge daily to support a healthy, polished finish.</p>
+            </main></body></html>
+            """
+        )
+
+        self.assertTrue(
+            crawler.is_product_detail_page(
+                "https://www.example.com/products/live/",
+                parser,
+                ["products", "live", "cuticle", "oil"],
+            )
+        )
+
     def test_root_level_editorial_article_is_not_a_product_detail_fallback(self) -> None:
         parser = crawler.parse_html(
             """

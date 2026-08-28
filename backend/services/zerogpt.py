@@ -10,11 +10,6 @@ from urllib import request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
-from dotenv import load_dotenv
-
-from config import ROOT_DIR
-
-
 ZEROGPT_API_BASE_URL = "https://api.zerogpt.com"
 ZEROGPT_API_KEY_ENV = "ARTICLE_AGENT_ZEROGPT_API_KEY"
 ZEROGPT_API_KEY_COMPAT_ENV = "ZEROGPT_API_KEY"
@@ -90,8 +85,6 @@ class ZeroGPTClient:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("timeout must be a positive number of seconds")
 
-        load_dotenv(ROOT_DIR / ".env")
-        load_dotenv(ROOT_DIR / "backend" / ".env")
         configured_base_url = base_url or os.environ.get(
             ZEROGPT_BASE_URL_ENV,
             ZEROGPT_API_BASE_URL,

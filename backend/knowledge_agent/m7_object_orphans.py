@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timezone
 from typing import Mapping, Sequence
 
+from config import initialize_environment
 from knowledge_agent.database import create_knowledge_engine
 from services.access_control import ActorIdentity
 from services.object_orphan_reconciliation import ProjectObjectOrphanReconciler
@@ -33,7 +34,13 @@ def main(
     environment: Mapping[str, str] | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
-    source = os.environ if environment is None else environment
+    if environment is None:
+        initialize_environment()
+        source: Mapping[str, str] = os.environ
+    else:
+        loaded_environment = dict(environment)
+        initialize_environment(loaded_environment)
+        source = loaded_environment
     database_url = source.get("ARTICLE_AGENT_DATABASE_URL", "").strip()
     if not database_url:
         raise SystemExit("ARTICLE_AGENT_DATABASE_URL is required")

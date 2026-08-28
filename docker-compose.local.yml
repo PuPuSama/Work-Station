@@ -1,0 +1,13 @@
+services:
+  backend:
+    environment:
+      ARTICLE_AGENT_DATABASE_URL: "postgresql+psycopg://${ARTICLE_DB_USER}:${ARTICLE_DB_PASSWORD}@host.docker.internal:${ARTICLE_DB_PORT:-5432}/${ARTICLE_DB_NAME}"
+      ARTICLE_AGENT_OBJECT_STORE_ENDPOINT: http://host.docker.internal:59000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  frontend:
+    ports: !override
+      - "3000:3000"

@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-from dotenv import load_dotenv
 from langgraph.checkpoint.postgres import PostgresSaver
 
+from config import initialize_environment
 from .settings import KnowledgeAgentSettings
-
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 def psycopg_connection_url(database_url: str) -> str:
@@ -19,8 +15,7 @@ def psycopg_connection_url(database_url: str) -> str:
 
 
 def main() -> None:
-    load_dotenv(ROOT_DIR / ".env")
-    load_dotenv(ROOT_DIR / "backend" / ".env")
+    initialize_environment()
     settings = KnowledgeAgentSettings.from_env(enabled=True)
     if settings.database_url is None:
         raise ValueError("ARTICLE_AGENT_DATABASE_URL is required")

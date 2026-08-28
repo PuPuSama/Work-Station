@@ -5,11 +5,14 @@ import os
 
 import uvicorn
 
-from app import app
+from config import initialize_environment
 
 
 def main() -> None:
     multiprocessing.freeze_support()
+    initialize_environment()
+    from app import app
+
     uvicorn.run(
         app,
         host=os.environ.get("ARTICLE_AGENT_BACKEND_HOST", "127.0.0.1"),

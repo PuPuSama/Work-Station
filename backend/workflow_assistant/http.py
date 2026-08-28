@@ -13,7 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from services.access_control import ActorIdentity
+from knowledge_agent.object_storage import KnowledgeObjectNotFound
+from services.access_control import ActorIdentity, ProjectAccessDenied
+from services.delivery_package import official_website_folder_name
+from services.object_store import ObjectStoreError
+from services.server_delivery_package import (
+    ServerBatchDeliveryPackage,
+    ServerDeliveryPackageError,
+)
+from services.server_request_security import AuthorizedProjectRequest
 from server_project_http import require_server_actor
 
 from .context import (
@@ -102,6 +110,16 @@ class AssistantMessageDispatchResponse(BaseModel):
 
 class AssistantConversationListResponse(BaseModel):
     conversations: list[AssistantConversationResponse]
+
+
+class WorkflowAssistantBatchDownloadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    url: str
+    expires_seconds: int
+    filename: str
+    file_count: int
 
 
 class AssistantEventResponse(BaseModel):
@@ -1735,6 +1753,172 @@ def get_plan(
                 plan_id=plan.plan_id,
             )
         return _plan_response(plan)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get(
+    "/plans/{plan_id}/delivery-package/download",
+    response_model=WorkflowAssistantBatchDownloadResponse,
+)
+def create_plan_delivery_download(
+    plan_id: str,
+    request: Request,
+    expires_seconds: int = Query(default=300, ge=30, le=3600),
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> WorkflowAssistantBatchDownloadResponse:
+    """Create one download URL for all completed packages in one project."""
+
+    _feature_enabled(request)
+    try:
+        repository = _repository(request)
+        plan = repository.get_plan(actor=actor, plan_id=plan_id)
+        _reauthorize_plan_read(request, actor=actor, plan=plan)
+        package_steps = [
+            step
+            for step in plan.steps
+            if step.action_kind == "package_delivery"
+        ]
+        if not package_steps:
+            raise HTTPException(
+                status_code=409,
+                detail="当前计划没有可批量下载的交付包。",
+            )
+
+        package_project_ids = {
+            step.project_id.strip() for step in package_steps if step.project_id.strip()
+        }
+        if len(package_project_ids) != 1:
+            raise HTTPException(
+                status_code=422,
+                detail="批量交付下载当前要求所有文章属于同一个项目；请分别下载各项目的交付包。",
+            )
+        project_id = next(iter(package_project_ids))
+        _context(request).access.require(actor, project_id, "article.deliver")
+
+        incomplete_steps = [
+            step
+            for step in package_steps
+            if (
+                step.status != "succeeded"
+                or not step.article_task_id
+                or str(step.output_summary.get("artifact_kind") or "")
+                != "delivery_package"
+                or not str(step.output_summary.get("asset_id") or "").strip()
+            )
+        ]
+        if incomplete_steps:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": (
+                        f"批量交付包尚未全部完成（已完成 "
+                        f"{len(package_steps) - len(incomplete_steps)}/{len(package_steps)}）。"
+                    ),
+                    "ready_count": len(package_steps) - len(incomplete_steps),
+                    "total_count": len(package_steps),
+                },
+            )
+
+        factory = getattr(
+            request.app.state,
+            "server_project_task_store_factory",
+            None,
+        )
+        create_runtime = getattr(factory, "create", None)
+        if not callable(create_runtime):
+            raise HTTPException(
+                status_code=503,
+                detail="Server project task storage is not available.",
+            )
+        try:
+            runtime = create_runtime(
+                AuthorizedProjectRequest(
+                    actor=actor,
+                    project_id=project_id,
+                    permission="article.deliver",
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Server project task storage is not available.",
+            ) from exc
+
+        tasks = []
+        seen_task_ids: set[str] = set()
+        for step in package_steps:
+            task_id = str(step.article_task_id or "").strip()
+            if not task_id or task_id in seen_task_ids:
+                raise HTTPException(
+                    status_code=409,
+                    detail="批量交付包中的文章任务标识无效或重复。",
+                )
+            seen_task_ids.add(task_id)
+            try:
+                task = runtime.store.get(task_id)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="批量交付包引用的文章任务已不存在。",
+                ) from exc
+            output_asset_id = str(
+                step.output_summary.get("asset_id") or ""
+            ).strip()
+            if task.delivery_package_asset_id.strip() != output_asset_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="文章交付包已发生变化，请刷新计划后重试。",
+                )
+            tasks.append(task)
+
+        object_service = getattr(
+            request.app.state,
+            "server_project_object_service",
+            None,
+        )
+        if not callable(getattr(object_service, "read_for_article_delivery", None)):
+            raise HTTPException(
+                status_code=503,
+                detail="Server project object storage is not available.",
+            )
+        asset = ServerBatchDeliveryPackage(objects=object_service).package(
+            actor=actor,
+            project_id=project_id,
+            tasks=tasks,
+        )
+        filename = f"{official_website_folder_name(project_id)}-batch-delivery.zip"
+        url = object_service.create_delivery_zip_download_url(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset.asset_id,
+            content_hash=asset.content_hash,
+            filename=filename,
+            expires_seconds=expires_seconds,
+        )
+        return WorkflowAssistantBatchDownloadResponse(
+            asset_id=asset.asset_id,
+            url=url,
+            expires_seconds=expires_seconds,
+            filename=filename,
+            file_count=len(tasks),
+        )
+    except HTTPException:
+        raise
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    except ServerDeliveryPackageError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KnowledgeObjectNotFound as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="批量交付包中的文件已失效，请重新生成对应文章的交付包。",
+        ) from exc
+    except ObjectStoreError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="批量交付下载暂时不可用。",
+        ) from exc
     except Exception as exc:
         raise _error(exc) from exc
 

@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from config import initialize_environment
 from .database import create_knowledge_engine
 from .embedding import OpenAICompatibleEmbeddingProvider
 from .evaluation import (
@@ -99,6 +100,7 @@ def _run_basic_hybrid(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    initialize_environment()
     parser = _parser()
     arguments = parser.parse_args(argv)
     cases_path = arguments.cases.expanduser().resolve()

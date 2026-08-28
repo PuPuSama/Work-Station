@@ -201,6 +201,25 @@ NON_PRODUCT_PATH_SEGMENTS = {
     "services",
     "team",
 }
+NON_PRODUCT_ENTRY_SLUGS = {
+    "live",
+    "odm",
+    "oem",
+    "oem-odm",
+}
+PRODUCT_ROUTE_SLUGS = {
+    "product",
+    "products",
+    "produkt",
+    "produkte",
+    "produit",
+    "produits",
+    "producto",
+    "productos",
+    "prodotto",
+    "prodotti",
+    "product-category",
+}
 PRODUCT_INDEX_PATHS = (
     "/products/",
     "/product/",
@@ -2021,12 +2040,15 @@ def looks_like_blog(url: str) -> bool:
 
 
 def looks_like_non_product_page(url: str) -> bool:
-    path_segments = {
+    path_segments = [
         segment.casefold()
         for segment in parse.unquote(parse.urlparse(url).path).strip("/").split("/")
         if segment
-    }
-    return bool(path_segments.intersection(NON_PRODUCT_PATH_SEGMENTS))
+    ]
+    if path_segments and path_segments[-1] in NON_PRODUCT_ENTRY_SLUGS:
+        if not set(path_segments[:2]).intersection(PRODUCT_ROUTE_SLUGS):
+            return True
+    return bool(set(path_segments).intersection(NON_PRODUCT_PATH_SEGMENTS))
 
 
 def looks_like_question(value: str) -> bool:

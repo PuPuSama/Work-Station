@@ -6,6 +6,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine, pool
 
+from backend.config import initialize_environment
+
 
 config = context.config
 
@@ -13,6 +15,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = None
+
+initialize_environment()
 
 
 def _database_url() -> str:

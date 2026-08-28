@@ -49,7 +49,6 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { ServerOutlineHistory } from "@/components/server-outline-history";
 import { ServerHeroAssetPicker } from "@/components/server-hero-asset-picker";
-import { ServerProductRediscoveryPanel } from "@/components/server-product-rediscovery-panel";
 import { ServerResearchWorkspace } from "@/components/server-research-workspace";
 import { ServerSectionRewritePanel } from "@/components/server-section-rewrite-panel";
 import { ServerSeoReviewPanel } from "@/components/server-seo-review-panel";
@@ -767,6 +766,15 @@ export function ServerArticleWorkbench({
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <ServerTaskResetPanel
+                task={task}
+                taskApi={taskApi}
+                pending={pending}
+                editAllowed={editAllowed}
+                resetAllowed={allowed.has("rewrite_from_scratch")}
+                runAction={runAction}
+                onCompleted={() => setStep("setup")}
+              />
               <Button
                 type="button"
                 variant="outline"
@@ -1103,23 +1111,6 @@ export function ServerArticleWorkbench({
               </Card>
             )}
 
-            <ServerProductRediscoveryPanel
-              key={`${customer}:${taskId}:product-rediscovery`}
-              customer={customer}
-              pending={pending}
-              knowledgeEditAllowed={editAllowed}
-              runJob={runJob}
-            />
-
-            <ServerTaskResetPanel
-              task={task}
-              taskApi={taskApi}
-              pending={pending}
-              editAllowed={editAllowed}
-              resetAllowed={allowed.has("rewrite_from_scratch")}
-              runAction={runAction}
-              onCompleted={() => setStep("setup")}
-            />
           </div>
         )}
 

@@ -746,6 +746,10 @@ export type ProjectAssetDownload = {
   filename?: string | null;
 };
 
+export type WorkflowAssistantBatchDownload = ProjectAssetDownload & {
+  file_count: number;
+};
+
 export type ServerCatalogProduct = {
   asset_count: number;
   name: string;

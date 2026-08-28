@@ -6,15 +6,12 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-
+import config as app_config
+from config import initialize_environment
 from .contracts import KnowledgeProject
 from .runtime import create_knowledge_runtime
 from .settings import KnowledgeAgentSettings
 from .wordpress import normalize_site_url
-
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,8 +29,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-    load_dotenv(ROOT_DIR / ".env")
-    load_dotenv(ROOT_DIR / "backend" / ".env")
+    initialize_environment()
     settings = KnowledgeAgentSettings.from_env(enabled=True)
     if settings.database_url is None:
         raise ValueError("ARTICLE_AGENT_DATABASE_URL is required")
@@ -42,7 +38,7 @@ def main(argv: list[str] | None = None) -> None:
     artifact_root = Path(
         os.environ.get(
             "ARTICLE_AGENT_KNOWLEDGE_ROOT",
-            str(ROOT_DIR / "data" / "knowledge-agent"),
+            str(app_config.application_root() / "data" / "knowledge-agent"),
         )
     )
     runtime = create_knowledge_runtime(

@@ -216,7 +216,7 @@ class OfficialPageClassificationTests(unittest.TestCase):
 
         self.assertEqual(result.page_type, "official_blog")
         self.assertIsNone(result.product_page)
-        self.assertEqual(result.metadata["parser_version"], "official-web-page/3")
+        self.assertEqual(result.metadata["parser_version"], "official-web-page/4")
 
     def test_homepage_with_shared_product_copy_is_not_a_product_detail(self) -> None:
         result = classify_web_page(
@@ -290,12 +290,15 @@ class OfficialPageClassificationTests(unittest.TestCase):
 
         self.assertEqual(result.page_type, "product_category")
         self.assertIsNone(result.product_page)
-        self.assertEqual(result.metadata["parser_version"], "official-web-page/3")
+        self.assertEqual(result.metadata["parser_version"], "official-web-page/4")
 
     def test_fixed_company_legal_and_service_pages_are_not_products(self) -> None:
         for slug in (
             "home-2",
             "home-3",
+            "live",
+            "odm",
+            "oem",
             "oem-odm",
             "privacy-policy",
             "thanks",
@@ -319,6 +322,8 @@ class OfficialPageClassificationTests(unittest.TestCase):
 
     def test_localized_service_and_privacy_pages_are_not_products(self) -> None:
         for path in (
+            "/en/live/",
+            "/fr/oem/",
             "/fr/oem-odm/",
             "/fr/politique-de-confidentialite/",
             "/de/datenschutzerklarung/",
@@ -462,6 +467,25 @@ class GeneralOfficialSiteDiscoveryTests(unittest.TestCase):
         self.assertEqual(result.page_type, "product_detail")
         self.assertIsNotNone(result.product_page)
         self.assertTrue(any("B2B" in reason for reason in result.reasons))
+
+    def test_reserved_entry_slug_under_product_route_remains_product_fallback(self) -> None:
+        result = classify_web_page(
+            requested_url="https://example.com/products/live/",
+            html="""
+            <html><head>
+              <title>Live Cuticle Oil</title>
+              <meta property="og:description" content="Official product information for a nourishing cuticle oil with botanical ingredients, usage guidance and wholesale packaging options for beauty buyers." />
+              <meta property="og:image" content="https://example.com/uploads/live-cuticle-oil.jpg" />
+            </head><body><main>
+              <h1>Live Cuticle Oil</h1>
+              <div class="product-gallery"><img src="/uploads/live-cuticle-oil.jpg" alt="Live cuticle oil" /></div>
+              <p>Apply around the nail edge daily to support a healthy, polished finish.</p>
+            </main></body></html>
+            """,
+        )
+
+        self.assertEqual(result.page_type, "product_detail")
+        self.assertIsNotNone(result.product_page)
 
     def test_category_discovery_keeps_only_same_site_product_context_links(self) -> None:
         html = """

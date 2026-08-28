@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 
-def _application_root() -> Path:
-    configured = os.environ.get("ARTICLE_AGENT_ROOT", "").strip()
+def _application_root(environment: Mapping[str, str] | None = None) -> Path:
+    source = os.environ if environment is None else environment
+    configured = str(source.get("ARTICLE_AGENT_ROOT", "") or "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
     if getattr(sys, "frozen", False):
@@ -20,10 +22,119 @@ def _application_root() -> Path:
 
 
 ROOT_DIR = _application_root()
-CONFIG_PATH = Path(
-    os.environ.get("ARTICLE_AGENT_CONFIG", str(ROOT_DIR / "config.yaml"))
-).expanduser().resolve()
+
+
+def _config_path(
+    environment: Mapping[str, str] | None = None,
+    *,
+    root: Path | None = None,
+) -> Path:
+    source = os.environ if environment is None else environment
+    application_root = root or _application_root(source)
+    configured = str(source.get("ARTICLE_AGENT_CONFIG", "") or "").strip()
+    path = Path(configured or "config.yaml").expanduser()
+    return (
+        path.resolve()
+        if path.is_absolute()
+        else (application_root / path).resolve()
+    )
+
+
+CONFIG_PATH = _config_path(root=ROOT_DIR)
 PROJECT_SCOPE = "全部项目"
+
+
+def application_root() -> Path:
+    """Return the current application root after environment initialization."""
+
+    return _application_root()
+
+
+def initialize_environment(
+    environment: MutableMapping[str, str] | None = None,
+    *,
+    app_root: Path | None = None,
+) -> Path:
+    """Load dotenv files once at an application or CLI boundary.
+
+    Process variables always win.  Without an explicit environment file, the
+    repository root ``.env`` wins over the legacy ``backend/.env`` for keys
+    which are not already present.  ``ARTICLE_AGENT_ENV_FILE`` is deliberately
+    read before the default candidates so it can select exactly one file.
+    """
+
+    target = os.environ if environment is None else environment
+    root = (app_root or _application_root(target)).expanduser().resolve()
+    selected = str(target.get("ARTICLE_AGENT_ENV_FILE", "") or "").strip()
+    if selected:
+        selected_path = Path(selected).expanduser()
+        if not selected_path.is_absolute():
+            selected_path = root / selected_path
+        selected_path = selected_path.resolve()
+        if not selected_path.is_file():
+            raise FileNotFoundError(
+                "ARTICLE_AGENT_ENV_FILE does not exist: "
+                f"{selected_path}"
+            )
+        candidates = (selected_path,)
+    else:
+        candidates = (root / ".env", root / "backend" / ".env")
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        for key, value in dotenv_values(path).items():
+            if not key or value is None or key in target:
+                continue
+            target[key] = value
+
+    effective_root = (app_root or _application_root(target)).expanduser().resolve()
+    effective_config_path = _config_path(target, root=effective_root)
+    if environment is None:
+        global ROOT_DIR, CONFIG_PATH
+        ROOT_DIR = effective_root
+        CONFIG_PATH = effective_config_path
+    return effective_root
+
+
+def _deep_merge(
+    base: Mapping[str, Any],
+    overlay: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(base)
+    for key, value in overlay.items():
+        previous = merged.get(key)
+        if isinstance(previous, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge(previous, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_yaml_config(
+    path: Path,
+    *,
+    ancestry: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    if resolved in ancestry:
+        chain = " -> ".join(str(item) for item in (*ancestry, resolved))
+        raise ValueError(f"configuration extends cycle: {chain}")
+    raw = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"configuration must be a mapping: {resolved}")
+    document = dict(raw)
+    parent_reference = document.pop("extends", None)
+    if parent_reference is None:
+        return document
+    if not isinstance(parent_reference, str) or not parent_reference.strip():
+        raise ValueError(
+            "configuration extends must be a non-empty path: "
+            f"{resolved}"
+        )
+    parent_path = (resolved.parent / parent_reference).resolve()
+    parent = _load_yaml_config(parent_path, ancestry=(*ancestry, resolved))
+    return _deep_merge(parent, document)
 
 
 def _environment_bool(name: str, default: bool) -> bool:
@@ -58,9 +169,14 @@ def _environment_int(
     return parsed
 
 
-def _configured_path(value: object) -> Path:
+def _configured_path(value: object, *, root: Path | None = None) -> Path:
     path = Path(str(value or "")).expanduser()
-    return path.resolve() if path.is_absolute() else (ROOT_DIR / path).resolve()
+    application_root = root or ROOT_DIR
+    return (
+        path.resolve()
+        if path.is_absolute()
+        else (application_root / path).resolve()
+    )
 
 
 @dataclass(frozen=True)
@@ -118,7 +234,9 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    root = _application_root()
+    config_path = _config_path(root=root)
+    raw = _load_yaml_config(config_path)
     paths = raw["paths"]
     article = raw["article"]
     prompts = raw.get("prompts", {})
@@ -164,9 +282,9 @@ def load_config() -> AppConfig:
         )
 
     return AppConfig(
-        topic_library=_configured_path(paths["topic_library"]),
-        knowledge_base=_configured_path(paths["knowledge_base"]),
-        output_root=_configured_path(paths["output_root"]),
+        topic_library=_configured_path(paths["topic_library"], root=root),
+        knowledge_base=_configured_path(paths["knowledge_base"], root=root),
+        output_root=_configured_path(paths["output_root"], root=root),
         # Compatibility-only fields. Task identity and paths no longer use
         # owner/date formatting.
         week_owner=str(legacy_week.get("owner", "")),
@@ -178,8 +296,9 @@ def load_config() -> AppConfig:
         humanize_prompt_path=_configured_path(
             prompts.get(
                 "humanize",
-                ROOT_DIR.parent / "降ai提示词-未测试效果版.txt",
-            )
+                root.parent / "降ai提示词-未测试效果版.txt",
+            ),
+            root=root,
         ),
         docx_font=str(docx.get("font", "Times New Roman")),
         title_1_size=float(styles["title_1"]["size_pt"]),
@@ -297,8 +416,6 @@ def load_runtime_config() -> AppConfig:
 
 def public_config(config: AppConfig) -> dict[str, Any]:
     # Integration secrets stay server-side. The UI only needs a readiness flag.
-    load_dotenv(ROOT_DIR / ".env")
-    load_dotenv(ROOT_DIR / "backend" / ".env")
     features: dict[str, bool] = {
         "knowledge_agent_enabled": config.knowledge_agent_enabled,
     }

@@ -15,6 +15,7 @@ import {
   Undo2,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -69,6 +70,7 @@ export function ServerArticleProductSelection({
   customer: string;
   taskId: string;
 }) {
+  const router = useRouter();
   const [task, setTask] = useState<TaskRecord | null>(null);
   const [catalog, setCatalog] = useState<ServerProjectCatalog | null>(null);
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(
@@ -88,6 +90,7 @@ export function ServerArticleProductSelection({
   const projectApi = `/api/projects/${encodedCustomer}`;
   const taskApi = `${projectApi}/tasks/${encodedTaskId}`;
   const workbenchHref = `/projects/${encodedCustomer}/articles/${encodedTaskId}?step=setup`;
+  const outlineHref = `/projects/${encodedCustomer}/articles/${encodedTaskId}?step=outline`;
 
   const load = useCallback(async () => {
     const requestId = requestIdRef.current + 1;
@@ -215,7 +218,8 @@ export function ServerArticleProductSelection({
       });
       setTask(updated);
       setSelectedProductIds(taskProductIds(updated));
-      setMessage(`已保存 ${updated.products.length} 个产品。`);
+      setMessage(`已确认 ${updated.products.length} 个产品，正在打开大纲页面。`);
+      router.push(outlineHref);
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -347,6 +351,18 @@ export function ServerArticleProductSelection({
               <Undo2 />
               恢复已保存选择
             </Button>
+            {!selectionDirty &&
+              !hasPendingRecommendation &&
+              selectedProductIds.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={pending}
+                  onClick={() => router.push(outlineHref)}
+                >
+                  进入大纲
+                </Button>
+              )}
           </div>
         </div>
 

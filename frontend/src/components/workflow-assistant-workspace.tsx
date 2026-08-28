@@ -53,6 +53,7 @@ import type {
   WorkflowAssistantDispatch,
   WorkflowAssistantAttentionCount,
   WorkflowAssistantAttentionList,
+  WorkflowAssistantBatchDownload,
   WorkflowAssistantGapFillResponse,
   WorkflowAssistantPlan,
   WorkflowAssistantPlanSummary,
@@ -315,6 +316,17 @@ const artifactDownloadEndpoints = {
   delivery_package: { endpoint: "delivery-package/download", label: "下载交付 ZIP" },
 } as const;
 
+function stepResultNote(step: WorkflowAssistantStep): string {
+  if (
+    step.action_kind === "humanize"
+    && step.status === "skipped"
+    && step.output_summary.skip_reason === "initial_ai_rate_below_threshold"
+  ) {
+    return "初检 AI 率低于 30%，已跳过降 AI 和二次检测。";
+  }
+  return "";
+}
+
 type ScopedTask = TaskRecord & { project_id: string };
 
 type AssistantRequestPhase = "idle" | "sending" | "waiting_reply" | "refreshing";
@@ -337,13 +349,13 @@ export function WorkflowAssistantWorkspace() {
   const [planPreviewExpanded, setPlanPreviewExpanded] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
   const [artifactPending, setArtifactPending] = useState("");
+  const [batchArtifactPending, setBatchArtifactPending] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlanSummary[]>([]);
   const [attentionPlanPendingId, setAttentionPlanPendingId] = useState<string | null>(null);
 
   // Debounce refresh to prevent request storms during SSE history replay
   const refreshTimeoutRef = useRef<number | null>(null);
-  const refreshPendingRef = useRef(false);
   const planRefreshTimeoutRef = useRef<number | null>(null);
   const [attachmentsEnabled, setAttachmentsEnabled] = useState(false);
   const [projectChangesEnabled, setProjectChangesEnabled] = useState(false);
@@ -660,6 +672,20 @@ export function WorkflowAssistantWorkspace() {
     ),
     [plan],
   );
+  const deliverySteps = useMemo(
+    () => (plan?.steps || []).filter((step) => step.action_kind === "package_delivery"),
+    [plan],
+  );
+  const readyDeliveryCount = deliverySteps.filter(
+    (step) => step.status === "succeeded"
+      && Boolean(step.article_task_id)
+      && step.output_summary.artifact_kind === "delivery_package"
+      && Boolean(String(step.output_summary.asset_id || "").trim()),
+  ).length;
+  const deliveryProjectIds = [...new Set(deliverySteps.map((step) => step.project_id))];
+  const batchDownloadReady = deliverySteps.length > 1
+    && readyDeliveryCount === deliverySteps.length
+    && deliveryProjectIds.length === 1;
   const waitingResearchSignature = useMemo(
     () => waitingResearchSteps
       .map((step) => `${step.step_id}:${step.project_id}:${researchThreadId(step)}`)
@@ -990,6 +1016,27 @@ export function WorkflowAssistantWorkspace() {
     }
   }
 
+  async function downloadBatchDelivery() {
+    if (!plan || !batchDownloadReady || batchArtifactPending) return;
+    setBatchArtifactPending(true);
+    setError("");
+    try {
+      const download = await apiGet<WorkflowAssistantBatchDownload>(
+        `/api/workflow-assistant/plans/${encodeURIComponent(plan.plan_id)}/delivery-package/download`,
+        30_000,
+      );
+      if (!download.url) throw new Error("服务器没有返回可用的批量下载地址。");
+      triggerBrowserDownload(
+        download.url,
+        download.filename || "batch-delivery.zip",
+      );
+    } catch (nextError) {
+      setError(messageText(nextError, plan));
+    } finally {
+      setBatchArtifactPending(false);
+    }
+  }
+
   async function openAttentionPlan(nextPlan: WorkflowAssistantPlanSummary) {
     setError("");
     setAttentionPlanPendingId(nextPlan.plan_id);
@@ -1134,6 +1181,7 @@ export function WorkflowAssistantWorkspace() {
                 <span className="text-muted-foreground">{requestPhase === "sending" ? "正在提交当前项目和文章范围。" : requestPhase === "waiting_reply" ? "助手正在处理请求，页面不会重复提交。" : "正在刷新会话和计划预览。"}</span>
               </div>}
               <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="直接聊天、查询所选项目的知识库，或描述要执行的工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
+              <p className="text-xs leading-5 text-muted-foreground">操作提示：需要跳过复检时可写“这篇不用复检”；若当前任务已有对应正文的初检 AI 率且低于 30%，助手会自动跳过降 AI 和二次检测，ZeroGPT 结果仍由人工确认。</p>
               <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="workflow-assistant-spinner" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新计划" : pending ? "处理中" : "发送"}</Button></div>
             </div>
           </CardContent>
@@ -1173,9 +1221,10 @@ export function WorkflowAssistantWorkspace() {
             <CardHeader className="border-b px-4 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-base">计划预览</CardTitle><CardDescription className="mt-1">确认后才会进入写操作队列。</CardDescription></div><div className="flex items-center gap-2">{plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}{plan && <Button type="button" variant="outline" size="sm" className="min-h-9" aria-expanded={planPreviewExpanded} aria-controls="workflow-plan-details" onClick={() => setPlanPreviewExpanded((current) => !current)}><ChevronDown className={`size-4 transition-transform duration-200 ${planPreviewExpanded ? "rotate-180" : ""}`} />{planPreviewExpanded ? "收起步骤" : `展开 ${plan.steps.length} 个步骤`}</Button>}</div></div></CardHeader>
             <CardContent id="workflow-plan-details" className="px-4 py-4">
               {plan ? <div className="grid gap-4">
-                <div><p className="font-medium">{plan.title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}</p></div>
-                {!planPreviewExpanded && <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">步骤详情已收起；当前计划包含 {plan.steps.length} 个步骤。点击上方“展开步骤”查看执行顺序和每一步的状态。</div>}
-                {planPreviewExpanded && <div className="max-h-[min(60vh,720px)] overflow-auto rounded-lg border bg-muted/10 p-2">
+                 <div><p className="font-medium">{plan.title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}</p></div>
+                 {!planPreviewExpanded && <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">步骤详情已收起；当前计划包含 {plan.steps.length} 个步骤。点击上方“展开步骤”查看执行顺序和每一步的状态。</div>}
+                 {deliverySteps.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed bg-muted/20 p-3"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium">批量交付下载</p><p className="mt-1 text-xs text-muted-foreground">{deliveryProjectIds.length > 1 ? "当前计划跨多个项目，请分别下载各项目交付包。" : `已准备 ${readyDeliveryCount}/${deliverySteps.length} 篇；全部完成后可一键下载。`}</p></div><Button type="button" size="sm" variant="outline" onClick={() => void downloadBatchDelivery()} disabled={!batchDownloadReady || batchArtifactPending}>{batchArtifactPending ? <Loader2 className="animate-spin" /> : <Download />}{batchDownloadReady ? `一键下载 ${deliverySteps.length} 篇` : `批量下载 ${readyDeliveryCount}/${deliverySteps.length}`}</Button></div></div>}
+                 {planPreviewExpanded && <div className="max-h-[min(60vh,720px)] overflow-auto rounded-lg border bg-muted/10 p-2">
                 <ol className="grid gap-2">
                   {plan.steps.map((step) => {
                     const artifactKind = typeof step.output_summary.artifact_kind === "string" ? step.output_summary.artifact_kind : "";
@@ -1191,7 +1240,8 @@ export function WorkflowAssistantWorkspace() {
                       ? step.input_summary.project_notes
                       : "";
                     const projectNotesChange = step.action_kind === "update_project_notes";
-                    return <li key={step.step_id} className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm"><span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span><span className="min-w-0 flex-1"><span className="flex items-center gap-2 font-medium"><span>{actionLabels[step.action_kind] || step.action_kind}</span><Badge variant="outline">{stepStatusLabels[step.status] || step.status}</Badge>{researchReviewRequired && <Badge variant="outline">待审查研究来源</Badge>}{pendingAiConfirmation && <Badge variant="outline">待确认交付包</Badge>}</span><span className="block text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" && plannedTopic ? ` · 主题：${plannedTopic}` : ""}{step.background_job_id ? ` · Job ${step.background_job_id}` : ""}{step.retry_count ? ` · 重试 ${step.retry_count}` : ""}{step.hard_gate && !step.human_gate_confirmed ? " · 需要人工确认" : ""}{step.standardized_error_code ? ` · ${step.standardized_error_code}` : ""}</span>{projectNotesChange && <div className="mt-2 grid gap-2 rounded-md border bg-muted/20 p-2 text-xs"><div><span className="font-medium">修改前</span><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-muted-foreground">{previousProjectNotes || "（空）"}</pre></div><div><span className="font-medium">确认后</span><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap">{proposedProjectNotes || "（空）"}</pre></div></div>}{Object.keys(step.output_summary).length > 0 && <span className="mt-1 block truncate text-xs text-muted-foreground">结果：{JSON.stringify(step.output_summary)}</span>}<span className="flex flex-wrap gap-2">{artifact && step.article_task_id && <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void downloadArtifact(step)} disabled={Boolean(artifactPending)}>{artifactPending === artifactKey ? <Loader2 className="animate-spin" /> : <Download />}{artifact.label}</Button>}{researchReviewRequired && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=outline`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开研究候选审查</Link>}{pendingAiConfirmation && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=review`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开文章工作台并提交人工截图</Link>}</span></span></li>;
+                     const resultNote = stepResultNote(step);
+                     return <li key={step.step_id} className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm"><span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span><span className="min-w-0 flex-1"><span className="flex items-center gap-2 font-medium"><span>{actionLabels[step.action_kind] || step.action_kind}</span><Badge variant="outline">{stepStatusLabels[step.status] || step.status}</Badge>{researchReviewRequired && <Badge variant="outline">待审查研究来源</Badge>}{pendingAiConfirmation && <Badge variant="outline">待确认交付包</Badge>}</span><span className="block text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" && plannedTopic ? ` · 主题：${plannedTopic}` : ""}{step.background_job_id ? ` · Job ${step.background_job_id}` : ""}{step.retry_count ? ` · 重试 ${step.retry_count}` : ""}{step.hard_gate && !step.human_gate_confirmed ? " · 需要人工确认" : ""}{step.standardized_error_code ? ` · ${step.standardized_error_code}` : ""}</span>{projectNotesChange && <div className="mt-2 grid gap-2 rounded-md border bg-muted/20 p-2 text-xs"><div><span className="font-medium">修改前</span><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-muted-foreground">{previousProjectNotes || "（空）"}</pre></div><div><span className="font-medium">确认后</span><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap">{proposedProjectNotes || "（空）"}</pre></div></div>}{resultNote && <span className="mt-1 block text-xs font-medium text-emerald-700">{resultNote}</span>}{Object.keys(step.output_summary).length > 0 && <span className="mt-1 block truncate text-xs text-muted-foreground">结果：{JSON.stringify(step.output_summary)}</span>}<span className="flex flex-wrap gap-2">{artifact && step.article_task_id && <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void downloadArtifact(step)} disabled={Boolean(artifactPending)}>{artifactPending === artifactKey ? <Loader2 className="animate-spin" /> : <Download />}{artifact.label}</Button>}{researchReviewRequired && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=outline`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开研究候选审查</Link>}{pendingAiConfirmation && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=review`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开文章工作台并提交人工截图</Link>}</span></span></li>;
                   })}
                 </ol>
                 {gapFillEnabled && waitingResearchSteps.map((step) => {
@@ -1257,7 +1307,7 @@ export function WorkflowAssistantWorkspace() {
                   </Alert>
                 ))}
                 </div>}
-                {plan.status === "awaiting_confirmation" && <Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button>}
+                {plan.status === "awaiting_confirmation" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消计划</Button></div>}
                 {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
                 {plan.status === "queued" || plan.status === "running" ? <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}><Pause />暂停</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div> : null}
                 {(plan.status === "queued" || plan.status === "running" || plan.status === "waiting_review") && plan.project_ids.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed p-3"><span className="text-xs font-medium text-muted-foreground">项目执行通道</span><div className="flex flex-wrap gap-2">{plan.project_ids.map((projectId) => { const paused = plan.paused_project_ids.includes(projectId); return <Button key={projectId} type="button" size="sm" variant="outline" onClick={() => void changePlan(paused ? "resume" : "pause", [projectId])} disabled={pending}>{paused ? <Play /> : <Pause />}{paused ? `恢复 ${projectId}` : `暂停 ${projectId}`}</Button>; })}</div></div>}

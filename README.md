@@ -25,13 +25,26 @@ Article Agent 是面向团队的文章生产与知识库服务。当前代码库
 准备 PostgreSQL、对象存储、OIDC 和模型服务所需环境变量后运行：
 
 ```powershell
-docker compose up -d --build --wait
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build --wait
 ```
 
 默认入口：
 
-- 前端：`http://127.0.0.1:3012`
+- 前端：`http://127.0.0.1:3000`
 - 后端健康检查：`GET http://127.0.0.1:8000/api/health`（容器网络内）
+
+## 配置约定
+
+- `config.yaml` 是所有运行形态共用的非敏感配置基线；`config.ci.yaml` 和
+  `config.docker.yaml` 只保存环境差异，并通过顶层 `extends: config.yaml` 合并。
+- 根目录 `.env` 是唯一推荐的项目环境文件。请从 `.env.example` 复制；其中只放
+  密钥、连接地址和运行时开关，不把密钥写进 YAML。
+- `backend/.env` 仅作为旧布局的兼容回退：只有根 `.env` 缺少某个键时才读取它，
+  根 `.env` 和进程环境优先。也可以用进程环境中的 `ARTICLE_AGENT_ENV_FILE` 指定
+  一份独立环境文件，此时不会再读取两份默认文件。
+- 应用入口统一调用 `initialize_environment()` 后再读取 `ARTICLE_AGENT_CONFIG`；
+  业务模块不再各自加载 dotenv。Docker Compose 注入根 `.env`，并显式选择
+  `/app/config.docker.yaml`；CI 显式选择 `config.ci.yaml`。
 
 数据库结构由 Alembic 管理；应用启动不会创建或迁移表。部署前应显式执行相应 Alembic 升级。
 

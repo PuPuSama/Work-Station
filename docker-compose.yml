@@ -13,7 +13,7 @@ services:
       - ${ARTICLE_ENV_FILE:-.env}
     environment:
       ARTICLE_AGENT_ROOT: /app
-      ARTICLE_AGENT_CONFIG: /app/config.yaml
+      ARTICLE_AGENT_CONFIG: /app/config.docker.yaml
     volumes:
       - ${ARTICLE_WORKSPACE_PATH:-./workspace}:/app/workspace
     networks:

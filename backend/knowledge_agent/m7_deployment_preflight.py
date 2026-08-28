@@ -6,6 +6,7 @@ import os
 
 import sqlalchemy as sa
 
+from config import initialize_environment
 from services.deployment_readiness import (
     EXPECTED_ALEMBIC_HEAD,
     postgres_database_probe,
@@ -65,6 +66,7 @@ def _load_recovery_evidence(
 
 
 def main() -> int:
+    initialize_environment()
     arguments = _parser().parse_args()
     environment = dict(os.environ)
     recovery_evidence = _load_recovery_evidence(arguments, environment)

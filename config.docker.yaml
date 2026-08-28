@@ -1,43 +1,16 @@
+extends: config.yaml
+
 paths:
   topic_library: /app/workspace/topic-library
   knowledge_base: /app/workspace/knowledge
   output_root: /app/workspace/projects
   data_file: /app/workspace/data/tasks.json
 
-article:
-  language: English
-  title_candidates: 10
-  default_word_count: 1200
-  ai_pass_threshold: 30
-
 prompts:
   humanize: /app/workspace/humanize.txt
 
-docx_format:
-  font: Times New Roman
-  styles:
-    title_1:
-      size_pt: 22
-    title_2:
-      size_pt: 18
-    title_3:
-      size_pt: 13.5
-    body:
-      size_pt: 12
-
 llm:
-  provider: responses
-  base_url: https://api.openai.com/v1
-  model: gpt-5.6-sol
-  available_models:
-    - gpt-5.6-sol
-    - gpt-5.6-terra
-    - gpt-5.6-luna
-  available_reasoning_efforts:
-    - low
-    - medium
-    - high
-    - xhigh
+  reasoning_effort: xhigh
 
 features:
   knowledge_agent_enabled: false
@@ -45,7 +18,3 @@ features:
   workflow_assistant_attachments_enabled: true
   workflow_assistant_project_changes_enabled: true
   workflow_assistant_gap_fill_enabled: true
-
-workflow_assistant:
-  max_concurrency: 3
-  soft_budget_warning_tokens: 24000

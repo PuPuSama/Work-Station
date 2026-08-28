@@ -99,11 +99,13 @@ Copy-Utf8BomText `
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "start.cmd") -Destination $PackageRoot -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "stop.cmd") -Destination $PackageRoot -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "OPERATIONS-README.txt") -Destination (Join-Path $PackageRoot "使用说明.txt") -Force
+$EnvironmentSource = Join-Path $Root ".env"
+if (-not (Test-Path -LiteralPath $EnvironmentSource)) {
+  $EnvironmentSource = Join-Path $Backend ".env"
+}
 $EnvironmentLines = @()
-foreach ($source in @((Join-Path $Root ".env"), (Join-Path $Backend ".env"))) {
-  if (Test-Path -LiteralPath $source) {
-    $EnvironmentLines += Get-Content -LiteralPath $source -Encoding UTF8
-  }
+if (Test-Path -LiteralPath $EnvironmentSource) {
+  $EnvironmentLines = Get-Content -LiteralPath $EnvironmentSource -Encoding UTF8
 }
 Set-Content -LiteralPath (Join-Path $PackageRoot ".env") -Value $EnvironmentLines -Encoding utf8
 

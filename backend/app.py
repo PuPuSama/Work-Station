@@ -15,12 +15,12 @@ from fastapi.responses import (
     JSONResponse,
     RedirectResponse,
 )
-from dotenv import load_dotenv
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import config as app_config
 from config import (
-    ROOT_DIR,
+    initialize_environment,
     load_runtime_config,
 )
 from models import (
@@ -196,12 +196,9 @@ from workflow_assistant.runner import WorkflowAssistantRunner
 from workflow_assistant.tools import WorkflowToolRegistry
 
 
-load_dotenv(ROOT_DIR / ".env")
-load_dotenv(ROOT_DIR / "backend" / ".env")
-
-
 @asynccontextmanager
 async def app_lifespan(application: FastAPI):
+    initialize_environment()
     cfg = config()
     server_engine = None
     previous_article_agent_config = getattr(
@@ -869,7 +866,11 @@ async def app_lifespan(application: FastAPI):
             artifact_root=Path(
                 os.environ.get(
                     "ARTICLE_AGENT_KNOWLEDGE_ROOT",
-                    str(ROOT_DIR / "workspace" / "knowledge-agent"),
+                    str(
+                        app_config.application_root()
+                        / "workspace"
+                        / "knowledge-agent"
+                    ),
                 )
             ),
             database_pool_size=cfg.database_pool_size,

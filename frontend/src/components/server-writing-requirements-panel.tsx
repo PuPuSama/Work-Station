@@ -145,6 +145,9 @@ export function ServerWritingRequirementsPanel({
   const scopeKey = `${projectApi}\n${taskApi}\n${task.id}`;
   const activeScopeRef = useRef("");
   const dirty = !settingsEqual(settings, baseline);
+  const articlePreviewReady = Boolean(
+    task.selected_title.trim() && task.outline.trim(),
+  );
 
   useEffect(() => {
     activeScopeRef.current = scopeKey;
@@ -417,6 +420,7 @@ export function ServerWritingRequirementsPanel({
   }
 
   async function loadPreview(kind: PreviewKind) {
+    if (kind === "article" && !articlePreviewReady) return;
     const requestScope = scopeKey;
     setLastPreviewKind(kind);
     setPreviewKind(kind);
@@ -812,7 +816,16 @@ export function ServerWritingRequirementsPanel({
                   type="button"
                   variant="outline"
                   className="min-h-11 w-full"
-                  disabled={Boolean(previewKind) || saveConflict}
+                  disabled={
+                    Boolean(previewKind) ||
+                    saveConflict ||
+                    (kind === "article" && !articlePreviewReady)
+                  }
+                  title={
+                    kind === "article" && !articlePreviewReady
+                      ? "请先生成并确认标题和大纲"
+                      : undefined
+                  }
                   onClick={() => void loadPreview(kind)}
                 >
                   {previewKind === kind ? <Loader2 className="animate-spin" /> : <Eye />}
@@ -820,6 +833,11 @@ export function ServerWritingRequirementsPanel({
                 </Button>
               ))}
             </div>
+            {!articlePreviewReady ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                正文 Prompt 依赖已确认标题和大纲；请先生成并确认大纲，完成后再预览。
+              </p>
+            ) : null}
             {previewError ? (
               <Alert variant="destructive">
                 <AlertCircle />
@@ -830,7 +848,11 @@ export function ServerWritingRequirementsPanel({
                     type="button"
                     variant="outline"
                     className="min-h-11"
-                    disabled={Boolean(previewKind) || saveConflict}
+                    disabled={
+                      Boolean(previewKind) ||
+                      saveConflict ||
+                      (lastPreviewKind === "article" && !articlePreviewReady)
+                    }
                     onClick={() => void loadPreview(lastPreviewKind)}
                   >
                     <RefreshCw />

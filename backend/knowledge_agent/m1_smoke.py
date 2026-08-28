@@ -5,11 +5,8 @@ import json
 import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-from config import load_config
+from config import initialize_environment, load_config
 
 from .contracts import (
     ChunkEmbedding,
@@ -27,12 +24,8 @@ from .schema import knowledge_chunks, knowledge_sources, projects, source_snapsh
 from .settings import load_knowledge_agent_settings
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-
-
 def main() -> None:
-    load_dotenv(ROOT_DIR / ".env")
-    load_dotenv(ROOT_DIR / "backend" / ".env")
+    initialize_environment()
     app_config = load_config()
     settings = load_knowledge_agent_settings(
         enabled=app_config.knowledge_agent_enabled,

@@ -30,7 +30,7 @@ WebPageType = Literal[
 
 MAX_WEB_RESOURCE_BYTES = 8 * 1024 * 1024
 WORDPRESS_PROBE_VERSION = "wordpress-site-probe/1"
-WEB_PAGE_PARSER_VERSION = "official-web-page/3"
+WEB_PAGE_PARSER_VERSION = "official-web-page/4"
 _NON_HTML_SUFFIXES = frozenset(
     {
         ".7z",
@@ -114,6 +114,9 @@ _FIXED_NON_PRODUCT_SLUGS = frozenset(
         "home-2",
         "home-3",
         "homepage",
+        "live",
+        "odm",
+        "oem",
         "oem-odm",
         "politica-de-privacidad",
         "politica-sulla-privacy",
@@ -126,6 +129,28 @@ _FIXED_NON_PRODUCT_SLUGS = frozenset(
         "thanks",
     }
 )
+_NON_PRODUCT_ENTRY_SLUGS = frozenset({"live", "odm", "oem", "oem-odm"})
+_PRODUCT_ROUTE_SLUGS = frozenset(
+    {
+        "product",
+        "products",
+        "produkt",
+        "produkte",
+        "produit",
+        "produits",
+        "producto",
+        "productos",
+        "prodotto",
+        "prodotti",
+        "product-category",
+    }
+)
+
+
+def _is_standard_product_route(path_segments: tuple[str, ...]) -> bool:
+    """Keep reserved service slugs usable below a conventional product route."""
+
+    return bool(set(path_segments[:2]) & _PRODUCT_ROUTE_SLUGS)
 
 
 def _looks_like_non_product_content_page(
@@ -139,7 +164,14 @@ def _looks_like_non_product_content_page(
     path_segments = tuple(
         segment for segment in decoded_path.strip("/").split("/") if segment
     )
-    if path_segments and path_segments[-1] in _FIXED_NON_PRODUCT_SLUGS:
+    if (
+        path_segments
+        and path_segments[-1] in _FIXED_NON_PRODUCT_SLUGS
+        and not (
+            path_segments[-1] in _NON_PRODUCT_ENTRY_SLUGS
+            and _is_standard_product_route(path_segments)
+        )
+    ):
         return True
     normalized = re.sub(
         r"[^\w\u4e00-\u9fff]+",
@@ -594,6 +626,12 @@ def classify_web_page(
         for token in str(value).split()
     }
     path = urlsplit(canonical).path.casefold()
+    non_product_content_page = _looks_like_non_product_content_page(
+        path=path,
+        title=title,
+        heading=heading,
+        body_classes=body_classes,
+    )
     crawler_terms = list(
         dict.fromkeys(
             token
@@ -602,10 +640,17 @@ def classify_web_page(
         )
     )[:16]
     crawler_document = crawler_parse_html(source.decode("utf-8", errors="replace"))
-    crawler_detail = crawler_is_product_detail_page(
-        canonical,
-        crawler_document,
-        crawler_terms,
+    # Page-level company/service semantics take precedence over the generic
+    # B2B fallback. This keeps exact OEM/ODM/Live entry pages out without
+    # excluding ordinary root-level product slugs.
+    crawler_detail = (
+        False
+        if non_product_content_page
+        else crawler_is_product_detail_page(
+            canonical,
+            crawler_document,
+            crawler_terms,
+        )
     )
     crawler_listing = crawler_is_product_listing_page(
         canonical,
@@ -644,12 +689,6 @@ def classify_web_page(
         or "single-post" in body_classes
     )
     home_page = not path.strip("/") or "home" in body_classes
-    non_product_content_page = _looks_like_non_product_content_page(
-        path=path,
-        title=title,
-        heading=heading,
-        body_classes=body_classes,
-    )
     blocks = _text_blocks(document)
     page_type: WebPageType
     confidence: float

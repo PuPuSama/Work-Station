@@ -20,3 +20,5 @@ workspace/projects/*
 !workspace/topic-library/.gitkeep
 !workspace/knowledge/.gitkeep
 !workspace/projects/.gitkeep
+tmp/
+outputs/
