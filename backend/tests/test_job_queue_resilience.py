@@ -5,6 +5,8 @@ import threading
 import unittest
 from http.client import RemoteDisconnected
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -12,6 +14,9 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.job_queue import BatchJobRunner, is_retryable_error  # noqa: E402
+from services.authorized_job_queue import (  # noqa: E402
+    authorized_batch_runner,
+)
 
 
 class FlakyQueue:
@@ -50,6 +55,25 @@ class FlakyQueue:
 
 
 class JobQueueResilienceTests(unittest.TestCase):
+    def test_authorized_runner_preserves_configured_concurrency(self) -> None:
+        queue = SimpleNamespace(
+            organization_id="org-a",
+            project_id="project-a",
+            worker_id="worker-a",
+        )
+
+        with patch("services.authorized_job_queue.BatchJobRunner") as factory:
+            runner = authorized_batch_runner(
+                queue,
+                lambda _job, _stop: 1,
+                access=object(),
+                operations=("article",),
+                concurrency=5,
+            )
+
+        self.assertIs(runner, factory.return_value)
+        self.assertEqual(factory.call_args.kwargs["concurrency"], 5)
+
     def test_transport_disconnect_is_retryable_even_without_error_text(self) -> None:
         self.assertTrue(is_retryable_error(RemoteDisconnected()))
         wrapped = RuntimeError("planner failed")

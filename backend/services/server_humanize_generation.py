@@ -41,6 +41,7 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
+from services.authorized_job_queue import DEFAULT_PROJECT_JOB_CONCURRENCY
 from services.generator import (
     ARTICLE_TARGET_MAX,
     ARTICLE_TARGET_MIN,
@@ -730,6 +731,7 @@ class ServerHumanizeGenerationRegistry:
         *,
         access: ProjectAccessService,
         handler: ProjectJobHandler | None,
+        project_job_concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
         access_repository: PostgresProjectAccessRepository | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
@@ -746,6 +748,7 @@ class ServerHumanizeGenerationRegistry:
             handler=handler,
             error_type=HumanizeGenerationUnavailable,
             terminal_audit=self._audit,
+            project_job_concurrency=project_job_concurrency,
         )
 
     def start_existing(self) -> None:

@@ -210,6 +210,7 @@ class AppConfig:
     workflow_assistant_gap_fill_enabled: bool
     workflow_assistant_max_concurrency: int
     workflow_assistant_soft_budget_tokens: int
+    project_job_concurrency: int
     database_pool_size: int = 20
     database_max_overflow: int = 20
     database_pool_timeout_seconds: int = 60
@@ -245,6 +246,7 @@ def load_config() -> AppConfig:
     llm = raw.get("llm", {})
     features = raw.get("features", {})
     workflow_assistant = raw.get("workflow_assistant", {}) or {}
+    server_jobs = raw.get("server_jobs", {}) or {}
     legacy_week = raw.get("week_folder", {})
     configured_model = str(llm.get("model", "")).strip()
     configured_reasoning_effort = str(
@@ -343,6 +345,12 @@ def load_config() -> AppConfig:
             int(workflow_assistant.get("soft_budget_warning_tokens", 24000)),
             minimum=1000,
             maximum=1_000_000,
+        ),
+        project_job_concurrency=_environment_int(
+            "ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY",
+            int(server_jobs.get("project_concurrency", 3)),
+            minimum=1,
+            maximum=32,
         ),
         database_pool_size=_environment_int(
             "ARTICLE_AGENT_DB_POOL_SIZE",

@@ -59,6 +59,13 @@
 - CI 显式选择 config.ci.yaml。
 - Windows 便携包启动脚本显式选择包内 config.yaml，包内只保留一份选定的 .env：根目录 .env 优先，只有不存在时才回退 backend/.env。
 
+## 2026-08-28：项目任务并发
+
+- 背景：各 Server 项目操作 runner 原先把并发硬编码为 1，批量执行相同动作时同一项目内只能串行处理。
+- 决策：`config.yaml` 的 `server_jobs.project_concurrency` 作为基线，`ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY` 可覆盖，默认值为 3，允许范围为 1–32；所有授权项目操作 runner 统一使用该值。
+- 安全边界：同一篇文章仍不能同时拥有两个活动 Job；并发上限只减少不必要的串行等待，不取消 PostgreSQL 队列、重授权和 revision/CAS 保护。
+- 影响：标题、产品、大纲、正文/重写、降 AI、SEO 复检、链接恢复、产品再发现和知识研究均接入统一并发配置；Workflow Assistant 自身的 `WORKFLOW_ASSISTANT_MAX_CONCURRENCY` 仍独立控制计划步骤并发。
+
 ## 4. Claude/Codex 并行开发规约
 
 1. 开始任务先运行 git status --short，再查看目标文件的 git diff；把已有修改视为用户资产。

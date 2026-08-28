@@ -130,6 +130,38 @@ class EnvironmentLoadingTests(unittest.TestCase):
 
 
 class YamlOverlayTests(unittest.TestCase):
+    def test_project_job_concurrency_comes_from_yaml_and_environment_override(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "config.yaml").write_text(
+                BASE_CONFIG
+                + "\nserver_jobs:\n  project_concurrency: 5\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ARTICLE_AGENT_ROOT": str(root),
+                    "ARTICLE_AGENT_CONFIG": "config.yaml",
+                },
+                clear=True,
+            ):
+                self.assertEqual(load_config().project_job_concurrency, 5)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ARTICLE_AGENT_ROOT": str(root),
+                    "ARTICLE_AGENT_CONFIG": "config.yaml",
+                    "ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY": "7",
+                },
+                clear=True,
+            ):
+                self.assertEqual(load_config().project_job_concurrency, 7)
+
     def test_overlay_deep_merges_the_shared_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

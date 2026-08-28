@@ -703,6 +703,7 @@ async def app_lifespan(application: FastAPI):
             access=server_access,
             provider=product_provider,
             handler=product_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_product_generation.start_existing()
         application.state.server_product_generation = (
@@ -725,6 +726,7 @@ async def app_lifespan(application: FastAPI):
             server_engine,
             access=server_access,
             handler=outline_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_outline_generation.start_existing()
         application.state.server_outline_generation = (
@@ -747,6 +749,7 @@ async def app_lifespan(application: FastAPI):
             config=cfg,
             access=server_access,
             handler=title_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_title_generation.start_existing()
         application.state.server_title_generation = (
@@ -783,6 +786,7 @@ async def app_lifespan(application: FastAPI):
             config=cfg,
             access=server_access,
             handler=article_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_article_generation.start_existing()
         application.state.server_article_generation = (
@@ -804,6 +808,7 @@ async def app_lifespan(application: FastAPI):
             server_engine,
             access=server_access,
             handler=link_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_link_restoration.start_existing()
         application.state.server_link_restoration = (
@@ -826,6 +831,7 @@ async def app_lifespan(application: FastAPI):
                 server_engine,
                 access=server_access,
                 handler=seo_review_handler,
+                project_job_concurrency=cfg.project_job_concurrency,
             )
         )
         server_seo_review_generation.start_existing()
@@ -850,6 +856,7 @@ async def app_lifespan(application: FastAPI):
             server_engine,
             access=server_access,
             handler=humanize_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_humanize_generation.start_existing()
         application.state.server_humanize_generation = (
@@ -909,6 +916,7 @@ async def app_lifespan(application: FastAPI):
             server_engine,
             access=server_access,
             handler=rediscovery_handler,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_product_rediscovery.start_existing()
         application.state.server_product_rediscovery = (
@@ -932,6 +940,7 @@ async def app_lifespan(application: FastAPI):
             access=server_access,
             execution=research_execution,
             access_repository=server_access_repository,
+            project_job_concurrency=cfg.project_job_concurrency,
         )
         server_knowledge_research.start_existing()
         application.state.server_knowledge_research = (

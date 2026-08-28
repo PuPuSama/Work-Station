@@ -26,6 +26,7 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
+from services.authorized_job_queue import DEFAULT_PROJECT_JOB_CONCURRENCY
 from services.job_queue import (
     ActiveJobError,
     JobCancelled,
@@ -465,6 +466,7 @@ class ServerSeoReviewGenerationRegistry:
         *,
         access: ProjectAccessService,
         handler: ProjectJobHandler | None,
+        project_job_concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
         context: PostgresPublishedGenerationContext | None = None,
         access_repository: PostgresProjectAccessRepository | None = None,
         audit: AuditEventWriter | None = None,
@@ -485,6 +487,7 @@ class ServerSeoReviewGenerationRegistry:
             handler=handler,
             error_type=SeoReviewGenerationUnavailable,
             terminal_audit=self._audit,
+            project_job_concurrency=project_job_concurrency,
         )
 
     def start_existing(self) -> None:

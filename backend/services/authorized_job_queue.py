@@ -16,6 +16,9 @@ from services.postgres_job_queue import PostgresJobQueue
 JobHandler = Callable[[dict[str, Any], Callable[[], bool]], int]
 
 
+DEFAULT_PROJECT_JOB_CONCURRENCY = 3
+
+
 WORKER_OPERATION_PERMISSIONS: dict[str, ProjectPermission] = {
     "article": "article.edit",
     "export_docx": "article.deliver",
@@ -205,6 +208,7 @@ def authorized_batch_runner(
     *,
     access: ProjectAccessService,
     operations: Iterable[str],
+    concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
 ) -> BatchJobRunner:
     """Build the only allowed Server runner with both authorization checks."""
 
@@ -213,16 +217,20 @@ def authorized_batch_runner(
         raise ValueError("worker operations are invalid")
     for operation in normalized:
         worker_permission_for(operation)
+    normalized_concurrency = int(concurrency)
+    if not 1 <= normalized_concurrency <= 32:
+        raise ValueError("concurrency must be between 1 and 32")
     return BatchJobRunner(
         AuthorizedPostgresJobQueue(queue, access=access),
         ReauthorizingJobHandler(handler, access=access),
-        concurrency=1,
+        concurrency=normalized_concurrency,
         operations=normalized,
     )
 
 
 __all__ = [
     "AuthorizedPostgresJobQueue",
+    "DEFAULT_PROJECT_JOB_CONCURRENCY",
     "ReauthorizingJobHandler",
     "WORKER_OPERATION_PERMISSIONS",
     "authorized_batch_runner",

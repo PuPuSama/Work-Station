@@ -10,7 +10,6 @@ import {
   BellRing,
   BookOpenCheck,
   CheckCircle2,
-  Download,
   FileCheck2,
   FileText,
   ImageIcon,
@@ -594,34 +593,42 @@ export function ServerArticleWorkbench({
     );
   }
 
-  async function download(label: string, endpoint: string) {
-    const actionScope = workbenchScope;
-    if (activeWorkbenchScopeRef.current !== actionScope) return;
-    setPending(label);
-    setError("");
-    setMessage("");
-    try {
-      const asset = await apiGet<ProjectAssetDownload>(
-        `${taskApi}/${endpoint}`,
-        30_000,
-      );
-      if (!asset.url) throw new Error("Server 未返回可用的短期下载地址。");
-      if (activeWorkbenchScopeRef.current !== actionScope) return;
-      const fallback = endpoint.includes("delivery-package")
-        ? "delivery.zip"
-        : endpoint.includes("tdk/")
-          ? "D.docx"
-          : endpoint.includes("screenshot")
-            ? "ai-rate.png"
-            : "article.docx";
-      triggerBrowserDownload(asset.url, asset.filename || fallback);
-      setMessage(`${label}已开始，请查看浏览器下载列表。`);
-    } catch (reason) {
-      if (activeWorkbenchScopeRef.current !== actionScope) return;
-      setError(errorMessage(reason));
-    } finally {
-      if (activeWorkbenchScopeRef.current === actionScope) setPending("");
-    }
+  async function exportWordAndDownload() {
+    if (!task) return;
+    const revision = task.revision ?? 0;
+    await runAction(
+      "导出 Word",
+      async () => {
+        await apiPost<TaskRecord>(`${taskApi}/export-docx`, { revision });
+        await downloadGeneratedArtifact(
+          `${taskApi}/docx/download`,
+          "article.docx",
+        );
+      },
+      "Word 已生成并开始下载，请查看浏览器下载列表。",
+    );
+  }
+
+  async function exportDeliveryZipAndDownload() {
+    if (!task) return;
+    const revision = task.revision ?? 0;
+    await runAction(
+      "导出交付 ZIP",
+      async () => {
+        const tdkTask = await apiPost<TaskRecord>(
+          `${taskApi}/generate-tdk`,
+          { revision },
+        );
+        await apiPost<TaskRecord>(`${taskApi}/package-delivery`, {
+          revision: tdkTask.revision ?? revision,
+        });
+        await downloadGeneratedArtifact(
+          `${taskApi}/delivery-package/download`,
+          "delivery.zip",
+        );
+      },
+      "TDK 已生成，交付 ZIP 已生成并开始下载，请查看浏览器下载列表。",
+    );
   }
 
   const confirmedProducts = useMemo(() => catalog?.products || [], [catalog]);
@@ -1989,7 +1996,7 @@ export function ServerArticleWorkbench({
               <CardHeader className="border-b">
                 <CardTitle>交付产物</CardTitle>
                 <CardDescription>
-                  生成命令使用 Task Revision；下载先取得重新授权的短期 URL。
+                  点击导出会生成产物并直接下载；交付 ZIP 会先生成 TDK，再完成打包并下载。
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
@@ -2034,106 +2041,33 @@ export function ServerArticleWorkbench({
                       !editAllowed ||
                       !allowed.has("export_docx")
                     }
-                    onClick={() =>
-                      void runAction("导出 Word", () =>
-                        apiPost<TaskRecord>(`${taskApi}/export-docx`, {
-                          revision: task.revision ?? 0,
-                        }),
-                      )
-                    }
+                    onClick={() => void exportWordAndDownload()}
                   >
-                    <FileText />
+                    {pending === "导出 Word" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <FileText />
+                    )}
                     导出 Word
                   </Button>
                   <Button
                     type="button"
-                    variant="outline"
                     className="min-h-11"
                     disabled={
                       Boolean(pending) ||
                       !editAllowed ||
-                      !allowed.has("generate_tdk")
+                      !allowed.has("generate_tdk") ||
+                      !allowed.has("package_delivery") ||
+                      !task.docx_asset_id
                     }
-                    onClick={() =>
-                      void runAction("生成 TDK", () =>
-                        apiPost<TaskRecord>(`${taskApi}/generate-tdk`, {
-                          revision: task.revision ?? 0,
-                        }),
-                      )
-                    }
+                    onClick={() => void exportDeliveryZipAndDownload()}
                   >
-                    <FileCheck2 />
-                    生成 TDK
-                  </Button>
-                  <Button
-                    type="button"
-                    className="min-h-11 sm:col-span-2"
-                    disabled={
-                      Boolean(pending) ||
-                      !editAllowed ||
-                      !allowed.has("package_delivery")
-                    }
-                    onClick={() =>
-                      void runAction("生成交付 ZIP", () =>
-                        apiPost<TaskRecord>(`${taskApi}/package-delivery`, {
-                          revision: task.revision ?? 0,
-                        }),
-                      )
-                    }
-                  >
-                    <Package />
-                    生成交付 ZIP
-                  </Button>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="min-h-11"
-                    disabled={Boolean(pending) || !task.docx_asset_id}
-                    onClick={() => void download("下载 Word", "docx/download")}
-                  >
-                    {pending === "下载 Word" ? (
+                    {pending === "导出交付 ZIP" ? (
                       <Loader2 className="animate-spin" />
                     ) : (
-                      <Download />
+                      <Package />
                     )}
-                    Word
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="min-h-11"
-                    disabled={Boolean(pending) || !task.tdk_asset_id}
-                    onClick={() => void download("下载 TDK", "tdk/download")}
-                  >
-                    {pending === "下载 TDK" ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <Download />
-                    )}
-                    TDK
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="min-h-11"
-                    disabled={
-                      Boolean(pending) || !task.delivery_package_asset_id
-                    }
-                    onClick={() =>
-                      void download(
-                        "下载交付 ZIP",
-                        "delivery-package/download",
-                      )
-                    }
-                  >
-                    {pending === "下载交付 ZIP" ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <Download />
-                    )}
-                    ZIP
+                    导出交付 ZIP
                   </Button>
                 </div>
               </CardContent>
@@ -2143,6 +2077,12 @@ export function ServerArticleWorkbench({
       </div>
     </main>
   );
+}
+
+async function downloadGeneratedArtifact(path: string, fallback: string) {
+  const asset = await apiGet<ProjectAssetDownload>(path, 30_000);
+  if (!asset.url) throw new Error("Server 未返回可用的短期下载地址。");
+  triggerBrowserDownload(asset.url, asset.filename || fallback);
 }
 
 function ArtifactState({ label, ready }: { label: string; ready: boolean }) {

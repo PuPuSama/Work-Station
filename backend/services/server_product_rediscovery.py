@@ -51,6 +51,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.authorized_job_queue import (
+    DEFAULT_PROJECT_JOB_CONCURRENCY,
     authorized_batch_runner,
 )
 from services.job_queue import (
@@ -628,11 +629,13 @@ class ServerProductRediscoveryRegistry:
         *,
         access: ProjectAccessService,
         handler: ProductRediscoveryJobHandler | None,
+        project_job_concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
         access_repository: PostgresProjectAccessRepository | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._access = access
+        self._project_job_concurrency = project_job_concurrency
         self._access_repository = (
             access_repository or PostgresProjectAccessRepository(engine)
         )
@@ -685,6 +688,7 @@ class ServerProductRediscoveryRegistry:
                 self._handler,
                 access=self._access,
                 operations=(PRODUCT_REDISCOVERY_OPERATION,),
+                concurrency=self._project_job_concurrency,
             )
             current.runner = runner
             try:

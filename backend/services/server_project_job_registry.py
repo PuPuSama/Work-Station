@@ -16,6 +16,7 @@ from services.access_control import (
 )
 from services.audit_log import AuditEventWriter
 from services.authorized_job_queue import (
+    DEFAULT_PROJECT_JOB_CONCURRENCY,
     authorized_batch_runner,
 )
 from services.job_queue import (
@@ -60,6 +61,7 @@ class ServerProjectJobRegistry:
         handler: ProjectJobHandler | None,
         error_type: type[RuntimeError],
         terminal_audit: AuditEventWriter,
+        project_job_concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
     ) -> None:
         self._engine = engine
         self._operation = operation
@@ -67,6 +69,7 @@ class ServerProjectJobRegistry:
         self._handler = handler
         self._error_type = error_type
         self._terminal_audit = terminal_audit
+        self._project_job_concurrency = project_job_concurrency
         self._lock = threading.Lock()
         self._closed = False
         self._projects: dict[tuple[str, str], _ProjectRunner] = {}
@@ -112,6 +115,7 @@ class ServerProjectJobRegistry:
                 self._handler,
                 access=self._access,
                 operations=(self._operation,),
+                concurrency=self._project_job_concurrency,
             )
             current.runner = runner
             try:

@@ -34,6 +34,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.authorized_job_queue import (
+    DEFAULT_PROJECT_JOB_CONCURRENCY,
     authorized_batch_runner,
 )
 from services.generator import (
@@ -802,12 +803,14 @@ class ServerOutlineGenerationRegistry:
         *,
         access: ProjectAccessService,
         handler: OutlineGenerationJobHandler | None,
+        project_job_concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
         context: PostgresPublishedOutlineContext | None = None,
         access_repository: PostgresProjectAccessRepository | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
         self._engine = engine
         self._access = access
+        self._project_job_concurrency = project_job_concurrency
         self._access_repository = (
             access_repository or PostgresProjectAccessRepository(engine)
         )
@@ -859,6 +862,7 @@ class ServerOutlineGenerationRegistry:
                 self._handler,
                 access=self._access,
                 operations=(OUTLINE_GENERATION_OPERATION,),
+                concurrency=self._project_job_concurrency,
             )
             current.runner = runner
             try:

@@ -53,6 +53,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.authorized_job_queue import (
+    DEFAULT_PROJECT_JOB_CONCURRENCY,
     authorized_batch_runner,
 )
 from services.generator import (
@@ -1249,6 +1250,7 @@ class ServerArticleGenerationRegistry:
         config: AppConfig,
         access: ProjectAccessService,
         handler: ArticleGenerationJobHandler | None,
+        project_job_concurrency: int | None = None,
         context: PostgresPublishedGenerationContext | None = None,
         official_links: PostgresPublishedOfficialLinks | None = None,
         access_repository: PostgresProjectAccessRepository | None = None,
@@ -1260,6 +1262,17 @@ class ServerArticleGenerationRegistry:
             config.default_word_count,
         )
         self._access = access
+        self._project_job_concurrency = (
+            int(project_job_concurrency)
+            if project_job_concurrency is not None
+            else int(
+                getattr(
+                    config,
+                    "project_job_concurrency",
+                    DEFAULT_PROJECT_JOB_CONCURRENCY,
+                )
+            )
+        )
         self._access_repository = (
             access_repository or PostgresProjectAccessRepository(engine)
         )
@@ -1316,6 +1329,7 @@ class ServerArticleGenerationRegistry:
                 self._handler,
                 access=self._access,
                 operations=ARTICLE_GENERATION_OPERATIONS,
+                concurrency=self._project_job_concurrency,
             )
             current.runner = runner
             try:

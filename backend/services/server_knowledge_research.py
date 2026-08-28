@@ -79,6 +79,7 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
+from services.authorized_job_queue import DEFAULT_PROJECT_JOB_CONCURRENCY
 from services.job_queue import (
     ACTIVE_JOB_STATUSES,
     ActiveJobError,
@@ -822,6 +823,7 @@ class ServerKnowledgeResearchRegistry:
         *,
         access: ProjectAccessService,
         execution: ResearchGraphExecutionService | None,
+        project_job_concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
         access_repository: PostgresProjectAccessRepository | None = None,
         audit: AuditEventWriter | None = None,
     ) -> None:
@@ -853,6 +855,7 @@ class ServerKnowledgeResearchRegistry:
             handler=handler,
             error_type=ServerKnowledgeResearchUnavailable,
             terminal_audit=self._audit,
+            project_job_concurrency=project_job_concurrency,
         )
 
     def start_existing(self) -> None:
