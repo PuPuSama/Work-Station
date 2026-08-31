@@ -1414,7 +1414,10 @@ export function WorkflowAssistantWorkspace() {
                           size="sm"
                           className="min-h-9"
                           aria-haspopup="dialog"
-                          onClick={() => setPlanDetailsOpen(true)}
+                          onClick={() => {
+                            setPlanPreviewOpen(false);
+                            setPlanDetailsOpen(true);
+                          }}
                         >
                           <Workflow />查看文章概览
                         </Button>
