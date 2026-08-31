@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import unittest
 from io import BytesIO
@@ -23,7 +24,13 @@ from knowledge_agent.object_storage import (  # noqa: E402
     ProjectKnowledgeObject,
     TDK_DOCX_ARTIFACT_KIND,
 )
-from models import AICheck, ArticleImage, TaskRecord  # noqa: E402
+from models import (  # noqa: E402
+    AICheck,
+    ArticleImage,
+    KnowledgeCoverageCheck,
+    TaskRecord,
+    TdkMetadata,
+)
 from services.access_control import ActorIdentity  # noqa: E402
 from services.server_delivery_package import (  # noqa: E402
     ServerDeliveryPackage,
@@ -185,6 +192,25 @@ def prepared() -> tuple[TaskRecord, RecordingDeliveryObjects]:
 class ServerDeliveryPackageTests(unittest.TestCase):
     def test_packages_verified_assets_without_local_paths(self) -> None:
         task, objects = prepared()
+        task.final_article = (
+            "# Industrial Floors\n\n"
+            "Industrial floors protect equipment. Industrial floors support "
+            "busy facilities. See [Industrial floors guide]"
+            "(https://www.example.com/floors)."
+        )
+        task.selected_title = "Fallback title"
+        task.tdk = TdkMetadata(keywords=["industrial floors", "equipment"])
+        task.final_ai_check.provider = "zerogpt"
+        task.final_ai_check.score = 18.5
+        task.final_ai_check.checked_at = "2026-07-31T01:02:03+00:00"
+        task.knowledge_coverage = KnowledgeCoverageCheck(
+            status="available",
+            eligible_sentences=4,
+            supported_sentences=3,
+            sentence_coverage=0.75,
+            evidence_link_count=1,
+            checked_at="2026-07-31T01:03:04+00:00",
+        )
         saved = ServerDeliveryPackage(objects=objects).package(
             actor=ActorIdentity("org-a", "editor-a"),
             project_id="www.example.com",
@@ -202,10 +228,25 @@ class ServerDeliveryPackageTests(unittest.TestCase):
                 {
                     "Buyer Guide.docx",
                     "D.docx",
+                    "metadata.json",
                     "hero.webp",
                     "final-ai-rate.png",
                 },
             )
+            metadata = json.loads(archive.read("metadata.json"))
+        self.assertEqual(metadata["title"], "Industrial Floors")
+        self.assertEqual(metadata["completion_date"], "2026-07-31")
+        self.assertEqual(metadata["keywords"], ["industrial floors", "equipment"])
+        self.assertEqual(
+            [item["keyword"] for item in metadata["keyword_density"]],
+            ["industrial floors", "equipment"],
+        )
+        self.assertEqual(metadata["keyword_density"][0]["occurrences"], 4)
+        self.assertEqual(metadata["keyword_density"][1]["occurrences"], 1)
+        self.assertEqual(metadata["ai_rate_percent"], 18.5)
+        self.assertEqual(metadata["knowledge_base_citation_rate_percent"], 75.0)
+        self.assertEqual(metadata["anchor_text"], ["Industrial floors guide"])
+        self.assertEqual(metadata["anchors"][0]["occurrences"], 1)
 
     def test_requires_confirmation_and_matching_asset_identity(self) -> None:
         task, objects = prepared()

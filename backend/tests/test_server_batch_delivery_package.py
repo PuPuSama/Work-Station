@@ -108,12 +108,14 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
             article_filename="Article-a.docx",
             tdk_docx=b"tdk-a",
             images=[("hero-a.webp", b"image-a")],
+            metadata=b'{"title":"A"}\n',
         )
         package_b = build_delivery_zip_bytes(
             article_docx=b"article-b",
             article_filename="Article-b.docx",
             tdk_docx=b"tdk-b",
             images=[("hero-b.webp", b"image-b")],
+            metadata=b'{"title":"B"}\n',
         )
         hash_a = objects.add("package-a", package_a)
         hash_b = objects.add("package-b", package_b)
@@ -155,9 +157,11 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
                 {
                     "project-a-topic_001/Article-a.docx",
                     "project-a-topic_001/D.docx",
+                    "project-a-topic_001/metadata.json",
                     "project-a-topic_001/hero-a.webp",
                     "project-b-topic_002/Article-b.docx",
                     "project-b-topic_002/D.docx",
+                    "project-b-topic_002/metadata.json",
                     "project-b-topic_002/hero-b.webp",
                     "manifest.json",
                 },

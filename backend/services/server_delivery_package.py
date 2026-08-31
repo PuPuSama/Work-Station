@@ -25,6 +25,10 @@ from services.delivery_package import (
     build_delivery_zip_bytes,
     official_website_folder_name,
 )
+from services.delivery_metadata import (
+    DELIVERY_METADATA_FILENAME,
+    build_delivery_metadata,
+)
 from services.server_ai_screenshots import (
     MAX_SERVER_AI_SCREENSHOT_BYTES,
 )
@@ -36,6 +40,7 @@ from services.server_docx_export import (
     verified_server_article_webp,
 )
 from services.server_tdk_export import MAX_SERVER_TDK_DOCX_BYTES
+from services.tdk import current_article
 from storage import content_hash
 
 
@@ -246,18 +251,29 @@ class ServerDeliveryPackage:
                 raise ServerDeliveryPackageError(str(exc)) from exc
             images.append((verified.filename, verified.data))
 
+        article_text = current_article(task)
+        folder = official_website_folder_name(project_id)
+        delivery_filename = f"{folder}-topic_{task.topic_index:03d}.zip"
+        metadata = build_delivery_metadata(
+            task,
+            article=article_text,
+            project_id=project_id,
+            delivery_filename=delivery_filename,
+        )
         try:
             archive = build_delivery_zip_bytes(
                 article_docx=article_data,
                 article_filename=task.docx_filename,
-            tdk_docx=tdk_data,
-            images=images,
-            final_screenshot=screenshot_data,
-            final_screenshot_filename=(
-                task.final_ai_check.screenshot_filename
-                or "final-ai-rate.png"
-            ),
-        )
+                tdk_docx=tdk_data,
+                images=images,
+                final_screenshot=screenshot_data,
+                final_screenshot_filename=(
+                    task.final_ai_check.screenshot_filename
+                    or "final-ai-rate.png"
+                ),
+                metadata=metadata,
+                metadata_filename=DELIVERY_METADATA_FILENAME,
+            )
         except DeliveryPackageError as exc:
             raise ServerDeliveryPackageError(str(exc)) from exc
         if not archive or len(archive) > MAX_SERVER_DELIVERY_ZIP_BYTES:
@@ -282,13 +298,10 @@ class ServerDeliveryPackage:
                 "stored delivery ZIP identity is inconsistent"
             )
 
-        folder = official_website_folder_name(project_id)
         task.delivery_package_path = ""
         task.delivery_package_asset_id = asset.asset_id
         task.delivery_package_content_hash = asset.content_hash
-        task.delivery_package_filename = (
-            f"{folder}-topic_{task.topic_index:03d}.zip"
-        )
+        task.delivery_package_filename = delivery_filename
         task.workflow_error = None
         return task
 

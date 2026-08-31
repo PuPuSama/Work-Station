@@ -138,6 +138,8 @@ def build_delivery_zip_bytes(
     images: Sequence[tuple[str, bytes]],
     final_screenshot: bytes | None = None,
     final_screenshot_filename: str = "final-ai-rate.png",
+    metadata: bytes | None = None,
+    metadata_filename: str = "metadata.json",
 ) -> bytes:
     """Build the public delivery layout without filesystem metadata."""
 
@@ -148,10 +150,13 @@ def build_delivery_zip_bytes(
         if final_screenshot is not None
         else b""
     )
+    metadata_data = bytes(metadata) if metadata is not None else None
     if not article_data:
         raise DeliveryPackageError("Article Word document is empty.")
     if not tdk_data:
         raise DeliveryPackageError("D document is empty.")
+    if metadata_data is not None and not metadata_data:
+        raise DeliveryPackageError("Metadata file is empty.")
     if not images:
         raise DeliveryPackageError(
             "No prepared article images are available for delivery."
@@ -180,12 +185,24 @@ def build_delivery_zip_bytes(
         )
         if not normalized_screenshot_name.casefold().startswith("final-ai-rate."):
             normalized_screenshot_name = "final-ai-rate.png"
+    normalized_metadata_name = ""
+    if metadata_data is not None:
+        normalized_metadata_name = _archive_filename(
+            metadata_filename,
+            "Delivery metadata file",
+        )
     used_names = {
         normalized_article_name.casefold(),
         "d.docx",
     }
     if normalized_screenshot_name:
         used_names.add(normalized_screenshot_name.casefold())
+    if normalized_metadata_name:
+        if normalized_metadata_name.casefold() in used_names:
+            raise DeliveryPackageError(
+                "Delivery metadata file conflicts with another delivery file."
+            )
+        used_names.add(normalized_metadata_name.casefold())
     normalized_images: list[tuple[str, bytes]] = []
     seen_hashes: set[str] = set()
     for raw_filename, raw_data in images:
@@ -224,6 +241,12 @@ def build_delivery_zip_bytes(
             article_data,
         )
         _write_deterministic_zip_entry(archive, "D.docx", tdk_data)
+        if metadata_data is not None:
+            _write_deterministic_zip_entry(
+                archive,
+                normalized_metadata_name,
+                metadata_data,
+            )
         for filename, data in normalized_images:
             _write_deterministic_zip_entry(archive, filename, data)
         if screenshot_data:

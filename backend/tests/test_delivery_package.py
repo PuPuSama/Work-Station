@@ -96,6 +96,24 @@ class DeliveryPackageTests(unittest.TestCase):
                 b"raw-jpeg-bytes",
             )
 
+    def test_in_memory_zip_can_include_delivery_metadata(self) -> None:
+        archive_bytes = build_delivery_zip_bytes(
+            article_docx=b"article",
+            article_filename="Article.docx",
+            tdk_docx=b"tdk",
+            images=[("hero.webp", b"hero")],
+            metadata=b'{"title":"Delivery"}\n',
+        )
+        with ZipFile(BytesIO(archive_bytes)) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                ["Article.docx", "D.docx", "metadata.json", "hero.webp"],
+            )
+            self.assertEqual(
+                archive.read("metadata.json"),
+                b'{"title":"Delivery"}\n',
+            )
+
     def test_in_memory_zip_can_defer_the_final_screenshot(self) -> None:
         archive_bytes = build_delivery_zip_bytes(
             article_docx=b"article",
