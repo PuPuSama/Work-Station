@@ -238,6 +238,7 @@ class WorkflowAssistantContractTests(unittest.TestCase):
                 "plan-partial",
                 request,  # type: ignore[arg-type]
                 expires_seconds=300,
+                project_id="project-a",
                 actor=ActorIdentity("org-a", "user-a"),
             )
 
