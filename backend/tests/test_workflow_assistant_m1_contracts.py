@@ -1275,46 +1275,51 @@ A: It affects support.
                 sequence = 0
                 for index in range(1, count + 1):
                     create_step_id = f"create-{index}"
-                    research_step_id = f"research-{index}"
-                    article_step_id = f"article-{index}"
-                    steps.extend(
-                        [
-                            {
-                                "step_id": create_step_id,
-                                "sequence": sequence + 1,
-                                "action_kind": "create_task",
-                                "project_id": "project-a",
-                                "input_summary": {
-                                    "published_topic_id": f"topic-{index}",
-                                    "topic": f"Topic {index}",
-                                    "bind_step_ids": [
-                                        research_step_id,
-                                        article_step_id,
-                                    ],
-                                },
-                            },
-                            {
-                                "step_id": research_step_id,
-                                "sequence": sequence + 2,
-                                "action_kind": "start_research",
-                                "project_id": "project-a",
-                                "input_summary": {
-                                    "create_task_step_id": create_step_id,
-                                },
-                            },
-                            {
-                                "step_id": article_step_id,
-                                "sequence": sequence + 3,
-                                "action_kind": "generate_article",
-                                "project_id": "project-a",
-                                "input_summary": {
-                                    "create_task_step_id": create_step_id,
-                                    "use_evidence_pack": True,
-                                },
-                            },
-                        ]
+                    actions = (
+                        "generate_titles",
+                        "select_title",
+                        "generate_products",
+                        "confirm_products",
+                        "generate_outline",
+                        "start_research",
+                        "generate_article",
+                        "review",
                     )
-                    sequence += 3
+                    step_ids = [f"{action}-{index}" for action in actions]
+                    steps.append(
+                        {
+                            "step_id": create_step_id,
+                            "sequence": sequence + 1,
+                            "action_kind": "create_task",
+                            "project_id": "project-a",
+                            "input_summary": {
+                                "published_topic_id": f"topic-{index}",
+                                "topic": f"Topic {index}",
+                                "bind_step_ids": step_ids,
+                            },
+                        }
+                    )
+                    for offset, (action, step_id) in enumerate(
+                        zip(actions, step_ids, strict=True),
+                        start=2,
+                    ):
+                        steps.append(
+                            {
+                                "step_id": step_id,
+                                "sequence": sequence + offset,
+                                "action_kind": action,
+                                "project_id": "project-a",
+                                "input_summary": {
+                                    "create_task_step_id": create_step_id,
+                                    **(
+                                        {"use_evidence_pack": True}
+                                        if action == "generate_article"
+                                        else {}
+                                    ),
+                                },
+                            }
+                        )
+                    sequence += 1 + len(actions)
                 return json.dumps(
                     {
                         "title": "Create requested articles",
@@ -1353,8 +1358,203 @@ A: It affects support.
         )
 
         self.assertEqual(llm.calls, 2)
-        self.assertEqual(len(plan.steps), 6)
+        self.assertEqual(len(plan.steps), 18)
         self.assertEqual(_planned_action_counts(plan, "generate_article"), {"project-a": 2})
+
+    def test_planner_repairs_missing_product_and_tdk_delivery_steps(self) -> None:
+        class DeliveryLlm:
+            ready = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, _messages, temperature=0.7, max_tokens=1800):
+                del temperature, max_tokens
+                self.calls += 1
+                actions = (
+                    (
+                        "generate_titles",
+                        "select_title",
+                        "generate_outline",
+                        "start_research",
+                        "generate_article",
+                        "humanize",
+                        "restore_links",
+                        "prepare_images",
+                        "export_docx",
+                        "package_delivery",
+                    )
+                    if self.calls == 1
+                    else (
+                        "generate_titles",
+                        "select_title",
+                        "generate_products",
+                        "confirm_products",
+                        "generate_outline",
+                        "start_research",
+                        "generate_article",
+                        "humanize",
+                        "restore_links",
+                        "prepare_images",
+                        "export_docx",
+                        "generate_tdk",
+                        "package_delivery",
+                    )
+                )
+                return json.dumps(
+                    {
+                        "title": "Write and package one article",
+                        "natural_language_request": "ignored",
+                        "project_ids": ["project-a"],
+                        "steps": [
+                            {
+                                "step_id": f"{action}-1",
+                                "sequence": sequence,
+                                "action_kind": action,
+                                "project_id": "project-a",
+                                "article_task_id": "task-1",
+                                "input_summary": (
+                                    {"use_evidence_pack": True}
+                                    if action == "generate_article"
+                                    else {}
+                                ),
+                            }
+                            for sequence, action in enumerate(actions, start=1)
+                        ],
+                    }
+                )
+
+        context = AssistantWorkspaceContext(
+            projects=(
+                AssistantProjectContext(
+                    project_id="project-a",
+                    customer_name="A",
+                    official_domain="a.example",
+                    project_notes="",
+                    revision=1,
+                    effective_role="editor",
+                    tasks=(
+                        AssistantTaskContext(
+                            task_id="task-1",
+                            topic="Topic",
+                            primary_keyword="keyword",
+                            competitor_keyword="",
+                            status="new",
+                            revision=0,
+                            selected_title=None,
+                        ),
+                    ),
+                    prompts=(),
+                    knowledge=(),
+                ),
+            ),
+        )
+        llm = DeliveryLlm()
+
+        plan = StructuredWorkflowPlanner(
+            SimpleNamespace(workflow_assistant_max_concurrency=3),
+            access=FakeAccess({"project-a"}),  # type: ignore[arg-type]
+            llm=llm,
+        ).plan(
+            actor=ActorIdentity("org-a", "user-a"),
+            request="生成一篇文章并打包下载，从头开始，跳过复检",
+            context=context,
+            selected_project_ids=("project-a",),
+            selected_task_ids=("task-1",),
+        )
+
+        actions = [step.action_kind for step in plan.steps]
+        self.assertEqual(llm.calls, 2)
+        self.assertIn("generate_products", actions)
+        self.assertIn("confirm_products", actions)
+        self.assertIn("generate_tdk", actions)
+        self.assertNotIn("review", actions)
+
+    def test_planner_requires_review_for_new_article_without_explicit_skip(self) -> None:
+        class ReviewLlm:
+            ready = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat(self, _messages, temperature=0.7, max_tokens=1800):
+                del temperature, max_tokens
+                self.calls += 1
+                actions = [
+                    "generate_titles",
+                    "select_title",
+                    "generate_products",
+                    "confirm_products",
+                    "generate_outline",
+                    "start_research",
+                    "generate_article",
+                ]
+                if self.calls > 1:
+                    actions.append("review")
+                return json.dumps(
+                    {
+                        "title": "Write one article",
+                        "natural_language_request": "ignored",
+                        "project_ids": ["project-a"],
+                        "steps": [
+                            {
+                                "step_id": f"{action}-1",
+                                "sequence": sequence,
+                                "action_kind": action,
+                                "project_id": "project-a",
+                                "article_task_id": "task-1",
+                                "input_summary": (
+                                    {"use_evidence_pack": True}
+                                    if action == "generate_article"
+                                    else {}
+                                ),
+                            }
+                            for sequence, action in enumerate(actions, start=1)
+                        ],
+                    }
+                )
+
+        context = AssistantWorkspaceContext(
+            projects=(
+                AssistantProjectContext(
+                    project_id="project-a",
+                    customer_name="A",
+                    official_domain="a.example",
+                    project_notes="",
+                    revision=1,
+                    effective_role="editor",
+                    tasks=(
+                        AssistantTaskContext(
+                            task_id="task-1",
+                            topic="Topic",
+                            primary_keyword="keyword",
+                            competitor_keyword="",
+                            status="new",
+                            revision=0,
+                            selected_title=None,
+                        ),
+                    ),
+                    prompts=(),
+                    knowledge=(),
+                ),
+            ),
+        )
+        llm = ReviewLlm()
+
+        plan = StructuredWorkflowPlanner(
+            SimpleNamespace(workflow_assistant_max_concurrency=3),
+            access=FakeAccess({"project-a"}),  # type: ignore[arg-type]
+            llm=llm,
+        ).plan(
+            actor=ActorIdentity("org-a", "user-a"),
+            request="生成一篇文章",
+            context=context,
+            selected_project_ids=("project-a",),
+            selected_task_ids=("task-1",),
+        )
+
+        self.assertEqual(llm.calls, 2)
+        self.assertEqual(plan.steps[-1].action_kind, "review")
 
     def test_planner_receives_and_validates_selected_article_range(self) -> None:
         class CaptureLlm:

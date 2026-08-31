@@ -13,7 +13,7 @@ from services.access_control import ActorIdentity, ProjectAccessService
 from services.job_queue import is_retryable_error
 from services.llm import LLMClient
 
-from .context import AssistantWorkspaceContext
+from .context import AssistantTaskContext, AssistantWorkspaceContext
 from .contracts import PlanDraft
 from .policy import (
     AssistantPolicyError,
@@ -90,6 +90,39 @@ _REVIEW_SKIP_NEGATION = re.compile(
     r"(?:the\s+)?(?:seo\s+)?(?:review|audit|recheck)"
     r"|(?:需要|必须|保留|进行)\s*(?:seo\s*)?(?:复检|复审|检查)",
     re.IGNORECASE,
+)
+_DELIVERY_REQUEST = re.compile(
+    r"(?:打包|交付包|压缩包)"
+    r"|\b(?:package|packaged|zip)\b"
+    r"|\bdelivery\s+(?:package|archive)\b",
+    re.IGNORECASE,
+)
+_DELIVERY_NEGATION = re.compile(
+    r"(?:不要|不用|无需|不需要|不做)\s*(?:打包|交付包|压缩包)"
+    r"|\b(?:do\s+not|don't|without)\s+(?:package|packaging|a\s+zip)\b",
+    re.IGNORECASE,
+)
+_OUTLINE_CONFIRMED_STATUSES = frozenset(
+    {
+        "outline_confirmed",
+        "draft_ready",
+        "initial_ai_checked",
+        "humanized_ready",
+        "final_ai_checked",
+        "links_verified",
+        "images_ready",
+        "docx_exported",
+        "completed",
+        "delivered",
+    }
+)
+_DELIVERY_ACTIONS = (
+    "humanize",
+    "restore_links",
+    "prepare_images",
+    "export_docx",
+    "generate_tdk",
+    "package_delivery",
 )
 _CHINESE_COUNTS = {
     "一": 1,
@@ -259,6 +292,151 @@ def request_skips_review(request: str) -> bool:
     return bool(_REVIEW_SKIP_REQUEST.search(normalized))
 
 
+def _request_requires_delivery(request: str) -> bool:
+    """Recognize an explicit package/ZIP request without guessing from download."""
+
+    normalized = sanitize_message(request)
+    if _DELIVERY_NEGATION.search(normalized):
+        return False
+    return bool(_DELIVERY_REQUEST.search(normalized))
+
+
+def _article_workflow_issues(
+    plan: PlanDraft,
+    *,
+    request: str,
+    context: AssistantWorkspaceContext,
+) -> tuple[str, ...]:
+    """Find incomplete generated-article chains before they can be approved.
+
+    The model chooses the requested business workflow, but it may not silently
+    remove prerequisites that make a new article or delivery executable.  The
+    persisted Task snapshot satisfies already-completed prerequisites; steps
+    that create a new Task have no such state and therefore require the full
+    prefix.
+    """
+
+    steps_by_id = {step.step_id: step for step in plan.steps}
+    dynamic_sources: dict[str, str] = {}
+    for step in plan.steps:
+        if step.action_kind != "create_task":
+            continue
+        targets = step.input_summary.get("bind_step_ids")
+        if not isinstance(targets, list):
+            continue
+        for value in targets:
+            target_id = str(value).strip()
+            if target_id in steps_by_id:
+                dynamic_sources[target_id] = step.step_id
+
+    chains: dict[tuple[str, str], list[Any]] = {}
+    for step in plan.steps:
+        if step.action_kind not in TASK_BOUND_ACTION_KINDS:
+            continue
+        chain_id = str(
+            step.article_task_id
+            or step.input_summary.get("create_task_step_id")
+            or dynamic_sources.get(step.step_id)
+            or ""
+        ).strip()
+        if chain_id:
+            chains.setdefault((step.project_id, chain_id), []).append(step)
+
+    tasks = {
+        (project.project_id, task.task_id): task
+        for project in context.projects
+        for task in project.tasks
+    }
+    skip_review = request_skips_review(request)
+    request_delivery = _request_requires_delivery(request)
+    issues: list[str] = []
+    for (project_id, chain_id), chain_steps in chains.items():
+        action_steps = {
+            step.action_kind: step
+            for step in sorted(chain_steps, key=lambda item: item.sequence)
+        }
+        article_step = action_steps.get("generate_article")
+        if article_step is None:
+            continue
+
+        task: AssistantTaskContext | None = tasks.get((project_id, chain_id))
+        operation = str(
+            article_step.input_summary.get("operation") or "article"
+        ).strip()
+        required: list[str] = []
+        if operation != "rewrite_article":
+            title_will_change = bool(
+                {"generate_titles", "select_title"}.intersection(action_steps)
+            )
+            title_missing = task is None or not str(task.selected_title or "").strip()
+            if title_missing:
+                if (
+                    task is None
+                    or task.status.strip().casefold() == "new"
+                    or task.title_candidate_count == 0
+                ):
+                    required.append("generate_titles")
+                required.append("select_title")
+
+            confirmed_products_available = bool(
+                task is not None
+                and task.confirmed_product_count > 0
+                and not title_will_change
+            )
+            product_candidates_available = bool(
+                task is not None
+                and task.product_candidate_count > 0
+                and not title_will_change
+            )
+            if not confirmed_products_available:
+                if not product_candidates_available:
+                    required.append("generate_products")
+                required.append("confirm_products")
+
+            outline_inputs_change = title_will_change or any(
+                action in required
+                for action in ("generate_products", "confirm_products")
+            )
+            outline_is_confirmed = bool(
+                task is not None
+                and task.status.strip().casefold()
+                in _OUTLINE_CONFIRMED_STATUSES
+                and not outline_inputs_change
+            )
+            if not outline_is_confirmed:
+                required.append("generate_outline")
+
+        required.extend(("start_research", "generate_article"))
+        if not skip_review:
+            required.append("review")
+
+        requested_suffix_index = max(
+            (
+                index
+                for index, action in enumerate(_DELIVERY_ACTIONS)
+                if action in action_steps
+            ),
+            default=-1,
+        )
+        if request_delivery:
+            requested_suffix_index = len(_DELIVERY_ACTIONS) - 1
+        if requested_suffix_index >= 0:
+            required.extend(_DELIVERY_ACTIONS[: requested_suffix_index + 1])
+
+        # Preserve the canonical order while removing prerequisites already
+        # listed for a more advanced requested endpoint.
+        required = list(dict.fromkeys(required))
+        missing = [action for action in required if action not in action_steps]
+        label = f"{project_id}/{chain_id}"
+        if missing:
+            issues.append(f"{label} missing: {', '.join(missing)}")
+            continue
+        sequences = [action_steps[action].sequence for action in required]
+        if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
+            issues.append(f"{label} has required actions out of order")
+    return tuple(issues)
+
+
 def planner_system_prompt() -> str:
     return (
         "You are the Article Agent Workflow Assistant planner. Return only "
@@ -294,6 +472,16 @@ def planner_system_prompt() -> str:
         "in the same article Task chain. Research must produce the Evidence "
         "Pack used by article generation; set input_summary.use_evidence_pack "
         "to true and never disable it."
+        " Never omit intermediate actions just because the user describes the "
+        "goal at a high level. For every new or from-start article Task, use "
+        "this ordered prefix: generate_titles, select_title, "
+        "generate_products, confirm_products, generate_outline, "
+        "start_research, generate_article. A persisted Task may omit only "
+        "prerequisites already satisfied by its supplied state. Every newly "
+        "generated article must then include review unless the user explicitly "
+        "asks to skip review. If the user requests a package, ZIP, or delivery "
+        "archive, continue in order with humanize, restore_links, "
+        "prepare_images, export_docx, generate_tdk, package_delivery."
         " Every delivery workflow must place prepare_images after "
         "restore_links and before export_docx; image preparation selects "
         "only current published product evidence from that project. Place "
@@ -848,6 +1036,41 @@ class StructuredWorkflowPlanner:
                 )
                 continue
             actual_counts = _planned_article_counts(candidate)
+            workflow_issues = _article_workflow_issues(
+                candidate,
+                request=request,
+                context=context,
+            )
+            if workflow_issues:
+                LOGGER.warning(
+                    "workflow assistant planner article workflow mismatch: "
+                    "attempt=%s issues=%s",
+                    semantic_attempt + 1,
+                    workflow_issues,
+                )
+                if semantic_attempt >= 2:
+                    raise PlannerOutputError(
+                        "planner omitted or misordered required article workflow steps"
+                    )
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Regenerate one complete JSON plan. The server "
+                            "rejected incomplete or misordered article chains: "
+                            f"{json.dumps(workflow_issues, ensure_ascii=False)}. "
+                            "For each new/from-start article use, in order, "
+                            "generate_titles, select_title, generate_products, "
+                            "confirm_products, generate_outline, start_research, "
+                            "generate_article, then review unless the request "
+                            "explicitly skips it. For package/ZIP delivery, "
+                            "continue with humanize, restore_links, "
+                            "prepare_images, export_docx, generate_tdk, and "
+                            "package_delivery. Do not summarize or omit steps."
+                        ),
+                    }
+                )
+                continue
             researched_counts = _planned_action_counts(candidate, "start_research")
             generated_counts = _planned_action_counts(candidate, "generate_article")
             mismatched = {

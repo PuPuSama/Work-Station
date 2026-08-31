@@ -158,6 +158,20 @@
 - 影响：涉及 `backend/services/server_delivery_package.py`、`backend/workflow_assistant/http.py`、`frontend/src/components/workflow-assistant-workspace.tsx` 和 `frontend/src/types.ts`；聚合包仍走私有对象存储、`article.deliver` 重授权和短期签名 URL。
 - 验证：后端全量 1068 项测试通过（跳过 301 项）；前端 `npm.cmd run lint` 无错误、`npm.cmd run build` 通过；本地 backend 容器健康。前端镜像重建因 Docker Hub 拉取 `node:22-alpine` EOF 未完成，已用本机验证过的 standalone 产物更新现有前端容器供本地测试，镜像本身尚未固化。
 
+## 2026-08-31：工作流助手文章链路完整性
+
+- 背景：自然语言规划依赖模型自行补齐文章步骤，曾接受从标题直接进入大纲且缺少产品选择、TDK 的残缺交付计划。
+- 决策：规划器按每篇文章和当前 Task 状态校验必需前置步骤及顺序；新文章固定经过标题、产品生成、产品确认、大纲、研究和正文，普通正文必须复检，只有用户明确要求时才跳过；打包交付继续要求降 AI、恢复链接、图片、正文 Word、TDK 和交付包。缺失或乱序会要求模型重规划，连续不合格则拒绝计划。
+- 影响：`backend/workflow_assistant/planner.py` 负责完整性校验和重规划，`backend/workflow_assistant/context.py` 向规划器提供任务级候选标题、候选产品和已确认产品计数；不改变人工 ZeroGPT 边界。
+- 验证：工作流助手 231 项测试通过（跳过 35 项），后端全量 1071 项测试通过（跳过 301 项），前端 lint/build 与 `git diff --check` 通过。
+
+## 2026-08-31：工作流助手对话区高度
+
+- 背景：消息滚动区只有弹性高度，父容器没有确定高度，历史消息增加时会持续撑高整个页面。
+- 决策：对话消息区使用 18rem–32rem 的响应式固定高度，历史消息改为内部滚动；切换会话、发送或收到新消息时自动滚到最新消息。
+- 影响：只修改 `frontend/src/components/workflow-assistant-workspace.tsx` 的消息区布局和滚动定位，不改变会话保留时间、接口或消息数据。
+- 验证：前端 `npm.cmd run lint` 和 `npm.cmd run build` 通过，`git diff --check` 通过。
+
 ## 7. 记忆更新格式
 
 只有稳定且经过验证的决策才追加到本文档。临时调试过程放在任务消息或专门的 runbook，不要持续膨胀本文件。建议使用以下格式：

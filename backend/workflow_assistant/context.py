@@ -36,6 +36,9 @@ class AssistantTaskContext:
     revision: int
     selected_title: str | None
     manual_completed: bool = False
+    title_candidate_count: int = 0
+    product_candidate_count: int = 0
+    confirmed_product_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +139,9 @@ class AssistantProjectContext:
                     "revision": task.revision,
                     "selected_title": task.selected_title,
                     "manual_completed": task.manual_completed,
+                    "title_candidate_count": task.title_candidate_count,
+                    "product_candidate_count": task.product_candidate_count,
+                    "confirmed_product_count": task.confirmed_product_count,
                 }
                 for task in self.tasks
             ],
@@ -327,6 +333,11 @@ class WorkflowAssistantContextResolver:
                     else None
                 ),
                 manual_completed=bool(row.get("manual_completed", False)),
+                title_candidate_count=len(row.get("title_candidates") or ()),
+                product_candidate_count=len(
+                    row.get("product_candidate_ids") or ()
+                ),
+                confirmed_product_count=len(row.get("products") or ()),
             )
             for row in task_rows
             if str(row.get("id") or "").strip()

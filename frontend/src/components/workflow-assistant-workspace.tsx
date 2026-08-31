@@ -372,6 +372,7 @@ export function WorkflowAssistantWorkspace() {
   const activeConversationIdRef = useRef<string | null>(null);
   const activePlanIdRef = useRef<string | null>(null);
   const loadedConversationRef = useRef<string | null>(null);
+  const messageScrollAreaRef = useRef<HTMLDivElement | null>(null);
   const lastEventSequenceRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -662,6 +663,19 @@ export function WorkflowAssistantWorkspace() {
 
   const conversationMessages = selectedConversation?.messages || [];
   const showPendingUserMessage = pendingUserMessage?.conversationId === selectedConversation?.conversation_id;
+  useEffect(() => {
+    const viewport = messageScrollAreaRef.current?.querySelector<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    );
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+  }, [
+    conversationMessages.length,
+    pendingUserMessage?.content,
+    selectedConversation?.conversation_id,
+    showPendingUserMessage,
+  ]);
   const selectedProjects = useMemo(
     () => projects.filter((project) => selectedProjectIds.includes(project.project_id)),
     [projects, selectedProjectIds],
@@ -1150,21 +1164,23 @@ export function WorkflowAssistantWorkspace() {
               </div>
               {tasks.filter((task) => selectedProjectIds.includes(task.project_id)).length > 0 && <div className="mt-4 grid gap-2"><div className="flex items-center justify-between gap-3"><Label>文章范围</Label><span className="text-xs text-muted-foreground">{selectedTaskIds.length} 个任务</span></div><div className="max-h-52 overflow-auto rounded-lg border bg-background p-2"><div className="grid gap-1">{tasks.filter((task) => selectedProjectIds.includes(task.project_id)).map((task) => { const checked = selectedTaskIds.includes(task.id); return <label key={`${task.project_id}:${task.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"><input type="checkbox" checked={checked} onChange={(event) => setSelectedTaskIds((current) => event.target.checked ? [...current, task.id] : current.filter((item) => item !== task.id))} className="mt-1 accent-primary" /><span className="min-w-0"><span className="block truncate">{task.topic}</span><span className="block truncate text-xs text-muted-foreground">{task.project_id} · {task.id} · {task.status}</span></span></label>; })}</div></div><span className="text-xs text-muted-foreground">不勾选任务时，助手按当前项目上下文规划。</span></div>}
             </div>
-            <ScrollArea className="min-h-0 flex-1 rounded-xl border bg-background p-4">
-              <div className="grid gap-3">
-                {conversationMessages.length || showPendingUserMessage ? <>
-                  {conversationMessages.map((message) => (
-                    <div key={message.message_id} className={`max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2.5 text-sm leading-6 ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}>
-                      <MessageContent content={message.content} />
-                    </div>
-                  ))}
-                  {pendingUserMessage && showPendingUserMessage && <div className="ml-auto flex max-w-[92%] items-start gap-2 rounded-xl bg-primary/80 px-3 py-2.5 text-sm leading-6 text-primary-foreground" aria-label="已发送，等待助手回复">
-                    <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
-                    <Loader2 className="workflow-assistant-spinner mt-1 size-4 shrink-0" />
-                  </div>}
-                </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
-              </div>
-            </ScrollArea>
+            <div ref={messageScrollAreaRef} className="h-[clamp(18rem,42dvh,32rem)] min-h-0 shrink-0">
+              <ScrollArea className="h-full rounded-xl border bg-background p-4">
+                <div className="grid gap-3" role="log" aria-label="对话消息" aria-live="polite">
+                  {conversationMessages.length || showPendingUserMessage ? <>
+                    {conversationMessages.map((message) => (
+                      <div key={message.message_id} className={`max-w-[92%] whitespace-pre-wrap break-words rounded-xl px-3 py-2.5 text-sm leading-6 ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted"}`}>
+                        <MessageContent content={message.content} />
+                      </div>
+                    ))}
+                    {pendingUserMessage && showPendingUserMessage && <div className="ml-auto flex max-w-[92%] items-start gap-2 rounded-xl bg-primary/80 px-3 py-2.5 text-sm leading-6 text-primary-foreground" aria-label="已发送，等待助手回复">
+                      <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
+                      <Loader2 className="workflow-assistant-spinner mt-1 size-4 shrink-0" />
+                    </div>}
+                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
+                </div>
+              </ScrollArea>
+            </div>
             {error && <Alert variant="destructive"><AlertCircle /><AlertTitle>助手暂时无法继续</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
             <div className="grid gap-2">
               {attachmentsEnabled && (
