@@ -90,6 +90,10 @@ HUMANIZE_OPERATION = "humanize"
 # links, headings, tables, or image markers.
 HUMANIZE_ACCEPT_MIN = ARTICLE_TARGET_MIN - 100
 HUMANIZE_ACCEPT_MAX = ARTICLE_TARGET_MAX + 200
+# A correction request must leave enough room for a complete 1000-1200 word
+# article, while preventing an overlong candidate from consuming the whole
+# response budget and ignoring the semantic compression instruction.
+HUMANIZE_CORRECTION_MAX_TOKENS = 2000
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -390,7 +394,10 @@ class LlmServerHumanizeProvider:
                                     f"approximately {max(1, semantic_delta)} words, "
                                     f"aiming for {target_low}-{target_high} visible "
                                     "English words inside the preferred 1000-1200 "
-                                    "target. Rewrite sentences and paragraphs; "
+                                    "target. Hard output budget: do not return "
+                                    f"more than {HUMANIZE_ACCEPT_MAX} visible "
+                                    "English words; count visible words before "
+                                    "returning. Rewrite sentences and paragraphs; "
                                     "do not mechanically truncate, cut off the ending, "
                                     "or delete a whole section. Preserve every heading "
                                     "and its order, "
@@ -407,9 +414,7 @@ class LlmServerHumanizeProvider:
                             },
                         ],
                         temperature=0.1,
-                        max_tokens=article_output_token_limit(
-                            ARTICLE_TARGET_MAX
-                        ),
+                        max_tokens=HUMANIZE_CORRECTION_MAX_TOKENS,
                     )
                     corrected = strip_llm_code_fence(str(result or "")).strip()
                     corrected_words = visible_word_count(corrected)

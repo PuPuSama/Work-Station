@@ -12,6 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
 from models import PromptSnapshot, TaskRecord  # noqa: E402
 from services.server_humanize_generation import (  # noqa: E402
     HumanizeGenerationUnavailable,
+    HUMANIZE_CORRECTION_MAX_TOKENS,
     LlmServerHumanizeProvider,
     apply_generated_humanized_article,
 )
@@ -66,9 +67,11 @@ class StubLlm:
         self.result = result
         self.error = error
         self.calls: list[object] = []
+        self.max_token_calls: list[int] = []
 
     def chat(self, messages, temperature=0.7, max_tokens=1800):
         self.calls.append(messages)
+        self.max_token_calls.append(max_tokens)
         if self.error:
             raise self.error
         return self.result
@@ -81,6 +84,7 @@ class SequentialLlm(StubLlm):
 
     def chat(self, messages, temperature=0.7, max_tokens=1800):
         self.calls.append(messages)
+        self.max_token_calls.append(max_tokens)
         return self.results.pop(0)
 
 
@@ -267,6 +271,8 @@ class ServerHumanizeGenerationTests(unittest.TestCase):
         self.assertIn("Semantically compress", correction_prompt)
         self.assertIn("do not mechanically truncate", correction_prompt)
         self.assertIn("approximately 360 words", correction_prompt)
+        self.assertIn("Hard output budget", correction_prompt)
+        self.assertEqual(llm.max_token_calls[1], HUMANIZE_CORRECTION_MAX_TOKENS)
 
     def test_provider_accepts_small_overshoot_without_retry_or_truncation(self) -> None:
         source = article_with_word_count(1808)
