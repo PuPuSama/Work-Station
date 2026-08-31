@@ -16,6 +16,7 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Settings2,
   Sparkles,
   Square,
   Workflow,
@@ -494,6 +495,7 @@ export function WorkflowAssistantWorkspace() {
   const [pending, setPending] = useState(false);
   const [requestPhase, setRequestPhase] = useState<AssistantRequestPhase>("idle");
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
+  const [scopeDialogOpen, setScopeDialogOpen] = useState(false);
   const [planPreviewOpen, setPlanPreviewOpen] = useState(false);
   const [planDetailsOpen, setPlanDetailsOpen] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
@@ -640,6 +642,7 @@ export function WorkflowAssistantWorkspace() {
       setPlan((current) => (
         current?.conversation_id === conversationId ? current : null
       ));
+      setScopeDialogOpen(false);
       setTimeline([]);
       setTimelineExpanded(false);
       lastEventSequenceRef.current = 0;
@@ -1265,28 +1268,70 @@ export function WorkflowAssistantWorkspace() {
           </CardHeader>
           <CardContent className="flex min-h-[570px] flex-col gap-4 px-5 py-5">
             <div className="rounded-xl border bg-muted/30 p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <Label>计划范围</Label>
-                <span className="text-xs text-muted-foreground">{selectedProjects.length} 个项目</span>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <Label>计划范围</Label>
+                  <p className="mt-1 text-sm font-medium">
+                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"} · {selectedTaskIds.length ? `已选 ${selectedTaskIds.length} 个任务` : "按项目上下文规划"}
+                  </p>
+                  <p className="mt-1 truncate text-xs text-muted-foreground" title={selectedProjects.map((project) => project.customer_name).join("、")}>
+                    {selectedProjects.length ? selectedProjects.map((project) => project.customer_name).join("、") : "请选择至少一个项目"}
+                  </p>
+                </div>
+                <Button type="button" variant="outline" size="sm" className="min-h-9 shrink-0" aria-haspopup="dialog" onClick={() => setScopeDialogOpen(true)}>
+                  <Settings2 />设置范围
+                </Button>
               </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {projects.map((project) => {
-                  const checked = selectedProjectIds.includes(project.project_id);
-                  return (
-                    <label key={project.project_id} className="flex cursor-pointer items-start gap-2 rounded-lg border bg-background px-3 py-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(event) => setSelectedProjectIds((current) => event.target.checked ? [...current, project.project_id] : current.filter((item) => item !== project.project_id))}
-                        className="mt-1 accent-primary"
-                      />
-                      <span className="min-w-0"><span className="block truncate font-medium">{project.customer_name}</span><span className="block truncate text-xs text-muted-foreground">{project.project_id}</span></span>
-                    </label>
-                  );
-                })}
-              </div>
-              {tasks.filter((task) => selectedProjectIds.includes(task.project_id)).length > 0 && <div className="mt-4 grid gap-2"><div className="flex items-center justify-between gap-3"><Label>文章范围</Label><span className="text-xs text-muted-foreground">{selectedTaskIds.length} 个任务</span></div><div className="max-h-52 overflow-auto rounded-lg border bg-background p-2"><div className="grid gap-1">{tasks.filter((task) => selectedProjectIds.includes(task.project_id)).map((task) => { const checked = selectedTaskIds.includes(task.id); return <label key={`${task.project_id}:${task.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"><input type="checkbox" checked={checked} onChange={(event) => setSelectedTaskIds((current) => event.target.checked ? [...current, task.id] : current.filter((item) => item !== task.id))} className="mt-1 accent-primary" /><span className="min-w-0"><span className="block truncate">{task.topic}</span><span className="block truncate text-xs text-muted-foreground">{task.project_id} · {task.id} · {task.status}</span></span></label>; })}</div></div><span className="text-xs text-muted-foreground">不勾选任务时，助手按当前项目上下文规划。</span></div>}
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">项目和文章选择已收进页内弹窗；不勾选具体文章时，助手会按当前项目上下文规划。</p>
             </div>
+            <Dialog open={scopeDialogOpen} onOpenChange={setScopeDialogOpen}>
+              <DialogContent className="h-[min(760px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-4xl sm:max-w-4xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
+                <DialogHeader className="border-b px-5 py-4 pr-12">
+                  <DialogTitle>计划范围</DialogTitle>
+                  <DialogDescription>选择本次自然语言请求要覆盖的项目和文章；不勾选具体文章时，助手会按项目上下文规划。</DialogDescription>
+                </DialogHeader>
+                <div className="min-h-0 overflow-y-auto px-5 pb-5">
+                  <div className="grid gap-5 pt-5">
+                    <section className="grid gap-3" aria-labelledby="workflow-scope-projects">
+                      <div className="flex items-center justify-between gap-3">
+                        <Label id="workflow-scope-projects">项目范围</Label>
+                        <span className="text-xs text-muted-foreground">已选 {selectedProjects.length} 个项目</span>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {projects.map((project) => {
+                          const checked = selectedProjectIds.includes(project.project_id);
+                          return (
+                            <label key={project.project_id} className="flex cursor-pointer items-start gap-2 rounded-lg border bg-background px-3 py-3 text-sm transition-colors hover:bg-muted/50">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(event) => setSelectedProjectIds((current) => event.target.checked ? [...current, project.project_id] : current.filter((item) => item !== project.project_id))}
+                                className="mt-1 accent-primary"
+                              />
+                              <span className="min-w-0"><span className="block truncate font-medium">{project.customer_name}</span><span className="block truncate text-xs text-muted-foreground">{project.project_id}</span></span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </section>
+                    {tasks.filter((task) => selectedProjectIds.includes(task.project_id)).length > 0 ? <section className="grid gap-3" aria-labelledby="workflow-scope-articles">
+                      <div className="flex items-center justify-between gap-3">
+                        <Label id="workflow-scope-articles">文章范围</Label>
+                        <span className="text-xs text-muted-foreground">已选 {selectedTaskIds.length} 个任务</span>
+                      </div>
+                      <div className="max-h-[min(32rem,55vh)] overflow-auto rounded-lg border bg-background p-2">
+                        <div className="grid gap-1">
+                          {tasks.filter((task) => selectedProjectIds.includes(task.project_id)).map((task) => {
+                            const checked = selectedTaskIds.includes(task.id);
+                            return <label key={`${task.project_id}:${task.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-sm hover:bg-muted"><input type="checkbox" checked={checked} onChange={(event) => setSelectedTaskIds((current) => event.target.checked ? [...current, task.id] : current.filter((item) => item !== task.id))} className="mt-1 accent-primary" /><span className="min-w-0"><span className="block truncate">{task.topic}</span><span className="block truncate text-xs text-muted-foreground">{task.project_id} · {task.id} · {task.status}</span></span></label>;
+                          })}
+                        </div>
+                      </div>
+                    </section> : <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground">当前项目暂无可选文章任务。</div>}
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
             <div ref={messageScrollAreaRef} className="h-[clamp(18rem,42dvh,32rem)] min-h-0 shrink-0">
               <ScrollArea className="h-full rounded-xl border bg-background p-4">
                 <div className="grid gap-3" role="log" aria-label="对话消息" aria-live="polite">
@@ -1385,8 +1430,30 @@ export function WorkflowAssistantWorkspace() {
                   Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
                 </p>
                 <p className="mt-3 rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
-                  点击“查看计划”打开完整步骤、批量交付和确认操作。
+                  点击“查看计划”打开完整步骤和确认操作；成功文章可在此处直接一键打包下载。
                 </p>
+                {deliverySteps.length > 0 && <div className="mt-4 grid gap-3 rounded-lg border border-dashed bg-muted/20 p-3">
+                  <div>
+                    <p className="text-sm font-medium">批量交付下载</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {readyDeliveryCount > 0
+                        ? `已成功 ${readyDeliveryCount}/${deliverySteps.length} 篇，来自 ${readyDeliveryProjectCount} 个项目；一键合并为一个 ZIP，失败或未完成文章会自动跳过。`
+                        : "暂无成功文章可打包下载；失败或未完成文章会自动跳过。"}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="justify-self-start"
+                    aria-label={`一键下载成功的 ${readyDeliveryCount} 篇文章`}
+                    onClick={() => void downloadBatchDelivery()}
+                    disabled={!readyDeliveryCount || Boolean(batchArtifactPending)}
+                  >
+                    {batchArtifactPending === "all" ? <Loader2 className="animate-spin" /> : <Download />}
+                    {batchArtifactPending === "all" ? "正在打包…" : `一键下载成功的 ${readyDeliveryCount} 篇`}
+                  </Button>
+                </div>}
               </div> : <div className="py-6 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
             </CardContent>
           </Card>
@@ -1404,7 +1471,7 @@ export function WorkflowAssistantWorkspace() {
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <CardTitle className="text-base">计划执行详情</CardTitle>
-                        <CardDescription className="mt-1">查看步骤状态、批量交付和计划控制。</CardDescription>
+                        <CardDescription className="mt-1">查看步骤状态和计划控制；批量交付下载在页面外直接操作。</CardDescription>
                       </div>
                       <div className="flex items-center gap-2">
                         <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>
@@ -1435,28 +1502,6 @@ export function WorkflowAssistantWorkspace() {
                 <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
                   文章概览已移到右上方的二级窗口；每张卡片显示项目、状态、处理进度和完成时间。
                 </div>
-                {deliverySteps.length > 0 && <div className="grid gap-3 rounded-lg border border-dashed bg-muted/20 p-3">
-                  <div>
-                    <p className="text-sm font-medium">批量交付下载</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {readyDeliveryCount > 0
-                        ? `已成功 ${readyDeliveryCount}/${deliverySteps.length} 篇，来自 ${readyDeliveryProjectCount} 个项目；一键合并为一个 ZIP，失败或未完成文章会自动跳过。`
-                        : "暂无成功文章可打包下载；失败或未完成文章会自动跳过。"}
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="justify-self-start"
-                    aria-label={`一键下载成功的 ${readyDeliveryCount} 篇文章`}
-                    onClick={() => void downloadBatchDelivery()}
-                    disabled={!readyDeliveryCount || Boolean(batchArtifactPending)}
-                  >
-                    {batchArtifactPending === "all" ? <Loader2 className="animate-spin" /> : <Download />}
-                    {batchArtifactPending === "all" ? "正在打包…" : `一键下载成功的 ${readyDeliveryCount} 篇`}
-                  </Button>
-                </div>}
                 {gapFillEnabled && waitingResearchSteps.map((step) => {
                   const detail = researchDetails[step.step_id];
                   const reviewCandidates = detail ? gapFillReviewCandidates(detail) : [];
