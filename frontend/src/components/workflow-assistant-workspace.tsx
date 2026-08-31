@@ -494,6 +494,7 @@ export function WorkflowAssistantWorkspace() {
   const [pending, setPending] = useState(false);
   const [requestPhase, setRequestPhase] = useState<AssistantRequestPhase>("idle");
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
+  const [planPreviewOpen, setPlanPreviewOpen] = useState(false);
   const [planDetailsOpen, setPlanDetailsOpen] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
   const [batchArtifactPending, setBatchArtifactPending] = useState("");
@@ -679,6 +680,7 @@ export function WorkflowAssistantWorkspace() {
 
   useEffect(() => {
     const planId = plan?.plan_id;
+    setPlanPreviewOpen(false);
     if (!planId) {
       activePlanIdRef.current = null;
       return;
@@ -1359,7 +1361,7 @@ export function WorkflowAssistantWorkspace() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <CardTitle className="text-base">计划预览</CardTitle>
-                  <CardDescription className="mt-1">确认后才会进入写操作队列。</CardDescription>
+                  <CardDescription className="mt-1">计划详情和执行控制已收进独立页内弹窗。</CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
                   {plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}
@@ -1369,14 +1371,57 @@ export function WorkflowAssistantWorkspace() {
                     size="sm"
                     className="min-h-9"
                     aria-haspopup="dialog"
-                    onClick={() => setPlanDetailsOpen(true)}
+                    onClick={() => setPlanPreviewOpen(true)}
                   >
-                    <Workflow />查看 {articleCards.length ? `${articleCards.length} 篇文章` : "文章概览"}
+                    <Workflow />查看计划
                   </Button>}
                 </div>
               </div>
             </CardHeader>
-            <CardContent id="workflow-plan-details" className="px-4 py-4">
+            <CardContent className="px-4 py-4">
+              {plan ? <div>
+                <p className="font-medium">{plan.title}</p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
+                </p>
+                <p className="mt-3 rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
+                  点击“查看计划”打开完整步骤、批量交付和确认操作。
+                </p>
+              </div> : <div className="py-6 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
+            </CardContent>
+          </Card>
+          {plan && <Dialog open={planPreviewOpen} onOpenChange={setPlanPreviewOpen}>
+            <DialogContent className="h-[min(900px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-7xl sm:max-w-7xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
+              <DialogHeader className="border-b px-5 py-4 pr-12">
+                <DialogTitle>计划详情</DialogTitle>
+                <DialogDescription>
+                  {plan.title} · Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章
+                </DialogDescription>
+              </DialogHeader>
+              <div className="min-h-0 overflow-y-auto px-5 pb-5">
+                <Card className="gap-0 border-0 py-0 shadow-none">
+                  <CardHeader className="border-b px-0 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <CardTitle className="text-base">计划执行详情</CardTitle>
+                        <CardDescription className="mt-1">查看步骤状态、批量交付和计划控制。</CardDescription>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="min-h-9"
+                          aria-haspopup="dialog"
+                          onClick={() => setPlanDetailsOpen(true)}
+                        >
+                          <Workflow />查看文章概览
+                        </Button>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent id="workflow-plan-details" className="px-0 py-4">
               {plan ? <div className="grid gap-4">
                 <div>
                   <p className="font-medium">{plan.title}</p>
@@ -1479,10 +1524,13 @@ export function WorkflowAssistantWorkspace() {
                 {plan.status === "failed" && <div className="grid gap-2 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3"><div className="text-sm text-muted-foreground">已完成的步骤不会重复执行，只会重新排队失败步骤及同一篇文章被阻断的后续步骤。</div><Button type="button" variant="outline" className="justify-self-start" onClick={() => void changePlan("retry")} disabled={pending}><RotateCcw />重试失败步骤</Button></div>}
                 {["draft", "awaiting_confirmation", "paused", "waiting_review", "failed"].includes(plan.status) && <div className="grid gap-2 rounded-lg border border-dashed p-3"><Label htmlFor="workflow-plan-revision">调整未完成步骤</Label><Textarea id="workflow-plan-revision" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} placeholder="例如：保留已完成步骤，只把未完成正文改成面向采购团队。" rows={3} disabled={revisionPending || pending} /><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">会生成新的 Revision，并要求重新确认。</span><Button type="button" variant="outline" onClick={() => void revisePlan()} disabled={revisionPending || pending || !revisionDraft.trim()}>{revisionPending ? <Loader2 className="animate-spin" /> : <Workflow />}生成修订预览</Button></div></div>}
               </div> : <div className="py-10 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
-           </CardContent>
-           </Card>
+                  </CardContent>
+                </Card>
+              </div>
+            </DialogContent>
+          </Dialog>}
           {plan && <Dialog open={planDetailsOpen} onOpenChange={setPlanDetailsOpen}>
-            <DialogContent className="h-[min(760px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
+            <DialogContent className="h-[min(880px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-7xl sm:max-w-7xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
               <DialogHeader className="border-b px-5 py-4 pr-12">
                 <DialogTitle>文章执行概览</DialogTitle>
                 <DialogDescription>
@@ -1490,7 +1538,7 @@ export function WorkflowAssistantWorkspace() {
                 </DialogDescription>
               </DialogHeader>
               <div className="min-h-0 overflow-y-auto px-5 py-4">
-                {articleCards.length ? <div className="grid gap-3 sm:grid-cols-2">
+                {articleCards.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {articleCards.map((card) => {
                     const workbenchHref = card.taskId
                       ? `/projects/${encodeURIComponent(card.projectId)}/articles/${encodeURIComponent(card.taskId)}?step=review`
