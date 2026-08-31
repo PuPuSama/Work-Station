@@ -3575,6 +3575,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                         {
                             delivered["docx_filename"],
                             "D.docx",
+                            "metadata.json",
                             *[
                                 image["filename"]
                                 for image in delivered["images"]
