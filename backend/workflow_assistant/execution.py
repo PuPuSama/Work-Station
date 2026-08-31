@@ -191,11 +191,10 @@ class WorkflowExecutionCoordinator:
             )
         self.authorize_plan(actor=actor, plan=plan)
         plan = self.reconcile_waiting_jobs(actor=actor, plan=plan)
-        if any(step.status == "failed" for step in plan.steps):
-            # A reconciled Job failure is a durable stop boundary. Do not
-            # start unrelated pending writes after a failed prerequisite or
-            # hide the failure behind a later successful step.
-            return self._finalize_plan(actor=actor, plan=plan, results=())
+        # A failed step only closes the suffix of its own article lane.  Keep
+        # that boundary durable before selecting the next wave so unrelated
+        # article lanes can continue in the same plan.
+        plan = self._skip_failed_step_dependents(actor=actor, plan=plan)
         paused_projects = set(plan.paused_project_ids)
         pending = tuple(
             step
@@ -425,11 +424,44 @@ class WorkflowExecutionCoordinator:
                         )
                     )
         plan = self._repository.get_plan(actor=actor, plan_id=plan.plan_id)
+        plan = self._skip_failed_step_dependents(actor=actor, plan=plan)
         return self._finalize_plan(
             actor=actor,
             plan=plan,
             results=tuple(sorted(results, key=lambda result: result.step_id)),
         )
+
+    def _skip_failed_step_dependents(
+        self,
+        *,
+        actor: ActorIdentity,
+        plan: WorkflowPlan,
+    ) -> WorkflowPlan:
+        """Persist blocked suffixes without stopping other article lanes."""
+
+        skip_blocked = getattr(
+            self._repository,
+            "skip_steps_blocked_by_failure",
+            None,
+        )
+        if not callable(skip_blocked):
+            # Keep small test/double repositories compatible with the
+            # coordinator. The production PostgreSQL repository always
+            # provides this durable transition.
+            return plan
+        changed = False
+        for step in plan.steps:
+            if step.status != "failed":
+                continue
+            blocked = skip_blocked(
+                actor=actor,
+                plan_id=plan.plan_id,
+                failed_step_id=step.step_id,
+            )
+            changed = changed or bool(blocked)
+        if not changed:
+            return plan
+        return self._repository.get_plan(actor=actor, plan_id=plan.plan_id)
 
     def reconcile_waiting_jobs(
         self,
@@ -735,19 +767,35 @@ class WorkflowExecutionCoordinator:
 
         if plan.status in {"queued", "running"}:
             statuses = {step.status for step in plan.steps}
-            if "failed" in statuses:
-                plan = self._repository.set_plan_status(
-                    actor=actor,
-                    plan_id=plan.plan_id,
-                    expected_revision=plan.revision,
-                    new_status="failed",
-                )
+            paused_projects = set(plan.paused_project_ids)
+            has_ready_pending = any(
+                step.status == "pending"
+                and step.project_id not in paused_projects
+                and self._predecessors_succeeded(step=step, steps=plan.steps)
+                for step in plan.steps
+            )
+            active = bool(statuses & {"running", "waiting_job"}) or has_ready_pending
+            if active:
+                # There may be a failed article lane while other lanes still
+                # have work to dispatch. Pending steps whose predecessor is
+                # failed or waiting for review are not active work and do not
+                # prevent the plan from surfacing that review state.
+                pass
             elif _should_wait_for_review(plan):
                 plan = self._repository.set_plan_status(
                     actor=actor,
                     plan_id=plan.plan_id,
                     expected_revision=plan.revision,
                     new_status="waiting_review",
+                )
+            elif "failed" in statuses and statuses.issubset(
+                {"succeeded", "skipped", "failed", "cancelled"}
+            ):
+                plan = self._repository.set_plan_status(
+                    actor=actor,
+                    plan_id=plan.plan_id,
+                    expected_revision=plan.revision,
+                    new_status="failed",
                 )
             elif statuses and statuses.issubset({"succeeded", "skipped", "cancelled"}):
                 plan = self._repository.set_plan_status(

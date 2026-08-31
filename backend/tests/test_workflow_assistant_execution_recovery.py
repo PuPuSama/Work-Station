@@ -19,6 +19,7 @@ from workflow_assistant.execution import (  # noqa: E402
     _available_dispatch_slots,
 )
 from workflow_assistant.repository import (  # noqa: E402
+    BLOCKED_BY_FAILED_STEP_ERROR_CODE,
     WorkflowExecutionCandidate,
     WorkflowPlan,
     WorkflowPlanStep,
@@ -178,6 +179,34 @@ class _GateRepository:
         self.plan = replace(self.plan, steps=tuple(steps))
         return changed
 
+    def skip_steps_blocked_by_failure(self, **kwargs: Any) -> tuple[str, ...]:
+        failed_step_id = str(kwargs["failed_step_id"])
+        failed = next(
+            step for step in self.plan.steps if step.step_id == failed_step_id
+        )
+        if failed.status != "failed":
+            return ()
+        blocked_ids: list[str] = []
+        steps = []
+        for step in self.plan.steps:
+            if (
+                step.status == "pending"
+                and step.sequence > failed.sequence
+                and step.project_id == failed.project_id
+                and (step.article_task_id or "") == (failed.article_task_id or "")
+            ):
+                step = replace(
+                    step,
+                    status="skipped",
+                    background_job_id=None,
+                    output_summary={},
+                    standardized_error_code=BLOCKED_BY_FAILED_STEP_ERROR_CODE,
+                )
+                blocked_ids.append(step.step_id)
+            steps.append(step)
+        self.plan = replace(self.plan, steps=tuple(steps))
+        return tuple(blocked_ids)
+
     def set_plan_status(self, **kwargs: Any) -> WorkflowPlan:
         new_status = str(kwargs["new_status"])
         self.status_transitions.append(new_status)
@@ -201,6 +230,19 @@ class _RecordingTools:
         self.calls.append(action_kind)
         if action_kind == "package_delivery":
             raise AssertionError("an unconfirmed hard gate must never execute")
+        return {}
+
+
+class _FailOneArticleTools:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    def invoke(self, invocation: Any) -> dict[str, Any]:
+        self.calls.append((str(invocation.action_kind), invocation.article_task_id))
+        if invocation.article_task_id == "task-a":
+            from workflow_assistant.tools import WorkflowToolError
+
+            raise WorkflowToolError("article-a failed")
         return {}
 
 
@@ -424,7 +466,7 @@ class WorkflowAssistantExecutionRecoveryTests(unittest.TestCase):
         self.assertEqual(repository.status_transitions, ["waiting_review"])
         self.assertEqual(tools.calls, ["generate_tdk"])
 
-    def test_reconciled_failure_takes_priority_over_an_unapproved_gate(self) -> None:
+    def test_reconciled_failure_does_not_hide_an_unapproved_gate(self) -> None:
         failed = replace(
             _step("failed-job", status="failed"),
             sequence=1,
@@ -451,9 +493,52 @@ class WorkflowAssistantExecutionRecoveryTests(unittest.TestCase):
             plan_id="plan-a",
         )
 
-        self.assertEqual(repository.plan.status, "failed")
-        self.assertEqual(repository.status_transitions, ["failed"])
+        self.assertEqual(repository.plan.status, "waiting_review")
+        self.assertEqual(repository.status_transitions, ["waiting_review"])
         self.assertFalse(repository.plan.steps[1].human_gate_confirmed)
+
+    def test_one_failed_article_lane_does_not_stop_another_lane(self) -> None:
+        failed = replace(
+            _step("failed", status="pending"),
+            sequence=1,
+            article_task_id="task-a",
+        )
+        blocked = replace(
+            _step("blocked", status="pending"),
+            sequence=2,
+            article_task_id="task-a",
+        )
+        independent = replace(
+            _step("independent", status="pending"),
+            sequence=3,
+            article_task_id="task-b",
+        )
+        repository = _GateRepository(_plan(failed, blocked, independent))
+        tools = _FailOneArticleTools()
+        coordinator = WorkflowExecutionCoordinator(
+            repository=repository,  # type: ignore[arg-type]
+            access=_AllowAccess(),  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
+        )
+
+        result = coordinator.execute_plan(
+            actor=ActorIdentity("org-a", "user-a"),
+            plan_id="plan-a",
+        )
+
+        self.assertEqual(
+            {task_id for _action, task_id in tools.calls},
+            {"task-a", "task-b"},
+        )
+        statuses = {step.step_id: step.status for step in repository.plan.steps}
+        self.assertEqual(statuses["failed"], "failed")
+        self.assertEqual(statuses["blocked"], "skipped")
+        self.assertEqual(statuses["independent"], "succeeded")
+        self.assertEqual(repository.plan.status, "failed")
+        self.assertEqual(
+            [item.status for item in result.results],
+            ["failed", "succeeded"],
+        )
 
     def test_research_waiting_review_preserves_job_and_safe_projection(self) -> None:
         waiting = _step(

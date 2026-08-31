@@ -229,6 +229,7 @@ _SERVER_JOB_OPERATIONS = {
 _SERVER_JOB_RECOVERY_WINDOW = timedelta(minutes=5)
 _SERVER_JOB_CLOCK_SKEW = timedelta(minutes=1)
 _EVENT_STEP_ID_LIMIT = 50
+BLOCKED_BY_FAILED_STEP_ERROR_CODE = "blocked_by_failed_step"
 
 
 def _server_job_operation(
@@ -1245,6 +1246,103 @@ class PostgresWorkflowAssistantRepository:
             )
             return bool(result.rowcount)
 
+    def skip_steps_blocked_by_failure(
+        self,
+        *,
+        actor: ActorIdentity,
+        plan_id: str,
+        failed_step_id: str,
+    ) -> tuple[str, ...]:
+        """Close the unfinished suffix of one article chain after a failure.
+
+        A failed step only blocks later steps in the same project/Task lane.
+        Other article lanes in the plan remain runnable.  The blocked suffix
+        is recorded as ``skipped`` so the coordinator cannot repeatedly try
+        to dispatch it, while the dedicated error code lets a later retry
+        requeue it together with the failed root step.
+        """
+
+        plan_id = _required(plan_id, "plan_id")
+        failed_step_id = _required(failed_step_id, "failed_step_id")
+        with self._engine.begin() as connection:
+            if self._lock_plan(connection, actor, plan_id) is None:
+                raise WorkflowAssistantNotFound("plan not found")
+            failed_row = connection.execute(
+                sa.select(
+                    workflow_plan_steps.c.step_id,
+                    workflow_plan_steps.c.sequence,
+                    workflow_plan_steps.c.project_id,
+                    workflow_plan_steps.c.article_task_id,
+                    workflow_plan_steps.c.status,
+                )
+                .where(
+                    workflow_plan_steps.c.organization_id == actor.organization_id,
+                    workflow_plan_steps.c.plan_id == plan_id,
+                    workflow_plan_steps.c.step_id == failed_step_id,
+                )
+                .with_for_update()
+            ).mappings().one_or_none()
+            if failed_row is None:
+                raise WorkflowAssistantNotFound("plan step not found")
+            if str(failed_row["status"]) != "failed":
+                return ()
+
+            lane_conditions = [
+                workflow_plan_steps.c.organization_id == actor.organization_id,
+                workflow_plan_steps.c.plan_id == plan_id,
+                workflow_plan_steps.c.project_id == str(failed_row["project_id"]),
+                workflow_plan_steps.c.sequence > int(failed_row["sequence"]),
+                workflow_plan_steps.c.status == "pending",
+            ]
+            failed_task_id = failed_row["article_task_id"]
+            if failed_task_id is None:
+                lane_conditions.append(workflow_plan_steps.c.article_task_id.is_(None))
+            else:
+                lane_conditions.append(
+                    workflow_plan_steps.c.article_task_id == str(failed_task_id)
+                )
+            blocked_step_ids = tuple(
+                str(step_id)
+                for step_id in connection.execute(
+                    sa.select(workflow_plan_steps.c.step_id)
+                    .where(*lane_conditions)
+                    .order_by(workflow_plan_steps.c.sequence)
+                    .with_for_update()
+                ).scalars()
+            )
+            if not blocked_step_ids:
+                return ()
+            connection.execute(
+                workflow_plan_steps.update()
+                .where(
+                    workflow_plan_steps.c.organization_id == actor.organization_id,
+                    workflow_plan_steps.c.plan_id == plan_id,
+                    workflow_plan_steps.c.step_id.in_(blocked_step_ids),
+                    workflow_plan_steps.c.status == "pending",
+                )
+                .values(
+                    status="skipped",
+                    background_job_id=None,
+                    output_summary={},
+                    standardized_error_code=BLOCKED_BY_FAILED_STEP_ERROR_CODE,
+                    updated_at=sa.func.now(),
+                )
+            )
+            self._insert_event(
+                connection,
+                actor=actor,
+                plan_id=plan_id,
+                event_kind="steps_blocked_by_failure",
+                public_payload={
+                    "failed_step_id": failed_step_id,
+                    **_bounded_step_id_event_projection(
+                        "blocked",
+                        blocked_step_ids,
+                    ),
+                },
+            )
+            return blocked_step_ids
+
     def release_research_gap_fill(
         self,
         *,
@@ -1897,13 +1995,14 @@ class PostgresWorkflowAssistantRepository:
         expected_revision: int,
         expected_plan_hash: str | None = None,
     ) -> WorkflowPlan:
-        """Requeue only failed steps while preserving completed work.
+        """Requeue failed steps and their blocked suffixes.
 
         A failed plan is a durable stop boundary. Retrying therefore needs a
         single transaction that checks the same revision the UI displayed,
-        clears failed-step execution state, and moves the plan back to the
-        queue. Completed and skipped steps remain immutable and are never
-        replayed.
+        clears failed-step execution state, reopens only steps that were
+        skipped because of those failures, and moves the plan back to the
+        queue. Completed and intentionally skipped steps remain immutable and
+        are never replayed.
         """
 
         plan_id = _required(plan_id, "plan_id")
@@ -1945,17 +2044,37 @@ class PostgresWorkflowAssistantRepository:
                 raise WorkflowAssistantConflict(
                     "plan has not been confirmed by this actor"
                 )
-            failed_step_ids = list(
+            retry_rows = list(
                 connection.execute(
-                    sa.select(workflow_plan_steps.c.step_id)
+                    sa.select(
+                        workflow_plan_steps.c.step_id,
+                        workflow_plan_steps.c.status,
+                    )
                     .where(
                         workflow_plan_steps.c.organization_id == actor.organization_id,
                         workflow_plan_steps.c.plan_id == plan_id,
-                        workflow_plan_steps.c.status == "failed",
+                        sa.or_(
+                            workflow_plan_steps.c.status == "failed",
+                            sa.and_(
+                                workflow_plan_steps.c.status == "skipped",
+                                workflow_plan_steps.c.standardized_error_code
+                                == BLOCKED_BY_FAILED_STEP_ERROR_CODE,
+                            ),
+                        ),
                     )
                     .order_by(workflow_plan_steps.c.sequence)
-                ).scalars()
+                ).mappings()
             )
+            failed_step_ids = [
+                str(row["step_id"])
+                for row in retry_rows
+                if str(row["status"]) == "failed"
+            ]
+            blocked_step_ids = [
+                str(row["step_id"])
+                for row in retry_rows
+                if str(row["status"]) == "skipped"
+            ]
             if not failed_step_ids:
                 raise WorkflowAssistantConflict("failed plan has no retryable steps")
             connection.execute(
@@ -1963,7 +2082,14 @@ class PostgresWorkflowAssistantRepository:
                 .where(
                     workflow_plan_steps.c.organization_id == actor.organization_id,
                     workflow_plan_steps.c.plan_id == plan_id,
-                    workflow_plan_steps.c.status == "failed",
+                    sa.or_(
+                        workflow_plan_steps.c.status == "failed",
+                        sa.and_(
+                            workflow_plan_steps.c.status == "skipped",
+                            workflow_plan_steps.c.standardized_error_code
+                            == BLOCKED_BY_FAILED_STEP_ERROR_CODE,
+                        ),
+                    ),
                 )
                 .values(
                     status="pending",
@@ -1995,8 +2121,15 @@ class PostgresWorkflowAssistantRepository:
                 plan_id=plan_id,
                 event_kind="plan_retry",
                 public_payload={
-                    "failed_step_ids": failed_step_ids,
-                    "reset_step_count": len(failed_step_ids),
+                    **_bounded_step_id_event_projection(
+                        "failed",
+                        failed_step_ids,
+                    ),
+                    **_bounded_step_id_event_projection(
+                        "blocked",
+                        blocked_step_ids,
+                    ),
+                    "reset_step_count": len(failed_step_ids) + len(blocked_step_ids),
                     "revision": next_revision,
                     "status": "queued",
                 },
@@ -3209,4 +3342,5 @@ __all__ = [
     "WorkflowPlanEvent",
     "WorkflowExecutionCandidate",
     "WorkflowPlanStep",
+    "BLOCKED_BY_FAILED_STEP_ERROR_CODE",
 ]

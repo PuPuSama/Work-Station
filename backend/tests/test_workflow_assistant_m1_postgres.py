@@ -738,6 +738,12 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
                         action_kind="generate_outline",
                         project_id=self.project_a,
                     ),
+                    PlanStep(
+                        step_id="blocked-step",
+                        sequence=3,
+                        action_kind="generate_article",
+                        project_id=self.project_a,
+                    ),
                 ],
             ),
         )
@@ -787,6 +793,14 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
                 background_job_id="failed-job",
             )
         )
+        self.assertEqual(
+            repository.skip_steps_blocked_by_failure(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                failed_step_id="failed-step",
+            ),
+            ("blocked-step",),
+        )
         failed_plan = repository.set_plan_status(
             actor=self.actor,
             plan_id=plan.plan_id,
@@ -811,6 +825,12 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
         self.assertIsNone(failed.background_job_id)
         self.assertEqual(failed.output_summary, {})
         self.assertIsNone(failed.standardized_error_code)
+        blocked = retried.steps[2]
+        self.assertEqual(blocked.status, "pending")
+        self.assertEqual(blocked.retry_count, 1)
+        self.assertIsNone(blocked.background_job_id)
+        self.assertEqual(blocked.output_summary, {})
+        self.assertIsNone(blocked.standardized_error_code)
 
     def test_gap_fill_release_binds_resume_job_and_is_idempotent(self) -> None:
         repository = PostgresWorkflowAssistantRepository(self.engine)
