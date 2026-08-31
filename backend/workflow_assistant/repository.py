@@ -1271,8 +1271,10 @@ class PostgresWorkflowAssistantRepository:
                 sa.select(
                     workflow_plan_steps.c.step_id,
                     workflow_plan_steps.c.sequence,
+                    workflow_plan_steps.c.action_kind,
                     workflow_plan_steps.c.project_id,
                     workflow_plan_steps.c.article_task_id,
+                    workflow_plan_steps.c.input_summary,
                     workflow_plan_steps.c.status,
                 )
                 .where(
@@ -1297,6 +1299,28 @@ class PostgresWorkflowAssistantRepository:
             failed_task_id = failed_row["article_task_id"]
             if failed_task_id is None:
                 lane_conditions.append(workflow_plan_steps.c.article_task_id.is_(None))
+                failed_action = str(failed_row["action_kind"])
+                failed_source_id = str(
+                    _json_dict(failed_row["input_summary"]).get(
+                        "create_task_step_id"
+                    )
+                    or ""
+                ).strip()
+                source_id = workflow_plan_steps.c.input_summary[
+                    "create_task_step_id"
+                ].astext
+                if failed_action == "create_task":
+                    # Dynamic article steps are tied to their own create
+                    # step until the server allocates a concrete Task ID.
+                    lane_conditions.append(source_id == failed_step_id)
+                elif failed_source_id:
+                    lane_conditions.append(source_id == failed_source_id)
+                else:
+                    # Project-scoped steps do not belong to a dynamic article
+                    # lane, so do not close another create_task suffix.
+                    lane_conditions.append(
+                        sa.or_(source_id.is_(None), source_id == "")
+                    )
             else:
                 lane_conditions.append(
                     workflow_plan_steps.c.article_task_id == str(failed_task_id)

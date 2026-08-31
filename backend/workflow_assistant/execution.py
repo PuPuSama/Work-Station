@@ -72,6 +72,21 @@ def _available_dispatch_slots(
     return max(0, limit - active_steps)
 
 
+def _article_lane_key(step: WorkflowPlanStep) -> tuple[str, str]:
+    """Identify one article chain before and after dynamic Task binding."""
+
+    if step.article_task_id:
+        return step.project_id, f"task:{step.article_task_id}"
+    source_id = str(
+        step.input_summary.get("create_task_step_id") or ""
+    ).strip()
+    if source_id:
+        return step.project_id, f"create:{source_id}"
+    if step.action_kind == "create_task":
+        return step.project_id, f"create:{step.step_id}"
+    return step.project_id, "project"
+
+
 def _should_wait_for_review(plan: WorkflowPlan) -> bool:
     """Return true only when a human gate is the plan's next real blocker.
 
@@ -747,13 +762,13 @@ class WorkflowExecutionCoordinator:
         step: WorkflowPlanStep,
         steps: tuple[WorkflowPlanStep, ...],
     ) -> bool:
-        key = (step.project_id, step.article_task_id or "")
+        key = _article_lane_key(step)
         terminal = {"succeeded", "skipped"}
         return all(
             previous.status in terminal
             for previous in steps
             if previous.sequence < step.sequence
-            and (previous.project_id, previous.article_task_id or "") == key
+            and _article_lane_key(previous) == key
         )
 
     def _finalize_plan(
