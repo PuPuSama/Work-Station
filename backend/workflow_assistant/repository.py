@@ -2073,6 +2073,12 @@ class PostgresWorkflowAssistantRepository:
                     sa.select(
                         workflow_plan_steps.c.step_id,
                         workflow_plan_steps.c.status,
+                        workflow_plan_steps.c.action_kind,
+                        workflow_plan_steps.c.project_id,
+                        workflow_plan_steps.c.article_task_id,
+                        workflow_plan_steps.c.expected_task_revision,
+                        workflow_plan_steps.c.background_job_id,
+                        workflow_plan_steps.c.output_summary,
                     )
                     .where(
                         workflow_plan_steps.c.organization_id == actor.organization_id,
@@ -2101,6 +2107,125 @@ class PostgresWorkflowAssistantRepository:
             ]
             if not failed_step_ids:
                 raise WorkflowAssistantConflict("failed plan has no retryable steps")
+
+            # A few queued adapters persist a small, internal checkpoint just
+            # before creating their Job (for example, deferring the initial
+            # AI-rate check before Humanize).  That checkpoint advances the
+            # Article Task revision, while the plan step still carries the
+            # revision that was valid when it was claimed.  Keep the retry
+            # CAS-safe by accepting only the revision recorded by the Job or
+            # the one deterministic +1 checkpoint for those adapters.  An
+            # arbitrary newer revision still requires a fresh plan.
+            retry_step_ids = [str(row["step_id"]) for row in retry_rows]
+            retry_lanes: dict[tuple[str, str], int] = {}
+            task_revision_cache: dict[tuple[str, str], tuple[int, str]] = {}
+            for row in retry_rows:
+                if str(row["status"]) != "failed":
+                    continue
+                task_id = str(row["article_task_id"] or "").strip()
+                expected_raw = row["expected_task_revision"]
+                if not task_id or expected_raw is None:
+                    continue
+                expected = int(expected_raw)
+                project_id = str(row["project_id"])
+                lane = (project_id, task_id)
+                task_row = task_revision_cache.get(lane)
+                if task_row is None:
+                    locked_task = connection.execute(
+                        sa.select(
+                            article_tasks.c.revision,
+                            article_tasks.c.payload,
+                        )
+                        .where(
+                            article_tasks.c.organization_id == actor.organization_id,
+                            article_tasks.c.project_id == project_id,
+                            article_tasks.c.task_id == task_id,
+                        )
+                        .with_for_update()
+                    ).mappings().one_or_none()
+                    if locked_task is None:
+                        raise WorkflowAssistantConflict(
+                            "article task is no longer available; revise the plan"
+                        )
+                    task_row = (
+                        int(locked_task["revision"]),
+                        str(_json_dict(locked_task["payload"]).get("status") or ""),
+                    )
+                    task_revision_cache[lane] = task_row
+                current_revision, task_status = task_row
+
+                source_revision: int | None = None
+                output_summary = _json_dict(row["output_summary"])
+                raw_source_revision = output_summary.get("source_revision")
+                if (
+                    isinstance(raw_source_revision, int)
+                    and not isinstance(raw_source_revision, bool)
+                    and raw_source_revision >= 0
+                ):
+                    source_revision = raw_source_revision
+                if source_revision is None and row["background_job_id"]:
+                    source_revision = connection.execute(
+                        sa.select(background_jobs.c.source_revision)
+                        .where(
+                            background_jobs.c.organization_id == actor.organization_id,
+                            background_jobs.c.project_id == project_id,
+                            background_jobs.c.task_id == task_id,
+                            background_jobs.c.job_id
+                            == str(row["background_job_id"]),
+                        )
+                    ).scalar_one_or_none()
+                    if source_revision is not None:
+                        source_revision = int(source_revision)
+
+                if source_revision is None:
+                    # This fallback repairs plans that were already retried
+                    # once and therefore lost their waiting Job projection.
+                    # Only the known pre-queue checkpoints may use it.
+                    action_kind = str(row["action_kind"])
+                    internal_checkpoint = (
+                        action_kind == "humanize"
+                        and task_status == "initial_ai_checked"
+                    ) or (
+                        action_kind == "restore_links"
+                        and task_status == "final_ai_checked"
+                    )
+                    if internal_checkpoint and current_revision == expected + 1:
+                        source_revision = current_revision
+
+                if source_revision is not None:
+                    if source_revision < expected or current_revision != source_revision:
+                        raise WorkflowAssistantConflict(
+                            "article task revision changed; revise the plan"
+                        )
+                elif current_revision != expected:
+                    raise WorkflowAssistantConflict(
+                        "article task revision changed; revise the plan"
+                    )
+
+                if source_revision is not None and source_revision > expected:
+                    previous = retry_lanes.get(lane)
+                    if previous is not None and previous != source_revision:
+                        raise WorkflowAssistantConflict(
+                            "article task revision changed; revise the plan"
+                        )
+                    retry_lanes[lane] = source_revision
+
+            # Rebind every retryable step in the affected article lane to the
+            # validated internal source revision before clearing its failure.
+            # Later steps will be advanced again by the normal result-revision
+            # propagation after the retried Job succeeds.
+            for (project_id, task_id), revision in retry_lanes.items():
+                connection.execute(
+                    workflow_plan_steps.update()
+                    .where(
+                        workflow_plan_steps.c.organization_id == actor.organization_id,
+                        workflow_plan_steps.c.plan_id == plan_id,
+                        workflow_plan_steps.c.step_id.in_(retry_step_ids),
+                        workflow_plan_steps.c.project_id == project_id,
+                        workflow_plan_steps.c.article_task_id == task_id,
+                    )
+                    .values(expected_task_revision=revision)
+                )
             connection.execute(
                 workflow_plan_steps.update()
                 .where(

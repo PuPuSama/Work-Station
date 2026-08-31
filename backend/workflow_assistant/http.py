@@ -1785,6 +1785,27 @@ def create_plan_delivery_download(
                 detail="当前计划没有可批量下载的交付包。",
             )
 
+        # A batch ZIP is an all-or-nothing delivery artifact.  Even if every
+        # package step happens to be ready, a plan that is still running,
+        # waiting for review, or failed must not expose a partial snapshot.
+        if plan.status != "completed":
+            ready_count = sum(
+                step.status == "succeeded"
+                and bool(step.article_task_id)
+                and str(step.output_summary.get("artifact_kind") or "")
+                == "delivery_package"
+                and bool(str(step.output_summary.get("asset_id") or "").strip())
+                for step in package_steps
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "计划尚未完整完成，禁止导出部分文章。",
+                    "ready_count": ready_count,
+                    "total_count": len(package_steps),
+                },
+            )
+
         package_project_ids = {
             step.project_id.strip() for step in package_steps if step.project_id.strip()
         }

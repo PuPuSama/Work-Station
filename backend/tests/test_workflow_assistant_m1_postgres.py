@@ -44,6 +44,7 @@ from workflow_assistant.execution import (  # noqa: E402
 from workflow_assistant.graph import WorkflowAssistantGraph  # noqa: E402
 from workflow_assistant.repository import (  # noqa: E402
     PostgresWorkflowAssistantRepository,
+    WorkflowAssistantConflict,
     WorkflowAssistantNotFound,
 )
 
@@ -831,6 +832,200 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
         self.assertIsNone(blocked.background_job_id)
         self.assertEqual(blocked.output_summary, {})
         self.assertIsNone(blocked.standardized_error_code)
+
+    def test_retry_failed_steps_rebinds_internal_task_checkpoint_revision(self) -> None:
+        task_id = f"{self.project_a}-retry-task"
+        with self.engine.begin() as connection:
+            connection.execute(
+                article_tasks.insert().values(
+                    organization_id=self.organization_id,
+                    project_id=self.project_a,
+                    task_id=task_id,
+                    customer="Project A",
+                    topic_index=0,
+                    position=0,
+                    revision=9,
+                    payload={"status": "initial_ai_checked"},
+                )
+            )
+
+        repository = PostgresWorkflowAssistantRepository(self.engine)
+        conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Retry stale task revision",
+            project_ids=(self.project_a,),
+        )
+        plan = repository.create_plan(
+            actor=self.actor,
+            conversation_id=conversation.conversation_id,
+            plan=PlanDraft(
+                title="Retry humanize",
+                natural_language_request="Retry the humanized article",
+                project_ids=[self.project_a],
+                steps=[
+                    PlanStep(
+                        step_id="humanize-step",
+                        sequence=1,
+                        action_kind="humanize",
+                        project_id=self.project_a,
+                        article_task_id=task_id,
+                        expected_task_revision=8,
+                    ),
+                    PlanStep(
+                        step_id="package-step",
+                        sequence=2,
+                        action_kind="package_delivery",
+                        project_id=self.project_a,
+                        article_task_id=task_id,
+                        expected_task_revision=8,
+                    ),
+                ],
+            ),
+        )
+        plan = repository.confirm_plan(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            expected_plan_hash=plan.plan_hash,
+        )
+        plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="running",
+        )
+        self.assertTrue(
+            repository.claim_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="humanize-step",
+            )
+        )
+        self.assertTrue(
+            repository.finish_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="humanize-step",
+                status="failed",
+                output_summary={},
+                standardized_error_code="background_job_failed",
+            )
+        )
+        self.assertEqual(
+            repository.skip_steps_blocked_by_failure(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                failed_step_id="humanize-step",
+            ),
+            ("package-step",),
+        )
+        failed_plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="failed",
+        )
+
+        retried = repository.retry_failed_steps(
+            actor=self.actor,
+            plan_id=failed_plan.plan_id,
+            expected_revision=failed_plan.revision,
+            expected_plan_hash=failed_plan.plan_hash,
+        )
+
+        self.assertEqual(
+            [step.expected_task_revision for step in retried.steps],
+            [9, 9],
+        )
+        self.assertEqual(
+            [step.status for step in retried.steps],
+            ["pending", "pending"],
+        )
+
+    def test_retry_failed_steps_rejects_unrelated_task_revision_change(self) -> None:
+        task_id = f"{self.project_a}-changed-task"
+        with self.engine.begin() as connection:
+            connection.execute(
+                article_tasks.insert().values(
+                    organization_id=self.organization_id,
+                    project_id=self.project_a,
+                    task_id=task_id,
+                    customer="Project A",
+                    topic_index=0,
+                    position=0,
+                    revision=10,
+                    payload={"status": "initial_ai_checked"},
+                )
+            )
+
+        repository = PostgresWorkflowAssistantRepository(self.engine)
+        conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Reject changed task",
+            project_ids=(self.project_a,),
+        )
+        plan = repository.create_plan(
+            actor=self.actor,
+            conversation_id=conversation.conversation_id,
+            plan=PlanDraft(
+                title="Reject stale retry",
+                natural_language_request="Retry the article",
+                project_ids=[self.project_a],
+                steps=[
+                    PlanStep(
+                        step_id="humanize-step",
+                        sequence=1,
+                        action_kind="humanize",
+                        project_id=self.project_a,
+                        article_task_id=task_id,
+                        expected_task_revision=8,
+                    ),
+                ],
+            ),
+        )
+        plan = repository.confirm_plan(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            expected_plan_hash=plan.plan_hash,
+        )
+        plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="running",
+        )
+        self.assertTrue(
+            repository.claim_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="humanize-step",
+            )
+        )
+        self.assertTrue(
+            repository.finish_step(
+                actor=self.actor,
+                plan_id=plan.plan_id,
+                step_id="humanize-step",
+                status="failed",
+                output_summary={},
+                standardized_error_code="background_job_failed",
+            )
+        )
+        failed_plan = repository.set_plan_status(
+            actor=self.actor,
+            plan_id=plan.plan_id,
+            expected_revision=plan.revision,
+            new_status="failed",
+        )
+
+        with self.assertRaises(WorkflowAssistantConflict):
+            repository.retry_failed_steps(
+                actor=self.actor,
+                plan_id=failed_plan.plan_id,
+                expected_revision=failed_plan.revision,
+                expected_plan_hash=failed_plan.plan_hash,
+            )
 
     def test_gap_fill_release_binds_resume_job_and_is_idempotent(self) -> None:
         repository = PostgresWorkflowAssistantRepository(self.engine)

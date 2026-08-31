@@ -697,7 +697,8 @@ export function WorkflowAssistantWorkspace() {
       && Boolean(String(step.output_summary.asset_id || "").trim()),
   ).length;
   const deliveryProjectIds = [...new Set(deliverySteps.map((step) => step.project_id))];
-  const batchDownloadReady = deliverySteps.length > 1
+  const batchDownloadReady = plan?.status === "completed"
+    && deliverySteps.length > 1
     && readyDeliveryCount === deliverySteps.length
     && deliveryProjectIds.length === 1;
   const waitingResearchSignature = useMemo(

@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -54,6 +56,7 @@ from workflow_assistant.http import (  # noqa: E402
     _merge_natural_language_revision,
     _normalize_explicit_revision_execution,
     _record_planner_usage,
+    create_plan_delivery_download,
 )
 from workflow_assistant.repository import (  # noqa: E402
     WorkflowAssistantConflict,
@@ -141,6 +144,62 @@ def make_plan(*, project_id: str = "project-a", action_kind: str = "list_tasks")
 
 
 class WorkflowAssistantContractTests(unittest.TestCase):
+    def test_batch_delivery_rejects_partial_plan_even_when_some_packages_are_ready(self) -> None:
+        ready_step = SimpleNamespace(
+            action_kind="package_delivery",
+            status="succeeded",
+            article_task_id="task-ready",
+            project_id="project-a",
+            output_summary={
+                "artifact_kind": "delivery_package",
+                "asset_id": "asset-ready",
+            },
+        )
+        failed_step = SimpleNamespace(
+            action_kind="package_delivery",
+            status="skipped",
+            article_task_id="task-failed",
+            project_id="project-a",
+            output_summary={},
+        )
+        plan = SimpleNamespace(
+            plan_id="plan-partial",
+            status="failed",
+            project_ids=("project-a",),
+            steps=(ready_step, failed_step),
+        )
+
+        class Repository:
+            def get_plan(self, **_kwargs):
+                return plan
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        with (
+            patch("workflow_assistant.http._feature_enabled"),
+            patch("workflow_assistant.http._repository", return_value=Repository()),
+            patch("workflow_assistant.http._reauthorize_plan_read"),
+        ):
+            with self.assertRaises(HTTPException) as context:
+                create_plan_delivery_download(
+                    "plan-partial",
+                    request,  # type: ignore[arg-type]
+                    actor=ActorIdentity("org-a", "user-a"),
+                )
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(
+            context.exception.detail["ready_count"],  # type: ignore[index]
+            1,
+        )
+        self.assertEqual(
+            context.exception.detail["total_count"],  # type: ignore[index]
+            2,
+        )
+        self.assertIn(
+            "禁止导出部分文章",
+            context.exception.detail["message"],  # type: ignore[index]
+        )
+
     def test_batch_quantity_parser_supports_single_project_chinese_request(self) -> None:
         self.assertEqual(
             _requested_article_counts(
