@@ -415,9 +415,16 @@ class ServerBatchDeliveryPackage:
                         )
 
                     topic_index = max(0, int(task.topic_index))
+                    try:
+                        website_folder = official_website_folder_name(
+                            source_project_id,
+                        )
+                    except DeliveryPackageError as exc:
+                        raise ServerDeliveryPackageError(
+                            f"delivery package has an invalid source project for task {task_id}"
+                        ) from exc
                     folder = (
-                        f"topic_{topic_index:03d}_"
-                        f"{_safe_batch_component(task_id, 'task')}"
+                        f"{website_folder}-topic_{topic_index:03d}"
                     )
                     base_folder = folder
                     suffix = 2

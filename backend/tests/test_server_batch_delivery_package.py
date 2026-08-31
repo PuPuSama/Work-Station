@@ -153,17 +153,21 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
             self.assertEqual(
                 names,
                 {
-                    "topic_001_task-a/Article-a.docx",
-                    "topic_001_task-a/D.docx",
-                    "topic_001_task-a/hero-a.webp",
-                    "topic_002_task-b/Article-b.docx",
-                    "topic_002_task-b/D.docx",
-                    "topic_002_task-b/hero-b.webp",
+                    "project-a-topic_001/Article-a.docx",
+                    "project-a-topic_001/D.docx",
+                    "project-a-topic_001/hero-a.webp",
+                    "project-b-topic_002/Article-b.docx",
+                    "project-b-topic_002/D.docx",
+                    "project-b-topic_002/hero-b.webp",
                     "manifest.json",
                 },
             )
             manifest = json.loads(archive.read("manifest.json"))
         self.assertEqual([item["task_id"] for item in manifest["items"]], ["task-a", "task-b"])
+        self.assertEqual(
+            [item["folder"] for item in manifest["items"]],
+            ["project-a-topic_001", "project-b-topic_002"],
+        )
         self.assertEqual(
             [item["project_id"] for item in manifest["items"]],
             ["project-a", "project-b"],
