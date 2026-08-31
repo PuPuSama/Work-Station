@@ -342,6 +342,11 @@ function workflowArticleCardStatus(
   if (statuses.includes("waiting_review")) return "waiting_review";
   if (statuses.includes("running") || statuses.includes("waiting_job")) return "running";
   if (statuses.includes("pending")) return "pending";
+  if (
+    packageStep?.status === "skipped"
+    && statuses.length
+    && statuses.every((status) => status === "succeeded" || status === "skipped")
+  ) return "skipped";
   if (statuses.length && statuses.every((status) => status === "skipped")) return "skipped";
   return "running";
 }
