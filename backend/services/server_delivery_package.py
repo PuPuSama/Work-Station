@@ -447,6 +447,7 @@ class ServerBatchDeliveryPackage:
                     used_folders.add(folder.casefold())
 
                     package_entry_names: set[str] = set()
+                    has_metadata = False
                     try:
                         source = ZipFile(BytesIO(stored.data))
                     except (BadZipFile, OSError, ValueError) as exc:
@@ -464,6 +465,8 @@ class ServerBatchDeliveryPackage:
                                     f"delivery package contains duplicate files for task {task_id}"
                                 )
                             package_entry_names.add(member_key)
+                            if member_key == DELIVERY_METADATA_FILENAME.casefold():
+                                has_metadata = True
                             if info.file_size > MAX_SERVER_DELIVERY_ZIP_BYTES:
                                 raise ServerDeliveryPackageError(
                                     f"delivery package contains an oversized file for task {task_id}"
@@ -496,6 +499,39 @@ class ServerBatchDeliveryPackage:
                                 f"{folder}/{member_name}",
                                 member_data,
                             )
+
+                    # Packages created before metadata support are still
+                    # valid source assets. Add the record while composing a
+                    # new batch archive so an old article becomes complete
+                    # on its next workflow-assistant download.
+                    if not has_metadata and isinstance(task, TaskRecord):
+                        metadata = build_delivery_metadata(
+                            task,
+                            article=current_article(task),
+                            project_id=source_project_id,
+                            delivery_filename=(
+                                task.delivery_package_filename
+                                or f"{website_folder}-topic_{topic_index:03d}.zip"
+                            ),
+                        )
+                        uncompressed_bytes += len(metadata)
+                        if (
+                            uncompressed_bytes
+                            > MAX_SERVER_BATCH_DELIVERY_ZIP_BYTES
+                        ):
+                            raise _BatchArchiveTooLarge(
+                                "batch delivery contains too much uncompressed content"
+                            )
+                        entry_count += 1
+                        if entry_count > MAX_SERVER_BATCH_DELIVERY_ENTRIES:
+                            raise ServerDeliveryPackageError(
+                                "batch delivery contains too many files"
+                            )
+                        _write_deterministic_zip_entry(
+                            archive,
+                            f"{folder}/{DELIVERY_METADATA_FILENAME}",
+                            metadata,
+                        )
 
                     manifest_items.append(
                         {

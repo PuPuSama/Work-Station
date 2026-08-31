@@ -19,6 +19,7 @@ from knowledge_agent.object_storage import (  # noqa: E402
     DELIVERY_ZIP_ARTIFACT_KIND,
     ProjectKnowledgeObject,
 )
+from models import TaskRecord  # noqa: E402
 from services.access_control import ActorIdentity  # noqa: E402
 from services.delivery_package import build_delivery_zip_bytes  # noqa: E402
 from services.server_delivery_package import (  # noqa: E402
@@ -101,6 +102,53 @@ def delivery_task(
 
 
 class ServerBatchDeliveryPackageTests(unittest.TestCase):
+    def test_adds_metadata_when_repacking_a_legacy_article_package(self) -> None:
+        objects = BatchDeliveryObjects()
+        package = build_delivery_zip_bytes(
+            article_docx=b"article",
+            article_filename="Article.docx",
+            tdk_docx=b"tdk",
+            images=[("hero.webp", b"image")],
+        )
+        package_hash = objects.add("legacy-package", package)
+        task = TaskRecord(
+            id="legacy-task",
+            week_folder="server",
+            customer="project-a",
+            topic_index=7,
+            topic="Legacy topic",
+            task_dir="/server/legacy-task",
+            final_article=(
+                "# Legacy title\n\n"
+                "Legacy article body with [Guide]"
+                "(https://example.com/guide)."
+            ),
+            delivery_package_asset_id="legacy-package",
+            delivery_package_content_hash=package_hash,
+            delivery_package_filename="project-a-topic_007.zip",
+            updated_at="2026-08-31T04:05:06+00:00",
+            created_at="2026-08-31T00:00:00+00:00",
+        )
+
+        ServerBatchDeliveryPackage(objects=objects).package(
+            actor=ActorIdentity("org-a", "user-a"),
+            project_id="anchor.example.com",
+            tasks=[task],
+            task_project_ids={"legacy-task": "project-a"},
+        )
+
+        with ZipFile(BytesIO(objects.archive)) as archive:
+            self.assertIn(
+                "project-a-topic_007/metadata.json",
+                archive.namelist(),
+            )
+            metadata = json.loads(
+                archive.read("project-a-topic_007/metadata.json")
+            )
+        self.assertEqual(metadata["title"], "Legacy title")
+        self.assertEqual(metadata["completion_date"], "2026-08-31")
+        self.assertEqual(metadata["anchor_text"], ["Guide"])
+
     def test_combines_completed_packages_into_task_folders(self) -> None:
         objects = BatchDeliveryObjects()
         package_a = build_delivery_zip_bytes(
