@@ -696,11 +696,19 @@ export function WorkflowAssistantWorkspace() {
       && step.output_summary.artifact_kind === "delivery_package"
       && Boolean(String(step.output_summary.asset_id || "").trim()),
   ).length;
-  const deliveryProjectIds = [...new Set(deliverySteps.map((step) => step.project_id))];
-  const batchDownloadReady = plan?.status === "completed"
-    && deliverySteps.length > 1
-    && readyDeliveryCount === deliverySteps.length
-    && deliveryProjectIds.length === 1;
+  const readyDeliveryProjectIds = [...new Set(
+    deliverySteps
+      .filter(
+        (step) => step.status === "succeeded"
+          && Boolean(step.article_task_id)
+          && step.output_summary.artifact_kind === "delivery_package"
+          && Boolean(String(step.output_summary.asset_id || "").trim()),
+      )
+      .map((step) => step.project_id),
+  )];
+  const batchDownloadReady = deliverySteps.length > 1
+    && readyDeliveryCount > 0
+    && readyDeliveryProjectIds.length === 1;
   const waitingResearchSignature = useMemo(
     () => waitingResearchSteps
       .map((step) => `${step.step_id}:${step.project_id}:${researchThreadId(step)}`)
@@ -1240,7 +1248,7 @@ export function WorkflowAssistantWorkspace() {
               {plan ? <div className="grid gap-4">
                  <div><p className="font-medium">{plan.title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}</p></div>
                  {!planPreviewExpanded && <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">步骤详情已收起；当前计划包含 {plan.steps.length} 个步骤。点击上方“展开步骤”查看执行顺序和每一步的状态。</div>}
-                 {deliverySteps.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed bg-muted/20 p-3"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium">批量交付下载</p><p className="mt-1 text-xs text-muted-foreground">{deliveryProjectIds.length > 1 ? "当前计划跨多个项目，请分别下载各项目交付包。" : `已准备 ${readyDeliveryCount}/${deliverySteps.length} 篇；全部完成后可一键下载。`}</p></div><Button type="button" size="sm" variant="outline" onClick={() => void downloadBatchDelivery()} disabled={!batchDownloadReady || batchArtifactPending}>{batchArtifactPending ? <Loader2 className="animate-spin" /> : <Download />}{batchDownloadReady ? `一键下载 ${deliverySteps.length} 篇` : `批量下载 ${readyDeliveryCount}/${deliverySteps.length}`}</Button></div></div>}
+                 {deliverySteps.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed bg-muted/20 p-3"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium">批量交付下载</p><p className="mt-1 text-xs text-muted-foreground">{readyDeliveryProjectIds.length > 1 ? "成功文章跨多个项目，请分别下载各项目交付包。" : readyDeliveryCount > 0 ? `已成功 ${readyDeliveryCount}/${deliverySteps.length} 篇；批量下载只包含成功文章。` : "暂无成功文章可批量下载。"}</p></div><Button type="button" size="sm" variant="outline" onClick={() => void downloadBatchDelivery()} disabled={!batchDownloadReady || batchArtifactPending}>{batchArtifactPending ? <Loader2 className="animate-spin" /> : <Download />}{batchDownloadReady ? `下载成功的 ${readyDeliveryCount} 篇` : `批量下载 ${readyDeliveryCount}/${deliverySteps.length}`}</Button></div></div>}
                  {planPreviewExpanded && <div className="max-h-[min(60vh,720px)] overflow-auto rounded-lg border bg-muted/10 p-2">
                 <ol className="grid gap-2">
                   {plan.steps.map((step) => {

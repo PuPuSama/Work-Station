@@ -144,7 +144,7 @@ def make_plan(*, project_id: str = "project-a", action_kind: str = "list_tasks")
 
 
 class WorkflowAssistantContractTests(unittest.TestCase):
-    def test_batch_delivery_rejects_partial_plan_even_when_some_packages_are_ready(self) -> None:
+    def test_batch_delivery_packages_only_ready_steps_from_partial_plan(self) -> None:
         ready_step = SimpleNamespace(
             action_kind="package_delivery",
             status="succeeded",
@@ -173,6 +173,102 @@ class WorkflowAssistantContractTests(unittest.TestCase):
             def get_plan(self, **_kwargs):
                 return plan
 
+        class Access:
+            def require(self, actor, project_id, permission):
+                self.last_call = (actor, project_id, permission)
+
+        class Context:
+            def __init__(self):
+                self.access = Access()
+
+        class Store:
+            def get(self, task_id):
+                self.last_task_id = task_id
+                if task_id != "task-ready":
+                    raise AssertionError(f"unexpected task lookup: {task_id}")
+                return SimpleNamespace(
+                    id="task-ready",
+                    delivery_package_asset_id="asset-ready",
+                )
+
+        class Runtime:
+            def __init__(self):
+                self.store = Store()
+
+        class Factory:
+            def create(self, _request):
+                return Runtime()
+
+        class Objects:
+            def read_for_article_delivery(self, **_kwargs):
+                raise AssertionError("article packages should be read by the batch packer")
+
+            def create_delivery_zip_download_url(self, **_kwargs):
+                return "https://download.invalid/batch.zip"
+
+        class BatchPacker:
+            def __init__(self):
+                self.calls = []
+
+            def package(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(asset_id="batch-asset", content_hash="batch-hash")
+
+        batch_packer = BatchPacker()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    server_project_task_store_factory=Factory(),
+                    server_project_object_service=Objects(),
+                )
+            )
+        )
+        context = Context()
+        with (
+            patch("workflow_assistant.http._feature_enabled"),
+            patch("workflow_assistant.http._repository", return_value=Repository()),
+            patch("workflow_assistant.http._reauthorize_plan_read"),
+            patch("workflow_assistant.http._context", return_value=context),
+            patch(
+                "workflow_assistant.http.ServerBatchDeliveryPackage",
+                return_value=batch_packer,
+            ),
+        ):
+            response = create_plan_delivery_download(
+                "plan-partial",
+                request,  # type: ignore[arg-type]
+                expires_seconds=300,
+                actor=ActorIdentity("org-a", "user-a"),
+            )
+
+        self.assertEqual(response.file_count, 1)
+        self.assertEqual(response.asset_id, "batch-asset")
+        self.assertEqual(len(batch_packer.calls), 1)
+        self.assertEqual(
+            [task.id for task in batch_packer.calls[0]["tasks"]],
+            ["task-ready"],
+        )
+
+    def test_batch_delivery_rejects_when_no_successful_package_exists(self) -> None:
+        plan = SimpleNamespace(
+            plan_id="plan-empty",
+            status="failed",
+            project_ids=("project-a",),
+            steps=(
+                SimpleNamespace(
+                    action_kind="package_delivery",
+                    status="failed",
+                    article_task_id="task-failed",
+                    project_id="project-a",
+                    output_summary={},
+                ),
+            ),
+        )
+
+        class Repository:
+            def get_plan(self, **_kwargs):
+                return plan
+
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
         with (
             patch("workflow_assistant.http._feature_enabled"),
@@ -181,24 +277,15 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         ):
             with self.assertRaises(HTTPException) as context:
                 create_plan_delivery_download(
-                    "plan-partial",
+                    "plan-empty",
                     request,  # type: ignore[arg-type]
                     actor=ActorIdentity("org-a", "user-a"),
                 )
 
         self.assertEqual(context.exception.status_code, 409)
-        self.assertEqual(
-            context.exception.detail["ready_count"],  # type: ignore[index]
-            1,
-        )
-        self.assertEqual(
-            context.exception.detail["total_count"],  # type: ignore[index]
-            2,
-        )
-        self.assertIn(
-            "禁止导出部分文章",
-            context.exception.detail["message"],  # type: ignore[index]
-        )
+        self.assertEqual(context.exception.detail["ready_count"], 0)  # type: ignore[index]
+        self.assertEqual(context.exception.detail["total_count"], 1)  # type: ignore[index]
+        self.assertIn("没有已成功并可下载", context.exception.detail["message"])  # type: ignore[index]
 
     def test_batch_quantity_parser_supports_single_project_chinese_request(self) -> None:
         self.assertEqual(

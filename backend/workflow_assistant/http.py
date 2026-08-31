@@ -1767,7 +1767,7 @@ def create_plan_delivery_download(
     expires_seconds: int = Query(default=300, ge=30, le=3600),
     actor: ActorIdentity = Depends(require_server_actor),
 ) -> WorkflowAssistantBatchDownloadResponse:
-    """Create one download URL for all completed packages in one project."""
+    """Create one download URL for the completed packages in one project."""
 
     _feature_enabled(request)
     try:
@@ -1785,29 +1785,35 @@ def create_plan_delivery_download(
                 detail="当前计划没有可批量下载的交付包。",
             )
 
-        # A batch ZIP is an all-or-nothing delivery artifact.  Even if every
-        # package step happens to be ready, a plan that is still running,
-        # waiting for review, or failed must not expose a partial snapshot.
-        if plan.status != "completed":
-            ready_count = sum(
+        # A partial plan is still allowed to produce a useful delivery ZIP.
+        # Keep only package steps with a verified delivery asset; failed or
+        # unfinished article lanes must not prevent successful articles from
+        # being downloaded together.
+        ready_package_steps = [
+            step
+            for step in package_steps
+            if (
                 step.status == "succeeded"
                 and bool(step.article_task_id)
                 and str(step.output_summary.get("artifact_kind") or "")
                 == "delivery_package"
                 and bool(str(step.output_summary.get("asset_id") or "").strip())
-                for step in package_steps
             )
+        ]
+        if not ready_package_steps:
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "message": "计划尚未完整完成，禁止导出部分文章。",
-                    "ready_count": ready_count,
+                    "message": "当前计划没有已成功并可下载的文章。",
+                    "ready_count": 0,
                     "total_count": len(package_steps),
                 },
             )
 
         package_project_ids = {
-            step.project_id.strip() for step in package_steps if step.project_id.strip()
+            step.project_id.strip()
+            for step in ready_package_steps
+            if step.project_id.strip()
         }
         if len(package_project_ids) != 1:
             raise HTTPException(
@@ -1816,30 +1822,6 @@ def create_plan_delivery_download(
             )
         project_id = next(iter(package_project_ids))
         _context(request).access.require(actor, project_id, "article.deliver")
-
-        incomplete_steps = [
-            step
-            for step in package_steps
-            if (
-                step.status != "succeeded"
-                or not step.article_task_id
-                or str(step.output_summary.get("artifact_kind") or "")
-                != "delivery_package"
-                or not str(step.output_summary.get("asset_id") or "").strip()
-            )
-        ]
-        if incomplete_steps:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": (
-                        f"批量交付包尚未全部完成（已完成 "
-                        f"{len(package_steps) - len(incomplete_steps)}/{len(package_steps)}）。"
-                    ),
-                    "ready_count": len(package_steps) - len(incomplete_steps),
-                    "total_count": len(package_steps),
-                },
-            )
 
         factory = getattr(
             request.app.state,
@@ -1868,7 +1850,7 @@ def create_plan_delivery_download(
 
         tasks = []
         seen_task_ids: set[str] = set()
-        for step in package_steps:
+        for step in ready_package_steps:
             task_id = str(step.article_task_id or "").strip()
             if not task_id or task_id in seen_task_ids:
                 raise HTTPException(
