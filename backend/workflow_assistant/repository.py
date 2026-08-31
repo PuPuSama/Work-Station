@@ -158,6 +158,7 @@ class WorkflowPlanStep:
     input_summary: dict[str, Any]
     output_summary: dict[str, Any]
     standardized_error_code: str | None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3448,6 +3449,7 @@ class PostgresWorkflowAssistantRepository:
             input_summary=_json_dict(row["input_summary"]),
             output_summary=_json_dict(row["output_summary"]),
             standardized_error_code=(str(row["standardized_error_code"]) if row["standardized_error_code"] else None),
+            updated_at=row["updated_at"],
         )
 
     @staticmethod

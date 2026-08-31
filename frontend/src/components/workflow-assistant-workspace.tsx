@@ -8,6 +8,7 @@ import {
   ChevronDown,
   CircleDot,
   Download,
+  ExternalLink,
   Loader2,
   MessageSquareText,
   Pause,
@@ -24,7 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -32,6 +33,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
@@ -45,7 +53,6 @@ import {
 import type {
   AccessibleProject,
   AuthStatus,
-  ProjectAssetDownload,
   ResearchRunDetail,
   TaskRecord,
   WorkflowAssistantConversation,
@@ -69,41 +76,6 @@ const statusLabels: Record<WorkflowAssistantPlan["status"], string> = {
   paused: "已暂停",
   completed: "已完成",
   failed: "执行失败",
-  cancelled: "已取消",
-};
-
-const actionLabels: Record<string, string> = {
-  list_projects: "读取项目目录",
-  list_tasks: "读取文章任务",
-  read_project_context: "读取项目上下文",
-  evidence_query: "查询项目证据",
-  read_plan_status: "读取计划状态",
-  update_project_notes: "更新项目注意事项",
-  create_task: "创建文章任务",
-  generate_titles: "生成标题",
-  select_title: "选择标题",
-  generate_products: "生成产品候选",
-  confirm_products: "确认产品",
-  generate_outline: "生成大纲",
-  start_research: "启动研究",
-  generate_article: "生成正文",
-  humanize: "自动人化",
-  review: "复检文章",
-  restore_links: "恢复链接",
-  prepare_images: "准备文章图片",
-  export_docx: "导出 DOCX",
-  generate_tdk: "生成 TDK",
-  package_delivery: "生成交付包",
-};
-
-const stepStatusLabels: Record<string, string> = {
-  pending: "待执行",
-  running: "执行中",
-  waiting_job: "等待 Job",
-  waiting_review: "等待人工确认",
-  succeeded: "已完成",
-  failed: "失败",
-  skipped: "已跳过",
   cancelled: "已取消",
 };
 
@@ -310,28 +282,192 @@ function statusVariant(status: WorkflowAssistantPlan["status"]): "default" | "ou
   return "default";
 }
 
-const artifactDownloadEndpoints = {
-  docx: { endpoint: "docx/download", label: "下载 Word" },
-  tdk: { endpoint: "tdk/download", label: "下载 D.docx" },
-  delivery_package: { endpoint: "delivery-package/download", label: "下载交付 ZIP" },
-} as const;
-
-function stepResultNote(step: WorkflowAssistantStep): string {
-  if (
-    step.action_kind === "humanize"
-    && step.status === "skipped"
-    && step.output_summary.skip_reason === "initial_ai_rate_below_threshold"
-  ) {
-    return "初检 AI 率低于 30%，已跳过降 AI 和二次检测。";
-  }
-  return "";
-}
-
 function isReadyDeliveryStep(step: WorkflowAssistantStep): boolean {
   return step.status === "succeeded"
     && Boolean(step.article_task_id)
     && step.output_summary.artifact_kind === "delivery_package"
     && Boolean(String(step.output_summary.asset_id || "").trim());
+}
+
+type WorkflowArticleCardStatus =
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "waiting_review"
+  | "running"
+  | "pending"
+  | "skipped";
+
+type WorkflowArticleCard = {
+  key: string;
+  projectId: string;
+  taskId: string | null;
+  title: string;
+  status: WorkflowArticleCardStatus;
+  progress: number;
+  total: number;
+  updatedAt: string | null;
+  packageReady: boolean;
+  errorCode: string | null;
+};
+
+function stepSummaryText(
+  summary: Record<string, unknown>,
+  ...keys: string[]
+): string {
+  for (const key of keys) {
+    const value = summary[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function workflowArticleLaneKey(step: WorkflowAssistantStep): string {
+  const taskId = step.article_task_id?.trim();
+  if (taskId) return `${step.project_id}:task:${taskId}`;
+  const createTaskStepId = stepSummaryText(step.input_summary, "create_task_step_id");
+  if (createTaskStepId) return `${step.project_id}:create:${createTaskStepId}`;
+  if (step.action_kind === "create_task") return `${step.project_id}:create:${step.step_id}`;
+  return `${step.project_id}:step:${step.step_id}`;
+}
+
+function workflowArticleCardStatus(
+  steps: WorkflowAssistantStep[],
+  packageStep: WorkflowAssistantStep | undefined,
+): WorkflowArticleCardStatus {
+  if (packageStep && isReadyDeliveryStep(packageStep)) return "completed";
+  const statuses = steps.map((step) => step.status);
+  if (statuses.includes("failed")) return "failed";
+  if (statuses.includes("cancelled")) return "cancelled";
+  if (statuses.includes("waiting_review")) return "waiting_review";
+  if (statuses.includes("running") || statuses.includes("waiting_job")) return "running";
+  if (statuses.includes("pending")) return "pending";
+  if (statuses.length && statuses.every((status) => status === "skipped")) return "skipped";
+  return "running";
+}
+
+const workflowArticleCardStatusLabels: Record<WorkflowArticleCardStatus, string> = {
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  waiting_review: "待人工处理",
+  running: "执行中",
+  pending: "待执行",
+  skipped: "已跳过",
+};
+
+const workflowArticleCardStatusVariants: Record<
+  WorkflowArticleCardStatus,
+  "default" | "outline" | "secondary" | "destructive"
+> = {
+  completed: "secondary",
+  failed: "destructive",
+  cancelled: "outline",
+  waiting_review: "outline",
+  running: "default",
+  pending: "default",
+  skipped: "outline",
+};
+
+function workflowArticleCardTitle(
+  steps: WorkflowAssistantStep[],
+  taskId: string | null,
+  index: number,
+  fallbackTitle: string,
+): string {
+  for (const step of steps) {
+    const value = stepSummaryText(
+      step.output_summary,
+      "selected_title",
+      "title",
+    ) || stepSummaryText(step.input_summary, "title", "topic", "primary_keyword");
+    if (value) return value.slice(0, 180);
+  }
+  if (fallbackTitle) return fallbackTitle.slice(0, 180);
+  return taskId ? `文章 ${taskId}` : `文章 ${index + 1}`;
+}
+
+function workflowArticleCardUpdatedAt(
+  steps: WorkflowAssistantStep[],
+): string | null {
+  const timestamps = steps
+    .map((step) => step.updated_at)
+    .filter((value): value is string => Boolean(value));
+  if (!timestamps.length) return null;
+  timestamps.sort();
+  return timestamps[timestamps.length - 1];
+}
+
+function buildWorkflowArticleCards(
+  plan: WorkflowAssistantPlan,
+  taskTopics: ReadonlyMap<string, string> = new Map(),
+): WorkflowArticleCard[] {
+  const packageSteps = plan.steps.filter((step) => step.action_kind === "package_delivery");
+  const sourceSteps = packageSteps.length
+    ? packageSteps
+    : plan.steps.filter((step) => step.action_kind === "create_task" || Boolean(step.article_task_id));
+  const seenKeys = new Set<string>();
+  const cards: WorkflowArticleCard[] = [];
+
+  sourceSteps.forEach((sourceStep, index) => {
+    const key = workflowArticleLaneKey(sourceStep);
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    const sourceTaskId = sourceStep.article_task_id?.trim() || null;
+    const createTaskStepId = stepSummaryText(sourceStep.input_summary, "create_task_step_id");
+    const relatedSteps = plan.steps.filter((candidate) => {
+      if (candidate.project_id !== sourceStep.project_id) return false;
+      if (sourceTaskId && candidate.article_task_id === sourceTaskId) return true;
+      if (createTaskStepId) {
+        return candidate.step_id === createTaskStepId
+          || stepSummaryText(candidate.input_summary, "create_task_step_id") === createTaskStepId;
+      }
+      return workflowArticleLaneKey(candidate) === key;
+    });
+    const steps = relatedSteps.length ? relatedSteps : [sourceStep];
+    const taskId = sourceTaskId
+      || steps.find((step) => step.article_task_id)?.article_task_id?.trim()
+      || null;
+    const taskTopic = taskId
+      ? taskTopics.get(`${sourceStep.project_id}:${taskId}`) || ""
+      : "";
+    const packageStep = sourceStep.action_kind === "package_delivery"
+      ? sourceStep
+      : packageSteps.find((step) => {
+        if (taskId && step.article_task_id === taskId) return true;
+        return step.project_id === sourceStep.project_id
+          && createTaskStepId
+          && stepSummaryText(step.input_summary, "create_task_step_id") === createTaskStepId;
+      });
+    const status = workflowArticleCardStatus(steps, packageStep);
+    const errorStep = steps.find((step) => step.status === "failed" || step.status === "cancelled");
+    cards.push({
+      key,
+      projectId: sourceStep.project_id,
+      taskId,
+      title: workflowArticleCardTitle(steps, taskId, index, taskTopic),
+      status,
+      progress: steps.filter((step) => step.status === "succeeded" || step.status === "skipped").length,
+      total: steps.length,
+      updatedAt: workflowArticleCardUpdatedAt(steps),
+      packageReady: Boolean(packageStep && isReadyDeliveryStep(packageStep)),
+      errorCode: errorStep?.standardized_error_code || null,
+    });
+  });
+
+  return cards;
+}
+
+function formatWorkflowArticleCardTime(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 type ScopedTask = TaskRecord & { project_id: string };
@@ -353,9 +489,8 @@ export function WorkflowAssistantWorkspace() {
   const [pending, setPending] = useState(false);
   const [requestPhase, setRequestPhase] = useState<AssistantRequestPhase>("idle");
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
-  const [planPreviewExpanded, setPlanPreviewExpanded] = useState(false);
+  const [planDetailsOpen, setPlanDetailsOpen] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
-  const [artifactPending, setArtifactPending] = useState("");
   const [batchArtifactPending, setBatchArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlanSummary[]>([]);
@@ -702,14 +837,17 @@ export function WorkflowAssistantWorkspace() {
     [deliverySteps],
   );
   const readyDeliveryCount = readyDeliverySteps.length;
-  const readyDeliveryProjectIds = [...new Set(readyDeliverySteps.map((step) => step.project_id))];
-  const readyDeliveryCountByProject = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const step of readyDeliverySteps) {
-      counts.set(step.project_id, (counts.get(step.project_id) || 0) + 1);
-    }
-    return counts;
-  }, [readyDeliverySteps]);
+  const readyDeliveryProjectCount = new Set(
+    readyDeliverySteps.map((step) => step.project_id),
+  ).size;
+  const taskTopics = useMemo(
+    () => new Map(tasks.map((task) => [`${task.project_id}:${task.id}`, task.topic] as const)),
+    [tasks],
+  );
+  const articleCards = useMemo(
+    () => (plan ? buildWorkflowArticleCards(plan, taskTopics) : []),
+    [plan, taskTopics],
+  );
   const waitingResearchSignature = useMemo(
     () => waitingResearchSteps
       .map((step) => `${step.step_id}:${step.project_id}:${researchThreadId(step)}`)
@@ -764,7 +902,7 @@ export function WorkflowAssistantWorkspace() {
       setConversations((current) => [created, ...current]);
       setSelectedConversation(created);
       setPlan(null);
-      setPlanPreviewExpanded(false);
+      setPlanDetailsOpen(false);
     } catch (nextError) {
       setError(messageText(nextError));
     } finally {
@@ -777,7 +915,7 @@ export function WorkflowAssistantWorkspace() {
     if (!content || pending) return;
     setPending(true);
     setRequestPhase("sending");
-    setPlanPreviewExpanded(false);
+    setPlanDetailsOpen(false);
     setError("");
     let dispatchConversation: WorkflowAssistantConversation | null = selectedConversation;
     let previousPlanId: string | null = null;
@@ -848,7 +986,7 @@ export function WorkflowAssistantWorkspace() {
         pendingMessageDispatchRef.current = null;
         if (recovered.plan) {
           setPlan(recovered.plan);
-          setPlanPreviewExpanded(false);
+          setPlanDetailsOpen(false);
         }
         setDraft("");
         setPendingUserMessage(null);
@@ -872,7 +1010,7 @@ export function WorkflowAssistantWorkspace() {
       setRequestPhase("refreshing");
       if (response.plan) {
         setPlan(response.plan);
-        setPlanPreviewExpanded(false);
+        setPlanDetailsOpen(false);
       }
       void refreshAttention().catch(() => undefined);
       setDraft("");
@@ -898,7 +1036,7 @@ export function WorkflowAssistantWorkspace() {
           setError("");
           if (recovered.plan) {
             setPlan(recovered.plan);
-            setPlanPreviewExpanded(false);
+            setPlanDetailsOpen(false);
           }
           setDraft("");
           setPendingUserMessage(null);
@@ -998,7 +1136,7 @@ export function WorkflowAssistantWorkspace() {
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
       setPlan(next);
-      setPlanPreviewExpanded(false);
+      setPlanDetailsOpen(false);
       setRevisionDraft("");
       void refreshAttention().catch(() => undefined);
     } catch (nextError) {
@@ -1008,51 +1146,19 @@ export function WorkflowAssistantWorkspace() {
     }
   }
 
-  async function downloadArtifact(step: WorkflowAssistantStep) {
-    const artifactKind = step.output_summary.artifact_kind;
-    if (
-      typeof artifactKind !== "string" ||
-      !(artifactKind in artifactDownloadEndpoints) ||
-      !step.article_task_id
-    ) {
-      return;
-    }
-    const artifact = artifactDownloadEndpoints[artifactKind as keyof typeof artifactDownloadEndpoints];
-    const key = `${step.step_id}:${artifactKind}`;
-    setArtifactPending(key);
-    setError("");
-    try {
-      const download = await apiGet<ProjectAssetDownload>(
-        `/api/projects/${encodeURIComponent(step.project_id)}/tasks/${encodeURIComponent(step.article_task_id)}/${artifact.endpoint}`,
-        30_000,
-      );
-      if (!download.url) throw new Error("服务器没有返回可用的短期下载地址。");
-      const fallback = artifactKind === "tdk"
-        ? "D.docx"
-        : artifactKind === "delivery_package"
-          ? "delivery.zip"
-          : "article.docx";
-      triggerBrowserDownload(download.url, download.filename || fallback);
-    } catch (nextError) {
-      setError(messageText(nextError));
-    } finally {
-      setArtifactPending("");
-    }
-  }
-
-  async function downloadBatchDelivery(projectId: string) {
-    if (!plan || !projectId || !readyDeliveryProjectIds.includes(projectId) || batchArtifactPending) return;
-    setBatchArtifactPending(projectId);
+  async function downloadBatchDelivery() {
+    if (!plan || !readyDeliveryCount || batchArtifactPending) return;
+    setBatchArtifactPending("all");
     setError("");
     try {
       const download = await apiGet<WorkflowAssistantBatchDownload>(
-        `/api/workflow-assistant/plans/${encodeURIComponent(plan.plan_id)}/delivery-package/download?project_id=${encodeURIComponent(projectId)}`,
+        `/api/workflow-assistant/plans/${encodeURIComponent(plan.plan_id)}/delivery-package/download`,
         30_000,
       );
       if (!download.url) throw new Error("服务器没有返回可用的批量下载地址。");
       triggerBrowserDownload(
         download.url,
-        download.filename || "batch-delivery.zip",
+        download.filename || "workflow-batch-delivery.zip",
       );
     } catch (nextError) {
       setError(messageText(nextError, plan));
@@ -1080,7 +1186,7 @@ export function WorkflowAssistantWorkspace() {
       loadedConversationRef.current = freshPlan.conversation_id;
       activePlanIdRef.current = freshPlan.plan_id;
       setPlan(freshPlan);
-      setPlanPreviewExpanded(false);
+      setPlanDetailsOpen(false);
       try {
         if (!conversation) throw new Error("conversation expired");
         setSelectedConversation(conversation);
@@ -1244,32 +1350,60 @@ export function WorkflowAssistantWorkspace() {
             </CardContent>
           </Card>}
           <Card className="gap-0 py-0">
-            <CardHeader className="border-b px-4 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-base">计划预览</CardTitle><CardDescription className="mt-1">确认后才会进入写操作队列。</CardDescription></div><div className="flex items-center gap-2">{plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}{plan && <Button type="button" variant="outline" size="sm" className="min-h-9" aria-expanded={planPreviewExpanded} aria-controls="workflow-plan-details" onClick={() => setPlanPreviewExpanded((current) => !current)}><ChevronDown className={`size-4 transition-transform duration-200 ${planPreviewExpanded ? "rotate-180" : ""}`} />{planPreviewExpanded ? "收起步骤" : `展开 ${plan.steps.length} 个步骤`}</Button>}</div></div></CardHeader>
+            <CardHeader className="border-b px-4 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <CardTitle className="text-base">计划预览</CardTitle>
+                  <CardDescription className="mt-1">确认后才会进入写操作队列。</CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  {plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}
+                  {plan && <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="min-h-9"
+                    aria-haspopup="dialog"
+                    onClick={() => setPlanDetailsOpen(true)}
+                  >
+                    <Workflow />查看 {articleCards.length ? `${articleCards.length} 篇文章` : "文章概览"}
+                  </Button>}
+                </div>
+              </div>
+            </CardHeader>
             <CardContent id="workflow-plan-details" className="px-4 py-4">
               {plan ? <div className="grid gap-4">
-                 <div><p className="font-medium">{plan.title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}</p></div>
-                 {!planPreviewExpanded && <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">步骤详情已收起；当前计划包含 {plan.steps.length} 个步骤。点击上方“展开步骤”查看执行顺序和每一步的状态。</div>}
-                 {deliverySteps.length > 1 && <div className="grid gap-3 rounded-lg border border-dashed bg-muted/20 p-3"><div><p className="text-sm font-medium">批量交付下载</p><p className="mt-1 text-xs text-muted-foreground">{readyDeliveryCount > 0 ? `已成功 ${readyDeliveryCount}/${deliverySteps.length} 篇；按项目分别下载成功文章。` : "暂无成功文章可批量下载。"}</p></div>{readyDeliveryProjectIds.length > 0 && <div className="flex flex-wrap gap-2">{readyDeliveryProjectIds.map((projectId) => { const count = readyDeliveryCountByProject.get(projectId) || 0; return <Button key={projectId} type="button" size="sm" variant="outline" aria-label={`下载 ${projectId} 成功文章`} onClick={() => void downloadBatchDelivery(projectId)} disabled={Boolean(batchArtifactPending)}>{batchArtifactPending === projectId ? <Loader2 className="animate-spin" /> : <Download />}下载 {projectId}（{count} 篇）</Button>; })}</div>}</div>}
-                 {planPreviewExpanded && <div className="max-h-[min(60vh,720px)] overflow-auto rounded-lg border bg-muted/10 p-2">
-                <ol className="grid gap-2">
-                  {plan.steps.map((step) => {
-                    const artifactKind = typeof step.output_summary.artifact_kind === "string" ? step.output_summary.artifact_kind : "";
-                    const artifact = artifactKind in artifactDownloadEndpoints ? artifactDownloadEndpoints[artifactKind as keyof typeof artifactDownloadEndpoints] : null;
-                    const artifactKey = `${step.step_id}:${artifactKind}`;
-                    const pendingAiConfirmation = step.output_summary.pending_ai_confirmation === true;
-                    const researchReviewRequired = step.action_kind === "start_research" && step.status === "waiting_review";
-                    const plannedTopic = typeof step.input_summary.topic === "string" ? step.input_summary.topic : "";
-                    const previousProjectNotes = typeof step.input_summary.previous_project_notes === "string"
-                      ? step.input_summary.previous_project_notes
-                      : "";
-                    const proposedProjectNotes = typeof step.input_summary.project_notes === "string"
-                      ? step.input_summary.project_notes
-                      : "";
-                    const projectNotesChange = step.action_kind === "update_project_notes";
-                     const resultNote = stepResultNote(step);
-                     return <li key={step.step_id} className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm"><span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span><span className="min-w-0 flex-1"><span className="flex items-center gap-2 font-medium"><span>{actionLabels[step.action_kind] || step.action_kind}</span><Badge variant="outline">{stepStatusLabels[step.status] || step.status}</Badge>{researchReviewRequired && <Badge variant="outline">待审查研究来源</Badge>}{pendingAiConfirmation && <Badge variant="outline">待确认交付包</Badge>}</span><span className="block text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" && plannedTopic ? ` · 主题：${plannedTopic}` : ""}{step.background_job_id ? ` · Job ${step.background_job_id}` : ""}{step.retry_count ? ` · 重试 ${step.retry_count}` : ""}{step.hard_gate && !step.human_gate_confirmed ? " · 需要人工确认" : ""}{step.standardized_error_code ? ` · ${step.standardized_error_code}` : ""}</span>{projectNotesChange && <div className="mt-2 grid gap-2 rounded-md border bg-muted/20 p-2 text-xs"><div><span className="font-medium">修改前</span><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-muted-foreground">{previousProjectNotes || "（空）"}</pre></div><div><span className="font-medium">确认后</span><pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap">{proposedProjectNotes || "（空）"}</pre></div></div>}{resultNote && <span className="mt-1 block text-xs font-medium text-emerald-700">{resultNote}</span>}{Object.keys(step.output_summary).length > 0 && <span className="mt-1 block truncate text-xs text-muted-foreground">结果：{JSON.stringify(step.output_summary)}</span>}<span className="flex flex-wrap gap-2">{artifact && step.article_task_id && <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void downloadArtifact(step)} disabled={Boolean(artifactPending)}>{artifactPending === artifactKey ? <Loader2 className="animate-spin" /> : <Download />}{artifact.label}</Button>}{researchReviewRequired && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=outline`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开研究候选审查</Link>}{pendingAiConfirmation && step.article_task_id && <Link href={`/projects/${encodeURIComponent(step.project_id)}/articles/${encodeURIComponent(step.article_task_id)}?step=review`} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-2" })}>打开文章工作台并提交人工截图</Link>}</span></span></li>;
-                  })}
-                </ol>
+                <div>
+                  <p className="font-medium">{plan.title}</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
+                  文章概览已移到右上方的二级窗口；每张卡片显示项目、状态、处理进度和完成时间。
+                </div>
+                {deliverySteps.length > 0 && <div className="grid gap-3 rounded-lg border border-dashed bg-muted/20 p-3">
+                  <div>
+                    <p className="text-sm font-medium">批量交付下载</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {readyDeliveryCount > 0
+                        ? `已成功 ${readyDeliveryCount}/${deliverySteps.length} 篇，来自 ${readyDeliveryProjectCount} 个项目；一键合并为一个 ZIP，失败或未完成文章会自动跳过。`
+                        : "暂无成功文章可打包下载；失败或未完成文章会自动跳过。"}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="justify-self-start"
+                    aria-label={`一键下载成功的 ${readyDeliveryCount} 篇文章`}
+                    onClick={() => void downloadBatchDelivery()}
+                    disabled={!readyDeliveryCount || Boolean(batchArtifactPending)}
+                  >
+                    {batchArtifactPending === "all" ? <Loader2 className="animate-spin" /> : <Download />}
+                    {batchArtifactPending === "all" ? "正在打包…" : `一键下载成功的 ${readyDeliveryCount} 篇`}
+                  </Button>
+                </div>}
                 {gapFillEnabled && waitingResearchSteps.map((step) => {
                   const detail = researchDetails[step.step_id];
                   const reviewCandidates = detail ? gapFillReviewCandidates(detail) : [];
@@ -1332,7 +1466,6 @@ export function WorkflowAssistantWorkspace() {
                     <AlertDescription>队列状态：{status}。研究完成后，原计划会继续执行未完成步骤。</AlertDescription>
                   </Alert>
                 ))}
-                </div>}
                 {plan.status === "awaiting_confirmation" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消计划</Button></div>}
                 {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
                 {plan.status === "queued" || plan.status === "running" ? <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}><Pause />暂停</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div> : null}
@@ -1341,8 +1474,68 @@ export function WorkflowAssistantWorkspace() {
                 {plan.status === "failed" && <div className="grid gap-2 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3"><div className="text-sm text-muted-foreground">已完成的步骤不会重复执行，只会重新排队失败步骤及同一篇文章被阻断的后续步骤。</div><Button type="button" variant="outline" className="justify-self-start" onClick={() => void changePlan("retry")} disabled={pending}><RotateCcw />重试失败步骤</Button></div>}
                 {["draft", "awaiting_confirmation", "paused", "waiting_review", "failed"].includes(plan.status) && <div className="grid gap-2 rounded-lg border border-dashed p-3"><Label htmlFor="workflow-plan-revision">调整未完成步骤</Label><Textarea id="workflow-plan-revision" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} placeholder="例如：保留已完成步骤，只把未完成正文改成面向采购团队。" rows={3} disabled={revisionPending || pending} /><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">会生成新的 Revision，并要求重新确认。</span><Button type="button" variant="outline" onClick={() => void revisePlan()} disabled={revisionPending || pending || !revisionDraft.trim()}>{revisionPending ? <Loader2 className="animate-spin" /> : <Workflow />}生成修订预览</Button></div></div>}
               </div> : <div className="py-10 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
-            </CardContent>
-          </Card>
+           </CardContent>
+           </Card>
+          {plan && <Dialog open={planDetailsOpen} onOpenChange={setPlanDetailsOpen}>
+            <DialogContent className="h-[min(760px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
+              <DialogHeader className="border-b px-5 py-4 pr-12">
+                <DialogTitle>文章执行概览</DialogTitle>
+                <DialogDescription>
+                  {plan.title} · {articleCards.length} 篇文章 · 成功 {readyDeliveryCount} 篇；点击卡片右上角可在新标签页打开文章工作台。
+                </DialogDescription>
+              </DialogHeader>
+              <div className="min-h-0 overflow-y-auto px-5 py-4">
+                {articleCards.length ? <div className="grid gap-3 sm:grid-cols-2">
+                  {articleCards.map((card) => {
+                    const workbenchHref = card.taskId
+                      ? `/projects/${encodeURIComponent(card.projectId)}/articles/${encodeURIComponent(card.taskId)}?step=review`
+                      : null;
+                    const timeLabel = card.status === "completed" ? "完成时间" : "最近更新";
+                    return (
+                      <article key={card.key} className="rounded-xl border bg-background p-3 shadow-xs">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold" title={card.title}>{card.title}</p>
+                            <p className="mt-1 truncate text-xs text-muted-foreground">{card.projectId}{card.taskId ? ` · ${card.taskId}` : ""}</p>
+                          </div>
+                          {workbenchHref ? <Link
+                            href={workbenchHref}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                            aria-label={`在新标签页打开${card.title}的文章工作台`}
+                          >
+                            <ExternalLink className="size-4" />
+                            <span className="sr-only">在新标签页打开文章工作台</span>
+                          </Link> : <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground/40" title="文章任务创建后可打开工作台">
+                            <ExternalLink className="size-4" />
+                            <span className="sr-only">文章任务尚未创建</span>
+                          </span>}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Badge variant={workflowArticleCardStatusVariants[card.status]}>
+                            {workflowArticleCardStatusLabels[card.status]}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">{card.progress}/{card.total} 步已处理</span>
+                        </div>
+                        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                          <div className="min-w-0">
+                            <dt className="text-muted-foreground">交付包</dt>
+                            <dd className="mt-0.5 truncate font-medium">{card.packageReady ? "已生成" : "未生成"}</dd>
+                          </div>
+                          <div className="min-w-0">
+                            <dt className="text-muted-foreground">{timeLabel}</dt>
+                            <dd className="mt-0.5 truncate font-medium">{formatWorkflowArticleCardTime(card.updatedAt)}</dd>
+                          </div>
+                        </dl>
+                        {card.errorCode && <p className="mt-3 truncate text-xs text-destructive" title={card.errorCode}>失败步骤：{card.errorCode}</p>}
+                      </article>
+                    );
+                  })}
+                </div> : <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">当前计划尚未形成可展示的文章链。</div>}
+              </div>
+            </DialogContent>
+          </Dialog>}
           <Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-base">执行时间线</CardTitle><CardDescription>{timeline.length ? `已记录 ${timeline.length} 条公开状态事件。` : "SSE 事件只展示公开状态，不展示思维链。"}</CardDescription></div><Button type="button" variant="outline" size="sm" className="min-h-9" aria-expanded={timelineExpanded} aria-controls="workflow-timeline-details" onClick={() => setTimelineExpanded((current) => !current)}><ChevronDown className={`size-4 transition-transform duration-200 ${timelineExpanded ? "rotate-180" : ""}`} />{timelineExpanded ? "收起事件" : "展开事件"}</Button></div></CardHeader><CardContent id="workflow-timeline-details" className="px-4 py-4">{timelineExpanded ? (timeline.length ? <ol className="max-h-72 overflow-auto rounded-lg border bg-muted/10 p-3 text-sm">{timeline.map((item) => <li key={item} className="flex items-center gap-2 py-1"><CircleDot className="size-3 shrink-0 text-primary" />{item}</li>)}</ol> : <p className="text-sm text-muted-foreground">计划确认后会在这里显示状态事件。</p>) : <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">时间线已收起{timeline.length ? `，共 ${timeline.length} 条事件` : "，暂无事件"}。点击“展开事件”查看公开执行记录。</div>}</CardContent></Card>
         </div>
       </div>

@@ -1383,6 +1383,7 @@ export type WorkflowAssistantStep = {
   output_summary: Record<string, unknown>;
   standardized_error_code: string | null;
   human_gate_confirmed: boolean;
+  updated_at: string | null;
 };
 
 export type WorkflowAssistantPlan = {

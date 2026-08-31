@@ -350,6 +350,7 @@ def _plan_response(plan: WorkflowPlan) -> WorkflowPlanResponse:
             output_summary=step.output_summary,
             standardized_error_code=step.standardized_error_code,
             human_gate_confirmed=step.human_gate_confirmed,
+            updated_at=_iso(step.updated_at) if step.updated_at else None,
         )
         for step in plan.steps
     ]
@@ -428,6 +429,7 @@ def _normalize_explicit_revision_execution(
                     "output_summary": {},
                     "standardized_error_code": None,
                     "human_gate_confirmed": False,
+                    "updated_at": None,
                 }
             )
         )
@@ -554,7 +556,7 @@ def _merge_natural_language_revision(
             remapped.append(step.model_copy(update={"input_summary": input_summary}))
         merged = remapped
     merged = [
-        step.model_copy(update={"sequence": index})
+        step.model_copy(update={"sequence": index, "updated_at": None})
         for index, step in enumerate(merged, start=1)
     ]
     if len(merged) > 1000:
@@ -1768,7 +1770,12 @@ def create_plan_delivery_download(
     project_id: str | None = Query(default=None, min_length=1, max_length=128),
     actor: ActorIdentity = Depends(require_server_actor),
 ) -> WorkflowAssistantBatchDownloadResponse:
-    """Create one download URL for completed packages in one project."""
+    """Create one download URL for every completed package in the plan.
+
+    Without ``project_id`` the ZIP aggregates successful articles across all
+    projects in the plan.  The optional project filter remains available for
+    callers that need a single-project package.
+    """
 
     _feature_enabled(request)
     try:
@@ -1811,11 +1818,6 @@ def create_plan_delivery_download(
                 },
             )
 
-        ready_project_ids = {
-            step.project_id.strip()
-            for step in ready_package_steps
-            if step.project_id.strip()
-        }
         requested_project_id = project_id.strip() if project_id is not None else None
         if project_id is not None and not requested_project_id:
             raise HTTPException(
@@ -1838,27 +1840,22 @@ def create_plan_delivery_download(
                         "project_id": requested_project_id,
                     },
                 )
-        elif len(ready_project_ids) != 1:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": "成功文章跨多个项目，请指定 project_id 分别下载各项目交付包。",
-                    "project_ids": sorted(ready_project_ids),
-                },
-            )
-
         package_project_ids = {
             step.project_id.strip()
             for step in ready_package_steps
             if step.project_id.strip()
         }
-        if len(package_project_ids) != 1:
+        if not package_project_ids:
             raise HTTPException(
-                status_code=422,
-                detail="批量交付下载当前要求成功文章属于同一个项目；请分别下载各项目的交付包。",
+                status_code=409,
+                detail="成功文章没有有效的项目范围。",
             )
-        project_id = next(iter(package_project_ids))
-        _context(request).access.require(actor, project_id, "article.deliver")
+        for source_project_id in sorted(package_project_ids):
+            _context(request).access.require(
+                actor,
+                source_project_id,
+                "article.deliver",
+            )
 
         factory = getattr(
             request.app.state,
@@ -1871,21 +1868,24 @@ def create_plan_delivery_download(
                 status_code=503,
                 detail="Server project task storage is not available.",
             )
-        try:
-            runtime = create_runtime(
-                AuthorizedProjectRequest(
-                    actor=actor,
-                    project_id=project_id,
-                    permission="article.deliver",
+        runtimes: dict[str, Any] = {}
+        for source_project_id in sorted(package_project_ids):
+            try:
+                runtimes[source_project_id] = create_runtime(
+                    AuthorizedProjectRequest(
+                        actor=actor,
+                        project_id=source_project_id,
+                        permission="article.deliver",
+                    )
                 )
-            )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="Server project task storage is not available.",
-            ) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Server project task storage is not available.",
+                ) from exc
 
         tasks = []
+        task_project_ids: dict[str, str] = {}
         seen_task_ids: set[str] = set()
         for step in ready_package_steps:
             task_id = str(step.article_task_id or "").strip()
@@ -1895,6 +1895,13 @@ def create_plan_delivery_download(
                     detail="批量交付包中的文章任务标识无效或重复。",
                 )
             seen_task_ids.add(task_id)
+            source_project_id = step.project_id.strip()
+            runtime = runtimes.get(source_project_id)
+            if runtime is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="批量交付包中的文章项目范围无效。",
+                )
             try:
                 task = runtime.store.get(task_id)
             except KeyError as exc:
@@ -1911,6 +1918,7 @@ def create_plan_delivery_download(
                     detail="文章交付包已发生变化，请刷新计划后重试。",
                 )
             tasks.append(task)
+            task_project_ids[task_id] = source_project_id
 
         object_service = getattr(
             request.app.state,
@@ -1922,15 +1930,21 @@ def create_plan_delivery_download(
                 status_code=503,
                 detail="Server project object storage is not available.",
             )
+        anchor_project_id = sorted(package_project_ids)[0]
         asset = ServerBatchDeliveryPackage(objects=object_service).package(
             actor=actor,
-            project_id=project_id,
+            project_id=anchor_project_id,
             tasks=tasks,
+            task_project_ids=task_project_ids,
         )
-        filename = f"{official_website_folder_name(project_id)}-batch-delivery.zip"
+        filename = (
+            f"{official_website_folder_name(anchor_project_id)}-batch-delivery.zip"
+            if requested_project_id is not None
+            else "workflow-batch-delivery.zip"
+        )
         url = object_service.create_delivery_zip_download_url(
             actor=actor,
-            project_id=project_id,
+            project_id=anchor_project_id,
             asset_id=asset.asset_id,
             content_hash=asset.content_hash,
             filename=filename,

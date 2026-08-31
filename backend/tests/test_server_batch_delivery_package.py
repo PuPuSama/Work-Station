@@ -32,6 +32,7 @@ class BatchDeliveryObjects:
         self.objects: dict[str, ProjectKnowledgeObject] = {}
         self.archive = b""
         self.uploaded_asset_id = ""
+        self.read_calls: list[tuple[str, str]] = []
 
     def add(self, asset_id: str, data: bytes) -> str:
         digest = hashlib.sha256(data).hexdigest()
@@ -57,7 +58,8 @@ class BatchDeliveryObjects:
         asset_id,
         max_bytes,
     ) -> ProjectKnowledgeObject:
-        del actor, project_id, max_bytes
+        del actor, max_bytes
+        self.read_calls.append((project_id, asset_id))
         return self.objects[asset_id]
 
     def upload_delivery_zip(
@@ -132,11 +134,20 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
 
         asset = ServerBatchDeliveryPackage(objects=objects).package(
             actor=ActorIdentity("org-a", "user-a"),
-            project_id="www.example.com",
+            project_id="anchor.example.com",
             tasks=tasks,
+            task_project_ids={
+                "task-a": "project-a",
+                "task-b": "project-b",
+            },
         )
 
         self.assertEqual(asset.asset_id, objects.uploaded_asset_id)
+        self.assertEqual(
+            objects.read_calls,
+            [("project-a", "package-a"), ("project-b", "package-b")],
+        )
+        self.assertEqual(asset.project_id, "anchor.example.com")
         with ZipFile(BytesIO(objects.archive)) as archive:
             names = set(archive.namelist())
             self.assertEqual(
@@ -153,6 +164,10 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
             )
             manifest = json.loads(archive.read("manifest.json"))
         self.assertEqual([item["task_id"] for item in manifest["items"]], ["task-a", "task-b"])
+        self.assertEqual(
+            [item["project_id"] for item in manifest["items"]],
+            ["project-a", "project-b"],
+        )
 
     def test_rejects_a_stale_package_identity(self) -> None:
         objects = BatchDeliveryObjects()

@@ -135,6 +135,9 @@ class PlanStep(BaseModel):
     output_summary: dict[str, Any] = Field(default_factory=dict)
     standardized_error_code: str | None = None
     human_gate_confirmed: bool = False
+    # Server-owned timestamp used by the plan overview; planner payloads keep
+    # the field unset and therefore do not persist it in normalized plans.
+    updated_at: str | None = None
 
     @field_validator("article_task_id", mode="before")
     @classmethod

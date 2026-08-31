@@ -288,6 +288,125 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         self.assertEqual(context.exception.detail["total_count"], 1)  # type: ignore[index]
         self.assertIn("没有已成功并可下载", context.exception.detail["message"])  # type: ignore[index]
 
+    def test_batch_delivery_aggregates_ready_packages_across_projects(self) -> None:
+        ready_steps = tuple(
+            SimpleNamespace(
+                action_kind="package_delivery",
+                status="succeeded",
+                article_task_id=task_id,
+                project_id=project_id,
+                output_summary={
+                    "artifact_kind": "delivery_package",
+                    "asset_id": f"asset-{task_id}",
+                },
+            )
+            for project_id, task_id in (
+                ("project-a", "task-a"),
+                ("project-b", "task-b"),
+            )
+        )
+        plan = SimpleNamespace(
+            plan_id="plan-cross-project",
+            status="completed",
+            project_ids=("project-a", "project-b"),
+            steps=ready_steps,
+        )
+
+        class Repository:
+            def get_plan(self, **_kwargs):
+                return plan
+
+        class Access:
+            def __init__(self):
+                self.calls = []
+
+            def require(self, _actor, project_id, permission):
+                self.calls.append((project_id, permission))
+
+        class Context:
+            def __init__(self):
+                self.access = Access()
+
+        class Store:
+            def __init__(self, project_id):
+                self.project_id = project_id
+
+            def get(self, task_id):
+                return SimpleNamespace(
+                    id=task_id,
+                    delivery_package_asset_id=f"asset-{task_id}",
+                )
+
+        class Runtime:
+            def __init__(self, project_id):
+                self.store = Store(project_id)
+
+        class Factory:
+            def __init__(self):
+                self.project_ids = []
+
+            def create(self, request):
+                self.project_ids.append(request.project_id)
+                return Runtime(request.project_id)
+
+        class Objects:
+            def read_for_article_delivery(self, **_kwargs):
+                raise AssertionError("article packages should be read by the batch packer")
+
+            def create_delivery_zip_download_url(self, **_kwargs):
+                return "https://download.invalid/workflow-batch.zip"
+
+        class BatchPacker:
+            def __init__(self):
+                self.calls = []
+
+            def package(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(asset_id="batch-asset", content_hash="batch-hash")
+
+        factory = Factory()
+        batch_packer = BatchPacker()
+        context = Context()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    server_project_task_store_factory=factory,
+                    server_project_object_service=Objects(),
+                )
+            )
+        )
+        with (
+            patch("workflow_assistant.http._feature_enabled"),
+            patch("workflow_assistant.http._repository", return_value=Repository()),
+            patch("workflow_assistant.http._reauthorize_plan_read"),
+            patch("workflow_assistant.http._context", return_value=context),
+            patch(
+                "workflow_assistant.http.ServerBatchDeliveryPackage",
+                return_value=batch_packer,
+            ),
+        ):
+            response = create_plan_delivery_download(
+                "plan-cross-project",
+                request,  # type: ignore[arg-type]
+                expires_seconds=300,
+                project_id=None,
+                actor=ActorIdentity("org-a", "user-a"),
+            )
+
+        self.assertEqual(response.file_count, 2)
+        self.assertEqual(response.filename, "workflow-batch-delivery.zip")
+        self.assertEqual(
+            context.access.calls,
+            [("project-a", "article.deliver"), ("project-b", "article.deliver")],
+        )
+        self.assertEqual(factory.project_ids, ["project-a", "project-b"])
+        self.assertEqual(len(batch_packer.calls), 1)
+        self.assertEqual(batch_packer.calls[0]["project_id"], "project-a")
+        self.assertEqual(
+            batch_packer.calls[0]["task_project_ids"],
+            {"task-a": "project-a", "task-b": "project-b"},
+        )
+
     def test_batch_quantity_parser_supports_single_project_chinese_request(self) -> None:
         self.assertEqual(
             _requested_article_counts(

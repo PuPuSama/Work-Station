@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from io import BytesIO
 from typing import Protocol
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
@@ -327,7 +328,12 @@ def _safe_batch_member_name(value: str) -> str:
 
 
 class ServerBatchDeliveryPackage:
-    """Combine completed per-article delivery packages into one ZIP."""
+    """Combine completed per-article delivery packages into one ZIP.
+
+    ``project_id`` is the authorized scope used to store the aggregate;
+    ``task_project_ids`` optionally identifies the source scope for each task
+    when a plan spans multiple projects.
+    """
 
     def __init__(
         self,
@@ -342,6 +348,7 @@ class ServerBatchDeliveryPackage:
         actor: ActorIdentity,
         project_id: str,
         tasks: list[TaskRecord] | tuple[TaskRecord, ...],
+        task_project_ids: Mapping[str, str] | None = None,
     ) -> KnowledgeAsset:
         normalized_tasks = list(tasks)
         if not normalized_tasks:
@@ -383,9 +390,16 @@ class ServerBatchDeliveryPackage:
                         raise ServerDeliveryPackageError(
                             f"delivery package is missing for task {task_id}"
                         )
+                    source_project_id = str(
+                        (task_project_ids or {}).get(task_id, project_id) or ""
+                    ).strip()
+                    if not source_project_id:
+                        raise ServerDeliveryPackageError(
+                            f"delivery package is missing a source project for task {task_id}"
+                        )
                     stored = self._objects.read_for_article_delivery(
                         actor=actor,
-                        project_id=project_id,
+                        project_id=source_project_id,
                         asset_id=asset_id,
                         max_bytes=MAX_SERVER_DELIVERY_ZIP_BYTES,
                     )
@@ -465,6 +479,7 @@ class ServerBatchDeliveryPackage:
 
                     manifest_items.append(
                         {
+                            "project_id": source_project_id,
                             "task_id": task_id,
                             "topic_index": topic_index,
                             "folder": folder,
