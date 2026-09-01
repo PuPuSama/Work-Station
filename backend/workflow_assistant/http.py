@@ -51,6 +51,7 @@ from .gap_fill import (
     GapFillUnavailable,
     WorkflowAssistantGapFillService,
 )
+from .fixed_workflow import build_fixed_article_plan
 from .message_router import (
     AssistantMessageRouter,
     AssistantMessageRouterUnavailable,
@@ -131,6 +132,7 @@ class AssistantEventResponse(BaseModel):
 
 class AssistantAttentionListResponse(BaseModel):
     plans: list[WorkflowPlanSummary]
+    count: int = 0
 
 
 def _feature_enabled(request: Request) -> None:
@@ -1280,23 +1282,21 @@ def list_conversations(
     _feature_enabled(request)
     try:
         conversations = _repository(request).list_conversations(actor=actor, limit=limit)
-        visible_conversations: list[AssistantConversation] = []
-        for conversation in conversations:
-            try:
-                _context(request).resolve(
-                    actor=actor,
-                    project_ids=list(conversation.project_ids) or None,
-                )
-            except AssistantContextError as exc:
-                # A conversation can outlive a project assignment. Do not
-                # expose its scope or messages after that assignment ends.
-                if str(exc) in {
-                    "project access denied",
-                    "project scope contains an inaccessible project",
-                }:
-                    continue
-                raise
-            visible_conversations.append(conversation)
+        # The list route is only a private session index. Resolving the full
+        # project context once per conversation made the first screen scale
+        # with every conversation's knowledge/tasks. Directory membership is
+        # the same access boundary used by the resolver; the selected
+        # conversation is still fully re-authorized by its detail route.
+        accessible_project_ids = {
+            project.project_id
+            for project in _context(request).accessible_projects(actor)
+        }
+        visible_conversations = [
+            conversation
+            for conversation in conversations
+            if not conversation.project_ids
+            or set(conversation.project_ids).issubset(accessible_project_ids)
+        ]
         return AssistantConversationListResponse(
             conversations=[_conversation_response(item) for item in visible_conversations]
         )
@@ -1425,6 +1425,41 @@ def get_planning_dispatch_by_idempotency(
             conversation_id=conversation_id,
             idempotency_key=idempotency_key,
         )
+        return _planning_dispatch_response(
+            request,
+            actor=actor,
+            dispatch=dispatch,
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get(
+    "/conversations/{conversation_id}/active-dispatch",
+    response_model=AssistantMessageDispatchResponse | None,
+)
+def get_active_planning_dispatch(
+    conversation_id: str,
+    request: Request,
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> AssistantMessageDispatchResponse | None:
+    """Restore an in-flight planner lease after a page refresh."""
+
+    _feature_enabled(request)
+    try:
+        repository = _repository(request)
+        # Authorize the conversation before returning whether a lease exists.
+        repository.get_conversation(
+            actor=actor,
+            conversation_id=conversation_id,
+            include_messages=False,
+        )
+        dispatch = repository.get_active_planning_dispatch(
+            actor=actor,
+            conversation_id=conversation_id,
+        )
+        if dispatch is None:
+            return None
         return _planning_dispatch_response(
             request,
             actor=actor,
@@ -1625,6 +1660,65 @@ def append_message(
             if callable(get_latest_plan)
             else None
         )
+        if payload.workflow_mode == "article":
+            if latest_plan is not None and latest_plan.status not in {
+                "completed",
+                "cancelled",
+                "failed",
+            }:
+                raise AssistantPolicyError(
+                    "当前会话已有未完成计划，请先处理或确认它"
+                )
+            fixed_plan = build_fixed_article_plan(
+                payload.content,
+                context,
+                selected_task_ids=selected_task_ids,
+                selection_locked=payload.article_task_ids is not None,
+                concurrency_limit=5,
+            )
+            fixed_plan = bind_plan_context(
+                fixed_plan,
+                context=context,
+                selected_task_ids=(
+                    selected_task_ids
+                    if payload.article_task_ids is not None
+                    else None
+                ),
+            )
+            fixed_plan = _apply_execution_limits(request, fixed_plan)
+            authorization_snapshot = _authorized_plan_scope(
+                request,
+                actor=actor,
+                project_ids=fixed_plan.project_ids,
+                step_project_ids=tuple(
+                    step.project_id for step in fixed_plan.steps
+                ),
+            )
+            persisted_plan = repository.create_plan(
+                actor=actor,
+                conversation_id=conversation_id,
+                plan=fixed_plan,
+                authorization_snapshot=authorization_snapshot,
+                source_idempotency_key=payload.idempotency_key,
+            )
+            assistant_message = repository.append_message(
+                actor=actor,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=_assistant_content_for_plan(persisted_plan),
+                request_id=_assistant_identity(
+                    payload.request_id,
+                    prefix="asst_req",
+                ),
+                idempotency_key=_assistant_identity(
+                    payload.idempotency_key,
+                    prefix="asst",
+                ),
+            )
+            return AssistantMessageDispatchResponse(
+                message=_message_response(assistant_message),
+                plan=_plan_response(persisted_plan),
+            )
         message_router = _message_router(request)
         intent = message_router.route(
             actor=actor,
@@ -2427,7 +2521,13 @@ def attention(
                     continue
                 raise
             visible.append(_plan_summary(plan))
-        return AssistantAttentionListResponse(plans=visible)
+        count = _repository(request).attention_count(
+            actor=actor,
+            accessible_project_ids=tuple(
+                project.project_id for project in accessible_projects
+            ),
+        )
+        return AssistantAttentionListResponse(plans=visible, count=count)
     except Exception as exc:
         raise _error(exc) from exc
 

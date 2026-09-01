@@ -975,6 +975,13 @@ class WorkflowAssistantServiceAdapters:
                 "use_evidence_pack",
                 default=True,
             )
+        if action in {"generate_outline", "generate_article"}:
+            operator_instruction = self._optional_text(
+                invocation.input_summary,
+                "writing_instruction",
+            )
+            if operator_instruction:
+                kwargs["operator_instruction"] = operator_instruction
         try:
             job = service.enqueue(**kwargs)
         except KeyError as exc:

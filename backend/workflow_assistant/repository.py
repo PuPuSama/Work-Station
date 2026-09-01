@@ -755,6 +755,41 @@ class PostgresWorkflowAssistantRepository:
                 raise WorkflowAssistantNotFound("planning dispatch not found")
             return self._dispatch_from_row(row)
 
+    def get_active_planning_dispatch(
+        self,
+        *,
+        actor: ActorIdentity,
+        conversation_id: str,
+    ) -> WorkflowAssistantDispatch | None:
+        """Return the newest queued/running dispatch for one private chat.
+
+        The browser can be restarted after the message POST has returned but
+        before the planner creates a plan. Keeping this lookup server-side
+        makes that in-flight state recoverable without trusting browser
+        memory or exposing dispatch rows from another conversation.
+        """
+
+        conversation_id = _required(conversation_id, "conversation_id")
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(workflow_assistant_dispatches)
+                .where(
+                    workflow_assistant_dispatches.c.organization_id
+                    == actor.organization_id,
+                    workflow_assistant_dispatches.c.creator_user_id
+                    == actor.user_id,
+                    workflow_assistant_dispatches.c.conversation_id
+                    == conversation_id,
+                    workflow_assistant_dispatches.c.status.in_(("queued", "running")),
+                )
+                .order_by(
+                    workflow_assistant_dispatches.c.created_at.desc(),
+                    workflow_assistant_dispatches.c.dispatch_id.desc(),
+                )
+                .limit(1)
+            ).mappings().one_or_none()
+            return self._dispatch_from_row(row) if row is not None else None
+
     def list_planning_dispatches(
         self,
         *,

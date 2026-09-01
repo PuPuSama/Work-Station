@@ -1347,6 +1347,8 @@ export type WorkflowAssistantActionKind =
   | "generate_tdk"
   | "package_delivery";
 
+export type WorkflowAssistantMode = "article" | "assistant";
+
 export type WorkflowAssistantMessage = {
   message_id: string;
   sequence: number;
@@ -1451,6 +1453,7 @@ export type WorkflowAssistantAttentionCount = {
 
 export type WorkflowAssistantAttentionList = {
   plans: WorkflowAssistantPlanSummary[];
+  count?: number;
 };
 
 export type WorkflowAssistantAttachmentStatus =

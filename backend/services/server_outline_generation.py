@@ -89,10 +89,40 @@ DEFAULT_GENERATION_SOURCE_KINDS = (
     "knowledge_page",
 )
 BLOG_REFERENCE_SOURCE_KINDS = ("official_blog",)
+MAX_OPERATOR_INSTRUCTION_LENGTH = 7_000
 
 
 class OutlineGenerationUnavailable(RuntimeError):
     """The scoped outline runner or provider cannot safely complete work."""
+
+
+def _operator_instruction(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise JobConflict("writing instruction is invalid")
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(normalized) > MAX_OPERATOR_INSTRUCTION_LENGTH:
+        raise JobConflict("writing instruction is too long")
+    return normalized
+
+
+def _task_with_operator_instruction(
+    task: TaskRecord,
+    instruction: str,
+) -> TaskRecord:
+    if not instruction:
+        return task
+    enriched = task.model_copy(deep=True)
+    existing = (
+        enriched.outline_custom_prompt
+        if enriched.use_outline_custom_prompt
+        else ""
+    ).strip()
+    additions = [value for value in (existing, instruction) if value]
+    enriched.outline_custom_prompt = "\n\n".join(additions)
+    enriched.use_outline_custom_prompt = True
+    return enriched
 
 
 class OutlineLlmClient(Protocol):
@@ -671,6 +701,9 @@ class ServerOutlineGenerationHandler:
         source_revision = int(job.get("source_revision") or 0)
         request = dict(job.get("request") or {})
         reference = OutlinePromptReference.from_mapping(request)
+        operator_instruction = _operator_instruction(
+            request.get("operator_instruction")
+        )
         raw_chunk_ids = request.get("context_chunk_ids") or []
         if (
             isinstance(raw_chunk_ids, (str, bytes))
@@ -731,7 +764,7 @@ class ServerOutlineGenerationHandler:
         )
         if callable(generate_for_organization):
             outline = generate_for_organization(
-                task,
+                _task_with_operator_instruction(task, operator_instruction),
                 organization_id=organization_id,
                 user_id=requester,
                 prompt_snapshot=prompt_snapshot,
@@ -739,7 +772,7 @@ class ServerOutlineGenerationHandler:
             )
         else:
             outline = self._provider.generate(
-                task,
+                _task_with_operator_instruction(task, operator_instruction),
                 prompt_snapshot=prompt_snapshot,
                 context_chunks=context_chunks,
             )
@@ -908,7 +941,9 @@ class ServerOutlineGenerationRegistry:
         project_id: str,
         task_id: str,
         source_revision: int,
+        operator_instruction: str = "",
     ) -> dict[str, object]:
+        operator_instruction = _operator_instruction(operator_instruction)
         self._access.require(actor, project_id, "article.edit")
         repository = PostgresTaskRepository(
             self._engine,
@@ -991,6 +1026,8 @@ class ServerOutlineGenerationRegistry:
                         chunk.chunk_id for chunk in context_chunks
                     ],
                 }
+                if operator_instruction:
+                    request["operator_instruction"] = operator_instruction
                 batch = project.queue.create_batch_in_transaction(
                     connection,
                     OUTLINE_GENERATION_OPERATION,

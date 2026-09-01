@@ -31,6 +31,7 @@ ActionKind = Literal[
 
 
 ConversationStatus = Literal["active", "expired"]
+WorkflowMode = Literal["assistant", "article"]
 PlanStatus = Literal[
     "draft",
     "awaiting_confirmation",
@@ -93,6 +94,9 @@ class AssistantMessageRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     project_ids: list[str] | None = Field(default=None, max_length=100)
     article_task_ids: list[str] | None = Field(default=None, max_length=500)
+    # The UI defaults to the deterministic article lane. Keep the API default
+    # on the legacy assistant route so older clients remain compatible.
+    workflow_mode: WorkflowMode = "assistant"
 
     @field_validator("project_ids")
     @classmethod
@@ -303,4 +307,5 @@ __all__ = [
     "PlanStep",
     "WorkflowPlanResponse",
     "WorkflowPlanSummary",
+    "WorkflowMode",
 ]

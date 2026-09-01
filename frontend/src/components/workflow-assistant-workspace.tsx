@@ -60,7 +60,6 @@ import type {
   WorkflowAssistantConversation,
   WorkflowAssistantConversationList,
   WorkflowAssistantDispatch,
-  WorkflowAssistantAttentionCount,
   WorkflowAssistantAttentionList,
   WorkflowAssistantBatchDownload,
   WorkflowAssistantGapFillResponse,
@@ -117,43 +116,65 @@ async function recoverDispatchResult(
         : idempotencyKey
           ? `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/dispatches?idempotency_key=${encodeURIComponent(idempotencyKey)}`
           : null;
-      const [dispatch, conversation, fallbackPlan] = await Promise.all([
-        dispatchUrl
-          ? apiGet<WorkflowAssistantDispatch>(dispatchUrl).catch(() => null)
-          : Promise.resolve<WorkflowAssistantDispatch | null>(null),
-        apiGet<WorkflowAssistantConversation>(
-          `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
-        ),
-        apiGet<WorkflowAssistantPlan | null>(
-          `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
-        ).catch(() => null),
-      ]);
-      if (dispatch?.dispatch_status === "failed") {
-        return {
-          conversation,
-          plan: dispatch.plan,
-          error: dispatch.dispatch_error_code
-            ? `计划生成失败（${dispatch.dispatch_error_code}），可以重新发送请求重试。`
-            : "计划生成失败，可以重新发送请求重试。",
-        };
-      }
-      const latestPlan = dispatch?.plan || fallbackPlan || null;
-      const planMatchesRequest = Boolean(
-        latestPlan
-        && latestPlan.natural_language_request.trim() === content
-        && (latestPlan.plan_id !== previousPlanId || previousPlanId === null),
-      );
-      const lastUserIndex = [...conversation.messages]
-        .map((message, index) => ({ message, index }))
-        .reverse()
-        .find(({ message }) => message.role === "user" && message.content.trim() === content)
-        ?.index;
-      const hasAssistantReply = lastUserIndex !== undefined
-        && conversation.messages.slice(lastUserIndex + 1).some(
-          (message) => message.role === "assistant",
+      if (dispatchUrl) {
+        // A queued lease is the only changing state while the planner works.
+        // Polling its compact projection avoids three full reads every two
+        // seconds; fetch the conversation and plan once the lease is done.
+        const dispatch = await apiGet<WorkflowAssistantDispatch>(dispatchUrl).catch(
+          () => null,
         );
-      if (dispatch?.dispatch_status === "succeeded" || planMatchesRequest || hasAssistantReply) {
-        return { conversation, plan: planMatchesRequest ? latestPlan : dispatch?.plan || null };
+        if (dispatch?.dispatch_status === "failed") {
+          const conversation = await apiGet<WorkflowAssistantConversation>(
+            `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
+          );
+          return {
+            conversation,
+            plan: dispatch.plan,
+            error: dispatch.dispatch_error_code
+              ? `计划生成失败（${dispatch.dispatch_error_code}），可以重新发送请求重试。`
+              : "计划生成失败，可以重新发送请求重试。",
+          };
+        }
+        if (dispatch?.dispatch_status === "succeeded" || dispatch?.message) {
+          const [conversation, fallbackPlan] = await Promise.all([
+            apiGet<WorkflowAssistantConversation>(
+              `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
+            ),
+            apiGet<WorkflowAssistantPlan | null>(
+              `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
+            ).catch(() => null),
+          ]);
+          return { conversation, plan: dispatch.plan || fallbackPlan || null };
+        }
+      } else {
+        // Compatibility fallback for a lost response before a dispatch ID
+        // exists. This path is rarely used and remains bounded by the same
+        // durable recovery deadline.
+        const [conversation, latestPlan] = await Promise.all([
+          apiGet<WorkflowAssistantConversation>(
+            `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
+          ),
+          apiGet<WorkflowAssistantPlan | null>(
+            `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
+          ).catch(() => null),
+        ]);
+        const planMatchesRequest = Boolean(
+          latestPlan
+          && latestPlan.natural_language_request.trim() === content
+          && (latestPlan.plan_id !== previousPlanId || previousPlanId === null),
+        );
+        const lastUserIndex = [...conversation.messages]
+          .map((message, index) => ({ message, index }))
+          .reverse()
+          .find(({ message }) => message.role === "user" && message.content.trim() === content)
+          ?.index;
+        const hasAssistantReply = lastUserIndex !== undefined
+          && conversation.messages.slice(lastUserIndex + 1).some(
+            (message) => message.role === "assistant",
+          );
+        if (planMatchesRequest || hasAssistantReply) {
+          return { conversation, plan: planMatchesRequest ? latestPlan : null };
+        }
       }
     } catch {
       // A proxy reconnect can briefly make both status reads fail. Keep the
@@ -491,10 +512,12 @@ export function WorkflowAssistantWorkspace() {
   const [selectedConversation, setSelectedConversation] = useState<WorkflowAssistantConversation | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const [workflowMode, setWorkflowMode] = useState<"article" | "assistant">("article");
   const [plan, setPlan] = useState<WorkflowAssistantPlan | null>(null);
   const [draft, setDraft] = useState("");
   const [revisionDraft, setRevisionDraft] = useState("");
   const [loading, setLoading] = useState(true);
+  const [tasksLoading, setTasksLoading] = useState(false);
   const [pending, setPending] = useState(false);
   const [requestPhase, setRequestPhase] = useState<AssistantRequestPhase>("idle");
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
@@ -525,6 +548,8 @@ export function WorkflowAssistantWorkspace() {
   const activeConversationIdRef = useRef<string | null>(null);
   const activePlanIdRef = useRef<string | null>(null);
   const loadedConversationRef = useRef<string | null>(null);
+  const loadedTaskProjectIdsRef = useRef<Set<string>>(new Set());
+  const loadingTaskProjectIdsRef = useRef<Set<string>>(new Set());
   const messageScrollAreaRef = useRef<HTMLDivElement | null>(null);
   const lastEventSequenceRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -538,16 +563,11 @@ export function WorkflowAssistantWorkspace() {
   } | null>(null);
 
   const refreshAttention = useCallback(async () => {
-    const [countResponse, listResponse] = await Promise.all([
-      apiGet<WorkflowAssistantAttentionCount>(
-        "/api/workflow-assistant/attention-count",
-      ),
-      apiGet<WorkflowAssistantAttentionList>(
-        "/api/workflow-assistant/attention",
-      ),
-    ]);
-    setAttentionCount(countResponse.count);
-    setAttentionPlans(listResponse.plans);
+    const response = await apiGet<WorkflowAssistantAttentionList>(
+      "/api/workflow-assistant/attention",
+    );
+    setAttentionCount(response.count ?? response.plans.length);
+    setAttentionPlans(response.plans);
   }, []);
 
   const debouncedRefreshAttention = useCallback(() => {
@@ -569,21 +589,7 @@ export function WorkflowAssistantWorkspace() {
         apiGet<WorkflowAssistantConversationList>("/api/workflow-assistant/conversations"),
         apiGet<AuthStatus>("/api/auth/status"),
       ]);
-      const nextTasks = (
-        await Promise.all(
-          nextProjects.map(async (project) => {
-            const projectTasks = await apiGet<TaskRecord[]>(
-              `/api/projects/${encodeURIComponent(project.project_id)}/tasks`,
-            );
-            return projectTasks.map((task) => ({
-              ...task,
-              project_id: project.project_id,
-            }));
-          }),
-        )
-      ).flat();
       setProjects(nextProjects);
-      setTasks(nextTasks);
       setConversations(nextConversations.conversations);
       setAttachmentsEnabled(Boolean(
         authStatus.data?.workflow_assistant_enabled &&
@@ -614,10 +620,48 @@ export function WorkflowAssistantWorkspace() {
     }
   }, [refreshAttention]);
 
+  const loadTasksForProjects = useCallback(async (projectIds: string[]) => {
+    const requested = [...new Set(projectIds)].filter(Boolean);
+    const missing = requested.filter(
+      (projectId) => !loadedTaskProjectIdsRef.current.has(projectId)
+        && !loadingTaskProjectIdsRef.current.has(projectId),
+    );
+    if (!missing.length) return;
+    missing.forEach((projectId) => loadingTaskProjectIdsRef.current.add(projectId));
+    setTasksLoading(true);
+    try {
+      const loaded = await Promise.all(
+        missing.map(async (projectId) => {
+          const projectTasks = await apiGet<TaskRecord[]>(
+            `/api/projects/${encodeURIComponent(projectId)}/tasks`,
+          );
+          return projectTasks.map((task) => ({ ...task, project_id: projectId }));
+        }),
+      );
+      const missingSet = new Set(missing);
+      setTasks((current) => [
+        ...current.filter((task) => !missingSet.has(task.project_id)),
+        ...loaded.flat(),
+      ]);
+      missing.forEach((projectId) => loadedTaskProjectIdsRef.current.add(projectId));
+    } catch (nextError) {
+      setError(messageText(nextError));
+    } finally {
+      missing.forEach((projectId) => loadingTaskProjectIdsRef.current.delete(projectId));
+      setTasksLoading(loadingTaskProjectIdsRef.current.size > 0);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
     return () => eventSourceRef.current?.close();
   }, [load]);
+
+  useEffect(() => {
+    if (scopeDialogOpen) {
+      void loadTasksForProjects(selectedProjectIds);
+    }
+  }, [loadTasksForProjects, scopeDialogOpen, selectedProjectIds]);
 
   const selectedConversationProjectKey = (
     selectedConversation?.project_ids || []
@@ -666,6 +710,7 @@ export function WorkflowAssistantWorkspace() {
     const conversationId = selectedConversation?.conversation_id;
     if (!conversationId || loadedConversationRef.current === conversationId) return;
     loadedConversationRef.current = conversationId;
+    let disposed = false;
     void Promise.all([
       apiGet<WorkflowAssistantConversation>(
         `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}`,
@@ -673,7 +718,11 @@ export function WorkflowAssistantWorkspace() {
       apiGet<WorkflowAssistantPlan | null>(
         `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/latest-plan`,
       ),
-    ]).then(([conversation, latestPlan]) => {
+      apiGet<WorkflowAssistantDispatch | null>(
+        `/api/workflow-assistant/conversations/${encodeURIComponent(conversationId)}/active-dispatch`,
+      ).catch(() => null),
+    ]).then(([conversation, latestPlan, activeDispatch]) => {
+      if (disposed) return;
       setSelectedConversation(conversation);
       setConversations((current) => current.map((item) => (
         item.conversation_id === conversation.conversation_id ? conversation : item
@@ -681,8 +730,64 @@ export function WorkflowAssistantWorkspace() {
       setPlan((current) => (
         current?.conversation_id === conversationId ? current : latestPlan
       ));
-    }).catch((nextError) => setError(messageText(nextError)));
-  }, [selectedConversation?.conversation_id]);
+      if (
+        activeDispatch?.dispatch_id
+        && (activeDispatch.dispatch_status === "queued" || activeDispatch.dispatch_status === "running")
+      ) {
+        const lastUserMessage = [...conversation.messages]
+          .reverse()
+          .find((message) => message.role === "user");
+        const content = lastUserMessage?.content || "";
+        setPending(true);
+        setRequestPhase("waiting_reply");
+        if (content) {
+          setPendingUserMessage({ conversationId, content });
+        }
+        void recoverDispatchResult(
+          conversationId,
+          content,
+          latestPlan?.plan_id || null,
+          activeDispatch.dispatch_id,
+        ).then((recovered) => {
+          if (disposed || activeConversationIdRef.current !== conversationId) return;
+          if (!recovered) {
+            setError("计划仍在后台生成，稍后会自动同步结果。");
+            return;
+          }
+          if (recovered.error) {
+            setError(recovered.error);
+            return;
+          }
+          if (recovered.plan) setPlan(recovered.plan);
+          setSelectedConversation(recovered.conversation);
+          setConversations((current) => current.map((item) => (
+            item.conversation_id === recovered.conversation.conversation_id
+              ? recovered.conversation
+              : item
+          )));
+          setPendingUserMessage(null);
+          void refreshAttention().catch(() => undefined);
+        }).catch((nextError) => {
+          if (!disposed) setError(messageText(nextError));
+        }).finally(() => {
+          if (!disposed && activeConversationIdRef.current === conversationId) {
+            setPending(false);
+            setRequestPhase("idle");
+          }
+        });
+      } else if (activeDispatch?.dispatch_status === "failed") {
+        if (activeDispatch.plan) setPlan(activeDispatch.plan);
+        setError(activeDispatch.dispatch_error_code
+          ? `计划生成失败（${activeDispatch.dispatch_error_code}），可以重新发送请求重试。`
+          : "计划生成失败，可以重新发送请求重试。");
+      }
+    }).catch((nextError) => {
+      if (!disposed) setError(messageText(nextError));
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [refreshAttention, selectedConversation?.conversation_id]);
 
   useEffect(() => {
     const planId = plan?.plan_id;
@@ -835,6 +940,10 @@ export function WorkflowAssistantWorkspace() {
     () => projects.filter((project) => selectedProjectIds.includes(project.project_id)),
     [projects, selectedProjectIds],
   );
+  const scopedTasks = useMemo(
+    () => tasks.filter((task) => selectedProjectIds.includes(task.project_id)),
+    [selectedProjectIds, tasks],
+  );
   const waitingResearchSteps = useMemo(
     () => (plan?.steps || []).filter(
       (step) => step.action_kind === "start_research" && step.status === "waiting_review",
@@ -976,6 +1085,7 @@ export function WorkflowAssistantWorkspace() {
           idempotency_key: dispatchIdentity.idempotencyKey,
           project_ids: selectedProjectIds,
           article_task_ids: selectedTaskIds.length ? selectedTaskIds : null,
+          workflow_mode: workflowMode,
         },
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
@@ -1230,7 +1340,7 @@ export function WorkflowAssistantWorkspace() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">Workflow Assistant</p>
               <h1 className="text-xl font-semibold">文章工作助手</h1>
-              <p className="text-sm text-muted-foreground">查询项目资料，生成跨项目文章计划，并在确认后执行。</p>
+              <p className="text-sm text-muted-foreground">固定写作一键串联文章流程；需要配置时仍可直接对话。</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1266,16 +1376,42 @@ export function WorkflowAssistantWorkspace() {
 
         <Card className="min-h-[640px] gap-0 py-0">
           <CardHeader className="border-b px-5 py-4">
-            <CardTitle>自然语言请求</CardTitle>
-            <CardDescription>只读问题可直接回答；涉及写入时会先生成完整计划并等待一次确认。</CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle>文章工作流</CardTitle>
+                <CardDescription>
+                  {workflowMode === "article"
+                    ? "固定模式不再调用规划模型，按文章当前状态生成可确认的执行链。"
+                    : "自由助手保留自然语言规划，适合查询资料、修改设置或处理特殊流程。"}
+                </CardDescription>
+              </div>
+              <div className="flex shrink-0 rounded-lg border bg-muted/40 p-1" role="group" aria-label="助手模式">
+                <button
+                  type="button"
+                  aria-pressed={workflowMode === "article"}
+                  onClick={() => setWorkflowMode("article")}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${workflowMode === "article" ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  固定写作
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={workflowMode === "assistant"}
+                  onClick={() => setWorkflowMode("assistant")}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${workflowMode === "assistant" ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  自由助手
+                </button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="flex min-h-[570px] flex-col gap-4 px-5 py-5">
             <div className="rounded-xl border bg-muted/30 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <Label>计划范围</Label>
+                  <Label>{workflowMode === "article" ? "写作范围" : "计划范围"}</Label>
                   <p className="mt-1 text-sm font-medium">
-                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"} · {selectedTaskIds.length ? `已选 ${selectedTaskIds.length} 个任务` : "按项目上下文规划"}
+                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"} · {selectedTaskIds.length ? `已选 ${selectedTaskIds.length} 个任务` : workflowMode === "article" ? "每个项目自动取 1 篇待写文章" : "按项目上下文规划"}
                   </p>
                   <p className="mt-1 truncate text-xs text-muted-foreground" title={selectedProjects.map((project) => project.customer_name).join("、")}>
                     {selectedProjects.length ? selectedProjects.map((project) => project.customer_name).join("、") : "请选择至少一个项目"}
@@ -1285,13 +1421,21 @@ export function WorkflowAssistantWorkspace() {
                   <Settings2 />设置范围
                 </Button>
               </div>
-              <p className="mt-3 text-xs leading-5 text-muted-foreground">项目和文章选择已收进页内弹窗；不勾选具体文章时，助手会按当前项目上下文规划。</p>
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                {workflowMode === "article"
+                  ? "不勾选具体文章时，每个项目自动取 1 篇可继续任务；发送内容会作为本次大纲和正文的补充要求。"
+                  : "项目和文章选择已收进页内弹窗；不勾选具体文章时，助手会按当前项目上下文规划。"}
+              </p>
             </div>
             <Dialog open={scopeDialogOpen} onOpenChange={setScopeDialogOpen}>
               <DialogContent className="h-[min(760px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-4xl sm:max-w-4xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
                 <DialogHeader className="border-b px-5 py-4 pr-12">
-                  <DialogTitle>计划范围</DialogTitle>
-                  <DialogDescription>选择本次自然语言请求要覆盖的项目和文章；不勾选具体文章时，助手会按项目上下文规划。</DialogDescription>
+                  <DialogTitle>{workflowMode === "article" ? "写作范围" : "计划范围"}</DialogTitle>
+                  <DialogDescription>
+                    {workflowMode === "article"
+                      ? "选择本次固定写作要覆盖的项目和文章；不勾选具体文章时，每个项目自动选择 1 篇待写文章。"
+                      : "选择本次自然语言请求要覆盖的项目和文章；不勾选具体文章时，助手会按项目上下文规划。"}
+                  </DialogDescription>
                 </DialogHeader>
                 <div className="min-h-0 overflow-y-auto px-5 pb-5">
                   <div className="grid gap-5 pt-5">
@@ -1317,14 +1461,14 @@ export function WorkflowAssistantWorkspace() {
                         })}
                       </div>
                     </section>
-                    {tasks.filter((task) => selectedProjectIds.includes(task.project_id)).length > 0 ? <section className="grid gap-3" aria-labelledby="workflow-scope-articles">
+                    {tasksLoading ? <div className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在读取所选项目的文章任务…</div> : scopedTasks.length > 0 ? <section className="grid gap-3" aria-labelledby="workflow-scope-articles">
                       <div className="flex items-center justify-between gap-3">
                         <Label id="workflow-scope-articles">文章范围</Label>
                         <span className="text-xs text-muted-foreground">已选 {selectedTaskIds.length} 个任务</span>
                       </div>
                       <div className="max-h-[min(32rem,55vh)] overflow-auto rounded-lg border bg-background p-2">
                         <div className="grid gap-1">
-                          {tasks.filter((task) => selectedProjectIds.includes(task.project_id)).map((task) => {
+                          {scopedTasks.map((task) => {
                             const checked = selectedTaskIds.includes(task.id);
                             return <label key={`${task.project_id}:${task.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-sm hover:bg-muted"><input type="checkbox" checked={checked} onChange={(event) => setSelectedTaskIds((current) => event.target.checked ? [...current, task.id] : current.filter((item) => item !== task.id))} className="mt-1 accent-primary" /><span className="min-w-0"><span className="block truncate">{task.topic}</span><span className="block truncate text-xs text-muted-foreground">{task.project_id} · {task.id} · {task.status}</span></span></label>;
                           })}
@@ -1348,7 +1492,7 @@ export function WorkflowAssistantWorkspace() {
                       <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
                       <Loader2 className="workflow-assistant-spinner mt-1 size-4 shrink-0" />
                     </div>}
-                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">直接聊天、查询资料或安排工作</p><p className="mt-1 max-w-sm">例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。</p></div>}
+                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">{workflowMode === "article" ? "选择文章后直接开始固定写作" : "直接聊天、查询资料或安排工作"}</p><p className="mt-1 max-w-sm">{workflowMode === "article" ? "例如：面向采购经理，重点突出安装维护；这次跳过复检。" : "例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。"}</p></div>}
                 </div>
               </ScrollArea>
             </div>
@@ -1367,8 +1511,8 @@ export function WorkflowAssistantWorkspace() {
                 <span className="font-medium">{requestPhase === "sending" ? "正在发送请求" : requestPhase === "waiting_reply" ? "已发送，等待助手回复" : "回复已收到，正在更新计划"}</span>
                 <span className="text-muted-foreground">{requestPhase === "sending" ? "正在提交当前项目和文章范围。" : requestPhase === "waiting_reply" ? "助手正在处理请求，页面不会重复提交。" : "正在刷新会话和计划预览。"}</span>
               </div>}
-              <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="直接聊天、查询所选项目的知识库，或描述要执行的工作…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
-              <p className="text-xs leading-5 text-muted-foreground">操作提示：需要跳过复检时可写“这篇不用复检”；若当前任务已有对应正文的初检 AI 率且低于 30%，助手会自动跳过降 AI 和二次检测，ZeroGPT 结果仍由人工确认。</p>
+              <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={workflowMode === "article" ? "补充本次写作要求，例如：面向采购经理，突出安装维护；这次跳过复检…" : "直接聊天、查询所选项目的知识库，或描述要执行的工作…"} rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
+              <p className="text-xs leading-5 text-muted-foreground">{workflowMode === "article" ? "本次要求会叠加到项目当前的大纲/正文提示词，不会覆盖项目默认提示词；需要跳过复检时写“这篇不用复检”。" : "操作提示：需要跳过复检时可写“这篇不用复检”；若当前任务已有对应正文的初检 AI 率且低于 30%，助手会自动跳过降 AI 和二次检测，ZeroGPT 结果仍由人工确认。"}</p>
               <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="workflow-assistant-spinner" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新计划" : pending ? "处理中" : "发送"}</Button></div>
             </div>
           </CardContent>
@@ -1408,8 +1552,8 @@ export function WorkflowAssistantWorkspace() {
             <CardHeader className="border-b px-4 py-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <CardTitle className="text-base">计划预览</CardTitle>
-                  <CardDescription className="mt-1">计划详情和执行控制已收进独立页内弹窗。</CardDescription>
+                  <CardTitle className="text-base">{workflowMode === "article" ? "固定写作流程" : "计划预览"}</CardTitle>
+                  <CardDescription className="mt-1">{workflowMode === "article" ? "固定步骤仍保留一次确认，便于审计和中途暂停。" : "计划详情和执行控制已收进独立页内弹窗。"}</CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
                   {plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}
@@ -1421,7 +1565,7 @@ export function WorkflowAssistantWorkspace() {
                     aria-haspopup="dialog"
                     onClick={() => setPlanPreviewOpen(true)}
                   >
-                    <Workflow />查看计划
+                    <Workflow />{workflowMode === "article" ? "查看流程" : "查看计划"}
                   </Button>}
                 </div>
               </div>
@@ -1433,7 +1577,7 @@ export function WorkflowAssistantWorkspace() {
                   Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
                 </p>
                 <p className="mt-3 rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
-                  点击“查看计划”打开完整步骤和确认操作；成功文章可在此处直接一键打包下载。
+                  点击“{workflowMode === "article" ? "查看流程" : "查看计划"}”打开完整步骤和确认操作；成功文章可在此处直接一键打包下载。
                 </p>
                 {deliverySteps.length > 0 && <div className="mt-4 grid gap-3 rounded-lg border border-dashed bg-muted/20 p-3">
                   <div>

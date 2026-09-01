@@ -124,10 +124,40 @@ MAX_GENERATED_ARTICLE_CHARACTERS = 200_000
 # scopes represented before the prompt character budget is applied.
 MAX_ARTICLE_CONTEXT_CHUNKS = 128
 MAX_ARTICLE_CONTEXT_CHARACTERS = 120_000
+MAX_OPERATOR_INSTRUCTION_LENGTH = 7_000
 
 
 class ArticleGenerationUnavailable(RuntimeError):
     """The scoped article runner or provider cannot safely complete work."""
+
+
+def _operator_instruction(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise JobConflict("writing instruction is invalid")
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(normalized) > MAX_OPERATOR_INSTRUCTION_LENGTH:
+        raise JobConflict("writing instruction is too long")
+    return normalized
+
+
+def _task_with_operator_instruction(
+    task: TaskRecord,
+    instruction: str,
+) -> TaskRecord:
+    if not instruction:
+        return task
+    enriched = task.model_copy(deep=True)
+    existing = (
+        enriched.article_custom_prompt
+        if enriched.use_article_custom_prompt
+        else ""
+    ).strip()
+    additions = [value for value in (existing, instruction) if value]
+    enriched.article_custom_prompt = "\n\n".join(additions)
+    enriched.use_article_custom_prompt = True
+    return enriched
 
 
 @dataclass(frozen=True, slots=True)
@@ -966,6 +996,9 @@ class ServerArticleGenerationHandler:
         source_revision = int(job.get("source_revision") or 0)
         request = dict(job.get("request") or {})
         reference = ProjectPromptReference.from_mapping(request)
+        operator_instruction = _operator_instruction(
+            request.get("operator_instruction")
+        )
         try:
             target_words = int(request.get("target_words") or 0)
         except (TypeError, ValueError) as exc:
@@ -1119,7 +1152,7 @@ class ServerArticleGenerationHandler:
         try:
             if callable(generate_for_organization):
                 raw_article = generate_for_organization(
-                    task,
+                    _task_with_operator_instruction(task, operator_instruction),
                     organization_id=organization_id,
                     user_id=requester,
                     target_words=target_words,
@@ -1128,7 +1161,7 @@ class ServerArticleGenerationHandler:
                 )
             else:
                 raw_article = self._provider.generate(
-                    task,
+                    _task_with_operator_instruction(task, operator_instruction),
                     target_words=target_words,
                     prompt_snapshot=prompt_snapshot,
                     context_chunks=context_chunks,
@@ -1378,7 +1411,9 @@ class ServerArticleGenerationRegistry:
         source_revision: int,
         operation: str = ARTICLE_GENERATION_OPERATION,
         use_evidence_pack: bool = True,
+        operator_instruction: str = "",
     ) -> dict[str, object]:
+        operator_instruction = _operator_instruction(operator_instruction)
         if operation not in ARTICLE_GENERATION_OPERATIONS:
             raise JobConflict("unsupported server job operation")
         if not isinstance(use_evidence_pack, bool):
@@ -1560,6 +1595,8 @@ class ServerArticleGenerationRegistry:
                         link.model_dump() for link in official_links
                     ],
                 }
+                if operator_instruction:
+                    request["operator_instruction"] = operator_instruction
                 batch = project.queue.create_batch_in_transaction(
                     connection,
                     operation,
