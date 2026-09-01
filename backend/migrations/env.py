@@ -7,7 +7,7 @@ from alembic import context
 from sqlalchemy import create_engine, pool
 
 from backend.config import initialize_environment
-from services.project_time import postgres_connect_args
+from backend.services.project_time import postgres_connect_args
 
 
 config = context.config
