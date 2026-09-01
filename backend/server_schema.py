@@ -1543,7 +1543,7 @@ workflow_plans = sa.Table(
         "concurrency_limit",
         sa.Integer(),
         nullable=False,
-        server_default=sa.text("3"),
+        server_default=sa.text("5"),
     ),
     sa.Column(
         "budget_warning",
