@@ -30,6 +30,14 @@ _STATUS_RANK = {
     "delivered": 11,
 }
 _COMPLETED_STATUSES = frozenset({"docx_exported", "completed", "delivered"})
+_DELIVERY_ACTIONS = (
+    "humanize",
+    "restore_links",
+    "prepare_images",
+    "export_docx",
+    "generate_tdk",
+    "package_delivery",
+)
 
 
 def _status_rank(task: AssistantTaskContext) -> int:
@@ -156,12 +164,13 @@ def build_fixed_article_plan(
     participating_projects: list[str] = []
     active_task_count = 0
     for chain_index, (project_id, task) in enumerate(tasks, start=1):
-        if task.manual_completed:
+        normalized_status = task.status.strip().casefold()
+        if task.manual_completed and normalized_status != "docx_exported":
             raise AssistantPolicyError(
                 f"文章 {task.task_id} 已人工完成，固定写作模式不会覆盖它"
             )
         rank = _status_rank(task)
-        if task.status.strip().casefold() in _COMPLETED_STATUSES:
+        if normalized_status in {"completed", "delivered"}:
             raise AssistantPolicyError(
                 f"文章 {task.task_id} 已完成交付，固定写作模式不会重复生成"
             )
@@ -242,10 +251,11 @@ def build_fixed_article_plan(
                     writing_instruction=writing_instruction,
                 )
             )
-        elif rank == _STATUS_RANK["draft_ready"] and not skip_review:
-            article_will_generate = True
+        article_needs_review = article_will_generate or (
+            rank == _STATUS_RANK["draft_ready"]
+        )
 
-        if article_will_generate and not skip_review and not any(
+        if article_needs_review and not skip_review and not any(
             step.article_task_id == task.task_id
             and step.action_kind == "review"
             for step in steps[before:]
@@ -259,6 +269,77 @@ def build_fixed_article_plan(
                     action="review",
                 )
             )
+
+        # A fixed writing request means a complete deliverable, not only an
+        # initial article draft. Keep the suffix state-aware so an existing
+        # task resumes at its first unfinished stage while a new task gets
+        # the canonical 14-step chain.
+        if rank < _STATUS_RANK["humanized_ready"]:
+            steps.append(
+                _step(
+                    sequence=len(steps) + 1,
+                    chain_index=chain_index,
+                    project_id=project_id,
+                    task=task,
+                    action="humanize",
+                )
+            )
+        if rank < _STATUS_RANK["links_verified"]:
+            steps.append(
+                _step(
+                    sequence=len(steps) + 1,
+                    chain_index=chain_index,
+                    project_id=project_id,
+                    task=task,
+                    action="restore_links",
+                )
+            )
+        if rank < _STATUS_RANK["images_ready"]:
+            steps.append(
+                _step(
+                    sequence=len(steps) + 1,
+                    chain_index=chain_index,
+                    project_id=project_id,
+                    task=task,
+                    action="prepare_images",
+                )
+            )
+        if rank < _STATUS_RANK["docx_exported"]:
+            steps.append(
+                _step(
+                    sequence=len(steps) + 1,
+                    chain_index=chain_index,
+                    project_id=project_id,
+                    task=task,
+                    action="export_docx",
+                )
+            )
+        if normalized_status == "docx_exported":
+            # The Server marks a Word export as manually complete, but TDK and
+            # delivery packaging are still legitimate downstream actions.
+            next_sequence = len(steps) + 1
+            for offset, action in enumerate(_DELIVERY_ACTIONS[-2:], start=0):
+                steps.append(
+                    _step(
+                        sequence=next_sequence + offset,
+                        chain_index=chain_index,
+                        project_id=project_id,
+                        task=task,
+                        action=action,
+                    )
+                )
+        elif rank < _STATUS_RANK["docx_exported"]:
+            next_sequence = len(steps) + 1
+            for offset, action in enumerate(_DELIVERY_ACTIONS[4:], start=0):
+                steps.append(
+                    _step(
+                        sequence=next_sequence + offset,
+                        chain_index=chain_index,
+                        project_id=project_id,
+                        task=task,
+                        action=action,
+                    )
+                )
 
         if len(steps) > before and project_id not in participating_projects:
             participating_projects.append(project_id)

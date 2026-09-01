@@ -562,6 +562,20 @@ class WorkflowExecutionCoordinator:
                     )
                     continue
                 if job_status in {"failed", "cancelled", "conflict"}:
+                    terminal_error_code = (
+                        "article_result_missing"
+                        if job_status == "failed"
+                        and bool(status.get("article_result_missing"))
+                        else (
+                            "background_job_failed"
+                            if job_status == "failed"
+                            else (
+                                "background_job_cancelled"
+                                if job_status == "cancelled"
+                                else "background_job_conflict"
+                            )
+                        )
+                    )
                     committed = self._repository.finish_step(
                         actor=actor,
                         plan_id=plan.plan_id,
@@ -572,15 +586,7 @@ class WorkflowExecutionCoordinator:
                             else "failed"
                         ),
                         output_summary=status,
-                        standardized_error_code=(
-                            "background_job_failed"
-                            if job_status == "failed"
-                            else (
-                                "background_job_cancelled"
-                                if job_status == "cancelled"
-                                else "background_job_conflict"
-                            )
-                        ),
+                        standardized_error_code=terminal_error_code,
                         background_job_id=step.background_job_id,
                         retry_count=self._retry_count(status),
                     )
@@ -596,15 +602,7 @@ class WorkflowExecutionCoordinator:
                         ),
                         public_payload={
                             "step_id": step.step_id,
-                            "error_code": (
-                                "background_job_failed"
-                                if job_status == "failed"
-                                else (
-                                    "background_job_cancelled"
-                                    if job_status == "cancelled"
-                                    else "background_job_conflict"
-                                )
-                            ),
+                            "error_code": terminal_error_code,
                         },
                     )
                     continue

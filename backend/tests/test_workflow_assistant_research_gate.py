@@ -201,7 +201,70 @@ def _job_status_adapter(
     return adapter
 
 
+def _article_job_status_adapter(
+    task: TaskRecord,
+) -> WorkflowAssistantServiceAdapters:
+    engine = MagicMock()
+    connection = engine.connect.return_value.__enter__.return_value
+    row = {
+        **_job("article-job", status="succeeded"),
+        "operation": "article",
+        "request": {},
+    }
+    connection.execute.return_value.mappings.return_value.one_or_none.return_value = row
+    return WorkflowAssistantServiceAdapters(
+        engine=engine,
+        config=SimpleNamespace(),  # type: ignore[arg-type]
+        task_factory=FakeTaskFactory(task),  # type: ignore[arg-type]
+    )
+
+
 class WorkflowAssistantResearchGateTests(unittest.TestCase):
+    def test_succeeded_article_job_requires_a_persisted_body(self) -> None:
+        task = _task().model_copy(
+            update={
+                "initial_article": "A persisted article body.",
+                "initial_article_word_count": 4,
+            }
+        )
+        adapter = _article_job_status_adapter(task)
+        step = SimpleNamespace(
+            background_job_id="article-job",
+            article_task_id="task-a",
+            action_kind="generate_article",
+            project_id="project-a",
+            input_summary={"operation": "article"},
+        )
+
+        status = adapter.job_status(
+            ActorIdentity(organization_id="org-a", user_id="user-a"),
+            step,
+        )
+
+        self.assertEqual(status["status"], "succeeded")
+        self.assertTrue(status["article_ready"])
+        self.assertEqual(status["article_word_count"], 4)
+
+    def test_succeeded_article_job_without_body_is_projected_as_failure(self) -> None:
+        adapter = _article_job_status_adapter(_task())
+        step = SimpleNamespace(
+            background_job_id="article-job",
+            article_task_id="task-a",
+            action_kind="generate_article",
+            project_id="project-a",
+            input_summary={"operation": "article"},
+        )
+
+        status = adapter.job_status(
+            ActorIdentity(organization_id="org-a", user_id="user-a"),
+            step,
+        )
+
+        self.assertEqual(status["status"], "failed")
+        self.assertTrue(status["has_error"])
+        self.assertTrue(status["article_result_missing"])
+        self.assertFalse(status["article_ready"])
+
     def test_succeeded_job_waiting_run_projects_runtime_human_gate(self) -> None:
         adapter = _job_status_adapter(_run("waiting_for_review"))
         step = SimpleNamespace(

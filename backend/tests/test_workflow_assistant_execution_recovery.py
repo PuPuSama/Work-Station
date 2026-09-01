@@ -581,6 +581,44 @@ class WorkflowAssistantExecutionRecoveryTests(unittest.TestCase):
             {"step_id": "research", "background_job_id": "job-research"},
         )
 
+    def test_missing_article_result_is_a_specific_terminal_failure(self) -> None:
+        waiting = replace(
+            _step(
+                "article",
+                status="waiting_job",
+                background_job_id="article-job",
+            ),
+            action_kind="generate_article",
+        )
+        repository = _ReviewRepository(_plan(waiting))
+        status = {
+            "status": "failed",
+            "job_id": "article-job",
+            "article_result_missing": True,
+            "article_ready": False,
+        }
+        coordinator = WorkflowExecutionCoordinator(
+            repository=repository,  # type: ignore[arg-type]
+            access=_AllowAccess(),  # type: ignore[arg-type]
+            tools=object(),  # type: ignore[arg-type]
+            job_status_resolver=lambda _actor, _step: status,
+        )
+
+        result = coordinator.reconcile_waiting_jobs(
+            actor=ActorIdentity("org-a", "user-a"),
+            plan=repository.plan,
+        )
+
+        self.assertEqual(result.steps[0].status, "failed")
+        self.assertEqual(
+            result.steps[0].standardized_error_code,
+            "article_result_missing",
+        )
+        self.assertEqual(
+            repository.events[0]["public_payload"]["error_code"],
+            "article_result_missing",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

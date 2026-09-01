@@ -81,8 +81,15 @@ class FixedArticleWorkflowTests(unittest.TestCase):
                 "start_research",
                 "generate_article",
                 "review",
+                "humanize",
+                "restore_links",
+                "prepare_images",
+                "export_docx",
+                "generate_tdk",
+                "package_delivery",
             ],
         )
+        self.assertEqual(len(plan.steps), 14)
         self.assertEqual(
             plan.steps[4].input_summary["writing_instruction"],
             "面向采购经理写一篇文章",
@@ -105,7 +112,48 @@ class FixedArticleWorkflowTests(unittest.TestCase):
 
         self.assertEqual(
             [step.action_kind for step in plan.steps],
-            ["start_research", "generate_article"],
+            [
+                "start_research",
+                "generate_article",
+                "humanize",
+                "restore_links",
+                "prepare_images",
+                "export_docx",
+                "generate_tdk",
+                "package_delivery",
+            ],
+        )
+
+    def test_new_article_with_skip_review_keeps_the_other_thirteen_steps(self) -> None:
+        plan = build_fixed_article_plan(
+            "写一篇文章，这次跳过复检",
+            _context(_task("task-a")),
+            selected_task_ids=("task-a",),
+            selection_locked=True,
+        )
+
+        self.assertEqual(len(plan.steps), 13)
+        self.assertNotIn("review", [step.action_kind for step in plan.steps])
+
+    def test_docx_exported_task_can_finish_tdk_and_delivery(self) -> None:
+        plan = build_fixed_article_plan(
+            "完成交付包",
+            _context(
+                _task(
+                    "task-a",
+                    status="docx_exported",
+                    selected_title="Selected title",
+                    confirmed_products=1,
+                    manual_completed=True,
+                )
+            ),
+            selected_task_ids=("task-a",),
+            selection_locked=True,
+        )
+
+        self.assertEqual(
+            [step.action_kind for step in plan.steps],
+            ["generate_tdk", "package_delivery"],
         )
 
     def test_no_selection_defaults_to_one_new_task_per_project(self) -> None:

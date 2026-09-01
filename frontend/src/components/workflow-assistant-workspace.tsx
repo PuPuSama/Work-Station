@@ -80,6 +80,34 @@ const statusLabels: Record<WorkflowAssistantPlan["status"], string> = {
   cancelled: "已取消",
 };
 
+const workflowStepActionLabels: Record<string, string> = {
+  generate_titles: "生成标题候选",
+  select_title: "确认标题",
+  generate_products: "生成产品候选",
+  confirm_products: "确认产品",
+  generate_outline: "生成大纲",
+  start_research: "知识库研究",
+  generate_article: "生成正文",
+  review: "正文复检",
+  humanize: "降 AI / 人化",
+  restore_links: "恢复并校验链接",
+  prepare_images: "准备图片",
+  export_docx: "导出 Word",
+  generate_tdk: "生成 TDK",
+  package_delivery: "生成交付包",
+};
+
+const workflowStepStatusLabels: Record<string, string> = {
+  pending: "待执行",
+  running: "执行中",
+  waiting_job: "排队中",
+  waiting_review: "待人工处理",
+  succeeded: "已完成",
+  failed: "失败",
+  skipped: "已跳过",
+  cancelled: "已取消",
+};
+
 // Planning can legitimately exceed the shared four-minute API timeout when
 // the selected model performs deep reasoning over several projects. Keep a
 // finite browser guard, but do not abort a healthy server-side planning call.
@@ -331,6 +359,7 @@ type WorkflowArticleCard = {
   total: number;
   updatedAt: string | null;
   packageReady: boolean;
+  articleReady: boolean;
   errorCode: string | null;
 };
 
@@ -371,6 +400,10 @@ function workflowArticleCardStatus(
     && statuses.every((status) => status === "succeeded" || status === "skipped")
   ) return "skipped";
   if (statuses.length && statuses.every((status) => status === "skipped")) return "skipped";
+  if (
+    statuses.length
+    && statuses.every((status) => status === "succeeded" || status === "skipped")
+  ) return "completed";
   return "running";
 }
 
@@ -470,8 +503,27 @@ function buildWorkflowArticleCards(
         return step.project_id === sourceStep.project_id
           && createTaskStepId
           && stepSummaryText(step.input_summary, "create_task_step_id") === createTaskStepId;
-      });
-    const status = workflowArticleCardStatus(steps, packageStep);
+    });
+    const articleStep = steps.find((step) => step.action_kind === "generate_article");
+    const hasDownstreamArticleResult = steps.some(
+      (step) => [
+        "humanize",
+        "restore_links",
+        "prepare_images",
+        "export_docx",
+        "generate_tdk",
+        "package_delivery",
+      ].includes(step.action_kind) && step.status === "succeeded",
+    );
+    const articleReady = articleStep
+      ? articleStep.status === "succeeded"
+        && articleStep.output_summary.article_ready !== false
+      : hasDownstreamArticleResult;
+    const articleResultMissing = articleStep?.status === "succeeded"
+      && articleStep.output_summary.article_ready === false;
+    const status = articleResultMissing
+      ? "failed"
+      : workflowArticleCardStatus(steps, packageStep);
     const errorStep = steps.find((step) => step.status === "failed" || step.status === "cancelled");
     cards.push({
       key,
@@ -483,7 +535,10 @@ function buildWorkflowArticleCards(
       total: steps.length,
       updatedAt: workflowArticleCardUpdatedAt(steps),
       packageReady: Boolean(packageStep && isReadyDeliveryStep(packageStep)),
-      errorCode: errorStep?.standardized_error_code || null,
+      articleReady,
+      errorCode: articleResultMissing
+        ? "article_result_missing"
+        : errorStep?.standardized_error_code || null,
     });
   });
 
@@ -1329,6 +1384,36 @@ export function WorkflowAssistantWorkspace() {
     }
   }
 
+  const planQuickActions = plan && (
+    <div className="flex flex-wrap items-center justify-end gap-2" aria-label="计划快速操作">
+      {(plan.status === "awaiting_confirmation" || plan.status === "waiting_review") && (
+        <Button type="button" size="sm" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}>
+          <Square />取消计划
+        </Button>
+      )}
+      {(plan.status === "queued" || plan.status === "running") && (
+        <>
+          <Button type="button" size="sm" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}>
+            <Pause />暂停
+          </Button>
+          <Button type="button" size="sm" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}>
+            <Square />取消
+          </Button>
+        </>
+      )}
+      {plan.status === "paused" && (
+        <>
+          <Button type="button" size="sm" onClick={() => void changePlan("resume")} disabled={pending}>
+            <Play />恢复
+          </Button>
+          <Button type="button" size="sm" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}>
+            <Square />取消
+          </Button>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b bg-card">
@@ -1553,10 +1638,11 @@ export function WorkflowAssistantWorkspace() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <CardTitle className="text-base">{workflowMode === "article" ? "固定写作流程" : "计划预览"}</CardTitle>
-                  <CardDescription className="mt-1">{workflowMode === "article" ? "固定步骤仍保留一次确认，便于审计和中途暂停。" : "计划详情和执行控制已收进独立页内弹窗。"}</CardDescription>
+                  <CardDescription className="mt-1">{workflowMode === "article" ? "固定步骤仍保留一次确认；暂停、恢复和取消可直接在这里操作。" : "完整步骤在弹窗内查看；暂停、恢复和取消可直接在这里操作。"}</CardDescription>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   {plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}
+                  {planQuickActions}
                   {plan && <Button
                     type="button"
                     variant="outline"
@@ -1646,6 +1732,29 @@ export function WorkflowAssistantWorkspace() {
                     计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
                   </p>
                 </div>
+                <div className="grid gap-2 rounded-lg border bg-background p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-medium">固定写作步骤</p>
+                      <p className="mt-1 text-xs text-muted-foreground">新文章完整链为 14 步；已有任务会从当前未完成阶段继续。</p>
+                    </div>
+                    <Badge variant="outline">当前 {plan.steps.length} 步</Badge>
+                  </div>
+                  <ol className="grid gap-2">
+                    {plan.steps.map((step) => (
+                      <li key={step.step_id} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-medium">{workflowStepActionLabels[step.action_kind] || step.action_kind}</span>
+                          <span className="mt-0.5 block truncate text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}</span>
+                        </span>
+                        <Badge variant={step.status === "failed" ? "destructive" : step.status === "succeeded" ? "secondary" : "outline"}>
+                          {workflowStepStatusLabels[step.status] || step.status}
+                        </Badge>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
                 <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
                   文章概览已移到右上方的二级窗口；每张卡片显示项目、状态、处理进度和完成时间。
                 </div>
@@ -1711,11 +1820,9 @@ export function WorkflowAssistantWorkspace() {
                     <AlertDescription>队列状态：{status}。研究完成后，原计划会继续执行未完成步骤。</AlertDescription>
                   </Alert>
                 ))}
-                {plan.status === "awaiting_confirmation" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消计划</Button></div>}
-                {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
-                {plan.status === "queued" || plan.status === "running" ? <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" onClick={() => void changePlan("pause")} disabled={pending}><Pause />暂停</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div> : null}
+                {plan.status === "awaiting_confirmation" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button></div>}
+                {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button></div>}
                 {(plan.status === "queued" || plan.status === "running" || plan.status === "waiting_review") && plan.project_ids.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed p-3"><span className="text-xs font-medium text-muted-foreground">项目执行通道</span><div className="flex flex-wrap gap-2">{plan.project_ids.map((projectId) => { const paused = plan.paused_project_ids.includes(projectId); return <Button key={projectId} type="button" size="sm" variant="outline" onClick={() => void changePlan(paused ? "resume" : "pause", [projectId])} disabled={pending}>{paused ? <Play /> : <Pause />}{paused ? `恢复 ${projectId}` : `暂停 ${projectId}`}</Button>; })}</div></div>}
-                {plan.status === "paused" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("resume")} disabled={pending}><Play />恢复</Button><Button type="button" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}><Square />取消</Button></div>}
                 {plan.status === "failed" && <div className="grid gap-2 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3"><div className="text-sm text-muted-foreground">已完成的步骤不会重复执行，只会重新排队失败步骤及同一篇文章被阻断的后续步骤。</div><Button type="button" variant="outline" className="justify-self-start" onClick={() => void changePlan("retry")} disabled={pending}><RotateCcw />重试失败步骤</Button></div>}
                 {["draft", "awaiting_confirmation", "paused", "waiting_review", "failed"].includes(plan.status) && <div className="grid gap-2 rounded-lg border border-dashed p-3"><Label htmlFor="workflow-plan-revision">调整未完成步骤</Label><Textarea id="workflow-plan-revision" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} placeholder="例如：保留已完成步骤，只把未完成正文改成面向采购团队。" rows={3} disabled={revisionPending || pending} /><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">会生成新的 Revision，并要求重新确认。</span><Button type="button" variant="outline" onClick={() => void revisePlan()} disabled={revisionPending || pending || !revisionDraft.trim()}>{revisionPending ? <Loader2 className="animate-spin" /> : <Workflow />}生成修订预览</Button></div></div>}
               </div> : <div className="py-10 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
@@ -1736,7 +1843,7 @@ export function WorkflowAssistantWorkspace() {
                 {articleCards.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {articleCards.map((card) => {
                     const workbenchHref = card.taskId
-                      ? `/projects/${encodeURIComponent(card.projectId)}/articles/${encodeURIComponent(card.taskId)}?step=review`
+                      ? `/projects/${encodeURIComponent(card.projectId)}/articles/${encodeURIComponent(card.taskId)}?step=draft`
                       : null;
                     const timeLabel = card.status === "completed" ? "完成时间" : "最近更新";
                     return (
@@ -1767,6 +1874,12 @@ export function WorkflowAssistantWorkspace() {
                           <span className="text-xs text-muted-foreground">{card.progress}/{card.total} 步已处理</span>
                         </div>
                         <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                          <div className="min-w-0">
+                            <dt className="text-muted-foreground">正文</dt>
+                            <dd className={`mt-0.5 truncate font-medium ${card.articleReady ? "text-foreground" : "text-muted-foreground"}`}>
+                              {card.articleReady ? "已生成" : "未生成"}
+                            </dd>
+                          </div>
                           <div className="min-w-0">
                             <dt className="text-muted-foreground">交付包</dt>
                             <dd className="mt-0.5 truncate font-medium">{card.packageReady ? "已生成" : "未生成"}</dd>

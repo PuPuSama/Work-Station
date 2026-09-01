@@ -282,6 +282,45 @@ class WorkflowAssistantServiceAdapters:
                 step=step,
                 job=public,
             )
+        if (
+            public.get("status") == "succeeded"
+            and str(step.action_kind) == "generate_article"
+            and self._task_factory is not None
+        ):
+            # A successful queue row is not enough to expose a completed
+            # article result. Verify the Server Task at the same reconciliation
+            # boundary so a missing body cannot be counted as a successful
+            # article step or shown as a finished deliverable.
+            try:
+                runtime = self._task_factory.create(
+                    AuthorizedProjectRequest(
+                        actor=actor,
+                        project_id=str(step.project_id),
+                        permission="article.edit",
+                    )
+                )
+                task = runtime.store.get(task_id)
+            except Exception as exc:
+                raise WorkflowToolError("article result is unavailable") from exc
+            article = str(
+                task.initial_article
+                or task.article
+                or task.raw_draft_article
+                or ""
+            ).strip()
+            if not article:
+                return {
+                    **public,
+                    "status": "failed",
+                    "has_error": True,
+                    "article_result_missing": True,
+                    "article_ready": False,
+                }
+            public = {
+                **public,
+                "article_ready": True,
+                "article_word_count": int(task.initial_article_word_count or 0),
+            }
         return public
 
     def _research_job_status(
