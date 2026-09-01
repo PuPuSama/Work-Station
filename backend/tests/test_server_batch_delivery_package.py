@@ -149,6 +149,50 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
         self.assertEqual(metadata["completion_date"], "2026-08-31")
         self.assertEqual(metadata["anchor_text"], ["Guide"])
 
+    def test_refreshes_an_old_metadata_schema_when_repacking(self) -> None:
+        objects = BatchDeliveryObjects()
+        package = build_delivery_zip_bytes(
+            article_docx=b"article",
+            article_filename="Article.docx",
+            tdk_docx=b"tdk",
+            images=[("hero.webp", b"image")],
+            metadata=b'{"schema_version":1,"title":"stale"}\n',
+        )
+        package_hash = objects.add("stale-package", package)
+        task = TaskRecord(
+            id="stale-task",
+            week_folder="server",
+            customer="project-a",
+            topic_index=8,
+            topic="PET preform manufacturing",
+            task_dir="/server/stale-task",
+            final_article=(
+                "# PET preform manufacturing\n\n"
+                "PET preform production supports reliable bottle production."
+            ),
+            tdk={"keywords": ["PET preform manufacturing"]},
+            delivery_package_asset_id="stale-package",
+            delivery_package_content_hash=package_hash,
+            delivery_package_filename="project-a-topic_008.zip",
+            updated_at="2026-08-31T04:05:06+00:00",
+            created_at="2026-08-31T00:00:00+00:00",
+        )
+
+        ServerBatchDeliveryPackage(objects=objects).package(
+            actor=ActorIdentity("org-a", "user-a"),
+            project_id="anchor.example.com",
+            tasks=[task],
+            task_project_ids={"stale-task": "project-a"},
+        )
+
+        with ZipFile(BytesIO(objects.archive)) as archive:
+            metadata = json.loads(
+                archive.read("project-a-topic_008/metadata.json")
+            )
+        self.assertEqual(metadata["schema_version"], 2)
+        self.assertEqual(metadata["title"], "PET preform manufacturing")
+        self.assertEqual(metadata["keyword_density"][0]["match_mode"], "approximate")
+
     def test_combines_completed_packages_into_task_folders(self) -> None:
         objects = BatchDeliveryObjects()
         package_a = build_delivery_zip_bytes(

@@ -234,6 +234,7 @@ class ServerDeliveryPackageTests(unittest.TestCase):
                 },
             )
             metadata = json.loads(archive.read("metadata.json"))
+        self.assertEqual(metadata["schema_version"], 2)
         self.assertEqual(metadata["title"], "Industrial Floors")
         self.assertEqual(metadata["completion_date"], "2026-07-31")
         self.assertEqual(metadata["keywords"], ["industrial floors", "equipment"])
@@ -243,6 +244,7 @@ class ServerDeliveryPackageTests(unittest.TestCase):
         )
         self.assertEqual(metadata["keyword_density"][0]["occurrences"], 4)
         self.assertEqual(metadata["keyword_density"][1]["occurrences"], 1)
+        self.assertEqual(metadata["keyword_density"][0]["match_mode"], "exact")
         self.assertEqual(metadata["ai_rate_percent"], 18.5)
         self.assertEqual(metadata["knowledge_base_citation_rate_percent"], 75.0)
         self.assertEqual(metadata["anchor_text"], ["Industrial floors guide"])

@@ -27,6 +27,7 @@ from services.delivery_package import (
 )
 from services.delivery_metadata import (
     DELIVERY_METADATA_FILENAME,
+    DELIVERY_METADATA_SCHEMA_VERSION,
     build_delivery_metadata,
 )
 from services.server_ai_screenshots import (
@@ -84,6 +85,17 @@ def _write_deterministic_zip_entry(
     info.external_attr = 0o600 << 16
     info.create_system = 3
     archive.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=6)
+
+
+def _is_current_delivery_metadata(data: bytes) -> bool:
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == DELIVERY_METADATA_SCHEMA_VERSION
+    )
 
 
 class ServerDeliveryObjectService(Protocol):
@@ -447,7 +459,7 @@ class ServerBatchDeliveryPackage:
                     used_folders.add(folder.casefold())
 
                     package_entry_names: set[str] = set()
-                    has_metadata = False
+                    has_current_metadata = False
                     try:
                         source = ZipFile(BytesIO(stored.data))
                     except (BadZipFile, OSError, ValueError) as exc:
@@ -465,19 +477,12 @@ class ServerBatchDeliveryPackage:
                                     f"delivery package contains duplicate files for task {task_id}"
                                 )
                             package_entry_names.add(member_key)
-                            if member_key == DELIVERY_METADATA_FILENAME.casefold():
-                                has_metadata = True
+                            is_metadata_entry = (
+                                member_key == DELIVERY_METADATA_FILENAME.casefold()
+                            )
                             if info.file_size > MAX_SERVER_DELIVERY_ZIP_BYTES:
                                 raise ServerDeliveryPackageError(
                                     f"delivery package contains an oversized file for task {task_id}"
-                                )
-                            uncompressed_bytes += info.file_size
-                            if (
-                                uncompressed_bytes
-                                > MAX_SERVER_BATCH_DELIVERY_ZIP_BYTES
-                            ):
-                                raise _BatchArchiveTooLarge(
-                                    "batch delivery contains too much uncompressed content"
                                 )
                             try:
                                 member_data = source.read(info)
@@ -488,6 +493,22 @@ class ServerBatchDeliveryPackage:
                             if len(member_data) != info.file_size:
                                 raise ServerDeliveryPackageError(
                                     f"delivery package integrity check failed for task {task_id}"
+                                )
+                            if is_metadata_entry and isinstance(task, TaskRecord):
+                                if _is_current_delivery_metadata(member_data):
+                                    has_current_metadata = True
+                                else:
+                                    # Replace an older schema so an existing
+                                    # package receives the current metric
+                                    # semantics on its next batch download.
+                                    continue
+                            uncompressed_bytes += info.file_size
+                            if (
+                                uncompressed_bytes
+                                > MAX_SERVER_BATCH_DELIVERY_ZIP_BYTES
+                            ):
+                                raise _BatchArchiveTooLarge(
+                                    "batch delivery contains too much uncompressed content"
                                 )
                             entry_count += 1
                             if entry_count > MAX_SERVER_BATCH_DELIVERY_ENTRIES:
@@ -504,7 +525,10 @@ class ServerBatchDeliveryPackage:
                     # valid source assets. Add the record while composing a
                     # new batch archive so an old article becomes complete
                     # on its next workflow-assistant download.
-                    if not has_metadata and isinstance(task, TaskRecord):
+                    if (
+                        not has_current_metadata
+                        and isinstance(task, TaskRecord)
+                    ):
                         metadata = build_delivery_metadata(
                             task,
                             article=current_article(task),
