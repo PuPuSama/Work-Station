@@ -32,9 +32,9 @@ from services.server_auth import (
 
 # Keep the signed deployment evidence bound to the schema that the Server
 # runtime actually requires.  The durable assistant dispatch inbox was added
-# in 0033; accepting the old M1 merge head would let a partially migrated
-# deployment pass the preflight gate and fail only when a user sends a plan.
-EXPECTED_ALEMBIC_HEAD = "20260826_0033"
+# in 0033; accepting an older head would let a partially migrated deployment
+# pass the preflight gate and miss the current workflow-plan defaults.
+EXPECTED_ALEMBIC_HEAD = "20260901_0034"
 
 
 @dataclass(frozen=True, slots=True)
