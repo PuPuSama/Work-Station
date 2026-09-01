@@ -156,7 +156,7 @@ class WorkflowExecutionCoordinator:
         repository: PostgresWorkflowAssistantRepository,
         access: ProjectAccessService,
         tools: WorkflowToolRegistry,
-        max_concurrency: int = 3,
+        max_concurrency: int = 5,
         job_status_resolver: JobStatusResolver | None = None,
     ) -> None:
         if not 1 <= max_concurrency <= 32:

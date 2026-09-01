@@ -62,7 +62,8 @@
 ## 2026-08-28：项目任务并发
 
 - 背景：各 Server 项目操作 runner 原先把并发硬编码为 1，批量执行相同动作时同一项目内只能串行处理。
-- 决策：`config.yaml` 的 `server_jobs.project_concurrency` 作为基线，`ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY` 可覆盖，默认值为 3，允许范围为 1–32；所有授权项目操作 runner 统一使用该值。
+- 决策：`config.yaml` 的 `server_jobs.project_concurrency` 作为基线，`ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY` 可覆盖，默认值为 5，允许范围为 1–32；所有授权项目操作 runner 统一使用该值。
+- 工作流助手计划的 `workflow_assistant.max_concurrency` 与 `WORKFLOW_ASSISTANT_MAX_CONCURRENCY` 也以 5 为默认上限（范围 1–32），用于限制批量计划同时派发的步骤数；计划仍可主动选择更低并发。
 - 安全边界：同一篇文章仍不能同时拥有两个活动 Job；并发上限只减少不必要的串行等待，不取消 PostgreSQL 队列、重授权和 revision/CAS 保护。
 - 影响：标题、产品、大纲、正文/重写、降 AI、SEO 复检、链接恢复、产品再发现和知识研究均接入统一并发配置；Workflow Assistant 自身的 `WORKFLOW_ASSISTANT_MAX_CONCURRENCY` 仍独立控制计划步骤并发。
 

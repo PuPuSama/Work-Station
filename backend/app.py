@@ -994,7 +994,7 @@ async def app_lifespan(application: FastAPI):
                 access=application.state.workflow_assistant_context.access,
                 tools=workflow_assistant_tools,
                 max_concurrency=int(
-                    getattr(cfg, "workflow_assistant_max_concurrency", 3)
+                    getattr(cfg, "workflow_assistant_max_concurrency", 5)
                 ),
                 job_status_resolver=workflow_assistant_adapters.job_status,
             )

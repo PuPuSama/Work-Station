@@ -149,7 +149,9 @@ class YamlOverlayTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                self.assertEqual(load_config().project_job_concurrency, 5)
+                config = load_config()
+                self.assertEqual(config.workflow_assistant_max_concurrency, 5)
+                self.assertEqual(config.project_job_concurrency, 5)
 
             with patch.dict(
                 os.environ,

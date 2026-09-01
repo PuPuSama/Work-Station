@@ -169,7 +169,7 @@ class PlanDraft(BaseModel):
     natural_language_request: str = Field(min_length=1, max_length=20_000)
     project_ids: list[str] = Field(min_length=1, max_length=100)
     steps: list[PlanStep] = Field(min_length=1, max_length=1000)
-    concurrency_limit: int = Field(default=3, ge=1, le=32)
+    concurrency_limit: int = Field(default=5, ge=1, le=32)
     budget_warning: bool = False
     attention_state: Literal["none", "user_confirmation", "error", "unread"] = "user_confirmation"
 

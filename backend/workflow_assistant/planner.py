@@ -625,7 +625,7 @@ def _planner_input(
                     "hard_gate": False,
                 }
             ],
-            "concurrency_limit": 3,
+            "concurrency_limit": 5,
             "budget_warning": False,
             "attention_state": "user_confirmation",
         },
@@ -1119,7 +1119,7 @@ class StructuredWorkflowPlanner:
         # contract expressive while making the execution limit authoritative
         # outside of model output.
         configured_max_concurrency = int(
-            getattr(self._config, "workflow_assistant_max_concurrency", 3)
+            getattr(self._config, "workflow_assistant_max_concurrency", 5)
         )
         usage = estimate_planner_usage(
             request,

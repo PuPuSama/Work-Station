@@ -163,9 +163,9 @@ def _apply_execution_limits(request: Request, plan: Any) -> Any:
 
     config = getattr(request.app.state, "article_agent_config", None)
     try:
-        configured = int(getattr(config, "workflow_assistant_max_concurrency", 3))
+        configured = int(getattr(config, "workflow_assistant_max_concurrency", 5))
     except (TypeError, ValueError):
-        configured = 3
+        configured = 5
     maximum = max(1, min(32, configured))
     if getattr(plan, "concurrency_limit", maximum) <= maximum:
         return plan

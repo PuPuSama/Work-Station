@@ -47,8 +47,8 @@ features:
   workflow_assistant_gap_fill_enabled: false
 
 workflow_assistant:
-  max_concurrency: 3
+  max_concurrency: 5
   soft_budget_warning_tokens: 24000
 
 server_jobs:
-  project_concurrency: 3
+  project_concurrency: 5

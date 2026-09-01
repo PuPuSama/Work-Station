@@ -336,7 +336,7 @@ def load_config() -> AppConfig:
         ),
         workflow_assistant_max_concurrency=_environment_int(
             "WORKFLOW_ASSISTANT_MAX_CONCURRENCY",
-            int(workflow_assistant.get("max_concurrency", 3)),
+            int(workflow_assistant.get("max_concurrency", 5)),
             minimum=1,
             maximum=32,
         ),
@@ -348,7 +348,7 @@ def load_config() -> AppConfig:
         ),
         project_job_concurrency=_environment_int(
             "ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY",
-            int(server_jobs.get("project_concurrency", 3)),
+            int(server_jobs.get("project_concurrency", 5)),
             minimum=1,
             maximum=32,
         ),
@@ -488,7 +488,7 @@ def public_config(config: AppConfig) -> dict[str, Any]:
     if config.workflow_assistant_enabled:
         payload["workflow_assistant"] = {
             "max_concurrency": int(
-                getattr(config, "workflow_assistant_max_concurrency", 3)
+                getattr(config, "workflow_assistant_max_concurrency", 5)
             ),
             "soft_budget_warning_tokens": int(
                 getattr(config, "workflow_assistant_soft_budget_tokens", 24000)
