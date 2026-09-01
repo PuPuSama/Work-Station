@@ -37,6 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ServerPrivateDocumentUpload } from "@/components/server-private-document-upload";
 import { apiDelete, apiGet, apiPost } from "@/lib/api";
+import { formatProjectDate } from "@/lib/project-date";
 import {
   countKnowledgeSourceOrigins,
   filterKnowledgeSources,
@@ -87,13 +88,10 @@ function canDeleteKnowledge(
 
 function formatDate(value: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "—"
-    : new Intl.DateTimeFormat("zh-CN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(date);
+  return formatProjectDate(value, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }) || "—";
 }
 
 function formatByteSize(value: number | null) {

@@ -4,7 +4,6 @@ import copy
 import hashlib
 import json
 import shutil
-from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Iterable, Mapping
@@ -19,13 +18,14 @@ from models import (
 )
 from services.task_identity import article_source_key, normalized_customer
 from services.task_repository import TaskRecordRepository
+from services.project_time import project_now_iso
 
 
 _TASK_STORE_LOCK = RLock()
 
 
 def now_iso() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    return project_now_iso()
 
 
 def content_hash(content: str) -> str:

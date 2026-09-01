@@ -7,6 +7,7 @@ from alembic import context
 from sqlalchemy import create_engine, pool
 
 from backend.config import initialize_environment
+from services.project_time import postgres_connect_args
 
 
 config = context.config
@@ -40,7 +41,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(_database_url(), poolclass=pool.NullPool)
+    connectable = create_engine(
+        _database_url(),
+        poolclass=pool.NullPool,
+        connect_args=postgres_connect_args(),
+    )
 
     with connectable.connect() as connection:
         context.configure(

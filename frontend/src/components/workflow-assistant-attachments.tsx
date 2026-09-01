@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { ApiError, apiFileUrl, apiGet, apiPost, apiUploadWithProgress } from "@/lib/api";
+import { formatProjectDate } from "@/lib/project-date";
 import {
   cancelWorkflowAssistantImportProposal,
   classifyWorkflowAssistantAttachment,
@@ -182,9 +183,7 @@ function sizeLabel(bytes: number) {
 }
 
 function expiryLabel(value: string) {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf())) return value;
-  return parsed.toLocaleString("zh-CN", {
+  return formatProjectDate(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

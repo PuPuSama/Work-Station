@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from hashlib import sha256
 import logging
 from pathlib import PurePath
-from datetime import datetime, timezone
 from time import monotonic
 from typing import Annotated, Literal
 from urllib.parse import quote
@@ -84,6 +83,7 @@ from .snapshot_reviews import (
     SnapshotReviewConflict,
     SnapshotReviewRepositoryError,
 )
+from services.project_time import project_now_iso
 from .runtime import KnowledgeAgentRuntime
 from .research_graph import ResearchGraphRequest, new_research_thread_id
 from .research_runs import (
@@ -1959,7 +1959,7 @@ async def stream_research_run_events(
             if now - last_heartbeat >= 15:
                 yield encode_sse(
                     event="heartbeat",
-                    data={"server_time": datetime.now(timezone.utc).isoformat()},
+                    data={"server_time": project_now_iso()},
                 )
                 last_heartbeat = now
             await asyncio.sleep(1)
@@ -2570,7 +2570,7 @@ def upload_private_knowledge(
         source_metadata["review"] = {
             "decision": review_decision,
             "reason": review_reason,
-            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "reviewed_at": project_now_iso(),
             "actor": "knowledge_auto_review_v2",
         }
         reviewed = KnowledgeSource(
@@ -2711,7 +2711,7 @@ def review_knowledge_source(
     metadata["review"] = {
         "decision": payload.decision,
         "reason": payload.reason.strip(),
-        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "reviewed_at": project_now_iso(),
     }
     reviewed = KnowledgeSource(
         project_id=source.project_id,

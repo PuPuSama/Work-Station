@@ -27,6 +27,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { apiGet, apiPost } from "@/lib/api";
 import { sameProjectId } from "@/lib/project-id";
+import { formatProjectDate } from "@/lib/project-date";
 import {
   canControlServerJob,
   serverJobHref,
@@ -47,13 +48,10 @@ function message(error: unknown) {
 
 function formatTime(value: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : new Intl.DateTimeFormat("zh-CN", {
-        dateStyle: "short",
-        timeStyle: "medium",
-      }).format(date);
+  return formatProjectDate(value, {
+    dateStyle: "short",
+    timeStyle: "medium",
+  }) || "—";
 }
 
 export function ServerProjectBatchDetail({

@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: ${ARTICLE_DB_NAME:-article_agent}
       POSTGRES_USER: ${ARTICLE_DB_USER:-article_agent}
       POSTGRES_PASSWORD: ${ARTICLE_DB_PASSWORD:-article_agent}
+      TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:${ARTICLE_DB_PORT:-55433}:5432"
     volumes:
@@ -37,6 +38,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${ARTICLE_AGENT_OBJECT_STORE_ACCESS_KEY:-}
       MINIO_ROOT_PASSWORD: ${ARTICLE_AGENT_OBJECT_STORE_SECRET_KEY:-}
+      TZ: Asia/Shanghai
     ports:
       - "127.0.0.1:${ARTICLE_OBJECT_STORE_API_PORT:-59000}:9000"
       - "127.0.0.1:${ARTICLE_OBJECT_STORE_CONSOLE_PORT:-59001}:9001"

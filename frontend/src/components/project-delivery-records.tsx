@@ -24,6 +24,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
 import { sameProjectId } from "@/lib/project-id";
+import { formatProjectDate } from "@/lib/project-date";
 import { cn } from "@/lib/utils";
 import type { AccessibleProject, ProjectAssetDownload, TaskRecord } from "@/types";
 
@@ -79,14 +80,12 @@ function canReview(
 }
 
 function formatUpdatedAt(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value || "-";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return formatProjectDate(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(date);
+  }) || "-";
 }
 
 export function ProjectDeliveryRecords({ customer }: { customer: string }) {

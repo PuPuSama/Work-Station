@@ -3,6 +3,8 @@ from __future__ import annotations
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
 
+from services.project_time import postgres_connect_args
+
 
 def create_knowledge_engine(
     database_url: str,
@@ -31,4 +33,5 @@ def create_knowledge_engine(
         max_overflow=max(0, int(max_overflow)),
         pool_timeout=max(5, int(pool_timeout)),
         pool_recycle=max(60, int(pool_recycle)),
+        connect_args=postgres_connect_args(),
     )

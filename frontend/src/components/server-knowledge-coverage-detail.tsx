@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/card";
 import { apiFileUrl, apiGet, apiPut } from "@/lib/api";
 import { sameProjectId } from "@/lib/project-id";
+import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
 import {
   getResearchRun,
   listResearchPlans,
@@ -66,10 +67,11 @@ function sourceKindLabel(value: string) {
 
 function checkedAtLabel(value: string) {
   if (!value) return "尚未记录检查时间";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime())
-    ? value
-    : `检查于 ${parsed.toLocaleString("zh-CN")}`;
+  const formatted = formatProjectDate(value, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  return `检查于 ${formatted || value}`;
 }
 
 function findRepairPlan(
@@ -92,7 +94,11 @@ function findRepairPlan(
           plan.outline_version === outlineVersion &&
           String(plan.metadata.task_id || "") === task.id,
       )
-      .sort((left, right) => right.created_at.localeCompare(left.created_at))[0]
+      .sort(
+        (left, right) =>
+          (parseProjectDate(right.created_at)?.getTime() ?? 0) -
+          (parseProjectDate(left.created_at)?.getTime() ?? 0),
+      )[0]
       ?? null
   );
 }
@@ -214,10 +220,10 @@ export function ServerKnowledgeCoverageDetail({
             (run) =>
               run.retrieval_plan_id === nextRepairPlan?.retrieval_plan_id,
           )
-          .sort((left, right) =>
-            String(right.updated_at || "").localeCompare(
-              String(left.updated_at || ""),
-            ),
+          .sort(
+            (left, right) =>
+              (parseProjectDate(right.updated_at)?.getTime() ?? 0) -
+              (parseProjectDate(left.updated_at)?.getTime() ?? 0),
           )[0];
         setDetail(nextDetail);
         setReviewAllowed(canReview(project));

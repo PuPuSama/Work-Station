@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { formatProjectDate } from "@/lib/project-date";
 import {
   Dialog,
   DialogContent,
@@ -632,7 +633,10 @@ function ReviewHistoryItem({
             </div>
             <div className="text-xs text-muted-foreground">
               {review.created_at
-                ? new Date(review.created_at).toLocaleString("zh-CN")
+                ? formatProjectDate(review.created_at, {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  })
                 : "时间未知"}
               {" · "}
               源正文 {review.source_article_hash.slice(0, 10)}

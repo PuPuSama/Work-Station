@@ -152,6 +152,7 @@ from services.server_llm_settings import (
 )
 from services.zerogpt import ZeroGPTClient
 from services.server_job_control import PostgresServerJobControlService
+from services.project_time import postgres_connect_args
 from knowledge_agent.assets import PostgresKnowledgeAssetRepository
 from knowledge_agent.catalog import PostgresProductCatalogRepository
 from knowledge_agent.http import router as knowledge_agent_router
@@ -503,6 +504,7 @@ async def app_lifespan(application: FastAPI):
             max_overflow=cfg.database_max_overflow,
             pool_timeout=cfg.database_pool_timeout_seconds,
             pool_recycle=cfg.database_pool_recycle_seconds,
+            connect_args=postgres_connect_args(),
         )
         server_access_repository = PostgresProjectAccessRepository(
             server_engine

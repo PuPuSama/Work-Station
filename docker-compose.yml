@@ -16,6 +16,7 @@ services:
     environment:
       ARTICLE_AGENT_ROOT: /app
       ARTICLE_AGENT_CONFIG: /app/config.docker.yaml
+      TZ: Asia/Shanghai
     volumes:
       - ${ARTICLE_WORKSPACE_PATH:-./workspace}:/app/workspace
     networks:
@@ -39,6 +40,8 @@ services:
     pids_limit: 128
     env_file:
       - ${ARTICLE_ENV_FILE:-.env}
+    environment:
+      TZ: Asia/Shanghai
     depends_on:
       backend:
         condition: service_healthy

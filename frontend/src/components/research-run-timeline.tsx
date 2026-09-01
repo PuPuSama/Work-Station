@@ -14,6 +14,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { formatProjectDate } from "@/lib/project-date";
 import type {
   ResearchGapFillAttempt,
   ResearchRunEvent,
@@ -36,13 +37,13 @@ const eventLabels: Record<string, string> = {
 
 function formatTime(value: string | null) {
   if (!value) return "时间待记录";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return formatProjectDate(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(value));
+  }) || "时间待记录";
 }
 
 function detailSummary(details: Record<string, unknown>) {

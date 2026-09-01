@@ -51,6 +51,7 @@ import {
   gapFillWorkflowAssistantPlan,
   getResearchRun,
 } from "@/lib/research-api";
+import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
 import type {
   AccessibleProject,
   AuthStatus,
@@ -400,7 +401,11 @@ function workflowArticleCardUpdatedAt(
     .map((step) => step.updated_at)
     .filter((value): value is string => Boolean(value));
   if (!timestamps.length) return null;
-  timestamps.sort();
+  timestamps.sort((left, right) => {
+    const leftTime = parseProjectDate(left)?.getTime() ?? 0;
+    const rightTime = parseProjectDate(right)?.getTime() ?? 0;
+    return leftTime - rightTime;
+  });
   return timestamps[timestamps.length - 1];
 }
 
@@ -466,14 +471,12 @@ function buildWorkflowArticleCards(
 
 function formatWorkflowArticleCardTime(value: string | null): string {
   if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return formatProjectDate(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(date);
+  }) || "—";
 }
 
 type ScopedTask = TaskRecord & { project_id: string };

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Literal, cast
 
@@ -30,6 +29,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.server_request_security import AuthorizedProjectRequest
+from services.project_time import project_now_iso
 
 
 PromptKind = Literal["outline", "article", "review", "humanize"]
@@ -74,7 +74,7 @@ def _system_snapshot(kind: PromptKind) -> PromptSnapshot:
     return PromptSnapshot(
         kind=kind,
         source="system",
-        captured_at=datetime.now(timezone.utc).isoformat(),
+        captured_at=project_now_iso(),
     )
 
 
@@ -211,7 +211,7 @@ class PostgresProjectPromptService:
             content=str(row["content"]),
             version=int(row["version"]),
             source=source,
-            captured_at=datetime.now(timezone.utc).isoformat(),
+            captured_at=project_now_iso(),
         )
 
     def _current_row(

@@ -5,7 +5,6 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -70,6 +69,7 @@ from services.server_web_evidence_ingestion import (
     ServerWebEvidenceContext,
 )
 from services.server_knowledge_commands import PostgresServerKnowledgeCommands
+from services.project_time import project_now_iso
 
 
 PRODUCT_REDISCOVERY_OPERATION = "product_rediscovery"
@@ -859,7 +859,7 @@ class ServerProductRediscoveryRegistry:
                 scan_id=f"manual_{uuid.uuid4().hex}",
                 project_id=project_id,
                 status="running",
-                started_at=datetime.now(timezone.utc).isoformat(),
+                started_at=project_now_iso(),
                 product_count=self._confirmed_product_count(project_id),
             )
             self._manual_scans[scope] = status
@@ -889,7 +889,7 @@ class ServerProductRediscoveryRegistry:
                 project_id=project_id,
                 status="succeeded",
                 started_at=self._scan_started_at(scope, scan_id),
-                finished_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=project_now_iso(),
                 processed_pages=len(result.pages),
                 skipped_pages=len(result.skipped_urls),
                 processed_products=len(result.products),
@@ -907,7 +907,7 @@ class ServerProductRediscoveryRegistry:
                 project_id=project_id,
                 status="failed",
                 started_at=self._scan_started_at(scope, scan_id),
-                finished_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=project_now_iso(),
                 source_count=self._published_source_count(project_id),
                 product_count=self._confirmed_product_count(project_id),
                 error=str(exc)[:500],
@@ -934,7 +934,7 @@ class ServerProductRediscoveryRegistry:
             current = self._manual_scans.get(scope)
             if current is not None and current.scan_id == scan_id:
                 return current.started_at
-        return datetime.now(timezone.utc).isoformat()
+        return project_now_iso()
 
     def _confirmed_product_count(self, project_id: str) -> int:
         with self._engine.connect() as connection:

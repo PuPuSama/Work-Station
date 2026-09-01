@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { formatProjectDate } from "@/lib/project-date";
 import type { ContentVersion } from "@/types";
 
 export function ArticleVersionHistory({
@@ -63,7 +64,10 @@ export function ArticleVersionHistory({
               </span>
               <span className="mt-1 block text-xs text-muted-foreground">
                 {version.created_at
-                  ? new Date(version.created_at).toLocaleString("zh-CN")
+                  ? formatProjectDate(version.created_at, {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    })
                   : "旧版本"}
                 {version.word_count ? ` · ${version.word_count} 词` : ""}
               </span>

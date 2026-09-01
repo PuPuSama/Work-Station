@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/table";
 import { apiGet, apiPut } from "@/lib/api";
 import { sameProjectId } from "@/lib/project-id";
+import { formatProjectDate } from "@/lib/project-date";
 import type { AccessibleProject, TaskRecord, WorkflowStatus } from "@/types";
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
@@ -98,14 +99,12 @@ function stepForStatus(status: WorkflowStatus) {
 }
 
 function formatUpdatedAt(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value || "-";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return formatProjectDate(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(date);
+  }) || "-";
 }
 
 export function ServerProjectArticleList({ customer }: { customer: string }) {

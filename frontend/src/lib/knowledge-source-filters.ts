@@ -1,4 +1,5 @@
 import type { KnowledgeSourceSummary } from "@/types";
+import { parseProjectDate } from "@/lib/project-date";
 
 export type KnowledgeSourceOrigin = "local" | "website";
 export type KnowledgeSourceSort = "newest" | "oldest";
@@ -12,8 +13,7 @@ export function knowledgeSourceOrigin(
 function sourceActivityTime(source: KnowledgeSourceSummary): number | null {
   const value = source.pending_fetched_at ?? source.latest_fetched_at;
   if (!value) return null;
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
+  return parseProjectDate(value)?.getTime() ?? null;
 }
 
 export function filterKnowledgeSources(

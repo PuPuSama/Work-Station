@@ -13,6 +13,7 @@ from services.deployment_readiness import (
     run_deployment_preflight,
 )
 from services.object_store import S3ObjectStore
+from services.project_time import postgres_connect_args
 from services.oidc_identity import (
     OidcProviderClient,
     OidcProviderSettings,
@@ -78,7 +79,11 @@ def main() -> int:
         ).strip()
         if not database_url:
             raise RuntimeError("database readiness check failed")
-        engine = sa.create_engine(database_url, pool_pre_ping=True)
+        engine = sa.create_engine(
+            database_url,
+            pool_pre_ping=True,
+            connect_args=postgres_connect_args(),
+        )
         try:
             return postgres_database_probe(engine)
         finally:

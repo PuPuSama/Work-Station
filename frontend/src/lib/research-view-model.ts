@@ -1,4 +1,5 @@
 import type { ResearchRunStatus } from "@/types";
+import { formatProjectDate } from "@/lib/project-date";
 
 export const TERMINAL_RESEARCH_STATUSES = new Set<ResearchRunStatus>([
   "completed",
@@ -32,12 +33,11 @@ export function researchStatusVariant(
 
 export function formatResearchDate(value: string | null) {
   if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
+  const formatted = formatProjectDate(value, {
     dateStyle: "medium",
     timeStyle: "short",
-  }).format(date);
+  });
+  return formatted || "—";
 }
 
 export function newResearchRequestId(prefix: "start" | "resume") {

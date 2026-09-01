@@ -45,6 +45,7 @@ import type {
   WorkspaceInvitationPage,
   WorkspaceTeam,
 } from "@/types";
+import { formatProjectDate } from "@/lib/project-date";
 
 const selectClass =
   "h-11 w-full cursor-pointer rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50";
@@ -56,13 +57,10 @@ function errorMessage(error: unknown, fallback: string) {
 }
 
 function formatDate(value: string) {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf())
-    ? value
-    : new Intl.DateTimeFormat("zh-CN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      }).format(parsed);
+  return formatProjectDate(value, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 }
 
 function mergeInvitations(
