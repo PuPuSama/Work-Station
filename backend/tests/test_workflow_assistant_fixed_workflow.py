@@ -11,11 +11,15 @@ if str(BACKEND_DIR) not in sys.path:
 
 from workflow_assistant.context import (  # noqa: E402
     AssistantProjectContext,
+    AssistantPublishedTopicContext,
     AssistantTaskContext,
     AssistantWorkspaceContext,
 )
 from workflow_assistant.fixed_workflow import build_fixed_article_plan  # noqa: E402
-from workflow_assistant.policy import AssistantPolicyError  # noqa: E402
+from workflow_assistant.policy import (  # noqa: E402
+    AssistantPolicyError,
+    bind_plan_context,
+)
 
 
 def _task(
@@ -43,7 +47,10 @@ def _task(
     )
 
 
-def _context(*tasks: AssistantTaskContext) -> AssistantWorkspaceContext:
+def _context(
+    *tasks: AssistantTaskContext,
+    published_topics: tuple[AssistantPublishedTopicContext, ...] = (),
+) -> AssistantWorkspaceContext:
     return AssistantWorkspaceContext(
         projects=(
             AssistantProjectContext(
@@ -56,12 +63,73 @@ def _context(*tasks: AssistantTaskContext) -> AssistantWorkspaceContext:
                 tasks=tuple(tasks),
                 prompts=(),
                 knowledge=(),
+                published_topics=published_topics,
             ),
         )
     )
 
 
 class FixedArticleWorkflowTests(unittest.TestCase):
+    def test_no_task_auto_selects_a_published_topic_and_binds_the_article_chain(self) -> None:
+        context = _context(
+            published_topics=(
+                AssistantPublishedTopicContext(
+                    topic_id="topic-1",
+                    topic="How to choose a heat exchanger",
+                    primary_keyword="heat exchanger selection",
+                    competitor_keyword="",
+                ),
+            )
+        )
+
+        plan = build_fixed_article_plan(
+            "写一篇文章",
+            context,
+            selected_task_ids=(),
+            selection_locked=False,
+        )
+
+        self.assertEqual(len(plan.steps), 15)
+        self.assertEqual(plan.steps[0].action_kind, "create_task")
+        self.assertEqual(
+            plan.steps[0].input_summary["published_topic_id"],
+            "topic-1",
+        )
+        self.assertEqual(
+            plan.steps[0].input_summary["topic"],
+            "How to choose a heat exchanger",
+        )
+        self.assertEqual(
+            plan.steps[0].input_summary["bind_step_ids"],
+            [step.step_id for step in plan.steps[1:]],
+        )
+        self.assertTrue(all(step.article_task_id is None for step in plan.steps[1:]))
+
+        bound = bind_plan_context(plan, context=context)
+        self.assertEqual(
+            bound.steps[1].input_summary["create_task_step_id"],
+            "fixed-1-create-task",
+        )
+        self.assertTrue(bound.steps[7].input_summary["use_evidence_pack"])
+
+    def test_no_task_auto_selection_requires_enough_published_topics(self) -> None:
+        with self.assertRaisesRegex(AssistantPolicyError, "没有足够的可用已发布话题"):
+            build_fixed_article_plan(
+                "写 2 篇文章",
+                _context(
+                    published_topics=(
+                        AssistantPublishedTopicContext(
+                            topic_id="topic-1",
+                            topic="Only topic",
+                            primary_keyword="only keyword",
+                            competitor_keyword="",
+                        ),
+                    )
+                ),
+                selected_task_ids=(),
+                selection_locked=False,
+            )
+
     def test_builds_complete_chain_without_planner(self) -> None:
         plan = build_fixed_article_plan(
             "面向采购经理写一篇文章",

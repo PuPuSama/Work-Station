@@ -1496,7 +1496,7 @@ export function WorkflowAssistantWorkspace() {
                 <div className="min-w-0">
                   <Label>{workflowMode === "article" ? "写作范围" : "计划范围"}</Label>
                   <p className="mt-1 text-sm font-medium">
-                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"} · {selectedTaskIds.length ? `已选 ${selectedTaskIds.length} 个任务` : workflowMode === "article" ? "每个项目自动取 1 篇待写文章" : "按项目上下文规划"}
+                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"} · {selectedTaskIds.length ? `已选 ${selectedTaskIds.length} 个任务` : workflowMode === "article" ? "优先取可继续文章，不足时自动选已发布话题" : "按项目上下文规划"}
                   </p>
                   <p className="mt-1 truncate text-xs text-muted-foreground" title={selectedProjects.map((project) => project.customer_name).join("、")}>
                     {selectedProjects.length ? selectedProjects.map((project) => project.customer_name).join("、") : "请选择至少一个项目"}
@@ -1508,7 +1508,7 @@ export function WorkflowAssistantWorkspace() {
               </div>
               <p className="mt-3 text-xs leading-5 text-muted-foreground">
                 {workflowMode === "article"
-                  ? "不勾选具体文章时，每个项目自动取 1 篇可继续任务；发送内容会作为本次大纲和正文的补充要求。"
+                  ? "不勾选具体文章时，每个项目优先取 1 篇可继续任务；没有可继续任务时，会从已发布话题中自动选择并创建文章。发送内容会作为本次大纲和正文的补充要求。"
                   : "项目和文章选择已收进页内弹窗；不勾选具体文章时，助手会按当前项目上下文规划。"}
               </p>
             </div>
@@ -1518,7 +1518,7 @@ export function WorkflowAssistantWorkspace() {
                   <DialogTitle>{workflowMode === "article" ? "写作范围" : "计划范围"}</DialogTitle>
                   <DialogDescription>
                     {workflowMode === "article"
-                      ? "选择本次固定写作要覆盖的项目和文章；不勾选具体文章时，每个项目自动选择 1 篇待写文章。"
+                      ? "选择本次固定写作要覆盖的项目和文章；不勾选具体文章时，每个项目优先选择可继续任务，不足时自动从已发布话题创建文章。"
                       : "选择本次自然语言请求要覆盖的项目和文章；不勾选具体文章时，助手会按项目上下文规划。"}
                   </DialogDescription>
                 </DialogHeader>
@@ -1559,7 +1559,7 @@ export function WorkflowAssistantWorkspace() {
                           })}
                         </div>
                       </div>
-                    </section> : <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground">当前项目暂无可选文章任务。</div>}
+                    </section> : <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground">当前项目暂无现有文章任务；发送后会尝试从已发布话题自动创建文章。</div>}
                   </div>
                 </div>
               </DialogContent>
@@ -1577,7 +1577,7 @@ export function WorkflowAssistantWorkspace() {
                       <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
                       <Loader2 className="workflow-assistant-spinner mt-1 size-4 shrink-0" />
                     </div>}
-                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">{workflowMode === "article" ? "选择文章后直接开始固定写作" : "直接聊天、查询资料或安排工作"}</p><p className="mt-1 max-w-sm">{workflowMode === "article" ? "例如：面向采购经理，重点突出安装维护；这次跳过复检。" : "例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。"}</p></div>}
+                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">{workflowMode === "article" ? "发送要求，自动选题并开始固定写作" : "直接聊天、查询资料或安排工作"}</p><p className="mt-1 max-w-sm">{workflowMode === "article" ? "例如：面向采购经理，重点突出安装维护；这次跳过复检。" : "例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。"}</p></div>}
                 </div>
               </ScrollArea>
             </div>
@@ -1746,7 +1746,7 @@ export function WorkflowAssistantWorkspace() {
                         <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate font-medium">{workflowStepActionLabels[step.action_kind] || step.action_kind}</span>
-                          <span className="mt-0.5 block truncate text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}</span>
+                          <span className="mt-0.5 block truncate text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" ? ` · ${stepSummaryText(step.input_summary, "topic") || "自动选题"}` : ""}</span>
                         </span>
                         <Badge variant={step.status === "failed" ? "destructive" : step.status === "succeeded" ? "secondary" : "outline"}>
                           {workflowStepStatusLabels[step.status] || step.status}

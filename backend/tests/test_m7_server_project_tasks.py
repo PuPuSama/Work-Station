@@ -1128,6 +1128,23 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     [item["id"] for item in response.json()],
                     [self.task_a],
                 )
+                recent = client.get(
+                    f"/api/projects/{self.project_a}/tasks/recent"
+                )
+                self.assertEqual(recent.status_code, 200)
+                self.assertEqual(
+                    recent.json(),
+                    [
+                        {
+                            "id": self.task_a,
+                            "topic_index": 2,
+                            "topic": "Topic 2",
+                            "selected_title": "Selected topic 2",
+                            "status": "title_selected",
+                            "updated_at": "2026-07-30T00:00:00+00:00",
+                        }
+                    ],
+                )
                 self.assertEqual(
                     client.get(
                         f"/api/projects/{self.project_a}/tasks/{self.task_a}"

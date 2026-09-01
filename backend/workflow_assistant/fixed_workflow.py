@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from .context import AssistantTaskContext, AssistantWorkspaceContext
+from .context import (
+    AssistantPublishedTopicContext,
+    AssistantTaskContext,
+    AssistantWorkspaceContext,
+)
 from .contracts import ActionKind, PlanDraft, PlanStep
 from .planner import _requested_article_counts, request_skips_review
-from .policy import AssistantPolicyError, sanitize_message
+from .policy import AssistantPolicyError, _selection_key, sanitize_message
 
 
 # The assistant message itself may be longer, but the per-step public summary
@@ -37,6 +41,17 @@ _DELIVERY_ACTIONS = (
     "export_docx",
     "generate_tdk",
     "package_delivery",
+)
+_ARTICLE_ACTIONS = (
+    "generate_titles",
+    "select_title",
+    "generate_products",
+    "confirm_products",
+    "generate_outline",
+    "start_research",
+    "generate_article",
+    "review",
+    *_DELIVERY_ACTIONS,
 )
 
 
@@ -95,14 +110,66 @@ def _selected_tasks(
     return tuple(selected)
 
 
+def _selected_topics(
+    context: AssistantWorkspaceContext,
+    *,
+    request: str,
+    selected_tasks: Sequence[tuple[str, AssistantTaskContext]],
+    selection_locked: bool,
+) -> tuple[tuple[str, AssistantPublishedTopicContext], ...]:
+    if selection_locked:
+        return ()
+
+    counts = _requested_article_counts(request, context.project_ids)
+    selected_counts: dict[str, int] = {}
+    for project_id, _task in selected_tasks:
+        selected_counts[project_id] = selected_counts.get(project_id, 0) + 1
+
+    topics: list[tuple[str, AssistantPublishedTopicContext]] = []
+    for project in context.projects:
+        needed = max(counts.get(project.project_id, 1) - selected_counts.get(project.project_id, 0), 0)
+        if not needed:
+            continue
+        existing_topics = {_selection_key(task.topic) for task in project.tasks}
+        existing_keywords = {
+            _selection_key(task.primary_keyword)
+            for task in project.tasks
+            if task.primary_keyword.strip()
+        }
+        candidates: list[AssistantPublishedTopicContext] = []
+        for topic in sorted(
+            project.published_topics,
+            key=lambda item: (item.topic_id, item.topic),
+        ):
+            topic_key = _selection_key(topic.topic)
+            keyword_key = _selection_key(topic.primary_keyword)
+            if not topic_key or topic_key in existing_topics:
+                continue
+            if keyword_key and keyword_key in existing_keywords:
+                continue
+            candidates.append(topic)
+            existing_topics.add(topic_key)
+            if keyword_key:
+                existing_keywords.add(keyword_key)
+            if len(candidates) == needed:
+                break
+        if len(candidates) < needed:
+            raise AssistantPolicyError(
+                f"项目 {project.project_id} 没有足够的可用已发布话题，请先发布更多话题或选择现有文章"
+            )
+        topics.extend((project.project_id, topic) for topic in candidates)
+    return tuple(topics)
+
+
 def _step(
     *,
     sequence: int,
     chain_index: int,
     project_id: str,
-    task: AssistantTaskContext,
+    task: AssistantTaskContext | None,
     action: ActionKind,
     writing_instruction: str = "",
+    create_task_step_id: str = "",
 ) -> PlanStep:
     input_summary: dict[str, object] = {}
     if action == "generate_article":
@@ -117,14 +184,64 @@ def _step(
         # not called "prompt" so it cannot be confused with a server prompt
         # snapshot or a provider secret by the policy boundary.
         input_summary["writing_instruction"] = writing_instruction
+    if create_task_step_id:
+        input_summary["create_task_step_id"] = create_task_step_id
     return PlanStep(
         step_id=f"fixed-{chain_index}-{action}",
         sequence=sequence,
         action_kind=action,
         project_id=project_id,
-        article_task_id=task.task_id,
+        article_task_id=task.task_id if task is not None else None,
         input_summary=input_summary,
     )
+
+
+def _append_topic_chain(
+    steps: list[PlanStep],
+    *,
+    chain_index: int,
+    project_id: str,
+    topic: AssistantPublishedTopicContext,
+    writing_instruction: str,
+    skip_review: bool,
+) -> None:
+    create_step_id = f"fixed-{chain_index}-create-task"
+    actions = tuple(
+        action for action in _ARTICLE_ACTIONS
+        if not (skip_review and action == "review")
+    )
+    first_sequence = len(steps) + 1
+    article_steps = [
+        _step(
+            sequence=first_sequence + offset + 1,
+            chain_index=chain_index,
+            project_id=project_id,
+            task=None,
+            action=action,
+            writing_instruction=writing_instruction,
+            create_task_step_id=create_step_id,
+        )
+        for offset, action in enumerate(actions)
+    ]
+    create_summary: dict[str, object] = {
+        "published_topic_id": topic.topic_id,
+        "topic": topic.topic,
+        "bind_step_ids": [step.step_id for step in article_steps],
+    }
+    if topic.primary_keyword:
+        create_summary["primary_keyword"] = topic.primary_keyword
+    if topic.competitor_keyword:
+        create_summary["competitor_keyword"] = topic.competitor_keyword
+    steps.append(
+        PlanStep(
+            step_id=create_step_id,
+            sequence=first_sequence,
+            action_kind="create_task",
+            project_id=project_id,
+            input_summary=create_summary,
+        )
+    )
+    steps.extend(article_steps)
 
 
 def build_fixed_article_plan(
@@ -137,10 +254,12 @@ def build_fixed_article_plan(
 ) -> PlanDraft:
     """Build the deterministic article lane without a planner-model call.
 
-    The builder only chooses already-existing Server Tasks. It never creates a
-    topic or silently reuses a completed Task. Normal plan confirmation,
-    project authorization, prompt/knowledge pinning, and worker CAS checks
-    still happen after this draft is built.
+    The builder chooses an existing Server Task first. If a project needs more
+    articles and has no suitable Task, it deterministically chooses published
+    topics and lets the existing create-task binding allocate the Task during
+    execution. It never invents a topic or silently reuses a completed Task.
+    Normal plan confirmation, project authorization, prompt/knowledge pinning,
+    and worker CAS checks still happen after this draft is built.
     """
 
     normalized_request = sanitize_message(request)
@@ -154,9 +273,15 @@ def build_fixed_article_plan(
         selected_task_ids=selected_task_ids,
         selection_locked=selection_locked,
     )
-    if not tasks:
+    topics = _selected_topics(
+        context,
+        request=normalized_request,
+        selected_tasks=tasks,
+        selection_locked=selection_locked,
+    )
+    if not tasks and not topics:
         raise AssistantPolicyError(
-            "固定写作模式没有找到可继续的文章任务，请先在“设置范围”中选择文章"
+            "固定写作模式没有可继续的文章任务，也没有可用的已发布话题，请先发布话题或选择现有文章"
         )
 
     skip_review = request_skips_review(normalized_request)
@@ -349,6 +474,24 @@ def build_fixed_article_plan(
             raise AssistantPolicyError(
                 f"文章 {task.task_id} 当前没有可执行的固定写作步骤"
             )
+
+    for topic_index, (project_id, topic) in enumerate(
+        topics,
+        start=len(tasks) + 1,
+    ):
+        before = len(steps)
+        _append_topic_chain(
+            steps,
+            chain_index=topic_index,
+            project_id=project_id,
+            topic=topic,
+            writing_instruction=writing_instruction,
+            skip_review=skip_review,
+        )
+        if len(steps) > before and project_id not in participating_projects:
+            participating_projects.append(project_id)
+        if len(steps) > before:
+            active_task_count += 1
 
     if not steps:
         if skip_review:

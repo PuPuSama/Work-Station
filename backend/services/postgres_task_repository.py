@@ -131,6 +131,42 @@ class PostgresTaskRepository:
             ).scalars()
             return [copy.deepcopy(dict(payload)) for payload in rows]
 
+    def load_recent(self, limit: int) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
+        if limit < 1 or limit > 20:
+            raise ValueError("limit must be between 1 and 20")
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(
+                    article_tasks.c.task_id.label("id"),
+                    article_tasks.c.topic_index,
+                    article_tasks.c.payload["topic"].astext.label("topic"),
+                    article_tasks.c.payload["selected_title"].astext.label(
+                        "selected_title"
+                    ),
+                    article_tasks.c.payload["status"].astext.label("status"),
+                    article_tasks.c.record_updated_at.label("updated_at"),
+                )
+                .where(*self._scope())
+                .order_by(
+                    article_tasks.c.record_updated_at.desc(),
+                    article_tasks.c.task_id,
+                )
+                .limit(limit)
+            ).mappings()
+            return [
+                {
+                    "id": str(row["id"]),
+                    "topic_index": int(row["topic_index"] or 0),
+                    "topic": str(row["topic"] or ""),
+                    "selected_title": str(row["selected_title"] or ""),
+                    "status": str(row["status"] or "new"),
+                    "updated_at": str(row["updated_at"] or ""),
+                }
+                for row in rows
+            ]
+
     def get(self, task_id: str) -> dict[str, Any] | None:
         normalized_task_id = _required_text(task_id, "task_id")
         with self._engine.connect() as connection:

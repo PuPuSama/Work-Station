@@ -420,6 +420,17 @@ class ProjectTaskIntakeItemResponse(BaseModel):
     revision: int
 
 
+class ProjectRecentTaskResponse(BaseModel):
+    """Small projection for the article workspace's quick-jump list."""
+
+    id: str
+    topic_index: int
+    topic: str
+    selected_title: str
+    status: str
+    updated_at: str
+
+
 class ProjectTaskIntakeResponse(BaseModel):
     intake_id: str
     intake_kind: Literal["manual", "row_import"]
@@ -1827,6 +1838,32 @@ def list_project_tasks(
             tasks,
             key=lambda task: (task.topic_index, task.id),
         )
+    ]
+
+
+@router.get(
+    "/{project}/tasks/recent",
+    response_model=list[ProjectRecentTaskResponse],
+)
+def list_recent_project_tasks(
+    project: str,
+    request: Request,
+    limit: int = Query(default=5, ge=1, le=20),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> list[ProjectRecentTaskResponse]:
+    del project
+    return [
+        ProjectRecentTaskResponse(
+            id=str(task["id"]),
+            topic_index=int(task["topic_index"]),
+            topic=str(task["topic"]),
+            selected_title=str(task["selected_title"]),
+            status=str(task["status"]),
+            updated_at=str(task["updated_at"]),
+        )
+        for task in _task_store(request, authorized).load_recent(limit)
     ]
 
 

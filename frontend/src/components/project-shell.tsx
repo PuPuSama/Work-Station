@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BookOpenText,
   Building2,
+  Clock3,
   FileText,
   Layers3,
   PackageCheck,
@@ -44,7 +45,8 @@ import {
 } from "@/components/ui/sidebar";
 import { apiGet } from "@/lib/api";
 import { sameProjectId } from "@/lib/project-id";
-import type { AccessibleProject } from "@/types";
+import { formatProjectDate } from "@/lib/project-date";
+import type { AccessibleProject, TaskRecord, WorkflowStatus } from "@/types";
 
 const sectionNames = {
   articles: "文章任务",
@@ -53,6 +55,35 @@ const sectionNames = {
   deliveries: "交付记录",
   settings: "项目设置",
 } as const;
+
+const RECENT_TASK_LIMIT = 5;
+type RecentArticleTask = Pick<
+  TaskRecord,
+  "id" | "topic_index" | "topic" | "selected_title" | "status" | "updated_at"
+>;
+
+const recentTaskStatusLabels: Record<WorkflowStatus, string> = {
+  new: "待生成标题",
+  titles_ready: "待选择标题",
+  title_selected: "待确认产品",
+  outline_ready: "待审阅大纲",
+  outline_confirmed: "待生成初稿",
+  draft_ready: "待填写 AI-rate",
+  initial_ai_checked: "待人化",
+  humanized_ready: "待终检",
+  final_ai_checked: "待恢复链接",
+  links_verified: "待准备图片",
+  images_ready: "待导出",
+  docx_exported: "已导出",
+};
+
+function recentTaskStep(status: WorkflowStatus) {
+  if (status === "new" || status === "titles_ready") return "setup";
+  if (status === "title_selected" || status === "outline_ready") return "outline";
+  if (status === "outline_confirmed" || status === "draft_ready") return "draft";
+  if (status === "initial_ai_checked" || status === "humanized_ready" || status === "final_ai_checked") return "review";
+  return "delivery";
+}
 
 export function ProjectShell({
   customer,
@@ -63,12 +94,14 @@ export function ProjectShell({
 }) {
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(null);
   const [isProjectOwner, setIsProjectOwner] = useState(false);
+  const [recentTasks, setRecentTasks] = useState<RecentArticleTask[]>([]);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
   const section = segments[2] as keyof typeof sectionNames | undefined;
   const isDetail =
     (section === "articles" || section === "batches") && segments.length > 3;
+  const isArticleDetail = section === "articles" && isDetail;
 
   useEffect(() => {
     let active = true;
@@ -86,6 +119,26 @@ export function ProjectShell({
       active = false;
     };
   }, [customer]);
+
+  useEffect(() => {
+    if (!isArticleDetail) {
+      return;
+    }
+    let active = true;
+    void apiGet<RecentArticleTask[]>(
+      `${projectPath}/tasks/recent?limit=${RECENT_TASK_LIMIT}`,
+    )
+      .then((tasks) => {
+        if (!active) return;
+        setRecentTasks(tasks);
+      })
+      .catch(() => {
+        if (active) setRecentTasks([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isArticleDetail, pathname, projectPath]);
 
   const items = [
     ["文章任务", "单篇内容与状态", "articles", FileText],
@@ -149,6 +202,37 @@ export function ProjectShell({
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
+          {isArticleDetail && <SidebarGroup className="mt-auto group-data-[collapsible=icon]:hidden">
+            <SidebarGroupLabel><Clock3 />最近修改</SidebarGroupLabel>
+            <SidebarGroupContent>
+              {recentTasks.length ? (
+                <SidebarMenu>
+                  {recentTasks.map((task) => {
+                    const href = `${projectPath}/articles/${encodeURIComponent(task.id)}?step=${recentTaskStep(task.status)}`;
+                    const title = task.selected_title || task.topic;
+                    return (
+                      <SidebarMenuItem key={task.id}>
+                        <SidebarMenuButton
+                          isActive={segments[3] === task.id}
+                          tooltip={title}
+                          render={<Link href={href} aria-label={`打开最近修改文章：${title}`} />}
+                          className="h-11"
+                        >
+                          <FileText />
+                          <span className="grid min-w-0 flex-1 leading-tight">
+                            <span className="truncate">{title}</span>
+                            <span className="truncate text-[11px] font-normal text-sidebar-foreground/55">
+                              {recentTaskStatusLabels[task.status]} · {formatProjectDate(task.updated_at, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                          </span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              ) : <p className="px-2 text-xs leading-5 text-sidebar-foreground/55">暂无最近修改文章</p>}
+            </SidebarGroupContent>
+          </SidebarGroup>}
         </SidebarContent>
         <SidebarFooter className="px-3 pb-3">
           <SidebarMenu>

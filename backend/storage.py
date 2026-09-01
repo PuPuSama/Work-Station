@@ -286,6 +286,12 @@ class TaskStore:
                 self._write_records(tasks)
             return tasks
 
+    def load_recent(self, limit: int) -> list[dict[str, Any]]:
+        with _TASK_STORE_LOCK:
+            if not self.repository.is_initialized():
+                return []
+            return self.repository.load_recent(limit)
+
     def save(self, tasks: Iterable[TaskRecord]) -> None:
         with _TASK_STORE_LOCK:
             self._write_records(tasks)
