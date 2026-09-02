@@ -383,7 +383,7 @@ export function BatchWritingWorkspace() {
         `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
       );
       setHistoryDetailPlan(nextPlan);
-      setHistoryPreviewMinimized(true);
+      setHistoryPreviewMinimized(false);
     } catch (nextError) {
       setHistoryError(messageText(nextError));
     } finally {
