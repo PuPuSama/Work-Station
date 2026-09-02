@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from .context import (
     AssistantPublishedTopicContext,
@@ -71,6 +71,7 @@ def _selected_tasks(
     request: str,
     selected_task_ids: Sequence[str],
     selection_locked: bool,
+    article_counts: Mapping[str, int] | None = None,
 ) -> tuple[tuple[str, AssistantTaskContext], ...]:
     by_id: dict[str, list[tuple[str, AssistantTaskContext]]] = {}
     by_project: dict[str, tuple[AssistantTaskContext, ...]] = {}
@@ -93,7 +94,11 @@ def _selected_tasks(
     # With no explicit checkboxes, keep the default predictable: one new
     # article per selected project, unless the user gives an unambiguous
     # quantity (for example, "写 2 篇").
-    counts = _requested_article_counts(request, context.project_ids)
+    counts = (
+        dict(article_counts)
+        if article_counts is not None
+        else _requested_article_counts(request, context.project_ids)
+    )
     selected: list[tuple[str, AssistantTaskContext]] = []
     for project_id in context.project_ids:
         candidates = sorted(
@@ -116,11 +121,16 @@ def _selected_topics(
     request: str,
     selected_tasks: Sequence[tuple[str, AssistantTaskContext]],
     selection_locked: bool,
+    article_counts: Mapping[str, int] | None = None,
 ) -> tuple[tuple[str, AssistantPublishedTopicContext], ...]:
     if selection_locked:
         return ()
 
-    counts = _requested_article_counts(request, context.project_ids)
+    counts = (
+        dict(article_counts)
+        if article_counts is not None
+        else _requested_article_counts(request, context.project_ids)
+    )
     selected_counts: dict[str, int] = {}
     for project_id, _task in selected_tasks:
         selected_counts[project_id] = selected_counts.get(project_id, 0) + 1
@@ -251,6 +261,9 @@ def build_fixed_article_plan(
     selected_task_ids: Sequence[str] = (),
     selection_locked: bool = False,
     concurrency_limit: int = 5,
+    article_counts: Mapping[str, int] | None = None,
+    writing_instruction: str | None = None,
+    skip_review: bool | None = None,
 ) -> PlanDraft:
     """Build the deterministic article lane without a planner-model call.
 
@@ -263,28 +276,61 @@ def build_fixed_article_plan(
     """
 
     normalized_request = sanitize_message(request)
-    writing_instruction = sanitize_message(
-        request,
-        max_length=MAX_FIXED_WRITING_INSTRUCTION_LENGTH,
-    )
+    if writing_instruction is None:
+        normalized_writing_instruction = sanitize_message(
+            request,
+            max_length=MAX_FIXED_WRITING_INSTRUCTION_LENGTH,
+        )
+    elif writing_instruction.strip():
+        normalized_writing_instruction = sanitize_message(
+            writing_instruction,
+            max_length=MAX_FIXED_WRITING_INSTRUCTION_LENGTH,
+        )
+    else:
+        normalized_writing_instruction = ""
+    if article_counts is not None:
+        normalized_counts: dict[str, int] = {}
+        expected_projects = set(context.project_ids)
+        for project_id, raw_count in article_counts.items():
+            normalized_project_id = str(project_id).strip()
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError) as exc:
+                raise AssistantPolicyError(
+                    f"项目 {normalized_project_id or 'unknown'} 的文章数量无效"
+                ) from exc
+            if not normalized_project_id or count < 1:
+                raise AssistantPolicyError("批量写作的每个项目至少需要 1 篇文章")
+            if count > 50:
+                raise AssistantPolicyError("单个项目批量写作最多 50 篇文章")
+            normalized_counts[normalized_project_id] = count
+        if set(normalized_counts) != expected_projects:
+            raise AssistantPolicyError("批量写作的项目数量配置与项目范围不一致")
+        article_counts = normalized_counts
     tasks = _selected_tasks(
         context,
         request=normalized_request,
         selected_task_ids=selected_task_ids,
         selection_locked=selection_locked,
+        article_counts=article_counts,
     )
     topics = _selected_topics(
         context,
         request=normalized_request,
         selected_tasks=tasks,
         selection_locked=selection_locked,
+        article_counts=article_counts,
     )
     if not tasks and not topics:
         raise AssistantPolicyError(
             "固定写作模式没有可继续的文章任务，也没有可用的已发布话题，请先发布话题或选择现有文章"
         )
 
-    skip_review = request_skips_review(normalized_request)
+    effective_skip_review = (
+        request_skips_review(normalized_request)
+        if skip_review is None
+        else bool(skip_review)
+    )
     steps: list[PlanStep] = []
     participating_projects: list[str] = []
     active_task_count = 0
@@ -351,7 +397,7 @@ def build_fixed_article_plan(
                     project_id=project_id,
                     task=task,
                     action="generate_outline",
-                    writing_instruction=writing_instruction,
+                    writing_instruction=normalized_writing_instruction,
                 )
             )
 
@@ -373,14 +419,14 @@ def build_fixed_article_plan(
                     project_id=project_id,
                     task=task,
                     action="generate_article",
-                    writing_instruction=writing_instruction,
+                    writing_instruction=normalized_writing_instruction,
                 )
             )
         article_needs_review = article_will_generate or (
             rank == _STATUS_RANK["draft_ready"]
         )
 
-        if article_needs_review and not skip_review and not any(
+        if article_needs_review and not effective_skip_review and not any(
             step.article_task_id == task.task_id
             and step.action_kind == "review"
             for step in steps[before:]
@@ -485,8 +531,8 @@ def build_fixed_article_plan(
             chain_index=topic_index,
             project_id=project_id,
             topic=topic,
-            writing_instruction=writing_instruction,
-            skip_review=skip_review,
+            writing_instruction=normalized_writing_instruction,
+            skip_review=effective_skip_review,
         )
         if len(steps) > before and project_id not in participating_projects:
             participating_projects.append(project_id)
@@ -494,7 +540,7 @@ def build_fixed_article_plan(
             active_task_count += 1
 
     if not steps:
-        if skip_review:
+        if effective_skip_review:
             detail = "；本次请求已明确跳过复检"
         else:
             detail = "；可能已完成正文或正在等待后续人工环节"

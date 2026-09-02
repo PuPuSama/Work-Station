@@ -9,6 +9,8 @@ from .contracts import (
     ActionKind,
     AssistantConversationCreateRequest,
     AssistantMessageRequest,
+    BatchWritingPlanRequest,
+    BatchWritingProjectConfig,
     PlanDraft,
     PlanStep,
 )
@@ -29,6 +31,8 @@ __all__ = [
     "ActionKind",
     "AssistantConversationCreateRequest",
     "AssistantMessageRequest",
+    "BatchWritingPlanRequest",
+    "BatchWritingProjectConfig",
     "PlanDraft",
     "PlanStep",
     "canonical_plan_hash",

@@ -7,6 +7,7 @@ import {
   ArrowRight,
   Building2,
   FileText,
+  Layers3,
   Loader2,
   Plus,
   RefreshCw,
@@ -249,6 +250,14 @@ export function ServerProjectSelector() {
                 {assistantAttentionCount > 0 && (
                   <Badge variant="secondary">{assistantAttentionCount}</Badge>
                 )}
+              </Button>}
+              {assistantEnabled && <Button
+                nativeButton={false}
+                variant="outline"
+                render={<Link href="/batch-writing" />}
+              >
+                <Layers3 />
+                批量写作
               </Button>}
                 <Button
                   type="button"

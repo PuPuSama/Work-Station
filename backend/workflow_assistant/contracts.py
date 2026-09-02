@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ActionKind = Literal[
@@ -107,6 +107,63 @@ class AssistantMessageRequest(BaseModel):
     @classmethod
     def validate_article_task_ids(cls, values: list[str] | None) -> list[str] | None:
         return _normalized_ids(values) if values is not None else None
+
+
+class BatchWritingProjectConfig(BaseModel):
+    """One explicit project row in the batch-writing form."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    project_id: str = Field(min_length=1, max_length=255)
+    article_count: int = Field(ge=1, le=50)
+
+
+class BatchWritingPlanRequest(BaseModel):
+    """Structured input for the deterministic multi-project writing lane."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    projects: list[BatchWritingProjectConfig] = Field(
+        min_length=1,
+        max_length=20,
+    )
+    writing_instruction: str = Field(default="", max_length=7_000)
+    skip_review: bool = False
+    concurrency_limit: int = Field(default=5, ge=1, le=32)
+    request_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    idempotency_key: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+
+    @field_validator("projects")
+    @classmethod
+    def validate_projects(
+        cls,
+        values: list[BatchWritingProjectConfig],
+    ) -> list[BatchWritingProjectConfig]:
+        project_ids = [item.project_id for item in values]
+        if len(project_ids) != len(set(project_ids)):
+            raise ValueError("batch writing projects must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_total_articles(self) -> "BatchWritingPlanRequest":
+        total = sum(item.article_count for item in self.projects)
+        if total > 60:
+            raise ValueError("batch writing may contain at most 60 articles")
+        return self
 
 
 class PlanStep(BaseModel):
@@ -296,6 +353,8 @@ AssistantConversationResponse.model_rebuild()
 
 __all__ = [
     "ActionKind",
+    "BatchWritingPlanRequest",
+    "BatchWritingProjectConfig",
     "AssistantConversationCreateRequest",
     "AssistantConversationResponse",
     "AssistantMessageRequest",

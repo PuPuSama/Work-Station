@@ -180,6 +180,25 @@ export function ProjectShell({
                 <div className="mt-1 truncate text-sm font-semibold">{customer}</div>
               </div>
               <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname === "/batch-writing"}
+                    tooltip="批量写作"
+                    render={
+                      <Link
+                        href={`/batch-writing?project=${encodeURIComponent(customer)}`}
+                        aria-current={pathname === "/batch-writing" ? "page" : undefined}
+                      />
+                    }
+                    className="h-10"
+                  >
+                    <Layers3 />
+                    <span className="grid min-w-0 flex-1 leading-tight">
+                      <span>批量写作</span>
+                      <span className="truncate text-[11px] font-normal text-sidebar-foreground/55">结构化配置并生成计划</span>
+                    </span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
                 {items.map(([label, description, key, Icon]) => {
                   const href = `${projectPath}/${key}`;
                   return (

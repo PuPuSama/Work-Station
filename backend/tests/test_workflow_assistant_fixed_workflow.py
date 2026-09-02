@@ -235,6 +235,81 @@ class FixedArticleWorkflowTests(unittest.TestCase):
             {"task-a"},
         )
 
+    def test_structured_counts_build_the_requested_matrix_without_natural_language(self) -> None:
+        context = AssistantWorkspaceContext(
+            projects=(
+                AssistantProjectContext(
+                    project_id="project-a",
+                    customer_name="Project A",
+                    official_domain="project-a.example",
+                    project_notes="",
+                    revision=1,
+                    effective_role="owner",
+                    tasks=(_task("task-a"),),
+                    prompts=(),
+                    knowledge=(),
+                    published_topics=(
+                        AssistantPublishedTopicContext(
+                            topic_id="topic-a-2",
+                            topic="Second topic for A",
+                            primary_keyword="second keyword a",
+                            competitor_keyword="",
+                        ),
+                    ),
+                ),
+                AssistantProjectContext(
+                    project_id="project-b",
+                    customer_name="Project B",
+                    official_domain="project-b.example",
+                    project_notes="",
+                    revision=1,
+                    effective_role="owner",
+                    tasks=(_task("task-b"),),
+                    prompts=(),
+                    knowledge=(),
+                    published_topics=(
+                        AssistantPublishedTopicContext(
+                            topic_id="topic-b-2",
+                            topic="Second topic for B",
+                            primary_keyword="second keyword b",
+                            competitor_keyword="",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        plan = build_fixed_article_plan(
+            "批量写作（结构化配置）",
+            context,
+            article_counts={"project-a": 2, "project-b": 2},
+            writing_instruction="",
+            skip_review=True,
+        )
+
+        self.assertEqual(
+            {
+                project_id: sum(
+                    1
+                    for step in plan.steps
+                    if step.project_id == project_id
+                    and (
+                        step.action_kind == "create_task"
+                        or (
+                            step.action_kind == "package_delivery"
+                            and step.article_task_id is not None
+                        )
+                    )
+                )
+                for project_id in ("project-a", "project-b")
+            },
+            {"project-a": 2, "project-b": 2},
+        )
+        self.assertNotIn("review", [step.action_kind for step in plan.steps])
+        self.assertFalse(
+            any("writing_instruction" in step.input_summary for step in plan.steps)
+        )
+
     def test_completed_or_manual_task_is_not_silently_reused(self) -> None:
         with self.assertRaises(AssistantPolicyError):
             build_fixed_article_plan(

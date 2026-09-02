@@ -35,6 +35,7 @@ from .contracts import (
     AssistantMessageRequest,
     AssistantMessageResponse,
     AttentionCountResponse,
+    BatchWritingPlanRequest,
     PlanCommandRequest,
     WorkflowPlanSummary,
     PlanDraft,
@@ -1266,6 +1267,180 @@ def create_conversation(
             project_ids=project_ids,
         )
         return _conversation_response(conversation)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+def _batch_writing_request_summary(payload: BatchWritingPlanRequest) -> str:
+    projects = "、".join(
+        f"{item.project_id} {item.article_count}篇"
+        for item in payload.projects
+    )
+    review = "跳过复检" if payload.skip_review else "包含复检"
+    instruction = payload.writing_instruction.strip()
+    suffix = f"；补充要求：{instruction}" if instruction else ""
+    return sanitize_message(
+        f"批量写作（结构化配置）：{projects}；{review}；并发上限 {payload.concurrency_limit}{suffix}",
+        max_length=20_000,
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/batch-plans",
+    response_model=AssistantMessageDispatchResponse,
+)
+def create_batch_writing_plan(
+    conversation_id: str,
+    payload: BatchWritingPlanRequest,
+    request: Request,
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> AssistantMessageDispatchResponse:
+    """Create a durable fixed-writing plan from explicit form fields.
+
+    This route deliberately does not invoke the natural-language planner. The
+    browser owns only the batch configuration; project context, topic
+    availability, prompt/knowledge pins, authorization and Task revisions are
+    resolved and checked by the Server before the plan is persisted.
+    """
+
+    _feature_enabled(request)
+    repository = _repository(request)
+    try:
+        conversation = repository.get_conversation(
+            actor=actor,
+            conversation_id=conversation_id,
+            include_messages=False,
+        )
+        project_ids = [item.project_id for item in payload.projects]
+        if set(conversation.project_ids) != set(project_ids):
+            raise AssistantPolicyError(
+                "批量写作项目范围与会话范围不一致，请重新开始"
+            )
+
+        request_summary = _batch_writing_request_summary(payload)
+        existing_user_message = repository.get_message_by_idempotency(
+            actor=actor,
+            conversation_id=conversation_id,
+            idempotency_key=payload.idempotency_key,
+        )
+        if existing_user_message is not None and (
+            existing_user_message.content != request_summary
+            or existing_user_message.request_id != payload.request_id
+        ):
+            raise WorkflowAssistantConflict(
+                "batch writing idempotency key already has different configuration"
+            )
+
+        existing_plan = repository.get_plan_by_idempotency(
+            actor=actor,
+            conversation_id=conversation_id,
+            source_idempotency_key=payload.idempotency_key,
+        )
+        if existing_plan is not None:
+            if existing_plan.natural_language_request != request_summary:
+                raise WorkflowAssistantConflict(
+                    "batch writing idempotency key already has different configuration"
+                )
+            _reauthorize_plan_read(request, actor=actor, plan=existing_plan)
+            assistant_message = repository.get_message_by_idempotency(
+                actor=actor,
+                conversation_id=conversation_id,
+                idempotency_key=_assistant_identity(
+                    payload.idempotency_key,
+                    prefix="asst",
+                ),
+            )
+            return AssistantMessageDispatchResponse(
+                message=(
+                    _message_response(assistant_message)
+                    if assistant_message is not None
+                    else None
+                ),
+                plan=_plan_response(existing_plan),
+            )
+
+        latest_plan = repository.get_latest_plan_for_conversation(
+            actor=actor,
+            conversation_id=conversation_id,
+        )
+        if latest_plan is not None and latest_plan.status not in {
+            "completed",
+            "cancelled",
+            "failed",
+        }:
+            raise AssistantPolicyError(
+                "当前会话已有未完成批量计划，请先处理或取消它"
+            )
+
+        context = _context(request).resolve(
+            actor=actor,
+            project_ids=project_ids,
+        )
+        repository.append_message(
+            actor=actor,
+            conversation_id=conversation_id,
+            role="user",
+            content=request_summary,
+            request_id=payload.request_id,
+            idempotency_key=payload.idempotency_key,
+        )
+        fixed_plan = build_fixed_article_plan(
+            request_summary,
+            context,
+            article_counts={
+                item.project_id: item.article_count
+                for item in payload.projects
+            },
+            writing_instruction=payload.writing_instruction,
+            skip_review=payload.skip_review,
+            concurrency_limit=payload.concurrency_limit,
+        )
+        fixed_plan = fixed_plan.model_copy(
+            update={
+                "title": (
+                    f"批量写作 · {len(payload.projects)} 个项目 · "
+                    f"{sum(item.article_count for item in payload.projects)} 篇"
+                ),
+            }
+        )
+        fixed_plan = bind_plan_context(
+            fixed_plan,
+            context=context,
+        )
+        fixed_plan = _apply_execution_limits(request, fixed_plan)
+        authorization_snapshot = _authorized_plan_scope(
+            request,
+            actor=actor,
+            project_ids=fixed_plan.project_ids,
+            step_project_ids=tuple(
+                step.project_id for step in fixed_plan.steps
+            ),
+        )
+        persisted_plan = repository.create_plan(
+            actor=actor,
+            conversation_id=conversation_id,
+            plan=fixed_plan,
+            authorization_snapshot=authorization_snapshot,
+            source_idempotency_key=payload.idempotency_key,
+        )
+        assistant_message = repository.append_message(
+            actor=actor,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=_assistant_content_for_plan(persisted_plan),
+            request_id=_assistant_identity(
+                payload.request_id,
+                prefix="asst_req",
+            ),
+            idempotency_key=_assistant_identity(
+                payload.idempotency_key,
+                prefix="asst",
+            ),
+        )
+        return AssistantMessageDispatchResponse(
+            message=_message_response(assistant_message),
+            plan=_plan_response(persisted_plan),
+        )
     except Exception as exc:
         raise _error(exc) from exc
 
