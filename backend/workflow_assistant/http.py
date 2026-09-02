@@ -657,6 +657,21 @@ def _reauthorize_plan_read(
     )
 
 
+def _reauthorize_plan_summary_read(
+    request: Request,
+    *,
+    actor: ActorIdentity,
+    plan: WorkflowPlan,
+) -> None:
+    """Recheck only project permissions for the lightweight attention inbox."""
+
+    _context(request).authorize_project_scope(
+        actor=actor,
+        project_ids=plan.project_ids,
+        step_project_ids=tuple(step.project_id for step in plan.steps),
+    )
+
+
 def _request_plan_job_cancellation(
     request: Request,
     *,
@@ -2687,7 +2702,7 @@ def attention(
         visible: list[WorkflowPlanSummary] = []
         for plan in plans:
             try:
-                _reauthorize_plan_read(request, actor=actor, plan=plan)
+                _reauthorize_plan_summary_read(request, actor=actor, plan=plan)
             except AssistantContextError as exc:
                 if str(exc) in {
                     "project access denied",

@@ -45,13 +45,18 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { WorkflowAssistantAttachments } from "@/components/workflow-assistant-attachments";
+import {
+  buildWorkflowArticleCards,
+  isReadyDeliveryStep,
+  WORKFLOW_STEP_LABELS,
+  stepSummaryText,
+} from "@/components/workflow-article-cards";
 import { ApiError, apiFileUrl, apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
 import {
   gapFillWorkflowAssistantPlan,
   getResearchRun,
 } from "@/lib/research-api";
-import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
 import type {
   AccessibleProject,
   AuthStatus,
@@ -78,23 +83,6 @@ const statusLabels: Record<WorkflowAssistantPlan["status"], string> = {
   completed: "已完成",
   failed: "执行失败",
   cancelled: "已取消",
-};
-
-const workflowStepActionLabels: Record<string, string> = {
-  generate_titles: "生成标题候选",
-  select_title: "确认标题",
-  generate_products: "生成产品候选",
-  confirm_products: "确认产品",
-  generate_outline: "生成大纲",
-  start_research: "知识库研究",
-  generate_article: "生成正文",
-  review: "正文复检",
-  humanize: "降 AI / 人化",
-  restore_links: "恢复并校验链接",
-  prepare_images: "准备图片",
-  export_docx: "导出 Word",
-  generate_tdk: "生成 TDK",
-  package_delivery: "生成交付包",
 };
 
 const workflowStepStatusLabels: Record<string, string> = {
@@ -333,228 +321,6 @@ function statusVariant(status: WorkflowAssistantPlan["status"]): "default" | "ou
   return "default";
 }
 
-function isReadyDeliveryStep(step: WorkflowAssistantStep): boolean {
-  return step.status === "succeeded"
-    && Boolean(step.article_task_id)
-    && step.output_summary.artifact_kind === "delivery_package"
-    && Boolean(String(step.output_summary.asset_id || "").trim());
-}
-
-type WorkflowArticleCardStatus =
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "waiting_review"
-  | "running"
-  | "pending"
-  | "skipped";
-
-type WorkflowArticleCard = {
-  key: string;
-  projectId: string;
-  taskId: string | null;
-  title: string;
-  status: WorkflowArticleCardStatus;
-  progress: number;
-  total: number;
-  updatedAt: string | null;
-  packageReady: boolean;
-  articleReady: boolean;
-  errorCode: string | null;
-};
-
-function stepSummaryText(
-  summary: Record<string, unknown>,
-  ...keys: string[]
-): string {
-  for (const key of keys) {
-    const value = summary[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function workflowArticleLaneKey(step: WorkflowAssistantStep): string {
-  const taskId = step.article_task_id?.trim();
-  if (taskId) return `${step.project_id}:task:${taskId}`;
-  const createTaskStepId = stepSummaryText(step.input_summary, "create_task_step_id");
-  if (createTaskStepId) return `${step.project_id}:create:${createTaskStepId}`;
-  if (step.action_kind === "create_task") return `${step.project_id}:create:${step.step_id}`;
-  return `${step.project_id}:step:${step.step_id}`;
-}
-
-function workflowArticleCardStatus(
-  steps: WorkflowAssistantStep[],
-  packageStep: WorkflowAssistantStep | undefined,
-): WorkflowArticleCardStatus {
-  if (packageStep && isReadyDeliveryStep(packageStep)) return "completed";
-  const statuses = steps.map((step) => step.status);
-  if (statuses.includes("failed")) return "failed";
-  if (statuses.includes("cancelled")) return "cancelled";
-  if (statuses.includes("waiting_review")) return "waiting_review";
-  if (statuses.includes("running") || statuses.includes("waiting_job")) return "running";
-  if (statuses.includes("pending")) return "pending";
-  if (
-    packageStep?.status === "skipped"
-    && statuses.length
-    && statuses.every((status) => status === "succeeded" || status === "skipped")
-  ) return "skipped";
-  if (statuses.length && statuses.every((status) => status === "skipped")) return "skipped";
-  if (
-    statuses.length
-    && statuses.every((status) => status === "succeeded" || status === "skipped")
-  ) return "completed";
-  return "running";
-}
-
-const workflowArticleCardStatusLabels: Record<WorkflowArticleCardStatus, string> = {
-  completed: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-  waiting_review: "待人工处理",
-  running: "执行中",
-  pending: "待执行",
-  skipped: "已跳过",
-};
-
-const workflowArticleCardStatusVariants: Record<
-  WorkflowArticleCardStatus,
-  "default" | "outline" | "secondary" | "destructive"
-> = {
-  completed: "secondary",
-  failed: "destructive",
-  cancelled: "outline",
-  waiting_review: "outline",
-  running: "default",
-  pending: "default",
-  skipped: "outline",
-};
-
-function workflowArticleCardTitle(
-  steps: WorkflowAssistantStep[],
-  taskId: string | null,
-  index: number,
-  fallbackTitle: string,
-): string {
-  for (const step of steps) {
-    const value = stepSummaryText(
-      step.output_summary,
-      "selected_title",
-      "title",
-    ) || stepSummaryText(step.input_summary, "title", "topic", "primary_keyword");
-    if (value) return value.slice(0, 180);
-  }
-  if (fallbackTitle) return fallbackTitle.slice(0, 180);
-  return taskId ? `文章 ${taskId}` : `文章 ${index + 1}`;
-}
-
-function workflowArticleCardUpdatedAt(
-  steps: WorkflowAssistantStep[],
-): string | null {
-  const timestamps = steps
-    .map((step) => step.updated_at)
-    .filter((value): value is string => Boolean(value));
-  if (!timestamps.length) return null;
-  timestamps.sort((left, right) => {
-    const leftTime = parseProjectDate(left)?.getTime() ?? 0;
-    const rightTime = parseProjectDate(right)?.getTime() ?? 0;
-    return leftTime - rightTime;
-  });
-  return timestamps[timestamps.length - 1];
-}
-
-function buildWorkflowArticleCards(
-  plan: WorkflowAssistantPlan,
-  taskTopics: ReadonlyMap<string, string> = new Map(),
-): WorkflowArticleCard[] {
-  const packageSteps = plan.steps.filter((step) => step.action_kind === "package_delivery");
-  const sourceSteps = packageSteps.length
-    ? packageSteps
-    : plan.steps.filter((step) => step.action_kind === "create_task" || Boolean(step.article_task_id));
-  const seenKeys = new Set<string>();
-  const cards: WorkflowArticleCard[] = [];
-
-  sourceSteps.forEach((sourceStep, index) => {
-    const key = workflowArticleLaneKey(sourceStep);
-    if (seenKeys.has(key)) return;
-    seenKeys.add(key);
-    const sourceTaskId = sourceStep.article_task_id?.trim() || null;
-    const createTaskStepId = stepSummaryText(sourceStep.input_summary, "create_task_step_id");
-    const relatedSteps = plan.steps.filter((candidate) => {
-      if (candidate.project_id !== sourceStep.project_id) return false;
-      if (sourceTaskId && candidate.article_task_id === sourceTaskId) return true;
-      if (createTaskStepId) {
-        return candidate.step_id === createTaskStepId
-          || stepSummaryText(candidate.input_summary, "create_task_step_id") === createTaskStepId;
-      }
-      return workflowArticleLaneKey(candidate) === key;
-    });
-    const steps = relatedSteps.length ? relatedSteps : [sourceStep];
-    const taskId = sourceTaskId
-      || steps.find((step) => step.article_task_id)?.article_task_id?.trim()
-      || null;
-    const taskTopic = taskId
-      ? taskTopics.get(`${sourceStep.project_id}:${taskId}`) || ""
-      : "";
-    const packageStep = sourceStep.action_kind === "package_delivery"
-      ? sourceStep
-      : packageSteps.find((step) => {
-        if (taskId && step.article_task_id === taskId) return true;
-        return step.project_id === sourceStep.project_id
-          && createTaskStepId
-          && stepSummaryText(step.input_summary, "create_task_step_id") === createTaskStepId;
-    });
-    const articleStep = steps.find((step) => step.action_kind === "generate_article");
-    const hasDownstreamArticleResult = steps.some(
-      (step) => [
-        "humanize",
-        "restore_links",
-        "prepare_images",
-        "export_docx",
-        "generate_tdk",
-        "package_delivery",
-      ].includes(step.action_kind) && step.status === "succeeded",
-    );
-    const articleReady = articleStep
-      ? articleStep.status === "succeeded"
-        && articleStep.output_summary.article_ready !== false
-      : hasDownstreamArticleResult;
-    const articleResultMissing = articleStep?.status === "succeeded"
-      && articleStep.output_summary.article_ready === false;
-    const status = articleResultMissing
-      ? "failed"
-      : workflowArticleCardStatus(steps, packageStep);
-    const errorStep = steps.find((step) => step.status === "failed" || step.status === "cancelled");
-    cards.push({
-      key,
-      projectId: sourceStep.project_id,
-      taskId,
-      title: workflowArticleCardTitle(steps, taskId, index, taskTopic),
-      status,
-      progress: steps.filter((step) => step.status === "succeeded" || step.status === "skipped").length,
-      total: steps.length,
-      updatedAt: workflowArticleCardUpdatedAt(steps),
-      packageReady: Boolean(packageStep && isReadyDeliveryStep(packageStep)),
-      articleReady,
-      errorCode: articleResultMissing
-        ? "article_result_missing"
-        : errorStep?.standardized_error_code || null,
-    });
-  });
-
-  return cards;
-}
-
-function formatWorkflowArticleCardTime(value: string | null): string {
-  if (!value) return "—";
-  return formatProjectDate(value, {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }) || "—";
-}
-
 type ScopedTask = TaskRecord & { project_id: string };
 
 type AssistantRequestPhase = "idle" | "sending" | "waiting_reply" | "refreshing";
@@ -578,7 +344,6 @@ export function WorkflowAssistantWorkspace() {
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [scopeDialogOpen, setScopeDialogOpen] = useState(false);
   const [planPreviewOpen, setPlanPreviewOpen] = useState(false);
-  const [planDetailsOpen, setPlanDetailsOpen] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
   const [batchArtifactPending, setBatchArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
@@ -659,9 +424,8 @@ export function WorkflowAssistantWorkspace() {
         authStatus.data?.workflow_assistant_gap_fill_enabled,
       ));
       void refreshAttention().catch(() => {
-        // Keep the workspace usable when an older backend has no inbox route.
-        setAttentionCount(0);
-        setAttentionPlans([]);
+        // Keep the last durable cards visible during a transient inbox
+        // failure; clearing them makes a refresh look like data loss.
       });
       setSelectedConversation((current) => current || nextConversations.conversations[0] || null);
       setSelectedProjectIds((current) => current.length ? current : nextProjects.map((project) => project.project_id));
@@ -1079,7 +843,6 @@ export function WorkflowAssistantWorkspace() {
       setConversations((current) => [created, ...current]);
       setSelectedConversation(created);
       setPlan(null);
-      setPlanDetailsOpen(false);
     } catch (nextError) {
       setError(messageText(nextError));
     } finally {
@@ -1092,7 +855,6 @@ export function WorkflowAssistantWorkspace() {
     if (!content || pending) return;
     setPending(true);
     setRequestPhase("sending");
-    setPlanDetailsOpen(false);
     setError("");
     let dispatchConversation: WorkflowAssistantConversation | null = selectedConversation;
     let previousPlanId: string | null = null;
@@ -1164,7 +926,6 @@ export function WorkflowAssistantWorkspace() {
         pendingMessageDispatchRef.current = null;
         if (recovered.plan) {
           setPlan(recovered.plan);
-          setPlanDetailsOpen(false);
         }
         setDraft("");
         setPendingUserMessage(null);
@@ -1188,7 +949,6 @@ export function WorkflowAssistantWorkspace() {
       setRequestPhase("refreshing");
       if (response.plan) {
         setPlan(response.plan);
-        setPlanDetailsOpen(false);
       }
       void refreshAttention().catch(() => undefined);
       setDraft("");
@@ -1214,7 +974,6 @@ export function WorkflowAssistantWorkspace() {
           setError("");
           if (recovered.plan) {
             setPlan(recovered.plan);
-            setPlanDetailsOpen(false);
           }
           setDraft("");
           setPendingUserMessage(null);
@@ -1314,7 +1073,6 @@ export function WorkflowAssistantWorkspace() {
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
       setPlan(next);
-      setPlanDetailsOpen(false);
       setRevisionDraft("");
       void refreshAttention().catch(() => undefined);
     } catch (nextError) {
@@ -1364,7 +1122,6 @@ export function WorkflowAssistantWorkspace() {
       loadedConversationRef.current = freshPlan.conversation_id;
       activePlanIdRef.current = freshPlan.plan_id;
       setPlan(freshPlan);
-      setPlanDetailsOpen(false);
       try {
         if (!conversation) throw new Error("conversation expired");
         setSelectedConversation(conversation);
@@ -1713,13 +1470,14 @@ export function WorkflowAssistantWorkspace() {
                           variant="outline"
                           size="sm"
                           className="min-h-9"
-                          aria-haspopup="dialog"
-                          onClick={() => {
-                            setPlanPreviewOpen(false);
-                            setPlanDetailsOpen(true);
-                          }}
+                          nativeButton={false}
+                          render={
+                            <Link
+                              href={`/batch-writing?plan_id=${encodeURIComponent(plan.plan_id)}&conversation_id=${encodeURIComponent(plan.conversation_id)}`}
+                            />
+                          }
                         >
-                          <Workflow />查看文章概览
+                          <ExternalLink />打开批量写作页
                         </Button>
                       </div>
                     </div>
@@ -1745,7 +1503,7 @@ export function WorkflowAssistantWorkspace() {
                       <li key={step.step_id} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
                         <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span>
                         <span className="min-w-0 flex-1">
-                          <span className="block truncate font-medium">{workflowStepActionLabels[step.action_kind] || step.action_kind}</span>
+                          <span className="block truncate font-medium">{WORKFLOW_STEP_LABELS[step.action_kind] || step.action_kind}</span>
                           <span className="mt-0.5 block truncate text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" ? ` · ${stepSummaryText(step.input_summary, "topic") || "自动选题"}` : ""}</span>
                         </span>
                         <Badge variant={step.status === "failed" ? "destructive" : step.status === "succeeded" ? "secondary" : "outline"}>
@@ -1756,7 +1514,7 @@ export function WorkflowAssistantWorkspace() {
                   </ol>
                 </div>
                 <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
-                  文章概览已移到右上方的二级窗口；每张卡片显示项目、状态、处理进度和完成时间。
+                  文章卡片已移到批量写作页；在那里可以按项目查看每篇文章的状态、处理进度和实际失败步骤。
                 </div>
                 {gapFillEnabled && waitingResearchSteps.map((step) => {
                   const detail = researchDetails[step.step_id];
@@ -1828,72 +1586,6 @@ export function WorkflowAssistantWorkspace() {
               </div> : <div className="py-10 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
                   </CardContent>
                 </Card>
-              </div>
-            </DialogContent>
-          </Dialog>}
-          {plan && <Dialog open={planDetailsOpen} onOpenChange={setPlanDetailsOpen}>
-            <DialogContent className="h-[min(880px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-7xl sm:max-w-7xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
-              <DialogHeader className="border-b px-5 py-4 pr-12">
-                <DialogTitle>文章执行概览</DialogTitle>
-                <DialogDescription>
-                  {plan.title} · {articleCards.length} 篇文章 · 成功 {readyDeliveryCount} 篇；点击卡片右上角可在新标签页打开文章工作台。
-                </DialogDescription>
-              </DialogHeader>
-              <div className="min-h-0 overflow-y-auto px-5 py-4">
-                {articleCards.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {articleCards.map((card) => {
-                    const workbenchHref = card.taskId
-                      ? `/projects/${encodeURIComponent(card.projectId)}/articles/${encodeURIComponent(card.taskId)}?step=draft`
-                      : null;
-                    const timeLabel = card.status === "completed" ? "完成时间" : "最近更新";
-                    return (
-                      <article key={card.key} className="rounded-xl border bg-background p-3 shadow-xs">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold" title={card.title}>{card.title}</p>
-                            <p className="mt-1 truncate text-xs text-muted-foreground">{card.projectId}{card.taskId ? ` · ${card.taskId}` : ""}</p>
-                          </div>
-                          {workbenchHref ? <Link
-                            href={workbenchHref}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                            aria-label={`在新标签页打开${card.title}的文章工作台`}
-                          >
-                            <ExternalLink className="size-4" />
-                            <span className="sr-only">在新标签页打开文章工作台</span>
-                          </Link> : <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground/40" title="文章任务创建后可打开工作台">
-                            <ExternalLink className="size-4" />
-                            <span className="sr-only">文章任务尚未创建</span>
-                          </span>}
-                        </div>
-                        <div className="mt-3 flex flex-wrap items-center gap-2">
-                          <Badge variant={workflowArticleCardStatusVariants[card.status]}>
-                            {workflowArticleCardStatusLabels[card.status]}
-                          </Badge>
-                          <span className="text-xs text-muted-foreground">{card.progress}/{card.total} 步已处理</span>
-                        </div>
-                        <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-                          <div className="min-w-0">
-                            <dt className="text-muted-foreground">正文</dt>
-                            <dd className={`mt-0.5 truncate font-medium ${card.articleReady ? "text-foreground" : "text-muted-foreground"}`}>
-                              {card.articleReady ? "已生成" : "未生成"}
-                            </dd>
-                          </div>
-                          <div className="min-w-0">
-                            <dt className="text-muted-foreground">交付包</dt>
-                            <dd className="mt-0.5 truncate font-medium">{card.packageReady ? "已生成" : "未生成"}</dd>
-                          </div>
-                          <div className="min-w-0">
-                            <dt className="text-muted-foreground">{timeLabel}</dt>
-                            <dd className="mt-0.5 truncate font-medium">{formatWorkflowArticleCardTime(card.updatedAt)}</dd>
-                          </div>
-                        </dl>
-                        {card.errorCode && <p className="mt-3 truncate text-xs text-destructive" title={card.errorCode}>失败步骤：{card.errorCode}</p>}
-                      </article>
-                    );
-                  })}
-                </div> : <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">当前计划尚未形成可展示的文章链。</div>}
               </div>
             </DialogContent>
           </Dialog>}

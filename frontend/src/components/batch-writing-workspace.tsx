@@ -11,6 +11,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Settings2,
   Sparkles,
   Square,
   Workflow,
@@ -31,6 +32,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  WORKFLOW_STEP_LABELS,
+  WorkflowArticleCards,
+} from "@/components/workflow-article-cards";
 import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
 import type {
@@ -54,24 +59,6 @@ const statusLabels: Record<WorkflowAssistantPlan["status"], string> = {
   completed: "已完成",
   failed: "执行失败",
   cancelled: "已取消",
-};
-
-const stepLabels: Record<string, string> = {
-  create_task: "创建文章任务",
-  generate_titles: "生成标题候选",
-  select_title: "确认标题",
-  generate_products: "生成产品候选",
-  confirm_products: "确认产品",
-  generate_outline: "生成大纲",
-  start_research: "知识库研究",
-  generate_article: "生成正文",
-  review: "正文复检",
-  humanize: "降 AI / 人化",
-  restore_links: "恢复并校验链接",
-  prepare_images: "准备图片",
-  export_docx: "导出 Word",
-  generate_tdk: "生成 TDK",
-  package_delivery: "生成交付包",
 };
 
 type BatchProjectRow = {
@@ -154,6 +141,15 @@ export function BatchWritingWorkspace() {
 
   const projectById = useMemo(
     () => new Map(projects.map((project) => [project.project_id, project])),
+    [projects],
+  );
+  const projectNames = useMemo(
+    () => new Map(
+      projects.map((project) => [
+        project.project_id,
+        project.customer_name || project.project_id,
+      ]),
+    ),
     [projects],
   );
   const totalArticles = rows.reduce((total, row) => total + row.article_count, 0);
@@ -358,16 +354,28 @@ export function BatchWritingWorkspace() {
               </p>
             </div>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            nativeButton={false}
-            render={<Link href="/assistant" />}
-            className="shrink-0"
-          >
-            <Sparkles />
-            对话助手
-          </Button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              nativeButton={false}
+              render={<Link href="/assistant" />}
+              className="shrink-0"
+            >
+              <Sparkles />
+              对话助手
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              nativeButton={false}
+              render={<Link href="/settings" />}
+              className="shrink-0"
+            >
+              <Settings2 />
+              全局设置
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -500,6 +508,23 @@ export function BatchWritingWorkspace() {
               </div>
             </CardContent>
           </Card>
+
+          {plan && (
+            <Card className="gap-0 py-0">
+              <CardHeader className="border-b px-5 py-5">
+                <CardTitle>文章执行概览</CardTitle>
+                <CardDescription>
+                  每张卡片对应一篇文章；失败或未完成时会标出实际步骤，打开工作台会定位到对应阶段。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="px-5 py-5">
+                <WorkflowArticleCards
+                  plan={plan}
+                  projectNames={projectNames}
+                />
+              </CardContent>
+            </Card>
+          )}
         </section>
 
         <aside className="grid content-start gap-4">
@@ -620,7 +645,7 @@ export function BatchWritingWorkspace() {
                       <li key={step.step_id} className="flex items-center gap-2 text-xs">
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted font-semibold">{step.sequence}</span>
                         <span className="min-w-0 flex-1 truncate">
-                          {stepLabels[step.action_kind] || step.action_kind}
+                          {WORKFLOW_STEP_LABELS[step.action_kind] || step.action_kind}
                           <span className="ml-1 text-muted-foreground">· {step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}</span>
                         </span>
                         <Badge variant={step.status === "failed" ? "destructive" : step.status === "succeeded" ? "secondary" : "outline"}>

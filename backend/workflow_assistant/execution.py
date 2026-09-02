@@ -142,6 +142,15 @@ def _permission_for_action(action_kind: str) -> str:
     return "article.edit"
 
 
+def _public_error_summary(error: WorkflowExecutionError) -> dict[str, Any]:
+    """Keep a bounded, user-actionable reason beside the stable error code."""
+
+    message = str(error).strip().replace("\x00", "")
+    if not message:
+        return {}
+    return {"error_message": message[:1_000]}
+
+
 class WorkflowExecutionCoordinator:
     """Reauthorize and execute already-confirmed typed steps.
 
@@ -404,11 +413,13 @@ class WorkflowExecutionCoordinator:
                         )
                     )
                 except WorkflowExecutionError as exc:
+                    error_summary = _public_error_summary(exc)
                     committed = self._repository.finish_step(
                         actor=actor,
                         plan_id=plan.plan_id,
                         step_id=step.step_id,
                         status="failed",
+                        output_summary=error_summary,
                         standardized_error_code=type(exc).__name__,
                     )
                     if not committed:
@@ -434,7 +445,7 @@ class WorkflowExecutionCoordinator:
                         StepExecutionResult(
                             step_id=step.step_id,
                             status="failed",
-                            output_summary={},
+                            output_summary=error_summary,
                             error_code=type(exc).__name__,
                         )
                     )

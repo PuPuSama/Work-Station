@@ -62,6 +62,7 @@ class AuthorizedPostgresJobQueue:
         self.organization_id = queue.organization_id
         self.project_id = queue.project_id
         self.worker_id = queue.worker_id
+        self.lease_seconds = getattr(queue, "lease_seconds", 15 * 60)
         self._scan_multiplier = max(1, int(scan_multiplier))
 
     def recover_interrupted(
@@ -136,6 +137,9 @@ class AuthorizedPostgresJobQueue:
 
     def is_cancel_requested(self, job_id: str) -> bool:
         return self._queue.is_cancel_requested(job_id)
+
+    def renew_lease(self, job_id: str) -> bool:
+        return self._queue.renew_lease(job_id)
 
     def mark_succeeded(self, job_id: str, result_revision: int) -> None:
         self._queue.mark_succeeded(job_id, result_revision)

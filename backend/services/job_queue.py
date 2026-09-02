@@ -56,6 +56,8 @@ class JobQueueBackend(Protocol):
 
     def is_cancel_requested(self, job_id: str) -> bool: ...
 
+    def renew_lease(self, job_id: str) -> bool: ...
+
     def mark_succeeded(self, job_id: str, result_revision: int) -> None: ...
 
     def mark_cancelled(self, job_id: str) -> None: ...
@@ -121,12 +123,29 @@ class BatchJobRunner:
         concurrency: int = 3,
         poll_seconds: float = 0.4,
         operations: Iterable[str] | None = None,
+        lease_renewal_seconds: float | None = None,
     ) -> None:
         self.queue = queue
         self.handler = handler
         self.concurrency = max(1, int(concurrency))
         self.poll_seconds = poll_seconds
         self.operations = tuple(dict.fromkeys(operations or ()))
+        if lease_renewal_seconds is not None:
+            if lease_renewal_seconds <= 0:
+                raise ValueError("lease_renewal_seconds must be greater than zero")
+            self._lease_renewal_seconds = float(lease_renewal_seconds)
+        else:
+            try:
+                lease_seconds = float(getattr(queue, "lease_seconds", 15 * 60))
+            except (TypeError, ValueError):
+                lease_seconds = float(15 * 60)
+            # PostgreSQL queues use a fifteen-minute lease by default. Keep
+            # the heartbeat comfortably below that boundary without making
+            # short-lived test or custom queues poll excessively.
+            self._lease_renewal_seconds = max(
+                0.5,
+                min(60.0, lease_seconds / 3.0),
+            )
         self._executor = ThreadPoolExecutor(
             max_workers=self.concurrency,
             thread_name_prefix="article-server-job",
@@ -221,7 +240,35 @@ class BatchJobRunner:
         job_id = str(job["id"])
         user_cancelled = lambda: self.queue.is_cancel_requested(job_id)
         should_stop = lambda: self._stop.is_set() or user_cancelled()
+        heartbeat_stop: threading.Event | None = None
+        heartbeat: threading.Thread | None = None
         try:
+            renew_lease = getattr(self.queue, "renew_lease", None)
+            if callable(renew_lease):
+                heartbeat_stop = threading.Event()
+                stop_event = heartbeat_stop
+
+                def renew_until_done() -> None:
+                    while not stop_event.wait(self._lease_renewal_seconds):
+                        try:
+                            if not bool(renew_lease(job_id)):
+                                return
+                        except Exception as exc:
+                            # A single transient renewal failure must not
+                            # abort a valid provider call. The next heartbeat
+                            # retries while the durable lease still exists.
+                            LOGGER.warning(
+                                "job lease renewal failed for %s (%s)",
+                                job_id,
+                                type(exc).__name__,
+                            )
+
+                heartbeat = threading.Thread(
+                    target=renew_until_done,
+                    name=f"article-job-lease-{job_id[:12]}",
+                    daemon=True,
+                )
+                heartbeat.start()
             try:
                 if self._stop.is_set():
                     self.queue.mark_interrupted(job_id)
@@ -251,6 +298,10 @@ class BatchJobRunner:
             except Exception:
                 pass
         finally:
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1.0)
             self.wake()
 
 

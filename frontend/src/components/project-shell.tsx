@@ -3,7 +3,6 @@
 import {
   ArrowLeft,
   BookOpenText,
-  Building2,
   Clock3,
   FileText,
   Layers3,
@@ -16,7 +15,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
-import { AccountProfileButton } from "@/components/account-profile-button";
 import { ServerProjectJobCenter } from "@/components/server-project-job-center";
 import {
   Breadcrumb,
@@ -255,13 +253,11 @@ export function ProjectShell({
         </SidebarContent>
         <SidebarFooter className="px-3 pb-3">
           <SidebarMenu>
-            {role === "org_admin" && (
-              <SidebarMenuItem>
-                <SidebarMenuButton tooltip="组织管理" render={<Link href="/organization" />}>
-                  <Building2 /><span>组织管理</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            )}
+            <SidebarMenuItem>
+              <SidebarMenuButton isActive={pathname === "/settings"} tooltip="全局设置" render={<Link href="/settings" />}>
+                <Settings2 /><span>全局设置</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
             {canManageSettings && (
               <SidebarMenuItem>
                 <SidebarMenuButton isActive={section === "settings"} tooltip="项目设置" render={<Link href={`${projectPath}/settings`} />}>
@@ -294,7 +290,13 @@ export function ProjectShell({
             role={role}
             isProjectOwner={isProjectOwner}
           />
-          <AccountProfileButton iconOnly />
+          <Link
+            href="/settings"
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            aria-label="打开全局设置"
+          >
+            <Settings2 className="size-4" />
+          </Link>
           <LogoutButton iconOnly />
         </header>
         <div className="min-w-0 flex-1">{children}</div>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -210,6 +210,43 @@ class WorkflowAssistantContextResolver:
             return self._directory.list_for_actor(actor)
         except Exception as exc:
             raise AssistantContextError("project directory is unavailable") from exc
+
+    def authorize_project_scope(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_ids: Sequence[str],
+        step_project_ids: Sequence[str] = (),
+    ) -> None:
+        """Re-authorize a persisted plan without loading article context.
+
+        Attention cards only need the durable plan projection. Resolving every
+        project's tasks, prompts, knowledge and products made that lightweight
+        inbox depend on unrelated project data and turned one damaged context
+        row into a 503 for the entire list.
+        """
+
+        normalized_projects = tuple(
+            dict.fromkeys(item.strip() for item in project_ids if item.strip())
+        )
+        if not normalized_projects:
+            raise AssistantContextError("project scope is empty")
+        normalized_steps = {
+            item.strip() for item in step_project_ids if item.strip()
+        }
+        if not normalized_steps.issubset(set(normalized_projects)):
+            raise AssistantContextError("project scope contains an inaccessible project")
+        accessible = {
+            project.project_id
+            for project in self.accessible_projects(actor)
+        }
+        if not set(normalized_projects).issubset(accessible):
+            raise AssistantContextError("project scope contains an inaccessible project")
+        try:
+            for project_id in normalized_projects:
+                self._access.require(actor, project_id, "project.view")
+        except ProjectAccessDenied as exc:
+            raise AssistantContextError("project access denied") from exc
 
     def resolve(
         self,

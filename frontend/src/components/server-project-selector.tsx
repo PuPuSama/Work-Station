@@ -19,7 +19,6 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
-import { AccountProfileButton } from "@/components/account-profile-button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,11 +40,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { apiGet, apiPost, apiPut } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import type {
   AccessibleProject,
   AuthStatus,
-  ServerLlmSettings,
   WorkflowAssistantAttentionCount,
   WorkspaceTeam,
   WorkspaceTeamPage,
@@ -75,13 +73,6 @@ export function ServerProjectSelector() {
   const [owningTeamId, setOwningTeamId] = useState("");
   const [teams, setTeams] = useState<WorkspaceTeam[]>([]);
   const [organizationId, setOrganizationId] = useState("");
-  const [canOpenOrganization, setCanOpenOrganization] = useState(false);
-  const [llmSettings, setLlmSettings] = useState<ServerLlmSettings | null>(null);
-  const [llmSettingsOpen, setLlmSettingsOpen] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("");
-  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState("");
-  const [llmSettingsPending, setLlmSettingsPending] = useState(false);
-  const [llmSettingsError, setLlmSettingsError] = useState("");
   const [assistantEnabled, setAssistantEnabled] = useState(false);
   const [assistantAttentionCount, setAssistantAttentionCount] = useState(0);
 
@@ -108,17 +99,9 @@ export function ServerProjectSelector() {
             setAssistantAttentionCount(0);
           }
         }
-        const currentOrganizationId = status.data?.organization_id || "";
-        if (!currentOrganizationId) {
-          setCanOpenOrganization(false);
-        } else {
-          await apiGet<WorkspaceTeamPage>(
-            `/api/organizations/${encodeURIComponent(currentOrganizationId)}/teams?limit=1`,
-          );
-          setCanOpenOrganization(true);
-        }
       } catch {
-        setCanOpenOrganization(false);
+        // The project directory remains usable when the optional assistant
+        // badge cannot be refreshed.
       }
     } catch (nextError) {
       setError(errorMessage(nextError));
@@ -130,50 +113,6 @@ export function ServerProjectSelector() {
   useEffect(() => {
     void loadProjects();
   }, [loadProjects]);
-
-  const loadLlmSettings = useCallback(async () => {
-    try {
-      setLlmSettings(await apiGet<ServerLlmSettings>("/api/settings/llm"));
-    } catch (nextError) {
-      setLlmSettings(null);
-      setLlmSettingsError(errorMessage(nextError));
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadLlmSettings();
-  }, [loadLlmSettings]);
-
-  const canManageOrganization = projects.some(
-    (project) => project.effective_role === "org_admin",
-  ) || canOpenOrganization;
-
-  function openLlmSettings() {
-    if (!llmSettings) return;
-    setSelectedModel(llmSettings.model);
-    setSelectedReasoningEffort(llmSettings.reasoning_effort);
-    setLlmSettingsError("");
-    setLlmSettingsOpen(true);
-  }
-
-  async function saveLlmSettings() {
-    if (!llmSettings || !selectedModel || !selectedReasoningEffort) return;
-    setLlmSettingsPending(true);
-    setLlmSettingsError("");
-    try {
-      const next = await apiPut<ServerLlmSettings>("/api/settings/llm", {
-        model: selectedModel,
-        reasoning_effort: selectedReasoningEffort,
-        revision: llmSettings.revision,
-      });
-      setLlmSettings(next);
-      setLlmSettingsOpen(false);
-    } catch (nextError) {
-      setLlmSettingsError(errorMessage(nextError));
-    } finally {
-      setLlmSettingsPending(false);
-    }
-  }
 
   async function openCreateProject() {
     setCreateOpen(true);
@@ -238,7 +177,7 @@ export function ServerProjectSelector() {
               未迁移的本地批量任务和本地设置入口不会在 Server 模式显示。
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <>
               {assistantEnabled && <Button
                 nativeButton={false}
@@ -260,18 +199,11 @@ export function ServerProjectSelector() {
                 批量写作
               </Button>}
                 <Button
-                  type="button"
+                  nativeButton={false}
                   variant="outline"
-                  onClick={openLlmSettings}
-                  disabled={!llmSettings || llmSettingsPending}
+                  render={<Link href="/settings" />}
                 >
-                  <Settings2 />
-                  模型设置
-                  {llmSettings && (
-                    <span className="hidden text-xs text-muted-foreground sm:inline">
-                      {llmSettings.model} · {llmSettings.reasoning_effort}
-                    </span>
-                  )}
+                  <Settings2 />全局设置
                 </Button>
                 <Button
                   type="button"
@@ -280,14 +212,6 @@ export function ServerProjectSelector() {
                   <Plus />
                   新建项目
                 </Button>
-                {canManageOrganization && <Button
-                  nativeButton={false}
-                  variant="outline"
-                  render={<Link href="/organization" />}
-                >
-                  <Building2 />
-                  组织管理
-                </Button>}
             </>
             <Button
               type="button"
@@ -302,7 +226,6 @@ export function ServerProjectSelector() {
               )}
               刷新
             </Button>
-            <AccountProfileButton />
             <LogoutButton />
           </div>
         </div>
@@ -468,91 +391,6 @@ export function ServerProjectSelector() {
               {createPending ? <Loader2 className="animate-spin" /> : <Plus />}
               创建并进入项目
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={llmSettingsOpen} onOpenChange={setLlmSettingsOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>个人模型设置</DialogTitle>
-            <DialogDescription>
-              当前账号发起的标题、产品分析、大纲、正文、复检和交付相关模型请求会使用这里的配置；只影响当前账号，不影响其他成员。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-5 py-2">
-            {llmSettingsError && (
-              <Alert variant="destructive">
-                <AlertCircle />
-                <AlertTitle>模型设置保存失败</AlertTitle>
-                <AlertDescription>{llmSettingsError}</AlertDescription>
-              </Alert>
-            )}
-            <div className="grid gap-2">
-              <Label htmlFor="global-llm-model">模型</Label>
-              <select
-                id="global-llm-model"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={selectedModel}
-                disabled={!llmSettings?.can_edit || llmSettingsPending}
-                onChange={(event) => setSelectedModel(event.target.value)}
-              >
-                {(llmSettings?.available_models || []).map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="global-reasoning-effort">模型推理程度</Label>
-              <select
-                id="global-reasoning-effort"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={selectedReasoningEffort}
-                disabled={!llmSettings?.can_edit || llmSettingsPending}
-                onChange={(event) => setSelectedReasoningEffort(event.target.value)}
-              >
-                {(llmSettings?.available_reasoning_efforts || []).map((effort) => (
-                  <option key={effort} value={effort}>
-                    {effort}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs leading-5 text-muted-foreground">
-                程度越高通常越适合复杂任务，但响应时间和用量也可能增加。标题生成仍保持系统设定的低推理档位。
-              </p>
-            </div>
-            {!llmSettings?.can_edit && (
-              <Alert>
-                <AlertTitle>仅供查看</AlertTitle>
-                <AlertDescription>
-                  当前账号没有有效的组织成员身份，因此不能修改个人模型设置。
-                </AlertDescription>
-              </Alert>
-            )}
-          </div>
-          <DialogFooter>
-            <DialogClose
-              render={
-                <Button type="button" variant="outline" disabled={llmSettingsPending} />
-              }
-            >
-              关闭
-            </DialogClose>
-            {llmSettings?.can_edit && (
-              <Button
-                type="button"
-                onClick={() => void saveLlmSettings()}
-                disabled={!selectedModel || !selectedReasoningEffort || llmSettingsPending}
-              >
-                {llmSettingsPending ? (
-                  <Loader2 className="animate-spin" />
-                ) : (
-                  <Settings2 />
-                )}
-                保存模型设置
-              </Button>
-            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import unittest
 from http.client import RemoteDisconnected
 from pathlib import Path
@@ -54,6 +55,48 @@ class FlakyQueue:
         return "failed"
 
 
+class LeaseRenewingQueue:
+    lease_seconds = 1
+
+    def __init__(self) -> None:
+        self.claimed = False
+        self.completed = threading.Event()
+        self.renewals: list[str] = []
+
+    def recover_interrupted(self, _operations=None) -> int:
+        return 0
+
+    def claim_jobs(self, _limit, _operations=None):
+        if self.claimed or self.completed.is_set():
+            return []
+        self.claimed = True
+        return [{"id": "long-job"}]
+
+    def is_cancel_requested(self, _job_id: str) -> bool:
+        return False
+
+    def renew_lease(self, job_id: str) -> bool:
+        self.renewals.append(job_id)
+        return True
+
+    def mark_succeeded(self, _job_id: str, _result_revision: int) -> None:
+        self.completed.set()
+
+    def mark_cancelled(self, _job_id: str) -> None:
+        self.completed.set()
+
+    def mark_interrupted(self, _job_id: str) -> None:
+        self.completed.set()
+
+    def mark_conflict(self, _job_id: str, _error: str) -> None:
+        self.completed.set()
+
+    def mark_failed(self, _job_id: str, _error: str, *, retryable: bool) -> str:
+        del retryable
+        self.completed.set()
+        return "failed"
+
+
 class JobQueueResilienceTests(unittest.TestCase):
     def test_authorized_runner_preserves_configured_concurrency(self) -> None:
         queue = SimpleNamespace(
@@ -102,6 +145,32 @@ class JobQueueResilienceTests(unittest.TestCase):
 
         self.assertTrue(report.dispatcher_stopped)
         self.assertEqual(report.remaining_jobs, 0)
+
+    def test_long_job_renews_its_database_lease(self) -> None:
+        queue = LeaseRenewingQueue()
+
+        def slow_handler(_job, _stop):
+            time.sleep(0.06)
+            return 1
+
+        runner = BatchJobRunner(
+            queue,
+            slow_handler,
+            concurrency=1,
+            poll_seconds=0.01,
+            lease_renewal_seconds=0.01,
+            operations=("article",),
+        )
+
+        runner.start()
+        self.assertTrue(
+            queue.completed.wait(timeout=3),
+            "long job did not complete",
+        )
+        report = runner.stop(timeout_seconds=1)
+
+        self.assertTrue(report.dispatcher_stopped)
+        self.assertGreaterEqual(queue.renewals.count("long-job"), 2)
 
 
 if __name__ == "__main__":

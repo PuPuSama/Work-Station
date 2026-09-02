@@ -103,8 +103,10 @@ function mergeBy<T>(items: T[], next: T[], key: (item: T) => string) {
 
 export function OrganizationAdminConsole({
   organizationId,
+  embedded = false,
 }: {
   organizationId: string;
+  embedded?: boolean;
 }) {
   const encodedOrg = encodeURIComponent(organizationId);
   const [users, setUsers] = useState<WorkspaceUser[]>([]);
@@ -193,9 +195,11 @@ export function OrganizationAdminConsole({
     }
   }
 
+  const Wrapper = embedded ? "div" : "main";
+
   return (
-    <main className="min-h-dvh bg-background text-foreground">
-      <header className="border-b bg-card">
+    <Wrapper className={embedded ? "grid gap-4" : "min-h-dvh bg-background text-foreground"}>
+      {!embedded && <header className="border-b bg-card">
         <div className="mx-auto flex max-w-6xl flex-col gap-4 px-5 py-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <div className="flex items-center gap-2">
@@ -223,9 +227,9 @@ export function OrganizationAdminConsole({
             <LogoutButton />
           </div>
         </div>
-      </header>
+      </header>}
 
-      <div className="mx-auto grid max-w-6xl gap-4 px-5 py-5">
+      <div className={embedded ? "grid gap-4" : "mx-auto grid max-w-6xl gap-4 px-5 py-5"}>
         {loadError && (
           <Alert variant="destructive">
             <AlertCircle />
@@ -328,7 +332,7 @@ export function OrganizationAdminConsole({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </main>
+    </Wrapper>
   );
 }
 

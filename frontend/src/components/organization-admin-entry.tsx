@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { apiGet } from "@/lib/api";
 import type { AuthStatus } from "@/types";
 
-export function OrganizationAdminEntry() {
+export function OrganizationAdminEntry({ embedded = false }: { embedded?: boolean }) {
   const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -45,10 +45,10 @@ export function OrganizationAdminEntry() {
   }, [resolve]);
 
   if (organizationId) {
-    return <OrganizationAdminConsole organizationId={organizationId} />;
+    return <OrganizationAdminConsole organizationId={organizationId} embedded={embedded} />;
   }
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-background px-5">
+    <main className={`flex items-center justify-center bg-background px-5 ${embedded ? "min-h-56" : "min-h-dvh"}`}>
       {loading ? (
         <div
           className="flex items-center gap-2 text-sm text-muted-foreground"
