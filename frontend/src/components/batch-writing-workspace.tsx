@@ -901,10 +901,10 @@ export function BatchWritingWorkspace() {
       {historyDetailPlan && (
         <section
           aria-label="历史批次文章预览窗口"
-          className="fixed bottom-4 right-4 z-50 w-[min(900px,calc(100vw-2rem))]"
+          className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center p-4"
         >
           {historyPreviewMinimized ? (
-            <div className="flex items-center gap-2 rounded-xl border border-primary/30 bg-card px-3 py-2 shadow-2xl">
+            <div className="pointer-events-auto flex w-full max-w-md items-center gap-2 rounded-xl border border-primary/30 bg-card px-3 py-2 shadow-2xl">
               <History className="size-4 shrink-0 text-primary" />
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-semibold">历史批次预览</p>
@@ -933,7 +933,7 @@ export function BatchWritingWorkspace() {
               </button>
             </div>
           ) : (
-            <Card className="overflow-hidden border-primary/30 bg-card/95 shadow-2xl backdrop-blur">
+            <Card className="pointer-events-auto w-full max-w-5xl overflow-hidden border-primary/30 bg-card/95 shadow-2xl backdrop-blur">
               <CardHeader className="flex flex-row items-start justify-between gap-3 border-b px-4 py-3">
                 <div className="min-w-0">
                   <CardTitle className="flex items-center gap-2 text-sm">
