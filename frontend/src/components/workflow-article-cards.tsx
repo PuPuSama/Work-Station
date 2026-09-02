@@ -1,27 +1,17 @@
-import { ExternalLink } from "lucide-react";
+"use client";
+
+import { ChevronDown, ExternalLink } from "lucide-react";
 import Link from "next/link";
+import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
+import {
+  isReadyDeliveryStep,
+  stepSummaryText,
+  WORKFLOW_STEP_LABELS,
+} from "@/lib/workflow-steps";
 import type { WorkflowAssistantPlan, WorkflowAssistantStep } from "@/types";
-
-export const WORKFLOW_STEP_LABELS: Record<string, string> = {
-  create_task: "创建文章任务",
-  generate_titles: "生成标题候选",
-  select_title: "确认标题",
-  generate_products: "生成产品候选",
-  confirm_products: "确认产品",
-  generate_outline: "生成大纲",
-  start_research: "知识库研究",
-  generate_article: "生成正文",
-  review: "正文复检",
-  humanize: "降 AI / 人化",
-  restore_links: "恢复并校验链接",
-  prepare_images: "准备图片",
-  export_docx: "导出 Word",
-  generate_tdk: "生成 TDK",
-  package_delivery: "生成交付包",
-};
 
 type WorkbenchStep = "setup" | "outline" | "draft" | "review" | "delivery";
 
@@ -59,25 +49,8 @@ export type WorkflowArticleCard = {
   focusStepLabel: string | null;
   focusStepStatus: WorkflowAssistantStep["status"] | null;
   workbenchStep: WorkbenchStep;
+  steps: WorkflowAssistantStep[];
 };
-
-export function stepSummaryText(
-  summary: Record<string, unknown>,
-  ...keys: string[]
-): string {
-  for (const key of keys) {
-    const value = summary[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-export function isReadyDeliveryStep(step: WorkflowAssistantStep): boolean {
-  return step.status === "succeeded"
-    && Boolean(step.article_task_id)
-    && step.output_summary.artifact_kind === "delivery_package"
-    && Boolean(String(step.output_summary.asset_id || "").trim());
-}
 
 function workflowArticleLaneKey(step: WorkflowAssistantStep): string {
   const taskId = step.article_task_id?.trim();
@@ -133,6 +106,31 @@ const workflowArticleCardStatusVariants: Record<
   running: "default",
   pending: "default",
   skipped: "outline",
+};
+
+const workflowStepStatusLabels: Record<WorkflowAssistantStep["status"], string> = {
+  pending: "待执行",
+  running: "执行中",
+  waiting_job: "等待任务",
+  waiting_review: "待人工处理",
+  succeeded: "已完成",
+  failed: "失败",
+  skipped: "已跳过",
+  cancelled: "已取消",
+};
+
+const workflowStepStatusVariants: Record<
+  WorkflowAssistantStep["status"],
+  "default" | "outline" | "secondary" | "destructive"
+> = {
+  pending: "outline",
+  running: "default",
+  waiting_job: "default",
+  waiting_review: "outline",
+  succeeded: "secondary",
+  failed: "destructive",
+  skipped: "outline",
+  cancelled: "outline",
 };
 
 function workflowArticleCardTitle(
@@ -271,6 +269,7 @@ export function buildWorkflowArticleCards(
       focusStepLabel: focusStep ? WORKFLOW_STEP_LABELS[focusStep.action_kind] || focusStep.action_kind : null,
       focusStepStatus: focusStep?.status ?? null,
       workbenchStep: workbenchStepForAction(focusStep?.action_kind || "create_task"),
+      steps,
     });
   });
 
@@ -297,6 +296,7 @@ export function WorkflowArticleCards({
   projectNames?: ReadonlyMap<string, string>;
 }) {
   const cards = buildWorkflowArticleCards(plan, taskTopics);
+  const [expandedCardKey, setExpandedCardKey] = useState<string | null>(null);
   if (!cards.length) {
     return (
       <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
@@ -315,15 +315,12 @@ export function WorkflowArticleCards({
         const focusVisible = card.status === "failed"
           || !["succeeded", "skipped"].includes(card.focusStepStatus || "");
         const projectLabel = projectNames.get(card.projectId) || card.projectId;
+        const isExpanded = expandedCardKey === card.key;
+        const detailsId = `workflow-article-card-details-${card.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+        const progressPercent = card.total ? Math.round((card.progress / card.total) * 100) : 0;
         return (
           <article key={card.key} className="rounded-xl border bg-background p-3 shadow-xs">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold" title={card.title}>{card.title}</p>
-                <p className="mt-1 truncate text-xs text-muted-foreground" title={card.projectId}>
-                  {projectLabel}{card.taskId ? ` · ${card.taskId}` : ""}
-                </p>
-              </div>
+            <div className="flex items-start gap-2">
               {workbenchHref ? (
                 <Link
                   href={workbenchHref}
@@ -341,12 +338,43 @@ export function WorkflowArticleCards({
                   <span className="sr-only">文章任务尚未创建</span>
                 </span>
               )}
+              <button
+                type="button"
+                className="group min-w-0 flex-1 text-left"
+                aria-expanded={isExpanded}
+                aria-controls={detailsId}
+                title="点击查看该文章的处理步骤"
+                onClick={() => setExpandedCardKey(isExpanded ? null : card.key)}
+              >
+                <span className="flex items-start justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold" title={card.title}>{card.title}</span>
+                    <span className="mt-1 block truncate text-xs text-muted-foreground" title={card.projectId}>
+                      {projectLabel}{card.taskId ? ` · ${card.taskId}` : ""}
+                    </span>
+                  </span>
+                  <ChevronDown className={`mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                </span>
+              </button>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Badge variant={workflowArticleCardStatusVariants[card.status]}>
                 {workflowArticleCardStatusLabels[card.status]}
               </Badge>
               <span className="text-xs text-muted-foreground">{card.progress}/{card.total} 步已结束</span>
+            </div>
+            <div
+              className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-label={`${card.title}执行进度`}
+              aria-valuemin={0}
+              aria-valuemax={card.total}
+              aria-valuenow={card.progress}
+            >
+              <div
+                className={`h-full rounded-full transition-[width] ${card.status === "failed" ? "bg-destructive" : "bg-primary"}`}
+                style={{ width: `${progressPercent}%` }}
+              />
             </div>
             {focusVisible && card.focusStepLabel && (
               <p className={`mt-3 truncate text-xs ${card.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
@@ -378,6 +406,45 @@ export function WorkflowArticleCards({
               <p className="mt-3 truncate text-xs text-destructive" title={card.errorMessage || card.errorCode}>
                 错误：{card.errorMessage || card.errorCode}
               </p>
+            )}
+            {isExpanded && (
+              <div id={detailsId} className="mt-4 border-t pt-3">
+                <p className="mb-2 text-xs font-medium text-muted-foreground">处理步骤</p>
+                <ol className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                  {card.steps.map((step) => {
+                    const detail = stepSummaryText(
+                      step.output_summary,
+                      "error_message",
+                      "message",
+                      "selected_title",
+                      "title",
+                      "topic",
+                    ) || stepSummaryText(step.input_summary, "title", "topic", "primary_keyword");
+                    return (
+                      <li key={step.step_id} className="rounded-lg border bg-muted/20 px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
+                              {step.sequence}
+                            </span>
+                            <span className="min-w-0 truncate text-xs font-medium" title={step.action_kind}>
+                              {WORKFLOW_STEP_LABELS[step.action_kind] || step.action_kind}
+                            </span>
+                          </div>
+                          <Badge variant={workflowStepStatusVariants[step.status]}>
+                            {workflowStepStatusLabels[step.status]}
+                          </Badge>
+                        </div>
+                        {(detail || step.standardized_error_code) && (
+                          <p className={`mt-1 truncate text-[11px] ${step.status === "failed" || step.standardized_error_code ? "text-destructive" : "text-muted-foreground"}`} title={detail || step.standardized_error_code || ""}>
+                            {detail || step.standardized_error_code}
+                          </p>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
             )}
           </article>
         );

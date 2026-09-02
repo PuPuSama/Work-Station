@@ -55,6 +55,8 @@ const sectionNames = {
 } as const;
 
 const RECENT_TASK_LIMIT = 5;
+const RECENT_TASK_REFRESH_MS = 10_000;
+const RECENT_TASK_REQUEST_TIMEOUT_MS = 15_000;
 type RecentArticleTask = Pick<
   TaskRecord,
   "id" | "topic_index" | "topic" | "selected_title" | "status" | "updated_at"
@@ -93,13 +95,14 @@ export function ProjectShell({
   const [role, setRole] = useState<AccessibleProject["effective_role"] | null>(null);
   const [isProjectOwner, setIsProjectOwner] = useState(false);
   const [recentTasks, setRecentTasks] = useState<RecentArticleTask[]>([]);
+  const [recentTasksLoading, setRecentTasksLoading] = useState(false);
+  const [recentTasksUnavailable, setRecentTasksUnavailable] = useState(false);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
   const section = segments[2] as keyof typeof sectionNames | undefined;
   const isDetail =
     (section === "articles" || section === "batches") && segments.length > 3;
-  const isArticleDetail = section === "articles" && isDetail;
 
   useEffect(() => {
     let active = true;
@@ -119,24 +122,54 @@ export function ProjectShell({
   }, [customer]);
 
   useEffect(() => {
-    if (!isArticleDetail) {
-      return;
-    }
     let active = true;
-    void apiGet<RecentArticleTask[]>(
-      `${projectPath}/tasks/recent?limit=${RECENT_TASK_LIMIT}`,
-    )
-      .then((tasks) => {
-        if (!active) return;
-        setRecentTasks(tasks);
-      })
-      .catch(() => {
-        if (active) setRecentTasks([]);
-      });
+    let requestInFlight = false;
+    const loadRecentTasks = (showLoading = false) => {
+      if (!active || requestInFlight) return;
+      requestInFlight = true;
+      if (showLoading) setRecentTasksLoading(true);
+      void apiGet<RecentArticleTask[]>(
+        `${projectPath}/tasks/recent?limit=${RECENT_TASK_LIMIT}`,
+        RECENT_TASK_REQUEST_TIMEOUT_MS,
+      )
+        .then((tasks) => {
+          if (!active) return;
+          setRecentTasks(tasks);
+          setRecentTasksUnavailable(false);
+        })
+        .catch(() => {
+          if (active) {
+            // Keep the last successful list. A transient auth/network/API
+            // failure must not make valid article links disappear.
+            setRecentTasksUnavailable(true);
+          }
+        })
+        .finally(() => {
+          requestInFlight = false;
+          if (active && showLoading) setRecentTasksLoading(false);
+        });
+    };
+
+    loadRecentTasks(true);
+    const refreshTimer = window.setInterval(
+      () => {
+        if (document.visibilityState === "visible") loadRecentTasks();
+      },
+      RECENT_TASK_REFRESH_MS,
+    );
+    const handleFocus = () => loadRecentTasks();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") loadRecentTasks();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       active = false;
+      window.clearInterval(refreshTimer);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isArticleDetail, pathname, projectPath]);
+  }, [pathname, projectPath]);
 
   const items = [
     ["文章任务", "单篇内容与状态", "articles", FileText],
@@ -219,10 +252,10 @@ export function ProjectShell({
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
-          {isArticleDetail && <SidebarGroup className="mt-auto group-data-[collapsible=icon]:hidden">
+          <SidebarGroup className="mt-auto group-data-[collapsible=icon]:hidden">
             <SidebarGroupLabel><Clock3 />最近修改</SidebarGroupLabel>
             <SidebarGroupContent>
-              {recentTasks.length ? (
+              {recentTasksLoading ? <p className="px-2 text-xs leading-5 text-sidebar-foreground/55">正在读取最近修改…</p> : recentTasks.length ? (
                 <SidebarMenu>
                   {recentTasks.map((task) => {
                     const href = `${projectPath}/articles/${encodeURIComponent(task.id)}?step=${recentTaskStep(task.status)}`;
@@ -247,9 +280,11 @@ export function ProjectShell({
                     );
                   })}
                 </SidebarMenu>
-              ) : <p className="px-2 text-xs leading-5 text-sidebar-foreground/55">暂无最近修改文章</p>}
+              ) : <p className="px-2 text-xs leading-5 text-sidebar-foreground/55">
+                {recentTasksUnavailable ? "最近修改暂时无法读取，稍后自动重试" : "暂无最近修改文章"}
+              </p>}
             </SidebarGroupContent>
-          </SidebarGroup>}
+          </SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="px-3 pb-3">
           <SidebarMenu>

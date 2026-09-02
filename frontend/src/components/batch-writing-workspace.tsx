@@ -32,12 +32,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  WORKFLOW_STEP_LABELS,
-  WorkflowArticleCards,
-} from "@/components/workflow-article-cards";
+import { WorkflowArticleCards } from "@/components/workflow-article-cards";
 import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
+import { WORKFLOW_STEP_LABELS } from "@/lib/workflow-steps";
 import type {
   AccessibleProject,
   WorkflowAssistantBatchDownload,
@@ -653,7 +651,7 @@ export function BatchWritingWorkspace() {
                         </Badge>
                       </li>
                     ))}
-                    {plan.steps.length > 120 && <li className="text-xs text-muted-foreground">其余步骤已省略，请打开对话助手查看完整计划。</li>}
+                    {plan.steps.length > 120 && <li className="text-xs text-muted-foreground">其余步骤已省略，请展开上方文章卡片查看每篇文章的处理步骤。</li>}
                   </ol>
                 </details>
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3">
@@ -667,7 +665,7 @@ export function BatchWritingWorkspace() {
                     nativeButton={false}
                     render={<Link href="/assistant" />}
                   >
-                    <ExternalLink />打开对话助手
+                    <ExternalLink />配置提示词
                   </Button>
                 </div>
               </CardContent>

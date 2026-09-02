@@ -45,18 +45,17 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { WorkflowAssistantAttachments } from "@/components/workflow-assistant-attachments";
-import {
-  buildWorkflowArticleCards,
-  isReadyDeliveryStep,
-  WORKFLOW_STEP_LABELS,
-  stepSummaryText,
-} from "@/components/workflow-article-cards";
 import { ApiError, apiFileUrl, apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
 import {
   gapFillWorkflowAssistantPlan,
   getResearchRun,
 } from "@/lib/research-api";
+import {
+  isReadyDeliveryStep,
+  stepSummaryText,
+  WORKFLOW_STEP_LABELS,
+} from "@/lib/workflow-steps";
 import type {
   AccessibleProject,
   AuthStatus,
@@ -781,14 +780,14 @@ export function WorkflowAssistantWorkspace() {
   const readyDeliveryProjectCount = new Set(
     readyDeliverySteps.map((step) => step.project_id),
   ).size;
-  const taskTopics = useMemo(
-    () => new Map(tasks.map((task) => [`${task.project_id}:${task.id}`, task.topic] as const)),
-    [tasks],
-  );
-  const articleCards = useMemo(
-    () => (plan ? buildWorkflowArticleCards(plan, taskTopics) : []),
-    [plan, taskTopics],
-  );
+  const articleCount = useMemo(() => {
+    if (deliverySteps.length) return deliverySteps.length;
+    return new Set(
+      (plan?.steps || [])
+        .filter((step) => Boolean(step.article_task_id))
+        .map((step) => `${step.project_id}:${step.article_task_id}`),
+    ).size;
+  }, [deliverySteps.length, plan]);
   const waitingResearchSignature = useMemo(
     () => waitingResearchSteps
       .map((step) => `${step.step_id}:${step.project_id}:${researchThreadId(step)}`)
@@ -1417,7 +1416,7 @@ export function WorkflowAssistantWorkspace() {
               {plan ? <div>
                 <p className="font-medium">{plan.title}</p>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
+                  Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCount} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
                 </p>
                 <p className="mt-3 rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
                   点击“{workflowMode === "article" ? "查看流程" : "查看计划"}”打开完整步骤和确认操作；成功文章可在此处直接一键打包下载。
@@ -1452,7 +1451,7 @@ export function WorkflowAssistantWorkspace() {
               <DialogHeader className="border-b px-5 py-4 pr-12">
                 <DialogTitle>计划详情</DialogTitle>
                 <DialogDescription>
-                  {plan.title} · Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章
+                  {plan.title} · Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCount} 篇文章
                 </DialogDescription>
               </DialogHeader>
               <div className="min-h-0 overflow-y-auto px-5 pb-5">
@@ -1487,7 +1486,7 @@ export function WorkflowAssistantWorkspace() {
                 <div>
                   <p className="font-medium">{plan.title}</p>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCards.length} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
+                    计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCount} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
                   </p>
                 </div>
                 <div className="grid gap-2 rounded-lg border bg-background p-3">
