@@ -363,6 +363,95 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
                 idempotency_key="message-dispatch-1",
             )
 
+    def test_batch_plan_history_filters_structured_plans_and_project_scope(self) -> None:
+        repository = PostgresWorkflowAssistantRepository(self.engine)
+        batch_conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Batch history",
+            project_ids=(self.project_a,),
+        )
+        batch_plan = repository.create_plan(
+            actor=self.actor,
+            conversation_id=batch_conversation.conversation_id,
+            plan=PlanDraft(
+                title="批量写作 · 1 个项目 · 1 篇",
+                natural_language_request=(
+                    f"批量写作（结构化配置）：{self.project_a} 1篇；包含复检；并发上限 5"
+                ),
+                project_ids=[self.project_a],
+                steps=[
+                    PlanStep(
+                        step_id="batch-history-step",
+                        sequence=1,
+                        action_kind="generate_titles",
+                        project_id=self.project_a,
+                    )
+                ],
+            ),
+        )
+        hidden_conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Hidden project batch history",
+            project_ids=(self.project_a, self.project_b),
+        )
+        repository.create_plan(
+            actor=self.actor,
+            conversation_id=hidden_conversation.conversation_id,
+            plan=PlanDraft(
+                title="批量写作 · 2 个项目 · 1 篇",
+                natural_language_request=(
+                    f"批量写作（结构化配置）：{self.project_b} 1篇；包含复检；并发上限 5"
+                ),
+                project_ids=[self.project_a, self.project_b],
+                steps=[
+                    PlanStep(
+                        step_id="hidden-batch-history-step",
+                        sequence=1,
+                        action_kind="generate_titles",
+                        project_id=self.project_b,
+                    )
+                ],
+            ),
+        )
+        ordinary_conversation = repository.create_conversation(
+            actor=self.actor,
+            title="Natural language history",
+            project_ids=(self.project_a,),
+        )
+        repository.create_plan(
+            actor=self.actor,
+            conversation_id=ordinary_conversation.conversation_id,
+            plan=PlanDraft(
+                title="Ordinary plan",
+                natural_language_request="Generate titles",
+                project_ids=[self.project_a],
+                steps=[
+                    PlanStep(
+                        step_id="ordinary-history-step",
+                        sequence=1,
+                        action_kind="generate_titles",
+                        project_id=self.project_a,
+                    )
+                ],
+            ),
+        )
+
+        visible = repository.list_batch_plan_summaries(
+            actor=self.actor,
+            accessible_project_ids=(self.project_a,),
+        )
+
+        self.assertEqual([plan.plan_id for plan in visible], [batch_plan.plan_id])
+        self.assertIsNotNone(visible[0].created_at)
+        self.assertIsNotNone(visible[0].updated_at)
+        self.assertEqual(
+            repository.list_batch_plan_summaries(
+                actor=self.other_actor,
+                accessible_project_ids=(self.project_a,),
+            ),
+            (),
+        )
+
     def test_plan_execution_advisory_lock_is_global_across_connections(self) -> None:
         first = PostgresWorkflowAssistantRepository(self.engine)
         second = PostgresWorkflowAssistantRepository(self.engine)

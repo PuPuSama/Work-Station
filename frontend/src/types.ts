@@ -1445,6 +1445,8 @@ export type WorkflowAssistantPlanSummary = {
   attention_state: string;
   approved_by: string | null;
   approved_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
 export type WorkflowAssistantAttentionCount = {
@@ -1454,6 +1456,11 @@ export type WorkflowAssistantAttentionCount = {
 export type WorkflowAssistantAttentionList = {
   plans: WorkflowAssistantPlanSummary[];
   count?: number;
+};
+
+export type WorkflowAssistantBatchPlanHistory = {
+  plans: WorkflowAssistantPlanSummary[];
+  count: number;
 };
 
 export type WorkflowAssistantAttachmentStatus =

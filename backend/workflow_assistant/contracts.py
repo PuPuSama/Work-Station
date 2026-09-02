@@ -325,7 +325,7 @@ class AttentionCountResponse(BaseModel):
 
 
 class WorkflowPlanSummary(BaseModel):
-    """Lightweight plan summary for attention lists, without full steps and snapshots."""
+    """Lightweight plan summary without full steps and knowledge snapshots."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -345,6 +345,8 @@ class WorkflowPlanSummary(BaseModel):
     attention_state: str
     approved_by: str | None = None
     approved_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 PlanDraft.model_rebuild()

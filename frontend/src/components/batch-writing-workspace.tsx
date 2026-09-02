@@ -6,6 +6,7 @@ import {
   CircleDot,
   Download,
   ExternalLink,
+  History,
   Layers3,
   Loader2,
   Pause,
@@ -35,13 +36,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { WorkflowArticleCards } from "@/components/workflow-article-cards";
 import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
+import { formatProjectDate } from "@/lib/project-date";
 import { WORKFLOW_STEP_LABELS } from "@/lib/workflow-steps";
 import type {
   AccessibleProject,
   WorkflowAssistantBatchDownload,
+  WorkflowAssistantBatchPlanHistory,
   WorkflowAssistantConversation,
   WorkflowAssistantDispatch,
   WorkflowAssistantPlan,
+  WorkflowAssistantPlanSummary,
 } from "@/types";
 
 const MAX_ARTICLES_PER_PROJECT = 50;
@@ -65,6 +69,7 @@ type BatchProjectRow = {
 };
 
 type PlanAction = "confirm" | "pause" | "resume" | "retry" | "cancel";
+type BatchSidebarTab = "current" | "history";
 
 function localId(prefix: string) {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -126,6 +131,15 @@ function readyDeliveryCount(plan: WorkflowAssistantPlan): number {
   ).length;
 }
 
+function historyTime(plan: WorkflowAssistantPlanSummary): string {
+  return formatProjectDate(plan.updated_at || plan.created_at, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }) || "时间未知";
+}
+
 export function BatchWritingWorkspace() {
   const [projects, setProjects] = useState<AccessibleProject[]>([]);
   const [rows, setRows] = useState<BatchProjectRow[]>([]);
@@ -136,6 +150,13 @@ export function BatchWritingWorkspace() {
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
+  const [sidebarTab, setSidebarTab] = useState<BatchSidebarTab>("current");
+  const [historyPlans, setHistoryPlans] = useState<WorkflowAssistantPlanSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyDetailPlan, setHistoryDetailPlan] = useState<WorkflowAssistantPlan | null>(null);
+  const [historyPlanPending, setHistoryPlanPending] = useState("");
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
 
   const projectById = useMemo(
     () => new Map(projects.map((project) => [project.project_id, project])),
@@ -153,6 +174,9 @@ export function BatchWritingWorkspace() {
   const totalArticles = rows.reduce((total, row) => total + row.article_count, 0);
   const selectedPlanCounts = plan ? planArticleCounts(plan) : {};
   const deliveryReady = plan ? readyDeliveryCount(plan) : 0;
+  const visibleArticlePlan = sidebarTab === "history" && historyDetailPlan
+    ? historyDetailPlan
+    : plan;
 
   useEffect(() => {
     let disposed = false;
@@ -196,6 +220,28 @@ export function BatchWritingWorkspace() {
       disposed = true;
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    async function loadHistory() {
+      setHistoryLoading(true);
+      setHistoryError("");
+      try {
+        const response = await apiGet<WorkflowAssistantBatchPlanHistory>(
+          "/api/workflow-assistant/batch-plans?limit=50",
+        );
+        if (!disposed) setHistoryPlans(response.plans);
+      } catch (nextError) {
+        if (!disposed) setHistoryError(messageText(nextError));
+      } finally {
+        if (!disposed) setHistoryLoading(false);
+      }
+    }
+    void loadHistory();
+    return () => {
+      disposed = true;
+    };
+  }, [historyRefreshKey]);
 
   useEffect(() => {
     if (!plan || !["queued", "running", "waiting_review"].includes(plan.status)) {
@@ -273,6 +319,9 @@ export function BatchWritingWorkspace() {
       );
       if (!response.plan) throw new Error("服务器没有返回批量写作计划。");
       setPlan(response.plan);
+      setHistoryDetailPlan(null);
+      setSidebarTab("current");
+      setHistoryRefreshKey((value) => value + 1);
       const params = new URLSearchParams({
         plan_id: response.plan.plan_id,
         conversation_id: response.plan.conversation_id,
@@ -298,6 +347,7 @@ export function BatchWritingWorkspace() {
         body,
       );
       setPlan(nextPlan);
+      setHistoryRefreshKey((value) => value + 1);
     } catch (nextError) {
       setError(messageText(nextError));
     } finally {
@@ -323,9 +373,27 @@ export function BatchWritingWorkspace() {
     }
   }
 
+  async function openHistoryPlan(planId: string) {
+    if (historyPlanPending) return;
+    setHistoryPlanPending(planId);
+    setHistoryError("");
+    try {
+      const nextPlan = await apiGet<WorkflowAssistantPlan>(
+        `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
+      );
+      setHistoryDetailPlan(nextPlan);
+    } catch (nextError) {
+      setHistoryError(messageText(nextError));
+    } finally {
+      setHistoryPlanPending("");
+    }
+  }
+
   function resetPlan() {
     setPlan(null);
     setRows([]);
+    setHistoryDetailPlan(null);
+    setSidebarTab("current");
     setError("");
     window.history.replaceState(null, "", "/batch-writing");
   }
@@ -507,17 +575,21 @@ export function BatchWritingWorkspace() {
             </CardContent>
           </Card>
 
-          {plan && (
+          {visibleArticlePlan && (
             <Card className="gap-0 py-0">
               <CardHeader className="border-b px-5 py-5">
-                <CardTitle>文章执行概览</CardTitle>
+                <CardTitle>
+                  {sidebarTab === "history" && historyDetailPlan ? "历史批次文章预览" : "文章执行概览"}
+                </CardTitle>
                 <CardDescription>
-                  每张卡片对应一篇文章；失败或未完成时会标出实际步骤，打开工作台会定位到对应阶段。
+                  {sidebarTab === "history" && historyDetailPlan
+                    ? "这是历史批次的只读预览；每张卡片对应一篇文章，点击卡片可回到对应工作台。"
+                    : "每张卡片对应一篇文章；失败或未完成时会标出实际步骤，打开工作台会定位到对应阶段。"}
                 </CardDescription>
               </CardHeader>
               <CardContent className="px-5 py-5">
                 <WorkflowArticleCards
-                  plan={plan}
+                  plan={visibleArticlePlan}
                   projectNames={projectNames}
                 />
               </CardContent>
@@ -527,11 +599,144 @@ export function BatchWritingWorkspace() {
 
         <aside className="grid content-start gap-4">
           <Card className="gap-0 py-0">
-            <CardHeader className="border-b px-5 py-5">
-              <CardTitle>提交前预览</CardTitle>
-              <CardDescription>项目和数量会在提交前明确锁定。</CardDescription>
+            <CardHeader className="gap-4 border-b px-5 py-5">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <History className="size-5 text-primary" />
+                  批量记录
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  当前批次和已保存的历史批次都在这里管理。
+                </CardDescription>
+              </div>
+              <div
+                className="grid grid-cols-2 rounded-lg bg-muted p-1"
+                role="tablist"
+                aria-label="批量记录标签"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarTab === "current"}
+                  onClick={() => setSidebarTab("current")}
+                  className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${sidebarTab === "current" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  当前批次
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarTab === "history"}
+                  onClick={() => {
+                    setSidebarTab("history");
+                    setHistoryRefreshKey((value) => value + 1);
+                  }}
+                  className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition-colors ${sidebarTab === "history" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                >
+                  历史批次
+                  {historyPlans.length > 0 && (
+                    <span className="rounded-full bg-primary/10 px-1.5 text-xs text-primary">
+                      {historyPlans.length}
+                    </span>
+                  )}
+                </button>
+              </div>
             </CardHeader>
-            <CardContent className="grid gap-4 px-5 py-5">
+            {sidebarTab === "history" && (
+              <CardContent className="grid gap-3 px-5 py-5">
+                {historyError && (
+                  <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm text-destructive">
+                    {historyError}
+                  </div>
+                )}
+                {historyLoading ? (
+                  <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" />正在读取历史批次…
+                  </div>
+                ) : historyPlans.length ? (
+                  <div className="grid gap-2">
+                    {historyPlans.map((historyPlan) => {
+                      const selected = historyDetailPlan?.plan_id === historyPlan.plan_id;
+                      return (
+                        <button
+                          key={historyPlan.plan_id}
+                          type="button"
+                          aria-pressed={selected}
+                          disabled={Boolean(historyPlanPending)}
+                          onClick={() => void openHistoryPlan(historyPlan.plan_id)}
+                          className={`grid gap-2 rounded-xl border p-3 text-left transition-colors ${selected ? "border-primary/60 bg-primary/5" : "hover:border-primary/40 hover:bg-muted/30"}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="min-w-0 truncate text-sm font-medium">
+                              {historyPlan.title}
+                            </span>
+                            <Badge className="shrink-0" variant={statusVariant(historyPlan.status)}>
+                              {statusLabels[historyPlan.status]}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <span className="truncate">
+                              {historyPlan.project_ids
+                                .map((projectId) => projectById.get(projectId)?.customer_name || projectId)
+                                .join("、")}
+                            </span>
+                            <span className="shrink-0">{historyTime(historyPlan)}</span>
+                          </div>
+                          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <span>{historyPlan.project_ids.length} 个项目 · {historyPlan.step_count} 个步骤</span>
+                            <span>{historyPlan.pending_step_count} 待处理</span>
+                          </div>
+                          {historyPlanPending === historyPlan.plan_id && (
+                            <span className="flex items-center gap-1 text-xs text-primary">
+                              <Loader2 className="size-3 animate-spin" />正在打开批次…
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+                    暂无历史批次。生成并保存第一个批量计划后，会自动出现在这里。
+                  </div>
+                )}
+                {historyDetailPlan && (
+                  <div className="grid gap-3 rounded-xl border border-primary/30 bg-primary/5 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">已选择历史批次</p>
+                        <p className="mt-1 truncate text-xs text-muted-foreground">
+                          {historyDetailPlan.title} · Revision {historyDetailPlan.revision}
+                        </p>
+                      </div>
+                      <Badge variant={statusVariant(historyDetailPlan.status)}>
+                        {statusLabels[historyDetailPlan.status]}
+                      </Badge>
+                    </div>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      左侧已显示该批次的只读文章卡片；如需处理单篇文章，请从卡片进入对应工作台。
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setHistoryDetailPlan(null)}
+                    >
+                      关闭历史预览
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            )}
+          </Card>
+
+          {sidebarTab === "current" && <>
+            <Card className="gap-0 py-0">
+              <CardHeader className="border-b px-5 py-5">
+                <CardTitle>提交前预览</CardTitle>
+                <CardDescription>项目和数量会在提交前明确锁定。</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 px-5 py-5">
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-lg border bg-muted/20 p-3">
                   <p className="text-2xl font-semibold">{rows.length}</p>
@@ -572,11 +777,11 @@ export function BatchWritingWorkspace() {
                 {pending === "create" ? <Loader2 className="animate-spin" /> : <Workflow />}
                 {pending === "create" ? "正在生成固定计划…" : "生成批量写作计划"}
               </Button>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          {plan && (
-            <Card className="gap-0 py-0">
+            {plan && (
+              <Card className="gap-0 py-0">
               <CardHeader className="border-b px-5 py-5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -669,8 +874,9 @@ export function BatchWritingWorkspace() {
                   </Button>
                 </div>
               </CardContent>
-            </Card>
-          )}
+              </Card>
+            )}
+          </>}
         </aside>
       </div>
     </main>

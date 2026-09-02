@@ -80,6 +80,7 @@ from .repository import (
     WorkflowAssistantDispatch,
     WorkflowAssistantNotFound,
     WorkflowPlan,
+    WorkflowPlanSummaryRecord,
 )
 from .tools import (
     WorkflowToolInvocation,
@@ -132,6 +133,11 @@ class AssistantEventResponse(BaseModel):
 
 
 class AssistantAttentionListResponse(BaseModel):
+    plans: list[WorkflowPlanSummary]
+    count: int = 0
+
+
+class BatchPlanHistoryResponse(BaseModel):
     plans: list[WorkflowPlanSummary]
     count: int = 0
 
@@ -307,13 +313,24 @@ def _conversation_response(
     )
 
 
-def _plan_summary(plan: WorkflowPlan) -> WorkflowPlanSummary:
+def _plan_summary(
+    plan: WorkflowPlan | WorkflowPlanSummaryRecord,
+) -> WorkflowPlanSummary:
     """Lightweight plan summary without full steps and knowledge snapshots.
 
     Used for attention lists to avoid transferring megabytes of repeated
     knowledge snapshots and step details when only displaying plan cards.
     """
-    pending_count = sum(1 for step in plan.steps if step.status == "pending")
+    pending_count = (
+        plan.pending_step_count
+        if isinstance(plan, WorkflowPlanSummaryRecord)
+        else sum(1 for step in plan.steps if step.status == "pending")
+    )
+    step_count = (
+        plan.step_count
+        if isinstance(plan, WorkflowPlanSummaryRecord)
+        else len(plan.steps)
+    )
     return WorkflowPlanSummary(
         plan_id=plan.plan_id,
         conversation_id=plan.conversation_id,
@@ -324,13 +341,15 @@ def _plan_summary(plan: WorkflowPlan) -> WorkflowPlanSummary:
         status=plan.status,
         project_ids=list(plan.project_ids),
         paused_project_ids=list(plan.paused_project_ids),
-        step_count=len(plan.steps),
+        step_count=step_count,
         pending_step_count=pending_count,
         concurrency_limit=plan.concurrency_limit,
         budget_warning=plan.budget_warning,
         attention_state=plan.attention_state,
         approved_by=plan.approved_by,
         approved_at=_iso(plan.approved_at) if plan.approved_at else None,
+        created_at=_iso(plan.created_at),
+        updated_at=_iso(plan.updated_at),
     )
 
 
@@ -661,14 +680,18 @@ def _reauthorize_plan_summary_read(
     request: Request,
     *,
     actor: ActorIdentity,
-    plan: WorkflowPlan,
+    plan: WorkflowPlan | WorkflowPlanSummaryRecord,
 ) -> None:
     """Recheck only project permissions for the lightweight attention inbox."""
 
     _context(request).authorize_project_scope(
         actor=actor,
         project_ids=plan.project_ids,
-        step_project_ids=tuple(step.project_id for step in plan.steps),
+        step_project_ids=(
+            plan.step_project_ids
+            if isinstance(plan, WorkflowPlanSummaryRecord)
+            else tuple(step.project_id for step in plan.steps)
+        ),
     )
 
 
@@ -2718,6 +2741,42 @@ def attention(
             ),
         )
         return AssistantAttentionListResponse(plans=visible, count=count)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/batch-plans", response_model=BatchPlanHistoryResponse)
+def batch_plan_history(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    actor: ActorIdentity = Depends(require_server_actor),
+) -> BatchPlanHistoryResponse:
+    """Return the creator's durable structured batch-writing history."""
+
+    _feature_enabled(request)
+    try:
+        accessible_projects = _context(request).accessible_projects(actor)
+        accessible_project_ids = tuple(
+            project.project_id for project in accessible_projects
+        )
+        plans = _repository(request).list_batch_plan_summaries(
+            actor=actor,
+            accessible_project_ids=accessible_project_ids,
+            limit=limit,
+        )
+        visible: list[WorkflowPlanSummary] = []
+        for plan in plans:
+            try:
+                _reauthorize_plan_summary_read(request, actor=actor, plan=plan)
+            except AssistantContextError as exc:
+                if str(exc) in {
+                    "project access denied",
+                    "project scope contains an inaccessible project",
+                }:
+                    continue
+                raise
+            visible.append(_plan_summary(plan))
+        return BatchPlanHistoryResponse(plans=visible, count=len(visible))
     except Exception as exc:
         raise _error(exc) from exc
 

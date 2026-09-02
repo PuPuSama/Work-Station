@@ -187,6 +187,33 @@ class WorkflowPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowPlanSummaryRecord:
+    """Database-level lightweight projection for plan history and inboxes."""
+
+    organization_id: str
+    plan_id: str
+    creator_user_id: str
+    conversation_id: str
+    title: str
+    natural_language_request: str
+    plan_hash: str
+    revision: int
+    status: PlanStatus
+    project_ids: tuple[str, ...]
+    paused_project_ids: tuple[str, ...]
+    step_project_ids: tuple[str, ...]
+    step_count: int
+    pending_step_count: int
+    concurrency_limit: int
+    budget_warning: bool
+    attention_state: str
+    approved_by: str | None
+    approved_at: datetime | None
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowPlanEvent:
     plan_id: str
     sequence: int
@@ -2841,6 +2868,174 @@ class PostgresWorkflowAssistantRepository:
                 if plan_id in plans_dict
             )
 
+    def list_batch_plan_summaries(
+        self,
+        *,
+        actor: ActorIdentity,
+        accessible_project_ids: Sequence[str] | None = None,
+        limit: int = 50,
+    ) -> tuple[WorkflowPlanSummaryRecord, ...]:
+        """List lightweight structured batch-writing history records.
+
+        Batch writing plans share the workflow assistant plan store with
+        natural-language plans.  The structured endpoint writes a stable
+        request prefix, so history can be filtered server-side without
+        adding a second source of truth or a schema migration.  Do not use
+        ``_batch_load_plans`` here: its full step projection includes pinned
+        prompt and knowledge snapshots intended for a single plan read.
+        """
+
+        if not 1 <= limit <= 200:
+            raise ValueError("batch plan history limit is invalid")
+        conditions = [
+            workflow_plans.c.organization_id == actor.organization_id,
+            workflow_plans.c.creator_user_id == actor.user_id,
+            workflow_plans.c.natural_language_request.like(
+                "批量写作（结构化配置）：%"
+            ),
+        ]
+        if accessible_project_ids is not None:
+            normalized_projects = tuple(
+                dict.fromkeys(
+                    project_id.strip()
+                    for project_id in accessible_project_ids
+                    if project_id.strip()
+                )
+            )
+            if not normalized_projects:
+                return ()
+            inaccessible_scope = sa.exists(
+                sa.select(1)
+                .select_from(workflow_plan_projects)
+                .where(
+                    workflow_plan_projects.c.organization_id
+                    == workflow_plans.c.organization_id,
+                    workflow_plan_projects.c.plan_id
+                    == workflow_plans.c.plan_id,
+                    workflow_plan_projects.c.project_id.not_in(normalized_projects),
+                )
+            )
+            conditions.append(~inaccessible_scope)
+        with self._engine.connect() as connection:
+            plan_rows = connection.execute(
+                sa.select(
+                    workflow_plans.c.organization_id,
+                    workflow_plans.c.plan_id,
+                    workflow_plans.c.creator_user_id,
+                    workflow_plans.c.conversation_id,
+                    sa.func.coalesce(
+                        workflow_plans.c.normalized_plan["title"].astext,
+                        "Workflow plan",
+                    ).label("title"),
+                    workflow_plans.c.natural_language_request,
+                    workflow_plans.c.plan_hash,
+                    workflow_plans.c.revision,
+                    workflow_plans.c.status,
+                    workflow_plans.c.concurrency_limit,
+                    workflow_plans.c.budget_warning,
+                    workflow_plans.c.attention_state,
+                    workflow_plans.c.approved_by,
+                    workflow_plans.c.approved_at,
+                    workflow_plans.c.created_at,
+                    workflow_plans.c.updated_at,
+                )
+                .where(*conditions)
+                .order_by(
+                    workflow_plans.c.updated_at.desc(),
+                    workflow_plans.c.plan_id.desc(),
+                )
+                .limit(limit)
+            ).mappings().all()
+            if not plan_rows:
+                return ()
+
+            plan_ids = [str(row["plan_id"]) for row in plan_rows]
+            project_rows = connection.execute(
+                sa.select(
+                    workflow_plan_projects.c.plan_id,
+                    workflow_plan_projects.c.project_id,
+                    workflow_plan_projects.c.paused,
+                )
+                .where(
+                    workflow_plan_projects.c.organization_id
+                    == actor.organization_id,
+                    workflow_plan_projects.c.plan_id.in_(plan_ids),
+                )
+                .order_by(
+                    workflow_plan_projects.c.plan_id,
+                    workflow_plan_projects.c.project_id,
+                )
+            ).mappings().all()
+            projects_by_plan: dict[str, list[RowMapping]] = {}
+            for row in project_rows:
+                projects_by_plan.setdefault(str(row["plan_id"]), []).append(row)
+
+            step_count_rows = connection.execute(
+                sa.select(
+                    workflow_plan_steps.c.plan_id,
+                    sa.func.count(workflow_plan_steps.c.step_id).label("step_count"),
+                    sa.func.coalesce(
+                        sa.func.sum(
+                            sa.case(
+                                (workflow_plan_steps.c.status == "pending", 1),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("pending_step_count"),
+                )
+                .where(
+                    workflow_plan_steps.c.organization_id
+                    == actor.organization_id,
+                    workflow_plan_steps.c.plan_id.in_(plan_ids),
+                )
+                .group_by(workflow_plan_steps.c.plan_id)
+            ).mappings().all()
+            step_counts_by_plan = {
+                str(row["plan_id"]): (
+                    int(row["step_count"]),
+                    int(row["pending_step_count"]),
+                )
+                for row in step_count_rows
+            }
+
+            return tuple(
+                WorkflowPlanSummaryRecord(
+                    organization_id=str(row["organization_id"]),
+                    plan_id=str(row["plan_id"]),
+                    creator_user_id=str(row["creator_user_id"]),
+                    conversation_id=str(row["conversation_id"]),
+                    title=str(row["title"] or "Workflow plan"),
+                    natural_language_request=str(row["natural_language_request"]),
+                    plan_hash=str(row["plan_hash"]),
+                    revision=int(row["revision"]),
+                    status=str(row["status"]),  # type: ignore[arg-type]
+                    project_ids=tuple(
+                        str(project["project_id"])
+                        for project in projects_by_plan.get(str(row["plan_id"]), [])
+                    ),
+                    paused_project_ids=tuple(
+                        str(project["project_id"])
+                        for project in projects_by_plan.get(str(row["plan_id"]), [])
+                        if bool(project["paused"])
+                    ),
+                    step_project_ids=tuple(
+                        str(project["project_id"])
+                        for project in projects_by_plan.get(str(row["plan_id"]), [])
+                    ),
+                    step_count=step_counts_by_plan.get(str(row["plan_id"]), (0, 0))[0],
+                    pending_step_count=step_counts_by_plan.get(str(row["plan_id"]), (0, 0))[1],
+                    concurrency_limit=int(row["concurrency_limit"]),
+                    budget_warning=bool(row["budget_warning"]),
+                    attention_state=str(row["attention_state"]),
+                    approved_by=(str(row["approved_by"]) if row["approved_by"] else None),
+                    approved_at=row["approved_at"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+                for row in plan_rows
+            )
+
     def mark_plan_seen(
         self,
         *,
@@ -3525,6 +3720,7 @@ __all__ = [
     "WorkflowAssistantNotFound",
     "WorkflowAssistantRepositoryError",
     "WorkflowPlan",
+    "WorkflowPlanSummaryRecord",
     "WorkflowPlanEvent",
     "WorkflowExecutionCandidate",
     "WorkflowPlanStep",
