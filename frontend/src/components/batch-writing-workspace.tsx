@@ -9,12 +9,15 @@ import {
   History,
   Layers3,
   Loader2,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   RefreshCw,
   Settings2,
   Sparkles,
   Square,
+  X,
   Workflow,
 } from "lucide-react";
 import Link from "next/link";
@@ -155,6 +158,7 @@ export function BatchWritingWorkspace() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [historyDetailPlan, setHistoryDetailPlan] = useState<WorkflowAssistantPlan | null>(null);
+  const [historyPreviewMinimized, setHistoryPreviewMinimized] = useState(false);
   const [historyPlanPending, setHistoryPlanPending] = useState("");
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
 
@@ -174,9 +178,6 @@ export function BatchWritingWorkspace() {
   const totalArticles = rows.reduce((total, row) => total + row.article_count, 0);
   const selectedPlanCounts = plan ? planArticleCounts(plan) : {};
   const deliveryReady = plan ? readyDeliveryCount(plan) : 0;
-  const visibleArticlePlan = sidebarTab === "history" && historyDetailPlan
-    ? historyDetailPlan
-    : plan;
 
   useEffect(() => {
     let disposed = false;
@@ -382,6 +383,7 @@ export function BatchWritingWorkspace() {
         `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
       );
       setHistoryDetailPlan(nextPlan);
+      setHistoryPreviewMinimized(true);
     } catch (nextError) {
       setHistoryError(messageText(nextError));
     } finally {
@@ -393,6 +395,7 @@ export function BatchWritingWorkspace() {
     setPlan(null);
     setRows([]);
     setHistoryDetailPlan(null);
+    setHistoryPreviewMinimized(false);
     setSidebarTab("current");
     setError("");
     window.history.replaceState(null, "", "/batch-writing");
@@ -575,21 +578,17 @@ export function BatchWritingWorkspace() {
             </CardContent>
           </Card>
 
-          {visibleArticlePlan && (
+          {plan && (
             <Card className="gap-0 py-0">
               <CardHeader className="border-b px-5 py-5">
-                <CardTitle>
-                  {sidebarTab === "history" && historyDetailPlan ? "历史批次文章预览" : "文章执行概览"}
-                </CardTitle>
+                <CardTitle>文章执行概览</CardTitle>
                 <CardDescription>
-                  {sidebarTab === "history" && historyDetailPlan
-                    ? "这是历史批次的只读预览；每张卡片对应一篇文章，点击卡片可回到对应工作台。"
-                    : "每张卡片对应一篇文章；失败或未完成时会标出实际步骤，打开工作台会定位到对应阶段。"}
+                  每张卡片对应一篇文章；失败或未完成时会标出实际步骤，打开工作台会定位到对应阶段。
                 </CardDescription>
               </CardHeader>
               <CardContent className="px-5 py-5">
                 <WorkflowArticleCards
-                  plan={visibleArticlePlan}
+                  plan={plan}
                   projectNames={projectNames}
                 />
               </CardContent>
@@ -618,7 +617,11 @@ export function BatchWritingWorkspace() {
                   type="button"
                   role="tab"
                   aria-selected={sidebarTab === "current"}
-                  onClick={() => setSidebarTab("current")}
+                  onClick={() => {
+                    setSidebarTab("current");
+                    setHistoryDetailPlan(null);
+                    setHistoryPreviewMinimized(false);
+                  }}
                   className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${sidebarTab === "current" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
                 >
                   当前批次
@@ -714,16 +717,31 @@ export function BatchWritingWorkspace() {
                       </Badge>
                     </div>
                     <p className="text-xs leading-5 text-muted-foreground">
-                      左侧已显示该批次的只读文章卡片；如需处理单篇文章，请从卡片进入对应工作台。
+                      历史批次已在右下角小窗中打开；窗口不会占用主页面布局，可从卡片进入对应工作台。
                     </p>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setHistoryDetailPlan(null)}
-                    >
-                      关闭历史预览
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setHistoryPreviewMinimized((value) => !value)}
+                      >
+                        {historyPreviewMinimized ? <Maximize2 /> : <Minimize2 />}
+                        {historyPreviewMinimized ? "展开小窗" : "最小化小窗"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setHistoryDetailPlan(null);
+                          setHistoryPreviewMinimized(false);
+                        }}
+                      >
+                        <X />
+                        关闭小窗
+                      </Button>
+                    </div>
                   </div>
                 )}
               </CardContent>
@@ -879,6 +897,87 @@ export function BatchWritingWorkspace() {
           </>}
         </aside>
       </div>
+
+      {historyDetailPlan && (
+        <section
+          aria-label="历史批次文章预览窗口"
+          className="fixed bottom-4 right-4 z-50 w-[min(900px,calc(100vw-2rem))]"
+        >
+          {historyPreviewMinimized ? (
+            <div className="flex items-center gap-2 rounded-xl border border-primary/30 bg-card px-3 py-2 shadow-2xl">
+              <History className="size-4 shrink-0 text-primary" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold">历史批次预览</p>
+                <p className="truncate text-xs text-muted-foreground">{historyDetailPlan.title}</p>
+              </div>
+              <button
+                type="button"
+                aria-label="展开历史批次预览"
+                title="展开历史批次预览"
+                onClick={() => setHistoryPreviewMinimized(false)}
+                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <Maximize2 className="size-4" />
+              </button>
+              <button
+                type="button"
+                aria-label="关闭历史批次预览"
+                title="关闭历史批次预览"
+                onClick={() => {
+                  setHistoryDetailPlan(null);
+                  setHistoryPreviewMinimized(false);
+                }}
+                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+          ) : (
+            <Card className="overflow-hidden border-primary/30 bg-card/95 shadow-2xl backdrop-blur">
+              <CardHeader className="flex flex-row items-start justify-between gap-3 border-b px-4 py-3">
+                <div className="min-w-0">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <History className="size-4 text-primary" />
+                    历史批次文章预览
+                  </CardTitle>
+                  <CardDescription className="mt-1 truncate text-xs">
+                    {historyDetailPlan.title} · Revision {historyDetailPlan.revision} · 只读
+                  </CardDescription>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label="最小化历史批次预览"
+                    title="最小化历史批次预览"
+                    onClick={() => setHistoryPreviewMinimized(true)}
+                    className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <Minimize2 className="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="关闭历史批次预览"
+                    title="关闭历史批次预览"
+                    onClick={() => {
+                      setHistoryDetailPlan(null);
+                      setHistoryPreviewMinimized(false);
+                    }}
+                    className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <X className="size-4" />
+                  </button>
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[min(72vh,760px)] overflow-y-auto p-4">
+                <WorkflowArticleCards
+                  plan={historyDetailPlan}
+                  projectNames={projectNames}
+                />
+              </CardContent>
+            </Card>
+          )}
+        </section>
+      )}
     </main>
   );
 }
