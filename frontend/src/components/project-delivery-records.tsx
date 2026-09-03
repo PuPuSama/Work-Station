@@ -4,6 +4,8 @@
 
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   Download,
   FileText,
   ImageIcon,
@@ -24,11 +26,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
 import { sameProjectId } from "@/lib/project-id";
-import { formatProjectDate } from "@/lib/project-date";
+import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
 import { cn } from "@/lib/utils";
 import type { AccessibleProject, ProjectAssetDownload, TaskRecord } from "@/types";
 
 type DeliveryFilter = "all" | "incomplete" | "ready" | "packaged";
+type UpdatedAtSortDirection = "asc" | "desc";
 
 const DELIVERY_LABELS: Record<string, string> = {
   article: "正文",
@@ -88,6 +91,27 @@ function formatUpdatedAt(value: string) {
   }) || "-";
 }
 
+function compareUpdatedAt(
+  left: TaskRecord,
+  right: TaskRecord,
+  direction: UpdatedAtSortDirection,
+) {
+  const leftDate = parseProjectDate(left.updated_at);
+  const rightDate = parseProjectDate(right.updated_at);
+  const leftTime = leftDate?.getTime() ?? null;
+  const rightTime = rightDate?.getTime() ?? null;
+
+  // Keep records without a valid timestamp at the end in either direction.
+  if (leftTime === null && rightTime !== null) return 1;
+  if (leftTime !== null && rightTime === null) return -1;
+  if (leftTime !== null && rightTime !== null && leftTime !== rightTime) {
+    return direction === "desc" ? rightTime - leftTime : leftTime - rightTime;
+  }
+
+  // A deterministic tie-breaker keeps rows stable when several edits share a timestamp.
+  return left.topic_index - right.topic_index || left.id.localeCompare(right.id);
+}
+
 export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [effectiveRole, setEffectiveRole] = useState<AccessibleProject["effective_role"] | null>(null);
@@ -97,6 +121,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [message, setMessage] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<DeliveryFilter>("all");
+  const [updatedAtSort, setUpdatedAtSort] = useState<UpdatedAtSortDirection>("desc");
   const [pending, setPending] = useState<Record<string, string>>({});
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
@@ -137,7 +162,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
 
   const filteredTasks = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    return tasks.filter((task) => {
+    const matchedTasks = tasks.filter((task) => {
       const parts = deliveryParts(task);
       const ready = parts.article && parts.links && parts.screenshot && parts.images && parts.word && parts.tdk;
       if (filter === "packaged" && !parts.package) return false;
@@ -145,7 +170,8 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
       if (filter === "incomplete" && (ready || parts.package)) return false;
       return !normalized || [task.id, task.topic, task.selected_title].join(" ").toLowerCase().includes(normalized);
     });
-  }, [filter, query, tasks]);
+    return [...matchedTasks].sort((left, right) => compareUpdatedAt(left, right, updatedAtSort));
+  }, [filter, query, tasks, updatedAtSort]);
 
   async function runTaskAction(task: TaskRecord, label: string, action: () => Promise<unknown>) {
     setPending((current) => ({ ...current, [task.id]: label }));
@@ -241,7 +267,9 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
         <Card className="rounded-lg">
           <CardHeader className="border-b">
             <CardTitle>文章交付状态</CardTitle>
-            <CardDescription>仅显示服务器中的项目任务；缺失项需要在对应工作流中补齐。</CardDescription>
+            <CardDescription>
+              仅显示服务器中的项目任务；缺失项需要在对应工作流中补齐。当前按更新时间{updatedAtSort === "desc" ? "最新优先" : "最早优先"}，点击表头可切换。
+            </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -250,7 +278,20 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
             </div>
             <div className="overflow-x-auto rounded-lg border">
               <Table>
-                <TableHeader><TableRow><TableHead className="w-28">编号</TableHead><TableHead>文章</TableHead><TableHead>交付项</TableHead><TableHead className="w-32">更新时间</TableHead><TableHead className="min-w-72 text-right">操作</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead className="w-28">编号</TableHead><TableHead>文章</TableHead><TableHead>交付项</TableHead><TableHead className="w-36">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="-ml-2 px-2"
+                    onClick={() => setUpdatedAtSort((current) => current === "desc" ? "asc" : "desc")}
+                    aria-label={`按更新时间${updatedAtSort === "desc" ? "升序" : "降序"}排序`}
+                    title={`当前：${updatedAtSort === "desc" ? "最新优先" : "最早优先"}，点击切换`}
+                  >
+                    更新时间
+                    {updatedAtSort === "desc" ? <ArrowDown aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
+                  </Button>
+                </TableHead><TableHead className="min-w-72 text-right">操作</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {filteredTasks.map((task) => {
                     const parts = deliveryParts(task);
