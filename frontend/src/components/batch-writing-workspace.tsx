@@ -160,6 +160,7 @@ export function BatchWritingWorkspace() {
   const [historyDetailPlan, setHistoryDetailPlan] = useState<WorkflowAssistantPlan | null>(null);
   const [historyPreviewMinimized, setHistoryPreviewMinimized] = useState(false);
   const [historyPlanPending, setHistoryPlanPending] = useState("");
+  const [historyActionPending, setHistoryActionPending] = useState("");
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
 
   const projectById = useMemo(
@@ -178,6 +179,7 @@ export function BatchWritingWorkspace() {
   const totalArticles = rows.reduce((total, row) => total + row.article_count, 0);
   const selectedPlanCounts = plan ? planArticleCounts(plan) : {};
   const deliveryReady = plan ? readyDeliveryCount(plan) : 0;
+  const historyDeliveryReady = historyDetailPlan ? readyDeliveryCount(historyDetailPlan) : 0;
 
   useEffect(() => {
     let disposed = false;
@@ -374,6 +376,49 @@ export function BatchWritingWorkspace() {
     }
   }
 
+  async function changeHistoryPlan(action: PlanAction) {
+    if (!historyDetailPlan || historyActionPending) return;
+    setHistoryActionPending(action);
+    setHistoryError("");
+    try {
+      const body = action === "confirm" || action === "retry"
+        ? {
+            revision: historyDetailPlan.revision,
+            plan_hash: historyDetailPlan.plan_hash,
+          }
+        : { revision: historyDetailPlan.revision };
+      const nextPlan = await apiPost<WorkflowAssistantPlan>(
+        `/api/workflow-assistant/plans/${encodeURIComponent(historyDetailPlan.plan_id)}/${action}`,
+        body,
+      );
+      setHistoryDetailPlan(nextPlan);
+      if (plan?.plan_id === nextPlan.plan_id) setPlan(nextPlan);
+      setHistoryRefreshKey((value) => value + 1);
+    } catch (nextError) {
+      setHistoryError(messageText(nextError));
+    } finally {
+      setHistoryActionPending("");
+    }
+  }
+
+  async function downloadHistoryDelivery() {
+    if (!historyDetailPlan || !historyDeliveryReady || historyActionPending) return;
+    setHistoryActionPending("download");
+    setHistoryError("");
+    try {
+      const download = await apiGet<WorkflowAssistantBatchDownload>(
+        `/api/workflow-assistant/plans/${encodeURIComponent(historyDetailPlan.plan_id)}/delivery-package/download`,
+        30_000,
+      );
+      if (!download.url) throw new Error("服务器没有返回可用的批量下载地址。");
+      triggerBrowserDownload(download.url, download.filename || "batch-delivery.zip");
+    } catch (nextError) {
+      setHistoryError(messageText(nextError));
+    } finally {
+      setHistoryActionPending("");
+    }
+  }
+
   async function openHistoryPlan(planId: string) {
     if (historyPlanPending) return;
     setHistoryPlanPending(planId);
@@ -399,6 +444,64 @@ export function BatchWritingWorkspace() {
     setSidebarTab("current");
     setError("");
     window.history.replaceState(null, "", "/batch-writing");
+  }
+
+  function renderHistoryActions() {
+    if (!historyDetailPlan) return null;
+    const status = historyDetailPlan.status;
+    const busy = Boolean(historyActionPending);
+    return (
+      <div className="grid gap-2 rounded-lg border border-dashed bg-background/70 p-3" aria-label="历史批次操作">
+        <span className="text-xs font-medium text-muted-foreground">批次操作</span>
+        <div className="flex flex-wrap gap-2">
+          {status === "awaiting_confirmation" && (
+            <Button type="button" size="sm" onClick={() => void changeHistoryPlan("confirm")} disabled={busy}>
+              {historyActionPending === "confirm" ? <Loader2 className="animate-spin" /> : <Check />}
+              确认并排队
+            </Button>
+          )}
+          {status === "waiting_review" && (
+            <Button type="button" size="sm" onClick={() => void changeHistoryPlan("confirm")} disabled={busy}>
+              {historyActionPending === "confirm" ? <Loader2 className="animate-spin" /> : <Check />}
+              确认并继续
+            </Button>
+          )}
+          {(status === "queued" || status === "running") && (
+            <Button type="button" size="sm" variant="outline" onClick={() => void changeHistoryPlan("pause")} disabled={busy}>
+              {historyActionPending === "pause" ? <Loader2 className="animate-spin" /> : <Pause />}
+              暂停
+            </Button>
+          )}
+          {status === "paused" && (
+            <Button type="button" size="sm" onClick={() => void changeHistoryPlan("resume")} disabled={busy}>
+              {historyActionPending === "resume" ? <Loader2 className="animate-spin" /> : <Play />}
+              恢复
+            </Button>
+          )}
+          {!(["completed", "cancelled"].includes(status)) && (
+            <Button type="button" size="sm" variant="destructive" onClick={() => void changeHistoryPlan("cancel")} disabled={busy}>
+              {historyActionPending === "cancel" ? <Loader2 className="animate-spin" /> : <Square />}
+              取消
+            </Button>
+          )}
+          {status === "failed" && (
+            <Button type="button" size="sm" variant="outline" onClick={() => void changeHistoryPlan("retry")} disabled={busy}>
+              {historyActionPending === "retry" ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              重试失败步骤
+            </Button>
+          )}
+          {historyDeliveryReady > 0 && (
+            <Button type="button" size="sm" variant="outline" onClick={() => void downloadHistoryDelivery()} disabled={busy}>
+              {historyActionPending === "download" ? <Loader2 className="animate-spin" /> : <Download />}
+              导出成功的 {historyDeliveryReady} 篇 ZIP
+            </Button>
+          )}
+        </div>
+        {!busy && ["completed", "cancelled"].includes(status) && historyDeliveryReady === 0 && (
+          <p className="text-xs text-muted-foreground">该批次已结束，暂无可执行操作或可导出的交付包。</p>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -717,8 +820,9 @@ export function BatchWritingWorkspace() {
                       </Badge>
                     </div>
                     <p className="text-xs leading-5 text-muted-foreground">
-                      历史批次已在右下角小窗中打开；窗口不会占用主页面布局，可从卡片进入对应工作台。
+                      历史批次已在预览窗口中打开；可在这里暂停、恢复、取消或导出成功文章。
                     </p>
+                    {renderHistoryActions()}
                     <div className="flex flex-wrap gap-2">
                       <Button
                         type="button"
@@ -941,7 +1045,7 @@ export function BatchWritingWorkspace() {
                     历史批次文章预览
                   </CardTitle>
                   <CardDescription className="mt-1 truncate text-xs">
-                    {historyDetailPlan.title} · Revision {historyDetailPlan.revision} · 只读
+                    {historyDetailPlan.title} · Revision {historyDetailPlan.revision} · 可控制批次
                   </CardDescription>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
@@ -969,6 +1073,7 @@ export function BatchWritingWorkspace() {
                 </div>
               </CardHeader>
               <CardContent className="max-h-[min(72vh,760px)] overflow-y-auto p-4">
+                {renderHistoryActions()}
                 <WorkflowArticleCards
                   plan={historyDetailPlan}
                   projectNames={projectNames}

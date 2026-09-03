@@ -6,6 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from knowledge_agent.research_chat_repository import (
     ResearchCitation,
     ResearchConversation,
@@ -15,7 +16,11 @@ from services.access_control import ActorIdentity
 from workflow_assistant.context import AssistantProjectContext, AssistantWorkspaceContext
 from workflow_assistant.contracts import AssistantMessageRequest
 from workflow_assistant.http import _knowledge_reply, append_message
-from workflow_assistant.message_router import AssistantMessageRouter, render_knowledge_answer
+from workflow_assistant.message_router import (
+    AssistantMessageRouter,
+    is_article_generation_request,
+    render_knowledge_answer,
+)
 from workflow_assistant.repository import AssistantConversation, AssistantMessage
 
 
@@ -159,6 +164,13 @@ class WorkflowAssistantMessageRouterTests(unittest.TestCase):
 
         self.assertEqual(intent.kind, "workflow")
         self.assertEqual(client.calls, [])
+
+    def test_prompt_configuration_is_not_redirected_to_batch_writing(self) -> None:
+        self.assertFalse(is_article_generation_request("把这段要求整理成正文提示词"))
+        self.assertFalse(is_article_generation_request("生成一份项目提示词"))
+        self.assertTrue(is_article_generation_request("帮我写一篇文章"))
+        self.assertTrue(is_article_generation_request("规划两篇文章"))
+        self.assertTrue(is_article_generation_request("暂停这个批次"))
 
     def test_short_follow_up_uses_active_plan_context(self) -> None:
         client = FakeClient([])
@@ -407,6 +419,44 @@ class WorkflowAssistantMessageRouterTests(unittest.TestCase):
         self.assertIsNone(response.plan)
         self.assertIn("6–12 kW", response.message.content)
         self.assertEqual([message.role for message in repository.messages], ["user", "assistant"])
+
+    def test_message_endpoint_rejects_legacy_article_mode(self) -> None:
+        repository = FakeAssistantRepository()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    article_agent_config=SimpleNamespace(
+                        workflow_assistant_enabled=True
+                    ),
+                    server_llm_client_factory=None,
+                )
+            )
+        )
+        payload = AssistantMessageRequest(
+            content="生成文章",
+            request_id="request-legacy-1",
+            idempotency_key="message-legacy-1",
+            workflow_mode="article",
+        )
+
+        with (
+            patch("workflow_assistant.http._repository", return_value=repository),
+            patch(
+                "workflow_assistant.http._context",
+                return_value=FakeContextResolver(),
+            ),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                append_message(
+                    "conversation-1",
+                    payload,
+                    request,
+                    actor=self.actor,
+                )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("批量写文章", str(raised.exception.detail))
+        self.assertEqual(repository.messages, [])
 
 
 if __name__ == "__main__":

@@ -39,6 +39,21 @@ ALLOWED_ACTION_KINDS: frozenset[ActionKind] = frozenset(
     }
 )
 
+# Natural-language conversations are intentionally narrower than the closed
+# registry used by the deterministic batch-writing lane.  Article generation
+# belongs to /batch-writing; the assistant may only answer questions or stage
+# a project-configuration change for confirmation.
+ASSISTANT_ALLOWED_ACTION_KINDS: frozenset[ActionKind] = frozenset(
+    {
+        "list_projects",
+        "list_tasks",
+        "read_project_context",
+        "evidence_query",
+        "read_plan_status",
+        "update_project_notes",
+    }
+)
+
 WRITE_ACTION_KINDS: frozenset[ActionKind] = frozenset(
     ALLOWED_ACTION_KINDS
     - {
@@ -299,6 +314,7 @@ def validate_plan_scope(
     actor: ActorIdentity,
     access: ProjectAccessService,
     accessible_project_ids: Iterable[str] | None = None,
+    allowed_action_kinds: Iterable[ActionKind] | None = None,
 ) -> None:
     """Require every plan project and every step project to be authorized.
 
@@ -325,8 +341,9 @@ def validate_plan_scope(
             access.require(actor, project_id, "project.view")
         except Exception as exc:
             raise AssistantPolicyError("plan contains an inaccessible project") from exc
+    allowed_actions = set(allowed_action_kinds or ALLOWED_ACTION_KINDS)
     for step in plan.steps:
-        if step.action_kind not in ALLOWED_ACTION_KINDS:
+        if step.action_kind not in allowed_actions:
             raise AssistantPolicyError("plan contains an unsupported action")
 
 
@@ -804,6 +821,7 @@ def requires_human_gate(action_kind: ActionKind) -> bool:
 
 __all__ = [
     "ALLOWED_ACTION_KINDS",
+    "ASSISTANT_ALLOWED_ACTION_KINDS",
     "AssistantPolicyError",
     "TASK_BOUND_ACTION_KINDS",
     "WRITE_ACTION_KINDS",

@@ -94,8 +94,8 @@ class AssistantMessageRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     project_ids: list[str] | None = Field(default=None, max_length=100)
     article_task_ids: list[str] | None = Field(default=None, max_length=500)
-    # The UI defaults to the deterministic article lane. Keep the API default
-    # on the legacy assistant route so older clients remain compatible.
+    # Keep the legacy discriminator so old clients receive a clear migration
+    # error; new assistant clients use the prompt/information lane only.
     workflow_mode: WorkflowMode = "assistant"
 
     @field_validator("project_ids")

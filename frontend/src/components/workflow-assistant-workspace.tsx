@@ -7,7 +7,6 @@ import {
   Check,
   ChevronDown,
   CircleDot,
-  Download,
   ExternalLink,
   Loader2,
   MessageSquareText,
@@ -46,26 +45,19 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { WorkflowAssistantAttachments } from "@/components/workflow-assistant-attachments";
 import { ApiError, apiFileUrl, apiGet, apiPost } from "@/lib/api";
-import { triggerBrowserDownload } from "@/lib/browser-download";
 import {
   gapFillWorkflowAssistantPlan,
   getResearchRun,
 } from "@/lib/research-api";
-import {
-  isReadyDeliveryStep,
-  stepSummaryText,
-  WORKFLOW_STEP_LABELS,
-} from "@/lib/workflow-steps";
+import { WORKFLOW_STEP_LABELS } from "@/lib/workflow-steps";
 import type {
   AccessibleProject,
   AuthStatus,
   ResearchRunDetail,
-  TaskRecord,
   WorkflowAssistantConversation,
   WorkflowAssistantConversationList,
   WorkflowAssistantDispatch,
   WorkflowAssistantAttentionList,
-  WorkflowAssistantBatchDownload,
   WorkflowAssistantGapFillResponse,
   WorkflowAssistantPlan,
   WorkflowAssistantPlanSummary,
@@ -94,6 +86,30 @@ const workflowStepStatusLabels: Record<string, string> = {
   skipped: "已跳过",
   cancelled: "已取消",
 };
+
+const ARTICLE_WORKFLOW_ACTIONS = new Set([
+  "create_task",
+  "generate_titles",
+  "select_title",
+  "generate_products",
+  "confirm_products",
+  "generate_outline",
+  "start_research",
+  "generate_article",
+  "review",
+  "humanize",
+  "restore_links",
+  "prepare_images",
+  "export_docx",
+  "generate_tdk",
+  "package_delivery",
+]);
+
+function isArticleWorkflowPlan(plan: WorkflowAssistantPlan | null): boolean {
+  return Boolean(
+    plan?.steps.some((step) => ARTICLE_WORKFLOW_ACTIONS.has(step.action_kind)),
+  );
+}
 
 // Planning can legitimately exceed the shared four-minute API timeout when
 // the selected model performs deep reasoning over several projects. Keep a
@@ -320,31 +336,24 @@ function statusVariant(status: WorkflowAssistantPlan["status"]): "default" | "ou
   return "default";
 }
 
-type ScopedTask = TaskRecord & { project_id: string };
-
 type AssistantRequestPhase = "idle" | "sending" | "waiting_reply" | "refreshing";
 type PendingUserMessage = { conversationId: string; content: string };
 
 export function WorkflowAssistantWorkspace() {
   const [projects, setProjects] = useState<AccessibleProject[]>([]);
-  const [tasks, setTasks] = useState<ScopedTask[]>([]);
   const [conversations, setConversations] = useState<WorkflowAssistantConversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<WorkflowAssistantConversation | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
-  const [workflowMode, setWorkflowMode] = useState<"article" | "assistant">("article");
   const [plan, setPlan] = useState<WorkflowAssistantPlan | null>(null);
   const [draft, setDraft] = useState("");
   const [revisionDraft, setRevisionDraft] = useState("");
   const [loading, setLoading] = useState(true);
-  const [tasksLoading, setTasksLoading] = useState(false);
   const [pending, setPending] = useState(false);
   const [requestPhase, setRequestPhase] = useState<AssistantRequestPhase>("idle");
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [scopeDialogOpen, setScopeDialogOpen] = useState(false);
   const [planPreviewOpen, setPlanPreviewOpen] = useState(false);
   const [revisionPending, setRevisionPending] = useState(false);
-  const [batchArtifactPending, setBatchArtifactPending] = useState("");
   const [attentionCount, setAttentionCount] = useState(0);
   const [attentionPlans, setAttentionPlans] = useState<WorkflowAssistantPlanSummary[]>([]);
   const [attentionPlanPendingId, setAttentionPlanPendingId] = useState<string | null>(null);
@@ -367,8 +376,6 @@ export function WorkflowAssistantWorkspace() {
   const activeConversationIdRef = useRef<string | null>(null);
   const activePlanIdRef = useRef<string | null>(null);
   const loadedConversationRef = useRef<string | null>(null);
-  const loadedTaskProjectIdsRef = useRef<Set<string>>(new Set());
-  const loadingTaskProjectIdsRef = useRef<Set<string>>(new Set());
   const messageScrollAreaRef = useRef<HTMLDivElement | null>(null);
   const lastEventSequenceRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -428,9 +435,6 @@ export function WorkflowAssistantWorkspace() {
       });
       setSelectedConversation((current) => current || nextConversations.conversations[0] || null);
       setSelectedProjectIds((current) => current.length ? current : nextProjects.map((project) => project.project_id));
-      // Keep an empty task selection as "let the planner choose from the
-      // project context". Only explicit checkbox selections lock the request
-      // to an article range and disable task supplementation.
     } catch (nextError) {
       setError(messageText(nextError));
     } finally {
@@ -438,48 +442,10 @@ export function WorkflowAssistantWorkspace() {
     }
   }, [refreshAttention]);
 
-  const loadTasksForProjects = useCallback(async (projectIds: string[]) => {
-    const requested = [...new Set(projectIds)].filter(Boolean);
-    const missing = requested.filter(
-      (projectId) => !loadedTaskProjectIdsRef.current.has(projectId)
-        && !loadingTaskProjectIdsRef.current.has(projectId),
-    );
-    if (!missing.length) return;
-    missing.forEach((projectId) => loadingTaskProjectIdsRef.current.add(projectId));
-    setTasksLoading(true);
-    try {
-      const loaded = await Promise.all(
-        missing.map(async (projectId) => {
-          const projectTasks = await apiGet<TaskRecord[]>(
-            `/api/projects/${encodeURIComponent(projectId)}/tasks`,
-          );
-          return projectTasks.map((task) => ({ ...task, project_id: projectId }));
-        }),
-      );
-      const missingSet = new Set(missing);
-      setTasks((current) => [
-        ...current.filter((task) => !missingSet.has(task.project_id)),
-        ...loaded.flat(),
-      ]);
-      missing.forEach((projectId) => loadedTaskProjectIdsRef.current.add(projectId));
-    } catch (nextError) {
-      setError(messageText(nextError));
-    } finally {
-      missing.forEach((projectId) => loadingTaskProjectIdsRef.current.delete(projectId));
-      setTasksLoading(loadingTaskProjectIdsRef.current.size > 0);
-    }
-  }, []);
-
   useEffect(() => {
     void load();
     return () => eventSourceRef.current?.close();
   }, [load]);
-
-  useEffect(() => {
-    if (scopeDialogOpen) {
-      void loadTasksForProjects(selectedProjectIds);
-    }
-  }, [loadTasksForProjects, scopeDialogOpen, selectedProjectIds]);
 
   const selectedConversationProjectKey = (
     selectedConversation?.project_ids || []
@@ -514,15 +480,6 @@ export function WorkflowAssistantWorkspace() {
       reconnectAttemptRef.current = 0;
     }
   }, [projects, selectedConversation?.conversation_id, selectedConversationProjectIds]);
-
-  useEffect(() => {
-    const scopedTaskIds = new Set(
-      tasks
-        .filter((task) => selectedProjectIds.includes(task.project_id))
-        .map((task) => task.id),
-    );
-    setSelectedTaskIds((current) => current.filter((taskId) => scopedTaskIds.has(taskId)));
-  }, [selectedProjectIds, tasks]);
 
   useEffect(() => {
     const conversationId = selectedConversation?.conversation_id;
@@ -758,36 +715,13 @@ export function WorkflowAssistantWorkspace() {
     () => projects.filter((project) => selectedProjectIds.includes(project.project_id)),
     [projects, selectedProjectIds],
   );
-  const scopedTasks = useMemo(
-    () => tasks.filter((task) => selectedProjectIds.includes(task.project_id)),
-    [selectedProjectIds, tasks],
-  );
+  const hasArticleWorkflow = isArticleWorkflowPlan(plan);
   const waitingResearchSteps = useMemo(
     () => (plan?.steps || []).filter(
       (step) => step.action_kind === "start_research" && step.status === "waiting_review",
     ),
     [plan],
   );
-  const deliverySteps = useMemo(
-    () => (plan?.steps || []).filter((step) => step.action_kind === "package_delivery"),
-    [plan],
-  );
-  const readyDeliverySteps = useMemo(
-    () => deliverySteps.filter(isReadyDeliveryStep),
-    [deliverySteps],
-  );
-  const readyDeliveryCount = readyDeliverySteps.length;
-  const readyDeliveryProjectCount = new Set(
-    readyDeliverySteps.map((step) => step.project_id),
-  ).size;
-  const articleCount = useMemo(() => {
-    if (deliverySteps.length) return deliverySteps.length;
-    return new Set(
-      (plan?.steps || [])
-        .filter((step) => Boolean(step.article_task_id))
-        .map((step) => `${step.project_id}:${step.article_task_id}`),
-    ).size;
-  }, [deliverySteps.length, plan]);
   const waitingResearchSignature = useMemo(
     () => waitingResearchSteps
       .map((step) => `${step.step_id}:${step.project_id}:${researchThreadId(step)}`)
@@ -836,7 +770,7 @@ export function WorkflowAssistantWorkspace() {
     setError("");
     try {
       const created = await apiPost<WorkflowAssistantConversation>("/api/workflow-assistant/conversations", {
-        title: "新的文章工作计划",
+        title: "新的提示词与资料会话",
         project_ids: selectedProjectIds,
       });
       setConversations((current) => [created, ...current]);
@@ -873,7 +807,6 @@ export function WorkflowAssistantWorkspace() {
         : null;
       const scopeKey = JSON.stringify({
         projectIds: selectedProjectIds,
-        articleTaskIds: selectedTaskIds,
       });
       let dispatchIdentity = pendingMessageDispatchRef.current;
       if (
@@ -900,8 +833,6 @@ export function WorkflowAssistantWorkspace() {
           request_id: dispatchIdentity.requestId,
           idempotency_key: dispatchIdentity.idempotencyKey,
           project_ids: selectedProjectIds,
-          article_task_ids: selectedTaskIds.length ? selectedTaskIds : null,
-          workflow_mode: workflowMode,
         },
         WORKFLOW_ASSISTANT_PLANNING_TIMEOUT_MS,
       );
@@ -1081,27 +1012,6 @@ export function WorkflowAssistantWorkspace() {
     }
   }
 
-  async function downloadBatchDelivery() {
-    if (!plan || !readyDeliveryCount || batchArtifactPending) return;
-    setBatchArtifactPending("all");
-    setError("");
-    try {
-      const download = await apiGet<WorkflowAssistantBatchDownload>(
-        `/api/workflow-assistant/plans/${encodeURIComponent(plan.plan_id)}/delivery-package/download`,
-        30_000,
-      );
-      if (!download.url) throw new Error("服务器没有返回可用的批量下载地址。");
-      triggerBrowserDownload(
-        download.url,
-        download.filename || "workflow-batch-delivery.zip",
-      );
-    } catch (nextError) {
-      setError(messageText(nextError, plan));
-    } finally {
-      setBatchArtifactPending("");
-    }
-  }
-
   async function openAttentionPlan(nextPlan: WorkflowAssistantPlanSummary) {
     setError("");
     setAttentionPlanPendingId(nextPlan.plan_id);
@@ -1140,7 +1050,7 @@ export function WorkflowAssistantWorkspace() {
     }
   }
 
-  const planQuickActions = plan && (
+  const planQuickActions = plan && !hasArticleWorkflow && (
     <div className="flex flex-wrap items-center justify-end gap-2" aria-label="计划快速操作">
       {(plan.status === "awaiting_confirmation" || plan.status === "waiting_review") && (
         <Button type="button" size="sm" variant="destructive" onClick={() => void changePlan("cancel")} disabled={pending}>
@@ -1180,8 +1090,8 @@ export function WorkflowAssistantWorkspace() {
             </Link>
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">Workflow Assistant</p>
-              <h1 className="text-xl font-semibold">文章工作助手</h1>
-              <p className="text-sm text-muted-foreground">固定写作一键串联文章流程；需要配置时仍可直接对话。</p>
+              <h1 className="text-xl font-semibold">提示词与资料助手</h1>
+              <p className="text-sm text-muted-foreground">配置项目提示词、查询项目资料；文章生成请前往批量写文章或文章工作台。</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1219,30 +1129,8 @@ export function WorkflowAssistantWorkspace() {
           <CardHeader className="border-b px-5 py-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <CardTitle>文章工作流</CardTitle>
-                <CardDescription>
-                  {workflowMode === "article"
-                    ? "固定模式不再调用规划模型，按文章当前状态生成可确认的执行链。"
-                    : "自由助手保留自然语言规划，适合查询资料、修改设置或处理特殊流程。"}
-                </CardDescription>
-              </div>
-              <div className="flex shrink-0 rounded-lg border bg-muted/40 p-1" role="group" aria-label="助手模式">
-                <button
-                  type="button"
-                  aria-pressed={workflowMode === "article"}
-                  onClick={() => setWorkflowMode("article")}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${workflowMode === "article" ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
-                >
-                  固定写作
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={workflowMode === "assistant"}
-                  onClick={() => setWorkflowMode("assistant")}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${workflowMode === "assistant" ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground"}`}
-                >
-                  自由助手
-                </button>
+                <CardTitle>提示词与资料助手</CardTitle>
+                <CardDescription>用于配置项目提示词和查询已发布资料，不负责生成文章或执行文章批次。</CardDescription>
               </div>
             </div>
           </CardHeader>
@@ -1250,9 +1138,9 @@ export function WorkflowAssistantWorkspace() {
             <div className="rounded-xl border bg-muted/30 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <Label>{workflowMode === "article" ? "写作范围" : "计划范围"}</Label>
+                  <Label>查询与配置范围</Label>
                   <p className="mt-1 text-sm font-medium">
-                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"} · {selectedTaskIds.length ? `已选 ${selectedTaskIds.length} 个任务` : workflowMode === "article" ? "优先取可继续文章，不足时自动选已发布话题" : "按项目上下文规划"}
+                    {selectedProjects.length ? `${selectedProjects.length} 个项目` : "未选择项目"}
                   </p>
                   <p className="mt-1 truncate text-xs text-muted-foreground" title={selectedProjects.map((project) => project.customer_name).join("、")}>
                     {selectedProjects.length ? selectedProjects.map((project) => project.customer_name).join("、") : "请选择至少一个项目"}
@@ -1263,19 +1151,15 @@ export function WorkflowAssistantWorkspace() {
                 </Button>
               </div>
               <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                {workflowMode === "article"
-                  ? "不勾选具体文章时，每个项目优先取 1 篇可继续任务；没有可继续任务时，会从已发布话题中自动选择并创建文章。发送内容会作为本次大纲和正文的补充要求。"
-                  : "项目和文章选择已收进页内弹窗；不勾选具体文章时，助手会按当前项目上下文规划。"}
+                项目范围用于限定资料查询与提示词配置；文章生成、复检和导出请在批量写文章或文章工作台完成。
               </p>
             </div>
             <Dialog open={scopeDialogOpen} onOpenChange={setScopeDialogOpen}>
               <DialogContent className="h-[min(760px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-4xl sm:max-w-4xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
                 <DialogHeader className="border-b px-5 py-4 pr-12">
-                  <DialogTitle>{workflowMode === "article" ? "写作范围" : "计划范围"}</DialogTitle>
+                  <DialogTitle>查询与配置范围</DialogTitle>
                   <DialogDescription>
-                    {workflowMode === "article"
-                      ? "选择本次固定写作要覆盖的项目和文章；不勾选具体文章时，每个项目优先选择可继续任务，不足时自动从已发布话题创建文章。"
-                      : "选择本次自然语言请求要覆盖的项目和文章；不勾选具体文章时，助手会按项目上下文规划。"}
+                    选择本次资料查询或提示词配置要覆盖的项目。
                   </DialogDescription>
                 </DialogHeader>
                 <div className="min-h-0 overflow-y-auto px-5 pb-5">
@@ -1302,20 +1186,6 @@ export function WorkflowAssistantWorkspace() {
                         })}
                       </div>
                     </section>
-                    {tasksLoading ? <div className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在读取所选项目的文章任务…</div> : scopedTasks.length > 0 ? <section className="grid gap-3" aria-labelledby="workflow-scope-articles">
-                      <div className="flex items-center justify-between gap-3">
-                        <Label id="workflow-scope-articles">文章范围</Label>
-                        <span className="text-xs text-muted-foreground">已选 {selectedTaskIds.length} 个任务</span>
-                      </div>
-                      <div className="max-h-[min(32rem,55vh)] overflow-auto rounded-lg border bg-background p-2">
-                        <div className="grid gap-1">
-                          {scopedTasks.map((task) => {
-                            const checked = selectedTaskIds.includes(task.id);
-                            return <label key={`${task.project_id}:${task.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-sm hover:bg-muted"><input type="checkbox" checked={checked} onChange={(event) => setSelectedTaskIds((current) => event.target.checked ? [...current, task.id] : current.filter((item) => item !== task.id))} className="mt-1 accent-primary" /><span className="min-w-0"><span className="block truncate">{task.topic}</span><span className="block truncate text-xs text-muted-foreground">{task.project_id} · {task.id} · {task.status}</span></span></label>;
-                          })}
-                        </div>
-                      </div>
-                    </section> : <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground">当前项目暂无现有文章任务；发送后会尝试从已发布话题自动创建文章。</div>}
                   </div>
                 </div>
               </DialogContent>
@@ -1333,7 +1203,7 @@ export function WorkflowAssistantWorkspace() {
                       <span className="whitespace-pre-wrap break-words"><MessageContent content={pendingUserMessage.content} /></span>
                       <Loader2 className="workflow-assistant-spinner mt-1 size-4 shrink-0" />
                     </div>}
-                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">{workflowMode === "article" ? "发送要求，自动选题并开始固定写作" : "直接聊天、查询资料或安排工作"}</p><p className="mt-1 max-w-sm">{workflowMode === "article" ? "例如：面向采购经理，重点突出安装维护；这次跳过复检。" : "例如：你是谁？这个项目的知识库里有哪些产品参数？或者帮我规划两篇文章。"}</p></div>}
+                  </> : <div className="flex min-h-52 flex-col items-center justify-center text-center text-sm text-muted-foreground"><MessageSquareText className="mb-3 size-8" /><p className="font-medium text-foreground">配置提示词，或查询项目资料</p><p className="mt-1 max-w-sm">例如：把这段要求整理成正文提示词，或查询项目知识库里的产品参数。</p></div>}
                 </div>
               </ScrollArea>
             </div>
@@ -1350,11 +1220,11 @@ export function WorkflowAssistantWorkspace() {
               {requestPhase !== "idle" && <div className="flex min-h-11 items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm" role="status" aria-live="polite">
                 <Loader2 className="workflow-assistant-spinner size-4 shrink-0 text-primary" />
                 <span className="font-medium">{requestPhase === "sending" ? "正在发送请求" : requestPhase === "waiting_reply" ? "已发送，等待助手回复" : "回复已收到，正在更新计划"}</span>
-                <span className="text-muted-foreground">{requestPhase === "sending" ? "正在提交当前项目和文章范围。" : requestPhase === "waiting_reply" ? "助手正在处理请求，页面不会重复提交。" : "正在刷新会话和计划预览。"}</span>
+                <span className="text-muted-foreground">{requestPhase === "sending" ? "正在提交当前项目范围。" : requestPhase === "waiting_reply" ? "助手正在处理请求，页面不会重复提交。" : "正在刷新会话和配置预览。"}</span>
               </div>}
-              <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={workflowMode === "article" ? "补充本次写作要求，例如：面向采购经理，突出安装维护；这次跳过复检…" : "直接聊天、查询所选项目的知识库，或描述要执行的工作…"} rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
-              <p className="text-xs leading-5 text-muted-foreground">{workflowMode === "article" ? "本次要求会叠加到项目当前的大纲/正文提示词，不会覆盖项目默认提示词；需要跳过复检时写“这篇不用复检”。" : "操作提示：需要跳过复检时可写“这篇不用复检”；若当前任务已有对应正文的初检 AI 率且低于 30%，助手会自动跳过降 AI 和二次检测，ZeroGPT 结果仍由人工确认。"}</p>
-              <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="workflow-assistant-spinner" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新计划" : pending ? "处理中" : "发送"}</Button></div>
+              <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如：把这段要求整理成正文提示词，或查询项目资料…" rows={4} disabled={pending} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void sendMessage(); } }} />
+              <p className="text-xs leading-5 text-muted-foreground">可以让我整理、优化和配置项目提示词，也可以查询当前项目的已发布资料；文章生成、复检和导出请使用批量写文章或文章工作台。</p>
+              <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">Ctrl/Cmd + Enter 发送 · 不会显示原始提示词或模型思维链</span><Button type="button" onClick={() => void sendMessage()} disabled={pending || !draft.trim() || !selectedProjectIds.length}>{pending ? <Loader2 className="workflow-assistant-spinner" /> : <Send />}{requestPhase === "sending" ? "正在发送" : requestPhase === "waiting_reply" ? "等待回复" : requestPhase === "refreshing" ? "更新结果" : pending ? "处理中" : "发送"}</Button></div>
             </div>
           </CardContent>
         </Card>
@@ -1393,13 +1263,13 @@ export function WorkflowAssistantWorkspace() {
             <CardHeader className="border-b px-4 py-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <CardTitle className="text-base">{workflowMode === "article" ? "固定写作流程" : "计划预览"}</CardTitle>
-                  <CardDescription className="mt-1">{workflowMode === "article" ? "固定步骤仍保留一次确认；暂停、恢复和取消可直接在这里操作。" : "完整步骤在弹窗内查看；暂停、恢复和取消可直接在这里操作。"}</CardDescription>
+                  <CardTitle className="text-base">配置变更预览</CardTitle>
+                  <CardDescription className="mt-1">提示词或项目配置变更会先生成提案，确认后才会写入。</CardDescription>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   {plan && <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>}
                   {planQuickActions}
-                  {plan && <Button
+                  {plan && !hasArticleWorkflow && <Button
                     type="button"
                     variant="outline"
                     size="sm"
@@ -1407,7 +1277,21 @@ export function WorkflowAssistantWorkspace() {
                     aria-haspopup="dialog"
                     onClick={() => setPlanPreviewOpen(true)}
                   >
-                    <Workflow />{workflowMode === "article" ? "查看流程" : "查看计划"}
+                    <Workflow />查看变更
+                  </Button>}
+                  {plan && hasArticleWorkflow && <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="min-h-9"
+                    nativeButton={false}
+                    render={
+                      <Link
+                        href={`/batch-writing?plan_id=${encodeURIComponent(plan.plan_id)}&conversation_id=${encodeURIComponent(plan.conversation_id)}`}
+                      />
+                    }
+                  >
+                    <ExternalLink />去批量写文章
                   </Button>}
                 </div>
               </div>
@@ -1415,43 +1299,29 @@ export function WorkflowAssistantWorkspace() {
             <CardContent className="px-4 py-4">
               {plan ? <div>
                 <p className="font-medium">{plan.title}</p>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCount} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
-                </p>
-                <p className="mt-3 rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
-                  点击“{workflowMode === "article" ? "查看流程" : "查看计划"}”打开完整步骤和确认操作；成功文章可在此处直接一键打包下载。
-                </p>
-                {deliverySteps.length > 0 && <div className="mt-4 grid gap-3 rounded-lg border border-dashed bg-muted/20 p-3">
-                  <div>
-                    <p className="text-sm font-medium">批量交付下载</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {readyDeliveryCount > 0
-                        ? `已成功 ${readyDeliveryCount}/${deliverySteps.length} 篇，来自 ${readyDeliveryProjectCount} 个项目；一键合并为一个 ZIP，失败或未完成文章会自动跳过。`
-                        : "暂无成功文章可打包下载；失败或未完成文章会自动跳过。"}
-                    </p>
+                {hasArticleWorkflow ? (
+                  <div className="mt-3 rounded-lg border border-dashed border-amber-500/40 bg-amber-50/60 px-3 py-3 text-sm text-amber-900 dark:bg-amber-950/20 dark:text-amber-100" role="status">
+                    这是历史文章计划，文章生成与批次控制已迁移到批量写文章页面；助手不再执行或导出文章。
                   </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="justify-self-start"
-                    aria-label={`一键下载成功的 ${readyDeliveryCount} 篇文章`}
-                    onClick={() => void downloadBatchDelivery()}
-                    disabled={!readyDeliveryCount || Boolean(batchArtifactPending)}
-                  >
-                    {batchArtifactPending === "all" ? <Loader2 className="animate-spin" /> : <Download />}
-                    {batchArtifactPending === "all" ? "正在打包…" : `一键下载成功的 ${readyDeliveryCount} 篇`}
-                  </Button>
-                </div>}
+                ) : (
+                  <>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      Revision {plan.revision} · {plan.steps.length} 个配置步骤{plan.budget_warning ? " · 接近软预算" : ""}
+                    </p>
+                    <p className="mt-3 rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
+                      点击“查看变更”查看配置提案和确认操作；知识库查询会直接回复，不生成执行计划。
+                    </p>
+                  </>
+                )}
               </div> : <div className="py-6 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
             </CardContent>
           </Card>
-          {plan && <Dialog open={planPreviewOpen} onOpenChange={setPlanPreviewOpen}>
+          {plan && !hasArticleWorkflow && <Dialog open={planPreviewOpen} onOpenChange={setPlanPreviewOpen}>
             <DialogContent className="h-[min(900px,calc(100vh-2rem))] w-[calc(100vw-2rem)] max-w-7xl sm:max-w-7xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0">
               <DialogHeader className="border-b px-5 py-4 pr-12">
-                <DialogTitle>计划详情</DialogTitle>
+                <DialogTitle>配置变更详情</DialogTitle>
                 <DialogDescription>
-                  {plan.title} · Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCount} 篇文章
+                  {plan.title} · Revision {plan.revision} · {plan.steps.length} 个配置步骤
                 </DialogDescription>
               </DialogHeader>
               <div className="min-h-0 overflow-y-auto px-5 pb-5">
@@ -1459,25 +1329,11 @@ export function WorkflowAssistantWorkspace() {
                   <CardHeader className="border-b px-0 py-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <CardTitle className="text-base">计划执行详情</CardTitle>
-                        <CardDescription className="mt-1">查看步骤状态和计划控制；批量交付下载在页面外直接操作。</CardDescription>
+                        <CardTitle className="text-base">配置变更详情</CardTitle>
+                        <CardDescription className="mt-1">查看配置步骤和确认操作。</CardDescription>
                       </div>
                       <div className="flex items-center gap-2">
                         <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="min-h-9"
-                          nativeButton={false}
-                          render={
-                            <Link
-                              href={`/batch-writing?plan_id=${encodeURIComponent(plan.plan_id)}&conversation_id=${encodeURIComponent(plan.conversation_id)}`}
-                            />
-                          }
-                        >
-                          <ExternalLink />打开批量写作页
-                        </Button>
                       </div>
                     </div>
                   </CardHeader>
@@ -1486,14 +1342,14 @@ export function WorkflowAssistantWorkspace() {
                 <div>
                   <p className="font-medium">{plan.title}</p>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    计划 Revision {plan.revision} · {plan.steps.length} 个步骤 · {articleCount} 篇文章 · 并发上限 {plan.concurrency_limit}{plan.budget_warning ? " · 接近软预算" : ""}
+                    配置 Revision {plan.revision} · {plan.steps.length} 个步骤{plan.budget_warning ? " · 接近软预算" : ""}
                   </p>
                 </div>
                 <div className="grid gap-2 rounded-lg border bg-background p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <p className="text-sm font-medium">固定写作步骤</p>
-                      <p className="mt-1 text-xs text-muted-foreground">新文章完整链为 14 步；已有任务会从当前未完成阶段继续。</p>
+                      <p className="text-sm font-medium">配置步骤</p>
+                      <p className="mt-1 text-xs text-muted-foreground">确认后才会写入项目配置；资料查询类请求会直接回复。</p>
                     </div>
                     <Badge variant="outline">当前 {plan.steps.length} 步</Badge>
                   </div>
@@ -1503,7 +1359,7 @@ export function WorkflowAssistantWorkspace() {
                         <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold">{step.sequence}</span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate font-medium">{WORKFLOW_STEP_LABELS[step.action_kind] || step.action_kind}</span>
-                          <span className="mt-0.5 block truncate text-xs text-muted-foreground">{step.project_id}{step.article_task_id ? ` · ${step.article_task_id}` : ""}{step.action_kind === "create_task" ? ` · ${stepSummaryText(step.input_summary, "topic") || "自动选题"}` : ""}</span>
+                          <span className="mt-0.5 block truncate text-xs text-muted-foreground">{step.project_id}</span>
                         </span>
                         <Badge variant={step.status === "failed" ? "destructive" : step.status === "succeeded" ? "secondary" : "outline"}>
                           {workflowStepStatusLabels[step.status] || step.status}
@@ -1511,9 +1367,6 @@ export function WorkflowAssistantWorkspace() {
                       </li>
                     ))}
                   </ol>
-                </div>
-                <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-sm text-muted-foreground" role="status">
-                  文章卡片已移到批量写作页；在那里可以按项目查看每篇文章的状态、处理进度和实际失败步骤。
                 </div>
                 {gapFillEnabled && waitingResearchSteps.map((step) => {
                   const detail = researchDetails[step.step_id];
@@ -1580,8 +1433,8 @@ export function WorkflowAssistantWorkspace() {
                 {plan.status === "awaiting_confirmation" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认计划并排队</Button></div>}
                 {plan.status === "waiting_review" && <div className="flex flex-wrap gap-2"><Button type="button" onClick={() => void changePlan("confirm")} disabled={pending}><Check />确认并继续</Button></div>}
                 {(plan.status === "queued" || plan.status === "running" || plan.status === "waiting_review") && plan.project_ids.length > 1 && <div className="grid gap-2 rounded-lg border border-dashed p-3"><span className="text-xs font-medium text-muted-foreground">项目执行通道</span><div className="flex flex-wrap gap-2">{plan.project_ids.map((projectId) => { const paused = plan.paused_project_ids.includes(projectId); return <Button key={projectId} type="button" size="sm" variant="outline" onClick={() => void changePlan(paused ? "resume" : "pause", [projectId])} disabled={pending}>{paused ? <Play /> : <Pause />}{paused ? `恢复 ${projectId}` : `暂停 ${projectId}`}</Button>; })}</div></div>}
-                {plan.status === "failed" && <div className="grid gap-2 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3"><div className="text-sm text-muted-foreground">已完成的步骤不会重复执行，只会重新排队失败步骤及同一篇文章被阻断的后续步骤。</div><Button type="button" variant="outline" className="justify-self-start" onClick={() => void changePlan("retry")} disabled={pending}><RotateCcw />重试失败步骤</Button></div>}
-                {["draft", "awaiting_confirmation", "paused", "waiting_review", "failed"].includes(plan.status) && <div className="grid gap-2 rounded-lg border border-dashed p-3"><Label htmlFor="workflow-plan-revision">调整未完成步骤</Label><Textarea id="workflow-plan-revision" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} placeholder="例如：保留已完成步骤，只把未完成正文改成面向采购团队。" rows={3} disabled={revisionPending || pending} /><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">会生成新的 Revision，并要求重新确认。</span><Button type="button" variant="outline" onClick={() => void revisePlan()} disabled={revisionPending || pending || !revisionDraft.trim()}>{revisionPending ? <Loader2 className="animate-spin" /> : <Workflow />}生成修订预览</Button></div></div>}
+                {plan.status === "failed" && <div className="grid gap-2 rounded-lg border border-dashed border-destructive/40 bg-destructive/5 p-3"><div className="text-sm text-muted-foreground">已完成的配置步骤不会重复执行，只会重新排队失败步骤。</div><Button type="button" variant="outline" className="justify-self-start" onClick={() => void changePlan("retry")} disabled={pending}><RotateCcw />重试失败步骤</Button></div>}
+                {["draft", "awaiting_confirmation", "paused", "waiting_review", "failed"].includes(plan.status) && <div className="grid gap-2 rounded-lg border border-dashed p-3"><Label htmlFor="workflow-plan-revision">调整未完成的配置变更</Label><Textarea id="workflow-plan-revision" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} placeholder="例如：保留已完成内容，只调整正文提示词中的语气。" rows={3} disabled={revisionPending || pending} /><div className="flex items-center justify-between gap-2"><span className="text-xs text-muted-foreground">会生成新的 Revision，并要求重新确认。</span><Button type="button" variant="outline" onClick={() => void revisePlan()} disabled={revisionPending || pending || !revisionDraft.trim()}>{revisionPending ? <Loader2 className="animate-spin" /> : <Workflow />}生成修订预览</Button></div></div>}
               </div> : <div className="py-10 text-center text-sm text-muted-foreground"><CircleDot className="mx-auto mb-3 size-7" /><p>发送请求后，这里会显示结构化计划。</p></div>}
                   </CardContent>
                 </Card>

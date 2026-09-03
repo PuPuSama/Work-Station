@@ -1,6 +1,12 @@
 import type { WorkflowAssistantStep } from "@/types";
 
 export const WORKFLOW_STEP_LABELS: Record<string, string> = {
+  list_projects: "查看项目",
+  list_tasks: "查看文章任务",
+  read_project_context: "读取项目资料",
+  evidence_query: "查询知识库",
+  read_plan_status: "查看计划状态",
+  update_project_notes: "更新项目提示词",
   create_task: "创建文章任务",
   generate_titles: "生成标题候选",
   select_title: "确认标题",

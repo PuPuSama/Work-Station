@@ -56,6 +56,7 @@ from .fixed_workflow import build_fixed_article_plan
 from .message_router import (
     AssistantMessageRouter,
     AssistantMessageRouterUnavailable,
+    is_article_generation_request,
     render_knowledge_answer,
 )
 from .planner import (
@@ -66,7 +67,9 @@ from .planner import (
     estimate_planner_usage,
 )
 from .policy import (
+    ASSISTANT_ALLOWED_ACTION_KINDS,
     AssistantPolicyError,
+    TASK_BOUND_ACTION_KINDS,
     WRITE_ACTION_KINDS,
     bind_plan_context,
     requires_confirmation,
@@ -1185,6 +1188,7 @@ def process_planning_dispatch(
             context=context,
             selected_project_ids=context.project_ids,
             selected_task_ids=selected_task_ids,
+            allowed_action_kinds=ASSISTANT_ALLOWED_ACTION_KINDS,
             recent_messages=recent_messages,
             active_plan_summary=active_plan_summary,
         )
@@ -1202,6 +1206,7 @@ def process_planning_dispatch(
             selected_project_ids=context.project_ids,
             selected_task_ids=selected_task_ids,
             plan=plan,
+            allowed_action_kinds=ASSISTANT_ALLOWED_ACTION_KINDS,
             recent_messages=recent_messages,
             active_plan_summary=active_plan_summary,
         )
@@ -1695,6 +1700,10 @@ def append_message(
     _feature_enabled(request)
     repository = _repository(request)
     try:
+        if payload.workflow_mode == "article":
+            raise AssistantPolicyError(
+                "文章生成已移至批量写文章页面；助手仅负责提示词配置和资料查询"
+            )
         conversation = repository.get_conversation(
             actor=actor,
             conversation_id=conversation_id,
@@ -1873,65 +1882,6 @@ def append_message(
             if callable(get_latest_plan)
             else None
         )
-        if payload.workflow_mode == "article":
-            if latest_plan is not None and latest_plan.status not in {
-                "completed",
-                "cancelled",
-                "failed",
-            }:
-                raise AssistantPolicyError(
-                    "当前会话已有未完成计划，请先处理或确认它"
-                )
-            fixed_plan = build_fixed_article_plan(
-                payload.content,
-                context,
-                selected_task_ids=selected_task_ids,
-                selection_locked=payload.article_task_ids is not None,
-                concurrency_limit=5,
-            )
-            fixed_plan = bind_plan_context(
-                fixed_plan,
-                context=context,
-                selected_task_ids=(
-                    selected_task_ids
-                    if payload.article_task_ids is not None
-                    else None
-                ),
-            )
-            fixed_plan = _apply_execution_limits(request, fixed_plan)
-            authorization_snapshot = _authorized_plan_scope(
-                request,
-                actor=actor,
-                project_ids=fixed_plan.project_ids,
-                step_project_ids=tuple(
-                    step.project_id for step in fixed_plan.steps
-                ),
-            )
-            persisted_plan = repository.create_plan(
-                actor=actor,
-                conversation_id=conversation_id,
-                plan=fixed_plan,
-                authorization_snapshot=authorization_snapshot,
-                source_idempotency_key=payload.idempotency_key,
-            )
-            assistant_message = repository.append_message(
-                actor=actor,
-                conversation_id=conversation_id,
-                role="assistant",
-                content=_assistant_content_for_plan(persisted_plan),
-                request_id=_assistant_identity(
-                    payload.request_id,
-                    prefix="asst_req",
-                ),
-                idempotency_key=_assistant_identity(
-                    payload.idempotency_key,
-                    prefix="asst",
-                ),
-            )
-            return AssistantMessageDispatchResponse(
-                message=_message_response(assistant_message),
-                plan=_plan_response(persisted_plan),
-            )
         message_router = _message_router(request)
         intent = message_router.route(
             actor=actor,
@@ -1942,6 +1892,48 @@ def append_message(
                 and latest_plan.status not in {"completed", "cancelled"}
             ),
         )
+        legacy_article_plan = bool(
+            latest_plan
+            and any(
+                step.action_kind in TASK_BOUND_ACTION_KINDS
+                or step.action_kind == "create_task"
+                for step in latest_plan.steps
+            )
+        )
+        legacy_article_follow_up = legacy_article_plan and payload.content.strip().casefold() in {
+            "继续",
+            "继续执行",
+            "恢复",
+            "重试",
+            "resume",
+            "continue",
+            "retry",
+            "暂停",
+            "取消",
+        }
+        if intent.kind == "workflow" and (
+            is_article_generation_request(payload.content)
+            or legacy_article_follow_up
+        ):
+            assistant_content = (
+                "文章生成和批次控制已移至“批量写文章”页面；当前助手只负责提示词配置和资料查询。"
+                "请打开批量写文章选择项目、文章数量后提交，已有批次也可以在那里暂停、取消或导出。"
+            )
+            assistant_message = repository.append_message(
+                actor=actor,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=assistant_content,
+                request_id=_assistant_identity(payload.request_id, prefix="asst_req"),
+                idempotency_key=_assistant_identity(
+                    payload.idempotency_key,
+                    prefix="asst",
+                ),
+            )
+            return AssistantMessageDispatchResponse(
+                message=_message_response(assistant_message),
+                plan=None,
+            )
         LOGGER.info(
             "workflow assistant message routed: request_id=%s kind=%s project_id=%s",
             payload.request_id,
@@ -2538,6 +2530,7 @@ def revise_plan(plan_id: str, payload: PlanRevisionRequest, request: Request, ac
                 request=payload.natural_language_request,
                 context=revision_context,
                 selected_project_ids=current_plan.project_ids,
+                allowed_action_kinds=ASSISTANT_ALLOWED_ACTION_KINDS,
             )
             planner_model_identity = planner.consume_model_identity()
             usage = estimate_planner_usage(
@@ -2545,6 +2538,7 @@ def revise_plan(plan_id: str, payload: PlanRevisionRequest, request: Request, ac
                 revision_context,
                 selected_project_ids=current_plan.project_ids,
                 plan=generated_plan,
+                allowed_action_kinds=ASSISTANT_ALLOWED_ACTION_KINDS,
             )
             bound_plan = bind_plan_context(
                 generated_plan,
@@ -2566,6 +2560,13 @@ def revise_plan(plan_id: str, payload: PlanRevisionRequest, request: Request, ac
             bound_plan = bind_plan_context(
                 revision_draft,
                 context=revision_context,
+            )
+        if any(
+            step.action_kind not in ASSISTANT_ALLOWED_ACTION_KINDS
+            for step in bound_plan.steps
+        ):
+            raise AssistantPolicyError(
+                "文章计划已移至批量写文章页面，助手不能修改文章执行计划"
             )
         bound_plan = _apply_execution_limits(request, bound_plan)
         bound_plan = bound_plan.model_copy(

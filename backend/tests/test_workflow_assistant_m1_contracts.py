@@ -81,6 +81,7 @@ from workflow_assistant.planner import (  # noqa: E402
     request_skips_review,
 )
 from workflow_assistant.policy import (  # noqa: E402
+    ASSISTANT_ALLOWED_ACTION_KINDS,
     AssistantPolicyError,
     bind_plan_context,
     canonical_plan_hash,
@@ -621,6 +622,15 @@ class WorkflowAssistantContractTests(unittest.TestCase):
             request="Add a hybrid inverter positioning rule to project notes",
             context=context,
             selected_project_ids=("project-a",),
+            allowed_action_kinds=ASSISTANT_ALLOWED_ACTION_KINDS,
+        )
+        self.assertNotIn(
+            "generate_article",
+            llm.input["allowed_action_kinds"],  # type: ignore[operator]
+        )
+        self.assertEqual(
+            set(llm.input["allowed_action_kinds"]),  # type: ignore[operator]
+            set(ASSISTANT_ALLOWED_ACTION_KINDS),
         )
         self.assertIn(
             "update_project_notes",
@@ -686,6 +696,32 @@ class WorkflowAssistantContractTests(unittest.TestCase):
             metadata.assertion["project_notes"],
             "- Existing requirement.\n- Prefer hybrid inverter positioning.",
         )
+
+    def test_assistant_planner_allowlist_rejects_article_actions(self) -> None:
+        output = json.dumps(
+            {
+                "title": "Generate an article",
+                "project_ids": ["project-a"],
+                "steps": [
+                    {
+                        "step_id": "article-1",
+                        "sequence": 1,
+                        "action_kind": "generate_article",
+                        "project_id": "project-a",
+                    }
+                ],
+            }
+        )
+
+        with self.assertRaisesRegex(PlannerOutputError, "unsupported action"):
+            parse_planner_output(
+                output,
+                request="generate an article",
+                actor=ActorIdentity("org-a", "user-a"),
+                access=FakeAccess({"project-a"}),  # type: ignore[arg-type]
+                accessible_project_ids=("project-a",),
+                allowed_action_kinds=ASSISTANT_ALLOWED_ACTION_KINDS,
+            )
 
     def test_planner_retries_a_contract_mismatch(self) -> None:
         class RetryContractLlm:
