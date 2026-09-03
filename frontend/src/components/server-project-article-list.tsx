@@ -36,8 +36,15 @@ import {
 } from "@/components/ui/table";
 import { apiGet, apiPut } from "@/lib/api";
 import { sameProjectId } from "@/lib/project-id";
-import { formatProjectDate } from "@/lib/project-date";
+import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
 import type { AccessibleProject, TaskRecord, WorkflowStatus } from "@/types";
+
+type TaskSort =
+  | "article_asc"
+  | "article_desc"
+  | "updated_desc"
+  | "updated_asc"
+  | "title_asc";
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   new: "待生成标题",
@@ -107,12 +114,41 @@ function formatUpdatedAt(value: string) {
   }) || "-";
 }
 
+function compareTasks(left: TaskRecord, right: TaskRecord, sort: TaskSort) {
+  if (sort === "article_asc" || sort === "article_desc") {
+    const articleOrder = left.topic_index - right.topic_index;
+    if (articleOrder !== 0) return sort === "article_asc" ? articleOrder : -articleOrder;
+  } else if (sort === "title_asc") {
+    const titleOrder = (left.selected_title || left.topic).localeCompare(
+      right.selected_title || right.topic,
+      "zh-CN",
+      { numeric: true, sensitivity: "base" },
+    );
+    if (titleOrder !== 0) return titleOrder;
+  } else {
+    const leftDate = parseProjectDate(left.updated_at);
+    const rightDate = parseProjectDate(right.updated_at);
+    const leftTime = leftDate?.getTime() ?? null;
+    const rightTime = rightDate?.getTime() ?? null;
+
+    // Keep records without a valid timestamp at the end in either direction.
+    if (leftTime === null && rightTime !== null) return 1;
+    if (leftTime !== null && rightTime === null) return -1;
+    if (leftTime !== null && rightTime !== null && leftTime !== rightTime) {
+      return sort === "updated_desc" ? rightTime - leftTime : leftTime - rightTime;
+    }
+  }
+
+  return left.topic_index - right.topic_index || left.id.localeCompare(right.id);
+}
+
 export function ServerProjectArticleList({ customer }: { customer: string }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [manualOnly, setManualOnly] = useState(false);
+  const [sort, setSort] = useState<TaskSort>("article_asc");
   const [canEdit, setCanEdit] = useState(false);
   const [completionPending, setCompletionPending] = useState<string | null>(
     null,
@@ -151,7 +187,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
 
   const filteredTasks = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    return tasks.filter((task) => {
+    const matchedTasks = tasks.filter((task) => {
       if (
         manualOnly &&
         (isTaskCompleted(task) || !MANUAL_STATUSES.has(task.status))
@@ -169,7 +205,8 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
         .toLocaleLowerCase()
         .includes(normalized);
     });
-  }, [manualOnly, query, tasks]);
+    return [...matchedTasks].sort((left, right) => compareTasks(left, right, sort));
+  }, [manualOnly, query, sort, tasks]);
 
   async function toggleCompletion(task: TaskRecord, completed: boolean) {
     setCompletionPending(task.id);
@@ -239,7 +276,7 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
             </CardTitle>
             <CardDescription>
               “待我处理”按工作流状态过滤，并排除已手动标记完成的任务；完成标记仍由
-              Server API 以 Revision CAS 保存。
+              Server API 以 Revision CAS 保存。默认按文章编号排序，可通过排序选择器切换。
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 px-4 py-4">
@@ -253,6 +290,24 @@ export function ServerProjectArticleList({ customer }: { customer: string }) {
                   placeholder="搜索编号、话题、标题或产品"
                   aria-label="搜索 Server 文章任务"
                 />
+              </div>
+              <div className="flex items-center gap-2">
+                <label htmlFor="server-task-sort" className="shrink-0 text-sm text-muted-foreground">
+                  排序
+                </label>
+                <select
+                  id="server-task-sort"
+                  value={sort}
+                  onChange={(event) => setSort(event.target.value as TaskSort)}
+                  className="h-11 min-w-40 rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  aria-label="文章任务排序方式"
+                >
+                  <option value="article_asc">文章编号（正序）</option>
+                  <option value="article_desc">文章编号（倒序）</option>
+                  <option value="updated_desc">更新时间（最新）</option>
+                  <option value="updated_asc">更新时间（最早）</option>
+                  <option value="title_asc">文章标题（A-Z）</option>
+                </select>
               </div>
               <Button
                 type="button"
