@@ -99,6 +99,7 @@ export function ProjectShell({
   const [recentTasksUnavailable, setRecentTasksUnavailable] = useState(false);
   const pathname = usePathname().replace(/\/$/, "");
   const projectPath = `/projects/${encodeURIComponent(customer)}`;
+  const projectApiPath = `/api/projects/${encodeURIComponent(customer)}`;
   const segments = pathname.split("/").filter(Boolean);
   const section = segments[2] as keyof typeof sectionNames | undefined;
   const isDetail =
@@ -129,7 +130,7 @@ export function ProjectShell({
       requestInFlight = true;
       if (showLoading) setRecentTasksLoading(true);
       void apiGet<RecentArticleTask[]>(
-        `${projectPath}/tasks/recent?limit=${RECENT_TASK_LIMIT}`,
+        `${projectApiPath}/tasks/recent?limit=${RECENT_TASK_LIMIT}`,
         RECENT_TASK_REQUEST_TIMEOUT_MS,
       )
         .then((tasks) => {
@@ -169,12 +170,11 @@ export function ProjectShell({
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [pathname, projectPath]);
+  }, [pathname, projectApiPath]);
 
   const items = [
     ["文章任务", "单篇内容与状态", "articles", FileText],
     ["知识库", "Inbox、发布与产品确认", "knowledge", BookOpenText],
-    ["批量处理", "批量生成与队列", "batches", Layers3],
     ["交付记录", "成品与导出历史", "deliveries", PackageCheck],
   ] as const;
   const canManageSettings =
