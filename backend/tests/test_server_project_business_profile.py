@@ -14,6 +14,7 @@ from services.server_project_business_profile import (  # noqa: E402
     PostgresProjectBusinessProfileService,
     ProjectBusinessProfileKnowledgeUnavailable,
     build_project_business_profile_prompt,
+    score_project_business_profile_filename,
 )
 
 
@@ -40,7 +41,118 @@ class StubProfileService(PostgresProjectBusinessProfileService):
         return self._chunks
 
 
+class FakeResult:
+    def __init__(self, rows) -> None:
+        self._rows = list(rows)
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class FakeConnection:
+    def __init__(self, results) -> None:
+        self._results = list(results)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        del exc_type, exc_value, traceback
+        return False
+
+    def execute(self, statement):
+        del statement
+        return FakeResult(self._results.pop(0))
+
+
+class FakeEngine:
+    def __init__(self, results) -> None:
+        self._connection = FakeConnection(results)
+
+    def connect(self):
+        return self._connection
+
+
 class ProjectBusinessProfileTests(unittest.TestCase):
+    def test_filename_score_prefers_business_background_material(self):
+        score, matches = score_project_business_profile_filename(
+            display_name="converted-document.md",
+            metadata={
+                "upload_filename": (
+                    "拼花木地板澳大利亚,阿联酋,西班牙"
+                    " 目标客群与痛点需求分析.docx"
+                )
+            },
+        )
+        generic_score, _ = score_project_business_profile_filename(
+            display_name="converted-document.md",
+            metadata={"upload_filename": "technical-data.pdf"},
+        )
+
+        self.assertGreater(score, generic_score)
+        self.assertIn("目标客群", matches)
+        self.assertIn("痛点需求", matches)
+
+    def test_select_uses_filename_index_before_loading_chunks(self):
+        source_rows = [
+            {
+                "source_id": "source-generic",
+                "display_name": "converted-document.md",
+                "source_kind": "private_file",
+                "trust_tier": "hard_fact",
+                "current_snapshot_id": "snapshot-generic",
+                "metadata": {"upload_filename": "technical-data.pdf"},
+            },
+            {
+                "source_id": "source-business",
+                "display_name": "converted-document.md",
+                "source_kind": "private_file",
+                "trust_tier": "hard_fact",
+                "current_snapshot_id": "snapshot-business",
+                "metadata": {
+                    "upload_filename": "company-business-profile.docx"
+                },
+            },
+        ]
+        chunk_rows = [
+            {
+                "source_id": "source-generic",
+                "display_name": "converted-document.md",
+                "source_kind": "private_file",
+                "trust_tier": "hard_fact",
+                "chunk_id": "chunk-generic",
+                "heading_path": ("Technical data",),
+                "text": "A specification table.",
+                "ordinal": 0,
+            },
+            {
+                "source_id": "source-business",
+                "display_name": "converted-document.md",
+                "source_kind": "private_file",
+                "trust_tier": "hard_fact",
+                "chunk_id": "chunk-business",
+                "heading_path": ("Business profile",),
+                "text": "The company serves commercial buyers.",
+                "ordinal": 0,
+            },
+        ]
+        service = PostgresProjectBusinessProfileService(
+            FakeEngine((source_rows, chunk_rows)),
+            object(),
+            llm=FakeLlm(),
+        )
+
+        chunks = service.select_published_knowledge(project_id="example.com")
+
+        self.assertEqual(
+            [chunk.source_id for chunk in chunks],
+            ["source-business"],
+        )
+        self.assertEqual(chunks[0].file_name, "company-business-profile.docx")
+
     def test_prompt_marks_knowledge_as_untrusted_and_keeps_business_scope(self):
         chunk = PublishedProjectKnowledgeChunk(
             source_id="source-1",
