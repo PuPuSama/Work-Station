@@ -541,6 +541,10 @@ def build_server_outline_prompt(
             task.project_introduction,
             task.include_project_introduction,
         ),
+        "PROJECT_BUSINESS_PROFILE": generation_context_value(
+            getattr(task, "project_business_profile", ""),
+            True,
+        ),
         "PROJECT_NOTES": generation_context_value(
             task.project_notes,
             task.include_project_notes,

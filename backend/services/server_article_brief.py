@@ -114,6 +114,10 @@ def article_brief_input_hash(task: TaskRecord) -> str:
                 ),
                 maximum=20_000,
             ),
+            "project_business_profile": _compact(
+                getattr(task, "project_business_profile", ""),
+                maximum=20_000,
+            ),
             "topic_notes": _compact(
                 generation_context_value(
                     task.topic_notes,
@@ -227,6 +231,10 @@ def build_article_brief_prompt(
             PROJECT_INTRODUCTION=generation_context_value(
                 task.project_introduction,
                 task.include_project_introduction,
+            ),
+            PROJECT_BUSINESS_PROFILE=generation_context_value(
+                getattr(task, "project_business_profile", ""),
+                True,
             ),
             PROJECT_NOTES=generation_context_value(
                 task.project_notes,

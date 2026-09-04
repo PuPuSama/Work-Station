@@ -27,6 +27,7 @@ from models import (
     STATUS_HUMANIZED_READY,
     STATUS_INITIAL_AI_CHECKED,
     AICheck,
+    KnowledgeCoverageStatus,
     SeoReviewChangeDecision,
     SeoReviewPreview,
     TaskRecord,
@@ -136,6 +137,11 @@ from services.server_project_metadata import (
     ServerProjectMetadata,
     ServerProjectMetadataConflict,
     ServerProjectMetadataUnavailable,
+)
+from services.server_project_business_profile import (
+    PostgresProjectBusinessProfileService,
+    ProjectBusinessProfileKnowledgeUnavailable,
+    ProjectBusinessProfileUnavailable,
 )
 from services.server_project_catalog import PostgresServerProjectCatalog
 from services.server_delivery_package import (
@@ -431,6 +437,16 @@ class ProjectRecentTaskResponse(BaseModel):
     updated_at: str
 
 
+class ProjectTaskMetricsResponse(BaseModel):
+    """Small projection for batch article cards."""
+
+    task_id: str
+    revision: int
+    final_ai_rate: float | None = None
+    knowledge_coverage_rate: float | None = None
+    knowledge_coverage_status: KnowledgeCoverageStatus = "not_checked"
+
+
 class ProjectTaskIntakeResponse(BaseModel):
     intake_id: str
     intake_kind: Literal["manual", "row_import"]
@@ -456,6 +472,7 @@ class ProjectMetadataResponse(BaseModel):
     customer_name: str
     official_domain: str
     project_notes: str
+    project_business_profile: str
     revision: int
     owning_team_id: str | None = None
     owner_user_id: str | None = None
@@ -473,6 +490,15 @@ class ProjectMetadataUpdateRequest(BaseModel):
     customer_name: str = Field(min_length=1, max_length=120)
     official_domain: str = Field(min_length=1, max_length=253)
     project_notes: str = Field(default="", max_length=30000)
+    project_business_profile: str | None = Field(
+        default=None,
+        max_length=30000,
+    )
+
+
+class ProjectBusinessProfileDraftResponse(BaseModel):
+    draft: str
+    source_count: int = Field(ge=1)
 
 
 def _project_metadata_response(
@@ -483,6 +509,7 @@ def _project_metadata_response(
         customer_name=metadata.customer_name,
         official_domain=metadata.official_domain,
         project_notes=metadata.project_notes,
+        project_business_profile=metadata.project_business_profile,
         revision=metadata.revision,
         owning_team_id=metadata.owning_team_id,
         owner_user_id=metadata.owner_user_id,
@@ -987,6 +1014,22 @@ def _project_metadata_service(
         raise HTTPException(
             status_code=503,
             detail="Server project metadata is not available.",
+        )
+    return service
+
+
+def _project_business_profile_service(
+    request: Request,
+) -> PostgresProjectBusinessProfileService:
+    service = getattr(
+        request.app.state,
+        "server_project_business_profile",
+        None,
+    )
+    if not isinstance(service, PostgresProjectBusinessProfileService):
+        raise HTTPException(
+            status_code=503,
+            detail="Server project profile service is not available.",
         )
     return service
 
@@ -1574,6 +1617,53 @@ def get_project_metadata(
     return _project_metadata_response(metadata)
 
 
+@router.post(
+    "/{project}/metadata/business-profile-draft",
+    response_model=ProjectBusinessProfileDraftResponse,
+)
+def generate_project_business_profile_draft(
+    project: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> ProjectBusinessProfileDraftResponse:
+    del project
+    _require_project_permission(
+        request,
+        authorized,
+        "article.edit",
+    )
+    try:
+        metadata = _project_metadata_service(request).get(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+        )
+        result = _project_business_profile_service(request).generate_draft(
+            project_id=authorized.project_id,
+            customer_name=metadata.customer_name,
+            official_domain=metadata.official_domain,
+            organization_id=authorized.actor.organization_id,
+            user_id=authorized.actor.user_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="project access denied",
+        ) from exc
+    except ProjectBusinessProfileKnowledgeUnavailable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ProjectBusinessProfileUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project profile draft is temporarily unavailable.",
+        ) from exc
+    return ProjectBusinessProfileDraftResponse(
+        draft=result.draft,
+        source_count=result.source_count,
+    )
+
+
 @router.put(
     "/{project}/metadata",
     response_model=ProjectMetadataResponse,
@@ -1600,6 +1690,7 @@ def update_project_metadata(
             customer_name=payload.customer_name,
             official_domain=payload.official_domain,
             project_notes=payload.project_notes,
+            project_business_profile=payload.project_business_profile,
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -2010,6 +2101,47 @@ def import_project_tasks(
             ),
         )
     )
+
+
+@router.get(
+    "/{project}/tasks/metrics",
+    response_model=list[ProjectTaskMetricsResponse],
+)
+def read_project_task_metrics(
+    project: str,
+    request: Request,
+    task_ids: str = Query(default="", max_length=8000),
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> list[ProjectTaskMetricsResponse]:
+    del project
+    requested_ids = tuple(
+        dict.fromkeys(
+            item.strip()
+            for item in task_ids.split(",")
+            if item.strip()
+        )
+    )
+    if not requested_ids:
+        return []
+    requested = set(requested_ids)
+    tasks = _task_store(request, authorized).load()
+    return [
+        ProjectTaskMetricsResponse(
+            task_id=task.id,
+            revision=task.revision,
+            final_ai_rate=task.final_ai_check.score,
+            knowledge_coverage_rate=(
+                task.knowledge_coverage.sentence_coverage
+                if task.knowledge_coverage.status == "available"
+                else None
+            ),
+            knowledge_coverage_status=task.knowledge_coverage.status,
+        )
+        for task in tasks
+        if task.id in requested
+    ]
 
 
 @router.get(

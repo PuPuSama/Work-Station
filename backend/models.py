@@ -403,6 +403,7 @@ class TaskRecord(WorkflowModel):
     brand_name: str = ""
     project_introduction: str = ""
     project_notes: str = ""
+    project_business_profile: str = ""
     topic_notes: str = ""
     title_generation_instruction: str = ""
     outline_custom_prompt: str = ""

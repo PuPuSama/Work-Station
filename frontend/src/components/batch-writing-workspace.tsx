@@ -21,7 +21,7 @@ import {
   Workflow,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -36,13 +36,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { WorkflowArticleCards } from "@/components/workflow-article-cards";
+import {
+  WorkflowArticleCards,
+  type WorkflowArticleCardMetrics,
+} from "@/components/workflow-article-cards";
 import { ApiError, apiGet, apiPost } from "@/lib/api";
 import { triggerBrowserDownload } from "@/lib/browser-download";
 import { formatProjectDate } from "@/lib/project-date";
 import { WORKFLOW_STEP_LABELS } from "@/lib/workflow-steps";
 import type {
   AccessibleProject,
+  ProjectTaskMetrics,
   WorkflowAssistantBatchDownload,
   WorkflowAssistantBatchPlanHistory,
   WorkflowAssistantConversation,
@@ -125,13 +129,42 @@ function planArticleCounts(plan: WorkflowAssistantPlan): Record<string, number> 
   return counts;
 }
 
-function readyDeliveryCount(plan: WorkflowAssistantPlan): number {
-  return plan.steps.filter(
-    (step) => step.action_kind === "package_delivery"
+function readyArticleCount(plan: WorkflowAssistantPlan): number {
+  const ready = new Set<string>();
+  const artifacts = new Map<string, Set<string>>();
+  for (const step of plan.steps) {
+    if (
+      step.action_kind === "package_delivery"
       && step.status === "succeeded"
+      && step.article_task_id
       && step.output_summary.artifact_kind === "delivery_package"
-      && Boolean(String(step.output_summary.asset_id || "").trim()),
-  ).length;
+      && Boolean(String(step.output_summary.asset_id || "").trim())
+    ) {
+      ready.add(`${step.project_id}:${step.article_task_id}`);
+    }
+    if (
+      step.status !== "succeeded"
+      || !step.article_task_id
+      || !["export_docx", "generate_tdk"].includes(step.action_kind)
+    ) {
+      continue;
+    }
+    const kind = step.action_kind === "export_docx" ? "docx" : "tdk";
+    if (
+      step.output_summary.artifact_kind !== kind
+      || !String(step.output_summary.asset_id || "").trim()
+    ) {
+      continue;
+    }
+    const key = `${step.project_id}:${step.article_task_id}`;
+    const current = artifacts.get(key) || new Set<string>();
+    current.add(kind);
+    artifacts.set(key, current);
+  }
+  for (const [key, kinds] of artifacts) {
+    if (kinds.has("docx") && kinds.has("tdk")) ready.add(key);
+  }
+  return ready.size;
 }
 
 function historyTime(plan: WorkflowAssistantPlanSummary): string {
@@ -141,6 +174,53 @@ function historyTime(plan: WorkflowAssistantPlanSummary): string {
     hour: "2-digit",
     minute: "2-digit",
   }) || "时间未知";
+}
+
+function planTaskIdsByProject(
+  targetPlan: WorkflowAssistantPlan | null,
+): Map<string, string[]> {
+  const taskIdsByProject = new Map<string, string[]>();
+  if (!targetPlan) return taskIdsByProject;
+  for (const step of targetPlan.steps) {
+    const taskId = step.article_task_id?.trim();
+    if (!taskId) continue;
+    const taskIds = taskIdsByProject.get(step.project_id) || [];
+    if (!taskIds.includes(taskId)) taskIds.push(taskId);
+    taskIdsByProject.set(step.project_id, taskIds);
+  }
+  return taskIdsByProject;
+}
+
+function planTaskSignature(targetPlan: WorkflowAssistantPlan | null): string {
+  return Array.from(planTaskIdsByProject(targetPlan).entries())
+    .flatMap(([projectId, taskIds]) => taskIds.map((taskId) => `${projectId}:${taskId}`))
+    .join("|");
+}
+
+async function readPlanTaskMetrics(
+  targetPlan: WorkflowAssistantPlan,
+): Promise<Map<string, WorkflowArticleCardMetrics>> {
+  const metrics = new Map<string, WorkflowArticleCardMetrics>();
+  const taskIdsByProject = planTaskIdsByProject(targetPlan);
+  await Promise.all(
+    Array.from(taskIdsByProject.entries()).map(async ([projectId, taskIds]) => {
+      try {
+        const response = await apiGet<ProjectTaskMetrics[]>(
+          `/api/projects/${encodeURIComponent(projectId)}/tasks/metrics?task_ids=${encodeURIComponent(taskIds.join(","))}`,
+        );
+        for (const item of response) {
+          metrics.set(`${projectId}:${item.task_id}`, {
+            finalAiRate: item.final_ai_rate,
+            knowledgeCoverageRate: item.knowledge_coverage_rate,
+            knowledgeCoverageStatus: item.knowledge_coverage_status,
+          });
+        }
+      } catch {
+        // Keep the cards usable while a metrics read is temporarily unavailable.
+      }
+    }),
+  );
+  return metrics;
 }
 
 export function BatchWritingWorkspace() {
@@ -159,6 +239,10 @@ export function BatchWritingWorkspace() {
   const [historyError, setHistoryError] = useState("");
   const [historyDetailPlan, setHistoryDetailPlan] = useState<WorkflowAssistantPlan | null>(null);
   const [historyPreviewMinimized, setHistoryPreviewMinimized] = useState(false);
+  const [currentPreviewOpen, setCurrentPreviewOpen] = useState(false);
+  const [currentPreviewMinimized, setCurrentPreviewMinimized] = useState(false);
+  const [taskMetrics, setTaskMetrics] = useState<Map<string, WorkflowArticleCardMetrics>>(new Map());
+  const [taskMetricsLoading, setTaskMetricsLoading] = useState(false);
   const [historyPlanPending, setHistoryPlanPending] = useState("");
   const [historyActionPending, setHistoryActionPending] = useState("");
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
@@ -178,8 +262,15 @@ export function BatchWritingWorkspace() {
   );
   const totalArticles = rows.reduce((total, row) => total + row.article_count, 0);
   const selectedPlanCounts = plan ? planArticleCounts(plan) : {};
-  const deliveryReady = plan ? readyDeliveryCount(plan) : 0;
-  const historyDeliveryReady = historyDetailPlan ? readyDeliveryCount(historyDetailPlan) : 0;
+  const deliveryReady = plan ? readyArticleCount(plan) : 0;
+  const historyDeliveryReady = historyDetailPlan ? readyArticleCount(historyDetailPlan) : 0;
+  const previewPlan = currentPreviewOpen && plan ? plan : historyDetailPlan;
+  const previewIsCurrent = Boolean(currentPreviewOpen && plan);
+  const previewMinimized = previewIsCurrent
+    ? currentPreviewMinimized
+    : historyPreviewMinimized;
+  const previewTaskSignature = planTaskSignature(previewPlan);
+  const previewPlanRef = useRef<WorkflowAssistantPlan | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -245,6 +336,37 @@ export function BatchWritingWorkspace() {
       disposed = true;
     };
   }, [historyRefreshKey]);
+
+  useEffect(() => {
+    previewPlanRef.current = previewPlan;
+  }, [previewPlan]);
+
+  useEffect(() => {
+    const targetPlan = previewPlanRef.current;
+    if (!targetPlan || !previewTaskSignature) {
+      setTaskMetrics(new Map());
+      setTaskMetricsLoading(false);
+      return;
+    }
+    const planForMetrics: WorkflowAssistantPlan = targetPlan;
+    let disposed = false;
+    let timer: number | null = null;
+    async function refresh() {
+      setTaskMetricsLoading(true);
+      const nextMetrics = await readPlanTaskMetrics(planForMetrics);
+      if (disposed) return;
+      setTaskMetrics(nextMetrics);
+      setTaskMetricsLoading(false);
+      if (["queued", "running", "waiting_review"].includes(planForMetrics.status)) {
+        timer = window.setTimeout(() => void refresh(), 5_000);
+      }
+    }
+    void refresh();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [previewPlan?.plan_id, previewPlan?.status, previewTaskSignature]);
 
   useEffect(() => {
     if (!plan || !["queued", "running", "waiting_review"].includes(plan.status)) {
@@ -427,6 +549,9 @@ export function BatchWritingWorkspace() {
       const nextPlan = await apiGet<WorkflowAssistantPlan>(
         `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
       );
+      setCurrentPreviewOpen(false);
+      setCurrentPreviewMinimized(false);
+      setTaskMetrics(new Map());
       setHistoryDetailPlan(nextPlan);
       setHistoryPreviewMinimized(false);
     } catch (nextError) {
@@ -436,11 +561,22 @@ export function BatchWritingWorkspace() {
     }
   }
 
+  function openCurrentPreview() {
+    if (!plan) return;
+    setHistoryDetailPlan(null);
+    setHistoryPreviewMinimized(false);
+    setCurrentPreviewOpen(true);
+    setCurrentPreviewMinimized(false);
+    setTaskMetrics(new Map());
+  }
+
   function resetPlan() {
     setPlan(null);
     setRows([]);
     setHistoryDetailPlan(null);
     setHistoryPreviewMinimized(false);
+    setCurrentPreviewOpen(false);
+    setCurrentPreviewMinimized(false);
     setSidebarTab("current");
     setError("");
     window.history.replaceState(null, "", "/batch-writing");
@@ -681,22 +817,6 @@ export function BatchWritingWorkspace() {
             </CardContent>
           </Card>
 
-          {plan && (
-            <Card className="gap-0 py-0">
-              <CardHeader className="border-b px-5 py-5">
-                <CardTitle>文章执行概览</CardTitle>
-                <CardDescription>
-                  每张卡片对应一篇文章；失败或未完成时会标出实际步骤，打开工作台会定位到对应阶段。
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="px-5 py-5">
-                <WorkflowArticleCards
-                  plan={plan}
-                  projectNames={projectNames}
-                />
-              </CardContent>
-            </Card>
-          )}
         </section>
 
         <aside className="grid content-start gap-4">
@@ -885,7 +1005,7 @@ export function BatchWritingWorkspace() {
                 )}
               </div>
               <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-                选题策略：未完成任务优先 → 已发布话题补足。提交后由服务端生成可确认的固定步骤，不调用规划模型。
+                选题策略：未报错的未完成任务优先 → 已发布话题补足；已报错任务不会被自动重试。提交后由服务端生成可确认的固定步骤，不调用规划模型。
               </div>
               {totalArticles > MAX_TOTAL_ARTICLES && (
                 <p className="text-sm text-destructive">当前总数超过 {MAX_TOTAL_ARTICLES} 篇上限。</p>
@@ -910,7 +1030,18 @@ export function BatchWritingWorkspace() {
                     <CardTitle className="truncate">{plan.title}</CardTitle>
                     <CardDescription className="mt-1">Revision {plan.revision} · {plan.steps.length} 个步骤</CardDescription>
                   </div>
-                  <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge variant={statusVariant(plan.status)}>{statusLabels[plan.status]}</Badge>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={openCurrentPreview}
+                    >
+                      <Maximize2 />
+                      打开文章卡片
+                    </Button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="grid gap-4 px-5 py-5">
@@ -960,7 +1091,7 @@ export function BatchWritingWorkspace() {
                 {deliveryReady > 0 && (
                   <Button type="button" variant="outline" onClick={() => void downloadDelivery()} disabled={Boolean(pending)}>
                     {pending === "download" ? <Loader2 className="animate-spin" /> : <Download />}
-                    下载成功的 {deliveryReady} 篇 ZIP
+                    导出成功的 {deliveryReady} 篇 ZIP
                   </Button>
                 )}
                 <details className="rounded-lg border bg-muted/10">
@@ -1002,34 +1133,46 @@ export function BatchWritingWorkspace() {
         </aside>
       </div>
 
-      {historyDetailPlan && (
+      {previewPlan && (
         <section
-          aria-label="历史批次文章预览窗口"
+          aria-label={previewIsCurrent ? "当前批次文章卡片窗口" : "历史批次文章预览窗口"}
           className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center p-4"
         >
-          {historyPreviewMinimized ? (
+          {previewMinimized ? (
             <div className="pointer-events-auto flex w-full max-w-md items-center gap-2 rounded-xl border border-primary/30 bg-card px-3 py-2 shadow-2xl">
-              <History className="size-4 shrink-0 text-primary" />
+              {previewIsCurrent ? (
+                <Layers3 className="size-4 shrink-0 text-primary" />
+              ) : (
+                <History className="size-4 shrink-0 text-primary" />
+              )}
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold">历史批次预览</p>
-                <p className="truncate text-xs text-muted-foreground">{historyDetailPlan.title}</p>
+                <p className="text-xs font-semibold">{previewIsCurrent ? "当前批次文章卡片" : "历史批次预览"}</p>
+                <p className="truncate text-xs text-muted-foreground">{previewPlan.title}</p>
               </div>
               <button
                 type="button"
-                aria-label="展开历史批次预览"
-                title="展开历史批次预览"
-                onClick={() => setHistoryPreviewMinimized(false)}
+                aria-label="展开批次文章预览"
+                title="展开批次文章预览"
+                onClick={() => {
+                  if (previewIsCurrent) setCurrentPreviewMinimized(false);
+                  else setHistoryPreviewMinimized(false);
+                }}
                 className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
                 <Maximize2 className="size-4" />
               </button>
               <button
                 type="button"
-                aria-label="关闭历史批次预览"
-                title="关闭历史批次预览"
+                aria-label="关闭批次文章预览"
+                title="关闭批次文章预览"
                 onClick={() => {
-                  setHistoryDetailPlan(null);
-                  setHistoryPreviewMinimized(false);
+                  if (previewIsCurrent) {
+                    setCurrentPreviewOpen(false);
+                    setCurrentPreviewMinimized(false);
+                  } else {
+                    setHistoryDetailPlan(null);
+                    setHistoryPreviewMinimized(false);
+                  }
                 }}
                 className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
@@ -1041,30 +1184,43 @@ export function BatchWritingWorkspace() {
               <CardHeader className="flex flex-row items-start justify-between gap-3 border-b px-4 py-3">
                 <div className="min-w-0">
                   <CardTitle className="flex items-center gap-2 text-sm">
-                    <History className="size-4 text-primary" />
-                    历史批次文章预览
+                    {previewIsCurrent ? (
+                      <Layers3 className="size-4 text-primary" />
+                    ) : (
+                      <History className="size-4 text-primary" />
+                    )}
+                    {previewIsCurrent ? "当前批次文章卡片" : "历史批次文章预览"}
                   </CardTitle>
                   <CardDescription className="mt-1 truncate text-xs">
-                    {historyDetailPlan.title} · Revision {historyDetailPlan.revision} · 可控制批次
+                    {previewPlan.title} · Revision {previewPlan.revision}
+                    {taskMetricsLoading ? " · 正在同步文章指标" : ""}
                   </CardDescription>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
                     type="button"
-                    aria-label="最小化历史批次预览"
-                    title="最小化历史批次预览"
-                    onClick={() => setHistoryPreviewMinimized(true)}
+                    aria-label="最小化批次文章预览"
+                    title="最小化批次文章预览"
+                    onClick={() => {
+                      if (previewIsCurrent) setCurrentPreviewMinimized(true);
+                      else setHistoryPreviewMinimized(true);
+                    }}
                     className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   >
                     <Minimize2 className="size-4" />
                   </button>
                   <button
                     type="button"
-                    aria-label="关闭历史批次预览"
-                    title="关闭历史批次预览"
+                    aria-label="关闭批次文章预览"
+                    title="关闭批次文章预览"
                     onClick={() => {
-                      setHistoryDetailPlan(null);
-                      setHistoryPreviewMinimized(false);
+                      if (previewIsCurrent) {
+                        setCurrentPreviewOpen(false);
+                        setCurrentPreviewMinimized(false);
+                      } else {
+                        setHistoryDetailPlan(null);
+                        setHistoryPreviewMinimized(false);
+                      }
                     }}
                     className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   >
@@ -1073,9 +1229,10 @@ export function BatchWritingWorkspace() {
                 </div>
               </CardHeader>
               <CardContent className="max-h-[min(72vh,760px)] overflow-y-auto p-4">
-                {renderHistoryActions()}
+                {!previewIsCurrent && renderHistoryActions()}
                 <WorkflowArticleCards
-                  plan={historyDetailPlan}
+                  plan={previewPlan}
+                  taskMetrics={taskMetrics}
                   projectNames={projectNames}
                 />
               </CardContent>

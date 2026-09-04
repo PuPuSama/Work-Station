@@ -251,6 +251,131 @@ class WorkflowAssistantContractTests(unittest.TestCase):
             ["task-ready"],
         )
 
+    def test_batch_delivery_exports_word_and_tdk_before_package_gate(self) -> None:
+        plan = SimpleNamespace(
+            plan_id="plan-partial-artifacts",
+            status="waiting_review",
+            project_ids=("project-a",),
+            steps=(
+                SimpleNamespace(
+                    action_kind="export_docx",
+                    status="succeeded",
+                    article_task_id="task-ready",
+                    project_id="project-a",
+                    output_summary={
+                        "artifact_kind": "docx",
+                        "asset_id": "docx-ready",
+                    },
+                ),
+                SimpleNamespace(
+                    action_kind="generate_tdk",
+                    status="succeeded",
+                    article_task_id="task-ready",
+                    project_id="project-a",
+                    output_summary={
+                        "artifact_kind": "tdk",
+                        "asset_id": "tdk-ready",
+                    },
+                ),
+                SimpleNamespace(
+                    action_kind="package_delivery",
+                    status="waiting_review",
+                    article_task_id="task-ready",
+                    project_id="project-a",
+                    output_summary={},
+                ),
+                SimpleNamespace(
+                    action_kind="package_delivery",
+                    status="failed",
+                    article_task_id="task-failed",
+                    project_id="project-a",
+                    output_summary={},
+                ),
+            ),
+        )
+
+        class Repository:
+            def get_plan(self, **_kwargs):
+                return plan
+
+        class Access:
+            def require(self, _actor, _project_id, _permission):
+                return None
+
+        class Context:
+            def __init__(self):
+                self.access = Access()
+
+        class Store:
+            def get(self, task_id):
+                if task_id != "task-ready":
+                    raise AssertionError(f"unexpected task lookup: {task_id}")
+                return SimpleNamespace(
+                    id="task-ready",
+                    docx_asset_id="docx-ready",
+                    tdk_asset_id="tdk-ready",
+                    delivery_package_asset_id="",
+                )
+
+        class Runtime:
+            def __init__(self):
+                self.store = Store()
+
+        class Factory:
+            def create(self, _request):
+                return Runtime()
+
+        class Objects:
+            def read_for_article_delivery(self, **_kwargs):
+                raise AssertionError("partial article export should be verified by the packer")
+
+            def create_delivery_zip_download_url(self, **_kwargs):
+                return "https://download.invalid/partial.zip"
+
+        class BatchPacker:
+            def __init__(self):
+                self.calls = []
+
+            def package_completed_articles(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(asset_id="partial-batch", content_hash="partial-hash")
+
+        batch_packer = BatchPacker()
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    server_project_task_store_factory=Factory(),
+                    server_project_object_service=Objects(),
+                )
+            )
+        )
+        context = Context()
+        with (
+            patch("workflow_assistant.http._feature_enabled"),
+            patch("workflow_assistant.http._repository", return_value=Repository()),
+            patch("workflow_assistant.http._reauthorize_plan_read"),
+            patch("workflow_assistant.http._context", return_value=context),
+            patch(
+                "workflow_assistant.http.ServerBatchDeliveryPackage",
+                return_value=batch_packer,
+            ),
+        ):
+            response = create_plan_delivery_download(
+                "plan-partial-artifacts",
+                request,  # type: ignore[arg-type]
+                expires_seconds=300,
+                project_id=None,
+                actor=ActorIdentity("org-a", "user-a"),
+            )
+
+        self.assertEqual(response.file_count, 1)
+        self.assertEqual(response.asset_id, "partial-batch")
+        self.assertEqual(len(batch_packer.calls), 1)
+        self.assertEqual(
+            [task.id for task in batch_packer.calls[0]["tasks"]],
+            ["task-ready"],
+        )
+
     def test_batch_delivery_rejects_when_no_successful_package_exists(self) -> None:
         plan = SimpleNamespace(
             plan_id="plan-empty",

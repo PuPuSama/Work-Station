@@ -37,7 +37,7 @@ from services.recovery_evidence import (  # noqa: E402
 
 NOW = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
 RELEASE_COMMIT = "1" * 40
-ALEMBIC_HEAD = "20260901_0034"
+ALEMBIC_HEAD = "20260904_0035"
 
 COMPLETE_ENVIRONMENT = {
     "ARTICLE_AGENT_SERVER_MODE": "true",

@@ -21,6 +21,9 @@ Customer project knowledge:
 Project introduction (company business and other factual background):
 {{PROJECT_INTRODUCTION}}
 
+Company and business profile (background boundary for the article):
+{{PROJECT_BUSINESS_PROFILE}}
+
 Project-wide feedback, notes, and requirements from the operator:
 {{PROJECT_NOTES}}
 

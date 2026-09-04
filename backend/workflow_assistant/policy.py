@@ -521,6 +521,16 @@ def bind_plan_context(
             if task is None:
                 raise AssistantPolicyError("plan references an unavailable article task")
             if (
+                task.blocking_failure_code
+                and (
+                    selected_tasks is None
+                    or step.article_task_id not in selected_tasks
+                )
+            ):
+                raise AssistantPolicyError(
+                    "article task has a blocking failure and must be explicitly selected"
+                )
+            if (
                 _task_is_completed(task)
                 and step.article_task_id not in continuation_task_ids
                 and (

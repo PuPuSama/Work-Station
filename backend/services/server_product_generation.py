@@ -563,6 +563,10 @@ def build_server_product_prompt(
                 task.project_notes,
                 task.include_project_notes,
             ),
+            PROJECT_BUSINESS_PROFILE=generation_context_value(
+                getattr(task, "project_business_profile", ""),
+                True,
+            ),
             PRODUCT_CONTEXT=context_json,
         )
     except Exception as exc:

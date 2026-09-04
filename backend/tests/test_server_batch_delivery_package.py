@@ -7,6 +7,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from zipfile import ZipFile
 
 
@@ -24,6 +25,7 @@ from services.access_control import ActorIdentity  # noqa: E402
 from services.delivery_package import build_delivery_zip_bytes  # noqa: E402
 from services.server_delivery_package import (  # noqa: E402
     ServerBatchDeliveryPackage,
+    ServerDeliveryPackage,
     ServerDeliveryPackageError,
 )
 
@@ -268,6 +270,45 @@ class ServerBatchDeliveryPackageTests(unittest.TestCase):
             [item["project_id"] for item in manifest["items"]],
             ["project-a", "project-b"],
         )
+
+    def test_exports_completed_article_artifacts_without_persisting_package(self) -> None:
+        objects = BatchDeliveryObjects()
+        article_package = build_delivery_zip_bytes(
+            article_docx=b"article",
+            article_filename="Article.docx",
+            tdk_docx=b"tdk",
+            images=[("hero.webp", b"image")],
+        )
+        task = TaskRecord(
+            id="task-ready",
+            week_folder="server",
+            customer="project-a",
+            topic_index=4,
+            topic="Ready article",
+            task_dir="/server/task-ready",
+            docx_asset_id="docx-ready",
+            tdk_asset_id="tdk-ready",
+            created_at="2026-09-03T00:00:00+00:00",
+            updated_at="2026-09-03T00:00:00+00:00",
+        )
+
+        with patch.object(
+            ServerDeliveryPackage,
+            "_build_archive",
+            return_value=article_package,
+        ):
+            asset = ServerBatchDeliveryPackage(objects=objects).package_completed_articles(
+                actor=ActorIdentity("org-a", "user-a"),
+                project_id="project-a",
+                tasks=[task],
+            )
+
+        self.assertEqual(asset.asset_id, objects.uploaded_asset_id)
+        self.assertEqual(objects.read_calls, [])
+        self.assertEqual(task.delivery_package_asset_id, "")
+        with ZipFile(BytesIO(objects.archive)) as archive:
+            self.assertIn("project-a-topic_004/Article.docx", archive.namelist())
+            self.assertIn("project-a-topic_004/D.docx", archive.namelist())
 
     def test_rejects_a_stale_package_identity(self) -> None:
         objects = BatchDeliveryObjects()

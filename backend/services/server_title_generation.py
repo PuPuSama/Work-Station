@@ -36,6 +36,7 @@ from services.generator import (
     load_prompt_template,
     parse_numbered_list,
     primary_keyword,
+    project_business_profile_for_title,
     render_prompt,
     title_generation_config,
 )
@@ -180,6 +181,12 @@ def build_server_title_prompt(
         PROJECT_NOTES=generation_context_value(
             task.project_notes,
             task.include_project_notes,
+        ),
+        PROJECT_BUSINESS_PROFILE=generation_context_value(
+            project_business_profile_for_title(
+                getattr(task, "project_business_profile", "")
+            ),
+            True,
         ),
         CUSTOMER_CONTEXT=published_generation_context_text(
             context_chunks

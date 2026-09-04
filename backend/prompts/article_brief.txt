@@ -7,6 +7,9 @@ Primary keyword: {{PRIMARY_KEYWORD}}
 Project introduction (factual business context):
 {{PROJECT_INTRODUCTION}}
 
+Company and business profile (factual business background):
+{{PROJECT_BUSINESS_PROFILE}}
+
 Project-wide operator notes (requirements and exclusions):
 {{PROJECT_NOTES}}
 

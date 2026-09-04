@@ -316,12 +316,20 @@ def _clear_tdk(task: TaskRecord) -> None:
     task.delivery_package_filename = ""
 
 
-def _clear_export(task: TaskRecord) -> None:
+def _clear_docx(task: TaskRecord) -> None:
     task.docx_path = ""
     task.docx_asset_id = ""
     task.docx_content_hash = ""
     task.docx_filename = ""
     task.legacy_export = False
+    task.delivery_package_path = ""
+    task.delivery_package_asset_id = ""
+    task.delivery_package_content_hash = ""
+    task.delivery_package_filename = ""
+
+
+def _clear_export(task: TaskRecord) -> None:
+    _clear_docx(task)
     _clear_tdk(task)
 
 
@@ -529,7 +537,11 @@ def invalidate_downstream(task: TaskRecord, changed_stage: str) -> TaskRecord:
         task.final_article = ""
         task.final_article_word_count = 0
         task.final_article_hash = ""
-        _clear_export(task)
+        # TDK is derived from the article text, not from the selected image
+        # assets. Keep it available when only the image selection changes,
+        # while invalidating the Word document and delivery ZIP that embed
+        # the old image set.
+        _clear_docx(task)
         task.status = STATUS_LINKS_VERIFIED
     elif stage == "final_article":
         task.article = task.final_article

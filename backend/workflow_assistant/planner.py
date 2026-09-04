@@ -500,7 +500,9 @@ def planner_system_prompt(
         "When the user requests a quantity, prefer existing tasks with status "
         "new before any create_task step. Never reuse a completed or delivered "
         "task, or a task marked manually completed, unless its task ID was "
-        "explicitly selected by the user. Do not "
+        "explicitly selected by the user. Never implicitly reuse a task with "
+        "a blocking_failure_code; it requires an explicit operator retry or "
+        "edit. Do not "
         "reuse the same topic, primary "
         "keyword, or obvious search intent within the requested set. A "
         "create_task step is allowed only when its published_topic_id matches "
@@ -575,7 +577,11 @@ def _planner_input(
                 (
                     task
                     for task in project.tasks
-                    if task.status.casefold() == "new" and not task.manual_completed
+                    if (
+                        task.status.casefold() == "new"
+                        and not task.manual_completed
+                        and not task.blocking_failure_code
+                    )
                 ),
                 key=lambda task: task.task_id,
             )

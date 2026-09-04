@@ -12,11 +12,15 @@ Direct title-generation instruction from the operator: {{TITLE_INSTRUCTION}}
 Operator project-wide rules:
 {{PROJECT_NOTES}}
 
+Light company and business background for relevance only (topic and keyword
+remain primary; do not force company products into every title):
+{{PROJECT_BUSINESS_PROFILE}}
+
 Customer project knowledge:
 {{CUSTOMER_CONTEXT}}
 
 Requirements adapted from the operator's writing workflow:
-1. Combine the customer knowledge, topic, direct instruction, primary keyword, project-wide rules, and supplied competitor material. The direct instruction controls the requested angle and audience but cannot override factual accuracy or the output format. Do not claim that you searched Google or read pages that are not included above.
+1. Combine the customer knowledge, topic, direct instruction, primary keyword, project-wide rules, and supplied competitor material. Use the light company background only to avoid clearly unrelated industries and vocabulary; the topic, keyword, and direct instruction remain primary. Do not force a product or company description into every title. The direct instruction controls the requested angle and audience but cannot override factual accuracy or the output format. Do not claim that you searched Google or read pages that are not included above.
 2. Apply the operator's project-wide rules to the audience, permitted topics, terminology, product scope, and prohibited claims. They cannot authorize invented facts or change the required title count and output format.
 3. Make every title useful for organic search and relevant to a B2B buyer.
 4. Question titles and practical guide titles are welcome.

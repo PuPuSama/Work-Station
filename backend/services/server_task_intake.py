@@ -342,6 +342,7 @@ class PostgresServerTaskIntakeService:
                 projects.c.customer_name,
                 projects.c.official_domain,
                 projects.c.project_notes,
+                projects.c.project_business_profile,
             ).where(
                 projects.c.project_id == self.project_id,
                 projects.c.status == "active",
@@ -407,6 +408,9 @@ class PostgresServerTaskIntakeService:
             or ""
         ).strip()
         inherited_project_notes = str(project["project_notes"] or "").strip()
+        inherited_project_business_profile = str(
+            project["project_business_profile"] or ""
+        ).strip()
 
         timestamp = now_iso()
         tasks: list[TaskRecord] = []
@@ -426,6 +430,7 @@ class PostgresServerTaskIntakeService:
                 brand_name=str(project["customer_name"]),
                 project_introduction=inherited_project_introduction,
                 project_notes=inherited_project_notes,
+                project_business_profile=inherited_project_business_profile,
                 source_key=(
                     f"server:{intake_kind}:{intake_id}:{offset}"
                 ),

@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -29,7 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, apiDelete, apiGet, apiPut } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
 import type { ServerProjectMetadata } from "@/types";
 
 type ServerProjectSettingsProps = {
@@ -39,6 +40,7 @@ type ServerProjectSettingsProps = {
 type MetadataForm = {
   customerName: string;
   officialDomain: string;
+  projectBusinessProfile: string;
   projectNotes: string;
 };
 
@@ -48,6 +50,7 @@ type Feedback = {
   kind: "success" | "error";
   message: string;
   canReload?: boolean;
+  title?: string;
 } | null;
 
 function normalizeCustomerName(value: string) {
@@ -62,6 +65,10 @@ function normalizeProjectNotes(value: string) {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
+function normalizeProjectBusinessProfile(value: string) {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
 function validateForm(form: MetadataForm): {
   errors: FieldErrors;
   normalized: MetadataForm;
@@ -69,6 +76,9 @@ function validateForm(form: MetadataForm): {
   const normalized = {
     customerName: normalizeCustomerName(form.customerName),
     officialDomain: normalizeOfficialDomain(form.officialDomain),
+    projectBusinessProfile: normalizeProjectBusinessProfile(
+      form.projectBusinessProfile,
+    ),
     projectNotes: normalizeProjectNotes(form.projectNotes),
   };
   const errors: FieldErrors = {};
@@ -92,6 +102,10 @@ function validateForm(form: MetadataForm): {
   if (normalized.projectNotes.length > 30000) {
     errors.projectNotes = "项目注意事项不能超过 30000 个字符。";
   }
+  if (normalized.projectBusinessProfile.length > 30000) {
+    errors.projectBusinessProfile =
+      "公司介绍与业务范围不能超过 30000 个字符。";
+  }
   return { errors, normalized };
 }
 
@@ -108,18 +122,21 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
   const [form, setForm] = useState<MetadataForm>({
     customerName: "",
     officialDomain: "",
+    projectBusinessProfile: "",
     projectNotes: "",
   });
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [profileGenerating, setProfileGenerating] = useState(false);
 
   const applyMetadata = useCallback((next: ServerProjectMetadata) => {
     setMetadata(next);
     setForm({
       customerName: next.customer_name,
       officialDomain: next.official_domain,
+      projectBusinessProfile: next.project_business_profile || "",
       projectNotes: next.project_notes,
     });
     setFieldErrors({});
@@ -156,6 +173,8 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
     (normalizeCustomerName(form.customerName) !== metadata.customer_name ||
       normalizeOfficialDomain(form.officialDomain) !==
         metadata.official_domain ||
+      normalizeProjectBusinessProfile(form.projectBusinessProfile) !==
+        metadata.project_business_profile ||
       normalizeProjectNotes(form.projectNotes) !== metadata.project_notes);
 
   function validateField(field: keyof MetadataForm) {
@@ -186,6 +205,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
           revision: metadata.revision,
           customer_name: result.normalized.customerName,
           official_domain: result.normalized.officialDomain,
+          project_business_profile: result.normalized.projectBusinessProfile,
           project_notes: result.normalized.projectNotes,
         },
       );
@@ -205,6 +225,51 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
       });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function generateBusinessProfile() {
+    if (!metadata || profileGenerating || saving || loading) return;
+    if (
+      normalizeProjectBusinessProfile(form.projectBusinessProfile) &&
+      !window.confirm(
+        "自动填写会替换当前公司介绍与业务范围草稿，是否继续？",
+      )
+    ) {
+      return;
+    }
+    setProfileGenerating(true);
+    setFeedback(null);
+    try {
+      const result = await apiPost<{
+        draft: string;
+        source_count: number;
+      }>(
+        `/api/projects/${encodedProject}/metadata/business-profile-draft`,
+      );
+      setForm((current) => ({
+        ...current,
+        projectBusinessProfile: result.draft,
+      }));
+      setFieldErrors((current) => ({
+        ...current,
+        projectBusinessProfile: undefined,
+      }));
+      setFeedback({
+        kind: "success",
+        title: "公司介绍草稿已生成",
+        message: `已根据当前项目的 ${result.source_count} 份已发布知识生成草稿，请核对后点击保存。`,
+      });
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        message: errorMessage(
+          error,
+          "公司介绍草稿生成失败，请确认知识库已有已发布资料后重试。",
+        ),
+      });
+    } finally {
+      setProfileGenerating(false);
     }
   }
 
@@ -234,7 +299,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
               项目身份资料
             </CardTitle>
             <CardDescription className="mt-1 max-w-2xl leading-6">
-              这里维护共享显示名与官方网站。项目 ID 不会被重命名，已有任务继续保留创建时捕获的身份，新任务录入和官网操作使用更新后的资料。
+              这里维护项目身份、公司业务背景和操作注意事项。项目 ID 不会被重命名；新任务会捕获保存时的背景快照，已有任务不会被静默覆盖。
             </CardDescription>
           </div>
           {metadata && (
@@ -247,7 +312,8 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
           <Alert variant={feedback.kind === "error" ? "destructive" : "default"}>
             {feedback.kind === "error" ? <AlertCircle /> : <CheckCircle2 />}
             <AlertTitle>
-              {feedback.kind === "error" ? "项目资料未保存" : "项目资料已更新"}
+              {feedback.title ||
+                (feedback.kind === "error" ? "项目资料未保存" : "项目资料已更新")}
             </AlertTitle>
             <AlertDescription>{feedback.message}</AlertDescription>
             {feedback.kind === "error" && feedback.canReload && (
@@ -348,6 +414,63 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
         </div>
 
         <div className="grid min-w-0 gap-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Label htmlFor="server-project-business-profile">
+              公司介绍与业务范围
+            </Label>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-9"
+              onClick={() => void generateBusinessProfile()}
+              disabled={!metadata || saving || loading || profileGenerating}
+            >
+              {profileGenerating ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Sparkles />
+              )}
+              自动填写
+            </Button>
+          </div>
+          <Textarea
+            id="server-project-business-profile"
+            className="min-h-44 resize-y"
+            value={form.projectBusinessProfile}
+            maxLength={30000}
+            placeholder="例如：公司主要提供什么产品或服务、服务哪些客户、主要应用于哪些场景。"
+            aria-invalid={Boolean(fieldErrors.projectBusinessProfile)}
+            aria-describedby="server-project-business-profile-help"
+            disabled={!metadata || saving || loading || profileGenerating}
+            onChange={(event) => {
+              setForm((current) => ({
+                ...current,
+                projectBusinessProfile: event.target.value,
+              }));
+              setFieldErrors((current) => ({
+                ...current,
+                projectBusinessProfile: undefined,
+              }));
+            }}
+            onBlur={() => validateField("projectBusinessProfile")}
+          />
+          <div
+            id="server-project-business-profile-help"
+            className="flex flex-wrap justify-between gap-2 text-xs text-muted-foreground"
+          >
+            <span
+              className={
+                fieldErrors.projectBusinessProfile ? "text-destructive" : ""
+              }
+            >
+              {fieldErrors.projectBusinessProfile ||
+                "可手动填写，也可从当前项目已发布知识生成草稿。保存后用于限制标题、大纲和正文的业务范围，请人工核对后再保存。"}
+            </span>
+            <span>{form.projectBusinessProfile.length}/30000</span>
+          </div>
+        </div>
+
+        <div className="grid min-w-0 gap-1.5">
           <Label htmlFor="server-project-notes">项目注意事项</Label>
           <Textarea
             id="server-project-notes"
@@ -395,7 +518,9 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
             type="button"
             className="min-h-11 w-full sm:w-auto"
             onClick={() => void saveMetadata()}
-            disabled={!metadata || !dirty || saving || loading}
+            disabled={
+              !metadata || !dirty || saving || loading || profileGenerating
+            }
           >
             {saving ? <Loader2 className="animate-spin" /> : <Save />}
             保存项目资料
@@ -403,7 +528,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
         </div>
 
         <p className="text-xs leading-5 text-muted-foreground">
-          项目注意事项用于给生成流程提供操作约束，不是事实证据；客户事实与产品资料仍应发布到 Knowledge，正式提示词规则仍由 Prompt Snapshot 管理。
+          公司介绍与业务范围是生成背景，不是事实证据；自动填写只读取当前项目已发布 Knowledge 并生成待核对草稿。客户事实与产品资料仍应发布到 Knowledge，正式提示词规则仍由 Prompt Snapshot 管理。
         </p>
       </CardContent>
     </Card>

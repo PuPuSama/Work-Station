@@ -1741,6 +1741,31 @@ class ServerTitleProviderTests(unittest.TestCase):
             excluded_prompt,
         )
 
+    def test_title_prompt_uses_business_profile_as_light_context(self) -> None:
+        task = self._task()
+        task.project_business_profile = (
+            "The company supplies engineered wood flooring for commercial buyers."
+        )
+
+        prompt = build_server_title_prompt(
+            task,
+            title_count=3,
+            context_chunks=(),
+        )
+
+        self.assertIn(
+            "The company supplies engineered wood flooring for commercial buyers.",
+            prompt,
+        )
+        self.assertIn(
+            "Light company and business background for relevance only",
+            prompt,
+        )
+        self.assertIn(
+            "the topic, keyword, and direct instruction remain primary",
+            prompt,
+        )
+
     def test_template_reference_detects_checked_in_prompt_drift(
         self,
     ) -> None:

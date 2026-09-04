@@ -46,6 +46,9 @@ Section-level evidence routing (use the assigned chunks for the matching H2 or p
 Project introduction:
 {{PROJECT_INTRODUCTION}}
 
+Company and business profile (background boundary for the article):
+{{PROJECT_BUSINESS_PROFILE}}
+
 Project-wide notes:
 {{PROJECT_NOTES}}
 

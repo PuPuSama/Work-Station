@@ -473,6 +473,10 @@ class InvalidationTests(unittest.TestCase):
         self.assertEqual(image.status, "pending")
         self.assertEqual(task.docx_path, "")
         self.assertEqual(task.docx_asset_id, "")
+        self.assertEqual(task.tdk_path, "D:/D.docx")
+        self.assertEqual(task.tdk_asset_id, "asset-tdk")
+        self.assertEqual(task.tdk_content_hash, "e" * 64)
+        self.assertEqual(task.tdk_filename, "D.docx")
         self.assertEqual(task.delivery_package_asset_id, "")
 
     def test_final_article_edit_only_invalidates_export(self) -> None:

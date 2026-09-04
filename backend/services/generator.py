@@ -141,6 +141,12 @@ def generate_titles(
             getattr(task, "project_notes", ""),
             getattr(task, "include_project_notes", True),
         ),
+        PROJECT_BUSINESS_PROFILE=generation_context_value(
+            project_business_profile_for_title(
+                getattr(task, "project_business_profile", "")
+            ),
+            True,
+        ),
         CUSTOMER_CONTEXT=collect_customer_context(config, task.customer),
     )
     result = client.chat(
@@ -213,6 +219,10 @@ def build_outline_prompt(
         PROJECT_INTRODUCTION=generation_context_value(
             getattr(task, "project_introduction", ""),
             include_project_introduction,
+        ),
+        PROJECT_BUSINESS_PROFILE=generation_context_value(
+            getattr(task, "project_business_profile", ""),
+            True,
         ),
         PROJECT_NOTES=generation_context_value(
             getattr(task, "project_notes", ""),
@@ -309,6 +319,10 @@ def build_article_prompt(
             getattr(task, "project_introduction", ""),
             include_project_introduction,
         ),
+        PROJECT_BUSINESS_PROFILE=generation_context_value(
+            getattr(task, "project_business_profile", ""),
+            True,
+        ),
         PROJECT_NOTES=generation_context_value(
             getattr(task, "project_notes", ""),
             include_project_notes,
@@ -330,6 +344,18 @@ def generation_context_value(value: object, included: bool) -> str:
         return "[Not included for this generation by the operator.]"
     cleaned = str(value or "").replace("\r\n", "\n").strip()
     return cleaned or "[Not supplied.]"
+
+
+def project_business_profile_for_title(value: object) -> str:
+    """Keep the project profile a deliberately light title-generation signal."""
+
+    cleaned = (
+        str(value or "")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip()
+    )
+    return cleaned[:4_000].rstrip()
 
 
 def _article_brief_prompt_value(task: TaskRecord) -> str:

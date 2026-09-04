@@ -62,6 +62,9 @@ from services.project_directory import PostgresProjectDirectory
 from services.project_memberships import PostgresProjectMembershipService
 from services.project_deletion import PostgresProjectDeletionService
 from services.server_project_metadata import PostgresServerProjectMetadata
+from services.server_project_business_profile import (
+    PostgresProjectBusinessProfileService,
+)
 from services.server_private_document_ingestion import (
     PostgresServerPrivateDocumentIngestion,
 )
@@ -292,6 +295,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_metadata",
         None,
     )
+    previous_server_project_business_profile = getattr(
+        application.state,
+        "server_project_business_profile",
+        None,
+    )
     previous_server_project_memberships = getattr(
         application.state,
         "server_project_memberships",
@@ -459,6 +467,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_task_writing_settings_service_factory = None
     application.state.server_project_directory = None
     application.state.server_project_metadata = None
+    application.state.server_project_business_profile = None
     application.state.server_project_memberships = None
     application.state.server_project_deletion = None
     application.state.server_project_object_service = None
@@ -579,6 +588,13 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_metadata = (
             PostgresServerProjectMetadata(server_engine)
+        )
+        application.state.server_project_business_profile = (
+            PostgresProjectBusinessProfileService(
+                server_engine,
+                cfg,
+                llm_factory=server_llm_client_factory,
+            )
         )
         application.state.server_project_memberships = (
             PostgresProjectMembershipService(server_engine)
@@ -1170,6 +1186,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_metadata = (
                 previous_server_project_metadata
+            )
+            application.state.server_project_business_profile = (
+                previous_server_project_business_profile
             )
             application.state.server_project_memberships = (
                 previous_server_project_memberships

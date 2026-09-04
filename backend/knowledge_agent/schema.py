@@ -20,6 +20,12 @@ projects = sa.Table(
         nullable=False,
         server_default=sa.text("''"),
     ),
+    sa.Column(
+        "project_business_profile",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("''"),
+    ),
     sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'active'")),
     sa.Column(
         "revision",

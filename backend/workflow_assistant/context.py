@@ -8,7 +8,12 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 from knowledge_agent.schema import knowledge_products, knowledge_sources, projects
-from server_schema import project_prompt_defaults, project_topics
+from server_schema import (
+    background_jobs,
+    project_prompt_defaults,
+    project_topics,
+    workflow_plan_steps,
+)
 from services.access_control import (
     ActorIdentity,
     PostgresProjectAccessRepository,
@@ -39,6 +44,11 @@ class AssistantTaskContext:
     title_candidate_count: int = 0
     product_candidate_count: int = 0
     confirmed_product_count: int = 0
+    # A task can be unfinished and still be unsafe to pick up implicitly:
+    # terminal Server Jobs and assistant plan failures are durable evidence
+    # that the last attempt needs operator attention. Explicit task selection
+    # remains available for a deliberate retry.
+    blocking_failure_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +152,7 @@ class AssistantProjectContext:
                     "title_candidate_count": task.title_candidate_count,
                     "product_candidate_count": task.product_candidate_count,
                     "confirmed_product_count": task.confirmed_product_count,
+                    "blocking_failure_code": task.blocking_failure_code,
                 }
                 for task in self.tasks
             ],
@@ -349,6 +360,11 @@ class WorkflowAssistantContextResolver:
                 organization_id=actor.organization_id,
                 project_id=project.project_id,
             ).load_all()
+            blocking_failures = self._blocking_failures(
+                actor=actor,
+                project_id=project.project_id,
+                task_rows=task_rows,
+            )
         except ProjectAccessDenied as exc:
             raise AssistantContextError("project access denied") from exc
         except AssistantContextError:
@@ -375,6 +391,9 @@ class WorkflowAssistantContextResolver:
                     row.get("product_candidate_ids") or ()
                 ),
                 confirmed_product_count=len(row.get("products") or ()),
+                blocking_failure_code=blocking_failures.get(
+                    str(row.get("id") or "")
+                ),
             )
             for row in task_rows
             if str(row.get("id") or "").strip()
@@ -457,6 +476,113 @@ class WorkflowAssistantContextResolver:
             products=products,
             published_topics=published_topics,
         )
+
+    def _blocking_failures(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        task_rows: Sequence[Mapping[str, Any]],
+    ) -> dict[str, str]:
+        """Read current-revision failure evidence without changing Task data.
+
+        Queue failures intentionally live in ``background_jobs`` and fixed
+        workflow failures live in ``workflow_plan_steps``. Neither source is
+        allowed to make an older failure block a task that was subsequently
+        edited: the source revision must still equal the current Task
+        revision. This keeps automatic selection conservative while allowing
+        a deliberate manual edit/retry to make the Task eligible again.
+        """
+
+        current_revisions: dict[str, int] = {}
+        markers: dict[str, str] = {}
+        for row in task_rows:
+            task_id = str(row.get("id") or "").strip()
+            if not task_id:
+                continue
+            try:
+                current_revisions[task_id] = int(row.get("revision") or 0)
+            except (TypeError, ValueError):
+                continue
+            workflow_error = row.get("workflow_error")
+            if not isinstance(workflow_error, Mapping):
+                continue
+            if workflow_error.get("blocking", True) is False:
+                continue
+            code = str(workflow_error.get("code") or "workflow_error").strip()
+            markers[task_id] = code[:120] or "workflow_error"
+
+        task_ids = tuple(current_revisions)
+        if not task_ids:
+            return markers
+
+        with self._engine.connect() as connection:
+            job_rows = connection.execute(
+                sa.select(
+                    background_jobs.c.task_id,
+                    background_jobs.c.operation,
+                    background_jobs.c.status,
+                    background_jobs.c.source_revision,
+                )
+                .where(
+                    background_jobs.c.organization_id == actor.organization_id,
+                    background_jobs.c.project_id == project_id,
+                    background_jobs.c.task_id.in_(task_ids),
+                    background_jobs.c.status.in_(("failed", "conflict")),
+                )
+                .order_by(
+                    background_jobs.c.updated_at.desc(),
+                    background_jobs.c.created_at.desc(),
+                )
+            ).mappings()
+            for row in job_rows:
+                task_id = str(row["task_id"] or "").strip()
+                if task_id in markers or task_id not in current_revisions:
+                    continue
+                try:
+                    source_revision = int(row["source_revision"] or 0)
+                except (TypeError, ValueError):
+                    continue
+                if source_revision != current_revisions[task_id]:
+                    continue
+                operation = str(row["operation"] or "job").strip() or "job"
+                status = str(row["status"] or "failed").strip() or "failed"
+                markers[task_id] = f"background_{operation}_{status}"[:120]
+
+            plan_rows = connection.execute(
+                sa.select(
+                    workflow_plan_steps.c.article_task_id,
+                    workflow_plan_steps.c.expected_task_revision,
+                    workflow_plan_steps.c.standardized_error_code,
+                )
+                .where(
+                    workflow_plan_steps.c.organization_id == actor.organization_id,
+                    workflow_plan_steps.c.project_id == project_id,
+                    workflow_plan_steps.c.article_task_id.in_(task_ids),
+                    workflow_plan_steps.c.status == "failed",
+                )
+                .order_by(workflow_plan_steps.c.updated_at.desc())
+            ).mappings()
+            for row in plan_rows:
+                task_id = str(row["article_task_id"] or "").strip()
+                if task_id in markers or task_id not in current_revisions:
+                    continue
+                expected = row["expected_task_revision"]
+                if expected is None:
+                    continue
+                try:
+                    expected_revision = int(expected)
+                except (TypeError, ValueError):
+                    continue
+                if expected_revision != current_revisions[task_id]:
+                    continue
+                code = (
+                    str(row["standardized_error_code"] or "workflow_step_failed")
+                    .strip()
+                )
+                markers[task_id] = code[:120] or "workflow_step_failed"
+
+        return markers
 
 
 __all__ = [

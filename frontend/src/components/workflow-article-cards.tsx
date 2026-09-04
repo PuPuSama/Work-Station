@@ -11,7 +11,11 @@ import {
   stepSummaryText,
   WORKFLOW_STEP_LABELS,
 } from "@/lib/workflow-steps";
-import type { WorkflowAssistantPlan, WorkflowAssistantStep } from "@/types";
+import type {
+  KnowledgeCoverageCheckRecord,
+  WorkflowAssistantPlan,
+  WorkflowAssistantStep,
+} from "@/types";
 
 type WorkbenchStep = "setup" | "outline" | "draft" | "review" | "delivery";
 
@@ -32,6 +36,12 @@ export type WorkflowArticleCardStatus =
   | "pending"
   | "skipped";
 
+export type WorkflowArticleCardMetrics = {
+  finalAiRate: number | null;
+  knowledgeCoverageRate: number | null;
+  knowledgeCoverageStatus: KnowledgeCoverageCheckRecord["status"];
+};
+
 export type WorkflowArticleCard = {
   key: string;
   projectId: string;
@@ -49,6 +59,9 @@ export type WorkflowArticleCard = {
   focusStepLabel: string | null;
   focusStepStatus: WorkflowAssistantStep["status"] | null;
   workbenchStep: WorkbenchStep;
+  finalAiRate: number | null;
+  knowledgeCoverageRate: number | null;
+  knowledgeCoverageStatus: KnowledgeCoverageCheckRecord["status"];
   steps: WorkflowAssistantStep[];
 };
 
@@ -188,6 +201,7 @@ function focusStepForCard(
 export function buildWorkflowArticleCards(
   plan: WorkflowAssistantPlan,
   taskTopics: ReadonlyMap<string, string> = new Map(),
+  taskMetrics: ReadonlyMap<string, WorkflowArticleCardMetrics> = new Map(),
 ): WorkflowArticleCard[] {
   const packageSteps = plan.steps.filter((step) => step.action_kind === "package_delivery");
   const sourceSteps = packageSteps.length
@@ -215,6 +229,9 @@ export function buildWorkflowArticleCards(
     const taskId = sourceTaskId
       || steps.find((step) => step.article_task_id)?.article_task_id?.trim()
       || null;
+    const metrics = taskId
+      ? taskMetrics.get(`${sourceStep.project_id}:${taskId}`)
+      : undefined;
     const taskTopic = taskId
       ? taskTopics.get(`${sourceStep.project_id}:${taskId}`) || ""
       : "";
@@ -269,6 +286,9 @@ export function buildWorkflowArticleCards(
       focusStepLabel: focusStep ? WORKFLOW_STEP_LABELS[focusStep.action_kind] || focusStep.action_kind : null,
       focusStepStatus: focusStep?.status ?? null,
       workbenchStep: workbenchStepForAction(focusStep?.action_kind || "create_task"),
+      finalAiRate: metrics?.finalAiRate ?? null,
+      knowledgeCoverageRate: metrics?.knowledgeCoverageRate ?? null,
+      knowledgeCoverageStatus: metrics?.knowledgeCoverageStatus ?? "not_checked",
       steps,
     });
   });
@@ -286,16 +306,36 @@ function formatWorkflowArticleCardTime(value: string | null): string {
   }) || "—";
 }
 
+function formatAiRate(value: number | null, taskId: string | null): string {
+  if (!taskId) return "待生成";
+  if (value === null) return "待检测";
+  return `${Number.isInteger(value) ? value : value.toFixed(1)}%`;
+}
+
+function formatKnowledgeCoverage(
+  value: number | null,
+  status: KnowledgeCoverageCheckRecord["status"],
+  taskId: string | null,
+): string {
+  if (!taskId) return "待生成";
+  if (value !== null) return `${Math.round(value * 100)}%`;
+  if (status === "stale") return "需复检";
+  if (status === "unavailable") return "不可用";
+  return "待检查";
+}
+
 export function WorkflowArticleCards({
   plan,
   taskTopics = new Map(),
+  taskMetrics = new Map(),
   projectNames = new Map(),
 }: {
   plan: WorkflowAssistantPlan;
   taskTopics?: ReadonlyMap<string, string>;
+  taskMetrics?: ReadonlyMap<string, WorkflowArticleCardMetrics>;
   projectNames?: ReadonlyMap<string, string>;
 }) {
-  const cards = buildWorkflowArticleCards(plan, taskTopics);
+  const cards = buildWorkflowArticleCards(plan, taskTopics, taskMetrics);
   const [expandedCardKey, setExpandedCardKey] = useState<string | null>(null);
   if (!cards.length) {
     return (
@@ -400,6 +440,22 @@ export function WorkflowArticleCards({
               <div className="min-w-0">
                 <dt className="text-muted-foreground">入口</dt>
                 <dd className="mt-0.5 truncate font-medium">{WORKBENCH_STEP_LABELS[card.workbenchStep]}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">最终 AI 率</dt>
+                <dd className="mt-0.5 truncate font-medium">
+                  {formatAiRate(card.finalAiRate, card.taskId)}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">知识库引用率</dt>
+                <dd className="mt-0.5 truncate font-medium">
+                  {formatKnowledgeCoverage(
+                    card.knowledgeCoverageRate,
+                    card.knowledgeCoverageStatus,
+                    card.taskId,
+                  )}
+                </dd>
               </div>
             </dl>
             {card.errorCode && (

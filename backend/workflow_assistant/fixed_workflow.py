@@ -106,6 +106,7 @@ def _selected_tasks(
                 task
                 for task in by_project.get(project_id, ())
                 if not task.manual_completed
+                and not task.blocking_failure_code
                 and task.status.strip().casefold() not in _COMPLETED_STATUSES
             ),
             key=lambda task: task.task_id,

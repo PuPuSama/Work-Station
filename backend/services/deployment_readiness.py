@@ -31,10 +31,10 @@ from services.server_auth import (
 )
 
 # Keep the signed deployment evidence bound to the schema that the Server
-# runtime actually requires.  The durable assistant dispatch inbox was added
-# in 0033; accepting an older head would let a partially migrated deployment
-# pass the preflight gate and miss the current workflow-plan defaults.
-EXPECTED_ALEMBIC_HEAD = "20260901_0034"
+# runtime actually requires. The project business profile was added in 0035;
+# accepting an older head would let a partially migrated deployment pass the
+# preflight gate while the settings and generation paths disagree.
+EXPECTED_ALEMBIC_HEAD = "20260904_0035"
 
 
 @dataclass(frozen=True, slots=True)

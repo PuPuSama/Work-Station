@@ -435,6 +435,14 @@ export type SeoReviewPreview = {
   structure_valid: boolean;
 };
 
+export type ProjectTaskMetrics = {
+  task_id: string;
+  revision: number;
+  final_ai_rate: number | null;
+  knowledge_coverage_rate: number | null;
+  knowledge_coverage_status: KnowledgeCoverageCheckRecord["status"];
+};
+
 export type TaskRecord = {
   schema_version?: number;
   revision?: number;
@@ -445,6 +453,7 @@ export type TaskRecord = {
   brand_name?: string;
   project_introduction?: string;
   project_notes?: string;
+  project_business_profile?: string;
   topic_notes?: string;
   title_generation_instruction?: string;
   outline_custom_prompt?: string;
@@ -586,6 +595,7 @@ export type ServerProjectMetadata = {
   customer_name: string;
   official_domain: string;
   project_notes: string;
+  project_business_profile: string;
   revision: number;
   owning_team_id?: string | null;
   owner_user_id?: string | null;

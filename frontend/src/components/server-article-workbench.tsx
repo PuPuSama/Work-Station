@@ -593,19 +593,22 @@ export function ServerArticleWorkbench({
     );
   }
 
-  async function exportWordAndDownload() {
+  async function generateOrDownloadWord() {
     if (!task) return;
     const revision = task.revision ?? 0;
+    const wordReady = Boolean(task.docx_asset_id?.trim());
+    if (!wordReady) {
+      await runAction(
+        "生成 Word",
+        () => apiPost<TaskRecord>(`${taskApi}/export-docx`, { revision }),
+        "Word 已生成，请再次点击“导出 Word”下载。",
+      );
+      return;
+    }
     await runAction(
       "导出 Word",
-      async () => {
-        await apiPost<TaskRecord>(`${taskApi}/export-docx`, { revision });
-        await downloadGeneratedArtifact(
-          `${taskApi}/docx/download`,
-          "article.docx",
-        );
-      },
-      "Word 已生成并开始下载，请查看浏览器下载列表。",
+      () => downloadGeneratedArtifact(`${taskApi}/docx/download`, "article.docx"),
+      "Word 下载已开始，请查看浏览器下载列表。",
     );
   }
 
@@ -656,6 +659,7 @@ export function ServerArticleWorkbench({
   const allowed = new Set(task?.allowed_actions || []);
   const editAllowed = canEdit(role, isProjectOwner);
   const reviewAllowed = canReview(role, isProjectOwner);
+  const wordReady = Boolean(task?.docx_asset_id?.trim());
   const hasArticleDraft = Boolean(
     (
       task?.initial_article ||
@@ -2039,16 +2043,16 @@ export function ServerArticleWorkbench({
                     disabled={
                       Boolean(pending) ||
                       !editAllowed ||
-                      !allowed.has("export_docx")
+                      !allowed.has(wordReady ? "download_docx" : "export_docx")
                     }
-                    onClick={() => void exportWordAndDownload()}
+                    onClick={() => void generateOrDownloadWord()}
                   >
-                    {pending === "导出 Word" ? (
+                    {pending === (wordReady ? "导出 Word" : "生成 Word") ? (
                       <Loader2 className="animate-spin" />
                     ) : (
                       <FileText />
                     )}
-                    导出 Word
+                    {wordReady ? "导出 Word" : "生成 Word"}
                   </Button>
                   <Button
                     type="button"

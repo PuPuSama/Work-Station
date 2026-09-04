@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -52,6 +52,7 @@ class ServerProjectMetadata:
     customer_name: str
     official_domain: str
     project_notes: str
+    project_business_profile: str
     revision: int
     owning_team_id: str | None = None
     owner_user_id: str | None = None
@@ -76,6 +77,7 @@ def _validated_metadata(
     customer_name: str,
     official_domain: str,
     project_notes: str,
+    project_business_profile: str = "",
     revision: int,
 ) -> ServerProjectMetadata:
     if isinstance(revision, bool) or not isinstance(revision, int):
@@ -91,11 +93,17 @@ def _validated_metadata(
     normalized_notes = str(project_notes or "").replace("\r\n", "\n").strip()
     if len(normalized_notes) > 30000:
         raise ValueError("project_notes is too long")
+    normalized_business_profile = str(
+        project_business_profile or ""
+    ).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(normalized_business_profile) > 30000:
+        raise ValueError("project_business_profile is too long")
     return ServerProjectMetadata(
         project_id=validated.project_id,
         customer_name=validated.customer_name,
         official_domain=validated.official_domain,
         project_notes=normalized_notes,
+        project_business_profile=normalized_business_profile,
         revision=revision,
     )
 
@@ -103,8 +111,9 @@ def _validated_metadata(
 class PostgresServerProjectMetadata:
     """Read and update shared Project settings without renaming its ID.
 
-    Project notes are operator guidance, not authoritative business evidence.
-    New Tasks capture them during intake; existing Tasks retain their snapshot.
+    Project notes are operator guidance, and the business profile is generation
+    background rather than authoritative business evidence. New Tasks capture
+    both during intake; existing Tasks retain their snapshots.
     """
 
     def __init__(
@@ -125,6 +134,9 @@ class PostgresServerProjectMetadata:
             customer_name=str(row["customer_name"]),
             official_domain=str(row["official_domain"]),
             project_notes=str(row["project_notes"] or ""),
+            project_business_profile=str(
+                row.get("project_business_profile") or ""
+            ),
             revision=int(row["revision"]),
             owning_team_id=(
                 str(row["owning_team_id"])
@@ -153,6 +165,7 @@ class PostgresServerProjectMetadata:
                         projects.c.customer_name,
                         projects.c.official_domain,
                         projects.c.project_notes,
+                        projects.c.project_business_profile,
                         projects.c.revision,
                         project_ownership.c.owning_team_id,
                         project_ownership.c.owner_user_id,
@@ -201,6 +214,7 @@ class PostgresServerProjectMetadata:
             customer_name=identity.customer_name,
             official_domain=identity.official_domain,
             project_notes="",
+            project_business_profile="",
             revision=0,
             owning_team_id=None,
             owner_user_id=None,
@@ -339,6 +353,7 @@ class PostgresServerProjectMetadata:
                     customer_name=requested.customer_name,
                     official_domain=requested.official_domain,
                     project_notes=requested.project_notes,
+                    project_business_profile=requested.project_business_profile,
                     revision=requested.revision,
                     owning_team_id=normalized_team_id,
                     owner_user_id=normalized_owner_user_id,
@@ -408,12 +423,22 @@ class PostgresServerProjectMetadata:
         customer_name: str,
         official_domain: str,
         project_notes: str,
+        project_business_profile: str | None = None,
     ) -> ServerProjectMetadata:
+        normalized_business_profile = (
+            None
+            if project_business_profile is None
+            else str(project_business_profile)
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .strip()
+        )
         requested = _validated_metadata(
             project_id=project_id,
             customer_name=customer_name,
             official_domain=official_domain,
             project_notes=project_notes,
+            project_business_profile=normalized_business_profile or "",
             revision=expected_revision,
         )
         try:
@@ -436,6 +461,7 @@ class PostgresServerProjectMetadata:
                         projects.c.customer_name,
                         projects.c.official_domain,
                         projects.c.project_notes,
+                        projects.c.project_business_profile,
                         projects.c.revision,
                         project_ownership.c.owning_team_id,
                         project_ownership.c.owner_user_id,
@@ -460,6 +486,11 @@ class PostgresServerProjectMetadata:
                     raise ServerProjectMetadataConflict(
                         "project metadata revision changed"
                     )
+                if normalized_business_profile is None:
+                    requested = replace(
+                        requested,
+                        project_business_profile=current.project_business_profile,
+                    )
                 customer_name_changed = (
                     current.customer_name != requested.customer_name
                 )
@@ -469,11 +500,16 @@ class PostgresServerProjectMetadata:
                 project_notes_changed = (
                     current.project_notes != requested.project_notes
                 )
+                project_business_profile_changed = (
+                    current.project_business_profile
+                    != requested.project_business_profile
+                )
                 if not any(
                     (
                         customer_name_changed,
                         official_domain_changed,
                         project_notes_changed,
+                        project_business_profile_changed,
                     )
                 ):
                     return current
@@ -489,6 +525,7 @@ class PostgresServerProjectMetadata:
                         customer_name=requested.customer_name,
                         official_domain=requested.official_domain,
                         project_notes=requested.project_notes,
+                        project_business_profile=requested.project_business_profile,
                         revision=next_revision,
                         updated_at=sa.func.now(),
                     )
@@ -497,6 +534,15 @@ class PostgresServerProjectMetadata:
                     raise ServerProjectMetadataConflict(
                         "project metadata revision changed"
                     )
+                details = {
+                    "from_revision": expected_revision,
+                    "to_revision": next_revision,
+                    "customer_name_changed": customer_name_changed,
+                    "official_domain_changed": official_domain_changed,
+                    "project_notes_changed": project_notes_changed,
+                }
+                if project_business_profile_changed:
+                    details["project_business_profile_changed"] = True
                 self._audit.append(
                     connection,
                     AuditEvent(
@@ -519,15 +565,7 @@ class PostgresServerProjectMetadata:
                         action="project.metadata.updated",
                         target_type="project",
                         target_id=project_id,
-                        details={
-                            "from_revision": expected_revision,
-                            "to_revision": next_revision,
-                            "customer_name_changed": customer_name_changed,
-                            "official_domain_changed": (
-                                official_domain_changed
-                            ),
-                            "project_notes_changed": project_notes_changed,
-                        },
+                        details=details,
                     ),
                 )
                 return ServerProjectMetadata(
@@ -535,6 +573,7 @@ class PostgresServerProjectMetadata:
                     customer_name=requested.customer_name,
                     official_domain=requested.official_domain,
                     project_notes=requested.project_notes,
+                    project_business_profile=requested.project_business_profile,
                     revision=next_revision,
                     owning_team_id=current.owning_team_id,
                     owner_user_id=current.owner_user_id,

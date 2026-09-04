@@ -2093,9 +2093,10 @@ def create_plan_delivery_download(
             )
 
         # A partial plan is still allowed to produce a useful delivery ZIP.
-        # Keep only package steps with a verified delivery asset; failed or
-        # unfinished article lanes must not prevent successful articles from
-        # being downloaded together.
+        # A package step may still be waiting for its final human gate even
+        # though the article Word and TDK artifacts are already complete. Keep
+        # both forms of success so failed or unfinished lanes do not hide
+        # downloadable articles from the operator.
         ready_package_steps = [
             step
             for step in package_steps
@@ -2107,7 +2108,46 @@ def create_plan_delivery_download(
                 and bool(str(step.output_summary.get("asset_id") or "").strip())
             )
         ]
-        if not ready_package_steps:
+        ready_package_by_task = {
+            (step.project_id.strip(), str(step.article_task_id).strip()): str(
+                step.output_summary.get("asset_id") or ""
+            ).strip()
+            for step in ready_package_steps
+            if step.project_id.strip() and str(step.article_task_id or "").strip()
+        }
+        article_artifacts: dict[tuple[str, str], dict[str, str]] = {}
+        for step in plan.steps:
+            if (
+                step.status != "succeeded"
+                or not step.article_task_id
+                or step.action_kind not in {"export_docx", "generate_tdk"}
+            ):
+                continue
+            artifact_kind = str(step.output_summary.get("artifact_kind") or "").strip()
+            asset_id = str(step.output_summary.get("asset_id") or "").strip()
+            expected_kind = "docx" if step.action_kind == "export_docx" else "tdk"
+            key = (step.project_id.strip(), str(step.article_task_id).strip())
+            if (
+                key[0]
+                and key[1]
+                and artifact_kind == expected_kind
+                and asset_id
+            ):
+                article_artifacts.setdefault(key, {})[expected_kind] = asset_id
+        partial_article_refs = {
+            key
+            for key, artifacts in article_artifacts.items()
+            if artifacts.get("docx") and artifacts.get("tdk")
+        }
+        ready_article_refs: list[tuple[str, str]] = []
+        for key in (
+            list(ready_package_by_task)
+            + [key for key in article_artifacts if key in partial_article_refs]
+        ):
+            if key not in ready_article_refs:
+                ready_article_refs.append(key)
+
+        if not ready_article_refs:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -2124,12 +2164,15 @@ def create_plan_delivery_download(
                 detail="project_id 不能为空。",
             )
         if requested_project_id is not None:
-            ready_package_steps = [
-                step
-                for step in ready_package_steps
-                if step.project_id.strip() == requested_project_id
+            ready_article_refs = [
+                key
+                for key in ready_article_refs
+                if key[0] == requested_project_id
             ]
-            if not ready_package_steps:
+            partial_article_refs = {
+                key for key in partial_article_refs if key in ready_article_refs
+            }
+            if not ready_article_refs:
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -2140,9 +2183,9 @@ def create_plan_delivery_download(
                     },
                 )
         package_project_ids = {
-            step.project_id.strip()
-            for step in ready_package_steps
-            if step.project_id.strip()
+            source_project_id
+            for source_project_id, _task_id in ready_article_refs
+            if source_project_id
         }
         if not package_project_ids:
             raise HTTPException(
@@ -2186,15 +2229,13 @@ def create_plan_delivery_download(
         tasks = []
         task_project_ids: dict[str, str] = {}
         seen_task_ids: set[str] = set()
-        for step in ready_package_steps:
-            task_id = str(step.article_task_id or "").strip()
+        for source_project_id, task_id in ready_article_refs:
             if not task_id or task_id in seen_task_ids:
                 raise HTTPException(
                     status_code=409,
                     detail="批量交付包中的文章任务标识无效或重复。",
                 )
             seen_task_ids.add(task_id)
-            source_project_id = step.project_id.strip()
             runtime = runtimes.get(source_project_id)
             if runtime is None:
                 raise HTTPException(
@@ -2208,14 +2249,26 @@ def create_plan_delivery_download(
                     status_code=409,
                     detail="批量交付包引用的文章任务已不存在。",
                 ) from exc
-            output_asset_id = str(
-                step.output_summary.get("asset_id") or ""
-            ).strip()
-            if task.delivery_package_asset_id.strip() != output_asset_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail="文章交付包已发生变化，请刷新计划后重试。",
-                )
+            key = (source_project_id, task_id)
+            if key in partial_article_refs:
+                artifacts = article_artifacts[key]
+                if (
+                    str(getattr(task, "docx_asset_id", "") or "").strip()
+                    != artifacts["docx"]
+                    or str(getattr(task, "tdk_asset_id", "") or "").strip()
+                    != artifacts["tdk"]
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="文章 Word 或 TDK 已发生变化，请刷新计划后重试。",
+                    )
+            else:
+                output_asset_id = ready_package_by_task[key]
+                if task.delivery_package_asset_id.strip() != output_asset_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="文章交付包已发生变化，请刷新计划后重试。",
+                    )
             tasks.append(task)
             task_project_ids[task_id] = source_project_id
 
@@ -2230,12 +2283,21 @@ def create_plan_delivery_download(
                 detail="Server project object storage is not available.",
             )
         anchor_project_id = sorted(package_project_ids)[0]
-        asset = ServerBatchDeliveryPackage(objects=object_service).package(
-            actor=actor,
-            project_id=anchor_project_id,
-            tasks=tasks,
-            task_project_ids=task_project_ids,
-        )
+        batch_packer = ServerBatchDeliveryPackage(objects=object_service)
+        if partial_article_refs:
+            asset = batch_packer.package_completed_articles(
+                actor=actor,
+                project_id=anchor_project_id,
+                tasks=tasks,
+                task_project_ids=task_project_ids,
+            )
+        else:
+            asset = batch_packer.package(
+                actor=actor,
+                project_id=anchor_project_id,
+                tasks=tasks,
+                task_project_ids=task_project_ids,
+            )
         filename = (
             f"{official_website_folder_name(anchor_project_id)}-batch-delivery.zip"
             if requested_project_id is not None

@@ -161,6 +161,47 @@ class ServerDeliveryPackage:
         project_id: str,
         task: TaskRecord,
     ) -> TaskRecord:
+        archive = self._build_archive(
+            actor=actor,
+            project_id=project_id,
+            task=task,
+        )
+        digest = hashlib.sha256(archive).hexdigest()
+        asset = self._objects.upload_delivery_zip(
+            actor=actor,
+            project_id=project_id,
+            asset_id=f"asset_{digest}",
+            data=archive,
+        )
+        if (
+            asset.content_hash != digest
+            or asset.content_type != "application/zip"
+            or str(asset.metadata.get("artifact_kind") or "")
+            != DELIVERY_ZIP_ARTIFACT_KIND
+        ):
+            raise ServerDeliveryPackageError(
+                "stored delivery ZIP identity is inconsistent"
+            )
+
+        task.delivery_package_path = ""
+        task.delivery_package_asset_id = asset.asset_id
+        task.delivery_package_content_hash = asset.content_hash
+        task.delivery_package_filename = (
+            f"{official_website_folder_name(project_id)}-"
+            f"topic_{task.topic_index:03d}.zip"
+        )
+        task.workflow_error = None
+        return task
+
+    def _build_archive(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        task: TaskRecord,
+    ) -> bytes:
+        """Build a delivery archive without uploading or mutating the Task."""
+
         screenshot_deferred = (
             task.final_ai_check.deferred
             and not task.final_ai_check.confirmed
@@ -292,30 +333,7 @@ class ServerDeliveryPackage:
             raise ServerDeliveryPackageError(
                 "generated delivery ZIP exceeds the delivery limit"
             )
-
-        digest = hashlib.sha256(archive).hexdigest()
-        asset = self._objects.upload_delivery_zip(
-            actor=actor,
-            project_id=project_id,
-            asset_id=f"asset_{digest}",
-            data=archive,
-        )
-        if (
-            asset.content_hash != digest
-            or asset.content_type != "application/zip"
-            or str(asset.metadata.get("artifact_kind") or "")
-            != DELIVERY_ZIP_ARTIFACT_KIND
-        ):
-            raise ServerDeliveryPackageError(
-                "stored delivery ZIP identity is inconsistent"
-            )
-
-        task.delivery_package_path = ""
-        task.delivery_package_asset_id = asset.asset_id
-        task.delivery_package_content_hash = asset.content_hash
-        task.delivery_package_filename = delivery_filename
-        task.workflow_error = None
-        return task
+        return archive
 
 
 def _safe_batch_component(value: object, fallback: str) -> str:
@@ -350,6 +368,73 @@ def _safe_batch_member_name(value: str) -> str:
             "batch delivery contains an unsafe archive path"
         )
     return normalized
+
+
+class _GeneratedDeliveryObjectService:
+    """Expose in-memory article archives to the batch repacker.
+
+    Partial batch export must not create per-article delivery assets just to
+    assemble a ZIP. The generated archives are verified in memory and only
+    the final aggregate is uploaded through the real object service.
+    """
+
+    def __init__(
+        self,
+        *,
+        delegate: ServerDeliveryObjectService,
+        archives: Mapping[tuple[str, str], tuple[str, bytes]],
+    ) -> None:
+        self._delegate = delegate
+        self._archives = archives
+
+    def read_for_article_delivery(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        max_bytes: int,
+    ) -> ProjectKnowledgeObject:
+        generated = self._archives.get((project_id, asset_id))
+        if generated is None:
+            return self._delegate.read_for_article_delivery(
+                actor=actor,
+                project_id=project_id,
+                asset_id=asset_id,
+                max_bytes=max_bytes,
+            )
+        content_hash, data = generated
+        if len(data) > max_bytes:
+            raise ServerDeliveryPackageError(
+                "generated delivery ZIP exceeds the delivery limit"
+            )
+        return ProjectKnowledgeObject(
+            asset=KnowledgeAsset(
+                project_id=project_id,
+                asset_id=asset_id,
+                content_hash=content_hash,
+                artifact_uri=f"https://generated.invalid/{asset_id}",
+                content_type="application/zip",
+                byte_size=len(data),
+                metadata={"artifact_kind": DELIVERY_ZIP_ARTIFACT_KIND},
+            ),
+            data=data,
+        )
+
+    def upload_delivery_zip(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        asset_id: str,
+        data: bytes,
+    ) -> KnowledgeAsset:
+        return self._delegate.upload_delivery_zip(
+            actor=actor,
+            project_id=project_id,
+            asset_id=asset_id,
+            data=data,
+        )
 
 
 class ServerBatchDeliveryPackage:
@@ -623,6 +708,84 @@ class ServerBatchDeliveryPackage:
                 "stored batch delivery ZIP identity is inconsistent"
             )
         return asset
+
+    def package_completed_articles(
+        self,
+        *,
+        actor: ActorIdentity,
+        project_id: str,
+        tasks: list[TaskRecord] | tuple[TaskRecord, ...],
+        task_project_ids: Mapping[str, str] | None = None,
+    ) -> KnowledgeAsset:
+        """Export articles whose Word and TDK artifacts are already ready.
+
+        The normal workflow still keeps its human-gated per-article delivery
+        step. This read/export path is intentionally separate: it verifies
+        the current article assets and assembles a partial aggregate without
+        marking any Task as delivered or releasing that gate.
+        """
+
+        normalized_tasks = list(tasks)
+        if not normalized_tasks:
+            raise ServerDeliveryPackageError(
+                "at least one completed article is required"
+            )
+        if len(normalized_tasks) > MAX_SERVER_BATCH_DELIVERY_TASKS:
+            raise ServerDeliveryPackageError(
+                "batch delivery contains too many articles"
+            )
+
+        archives: dict[tuple[str, str], tuple[str, bytes]] = {}
+        prepared_tasks: list[TaskRecord] = []
+        for task in normalized_tasks:
+            if not isinstance(task, TaskRecord):
+                raise ServerDeliveryPackageError(
+                    "partial batch delivery requires Server Tasks"
+                )
+            task_id = str(task.id or "").strip()
+            source_project_id = str(
+                (task_project_ids or {}).get(task_id, project_id) or ""
+            ).strip()
+            if not task_id or not source_project_id:
+                raise ServerDeliveryPackageError(
+                    "partial batch delivery contains an invalid Task identity"
+                )
+            archive = ServerDeliveryPackage(
+                objects=self._objects
+            )._build_archive(
+                actor=actor,
+                project_id=source_project_id,
+                task=task,
+            )
+            digest = hashlib.sha256(archive).hexdigest()
+            asset_id = f"asset_{digest}"
+            key = (source_project_id, asset_id)
+            existing = archives.get(key)
+            if existing is not None and existing[0] != digest:
+                raise ServerDeliveryPackageError(
+                    f"partial batch delivery contains duplicate Task identity {task_id}"
+                )
+            archives[key] = (digest, archive)
+
+            prepared = task.model_copy(deep=True)
+            prepared.delivery_package_asset_id = asset_id
+            prepared.delivery_package_content_hash = digest
+            prepared.delivery_package_filename = (
+                f"{official_website_folder_name(source_project_id)}-"
+                f"topic_{max(0, int(task.topic_index)):03d}.zip"
+            )
+            prepared_tasks.append(prepared)
+
+        generated_objects = _GeneratedDeliveryObjectService(
+            delegate=self._objects,
+            archives=archives,
+        )
+        return ServerBatchDeliveryPackage(objects=generated_objects).package(
+            actor=actor,
+            project_id=project_id,
+            tasks=prepared_tasks,
+            task_project_ids=task_project_ids,
+        )
 
 
 __all__ = [

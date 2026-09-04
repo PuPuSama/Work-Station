@@ -31,6 +31,7 @@ def _task(
     product_candidates: int = 0,
     confirmed_products: int = 0,
     manual_completed: bool = False,
+    blocking_failure_code: str | None = None,
 ) -> AssistantTaskContext:
     return AssistantTaskContext(
         task_id=task_id,
@@ -44,6 +45,7 @@ def _task(
         product_candidate_count=product_candidates,
         confirmed_product_count=confirmed_products,
         manual_completed=manual_completed,
+        blocking_failure_code=blocking_failure_code,
     )
 
 
@@ -234,6 +236,50 @@ class FixedArticleWorkflowTests(unittest.TestCase):
             {step.article_task_id for step in plan.steps},
             {"task-a"},
         )
+
+    def test_no_selection_skips_task_with_a_blocking_failure(self) -> None:
+        plan = build_fixed_article_plan(
+            "写一篇文章",
+            _context(
+                _task("failed-task", blocking_failure_code="background_products_failed"),
+                _task("new-task"),
+            ),
+        )
+
+        self.assertEqual(
+            {step.article_task_id for step in plan.steps},
+            {"new-task"},
+        )
+
+    def test_explicit_selection_can_deliberately_retry_a_failed_task(self) -> None:
+        plan = build_fixed_article_plan(
+            "重试这篇文章",
+            _context(
+                _task("failed-task", blocking_failure_code="background_products_failed"),
+            ),
+            selected_task_ids=("failed-task",),
+            selection_locked=True,
+        )
+
+        self.assertEqual(
+            {step.article_task_id for step in plan.steps},
+            {"failed-task"},
+        )
+
+    def test_policy_rejects_implicit_retry_of_a_blocked_task(self) -> None:
+        plan = build_fixed_article_plan(
+            "写一篇文章",
+            _context(
+                _task("failed-task", blocking_failure_code="background_products_failed"),
+            ),
+            selected_task_ids=("failed-task",),
+            selection_locked=True,
+        )
+
+        with self.assertRaisesRegex(AssistantPolicyError, "blocking failure"):
+            bind_plan_context(plan, context=_context(
+                _task("failed-task", blocking_failure_code="background_products_failed"),
+            ))
 
     def test_structured_counts_build_the_requested_matrix_without_natural_language(self) -> None:
         context = AssistantWorkspaceContext(
