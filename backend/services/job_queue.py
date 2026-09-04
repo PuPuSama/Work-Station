@@ -7,6 +7,8 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
 
+from services.job_admission import JobAdmissionController
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +55,11 @@ class JobQueueBackend(Protocol):
         limit: int,
         operations: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]: ...
+
+    def has_pending_jobs(
+        self,
+        operations: Iterable[str] | None = None,
+    ) -> bool: ...
 
     def is_cancel_requested(self, job_id: str) -> bool: ...
 
@@ -124,12 +131,23 @@ class BatchJobRunner:
         poll_seconds: float = 0.4,
         operations: Iterable[str] | None = None,
         lease_renewal_seconds: float | None = None,
+        admission_controller: JobAdmissionController | None = None,
+        idle_shutdown_seconds: float | None = None,
     ) -> None:
         self.queue = queue
         self.handler = handler
         self.concurrency = max(1, int(concurrency))
         self.poll_seconds = poll_seconds
         self.operations = tuple(dict.fromkeys(operations or ()))
+        if idle_shutdown_seconds is not None and idle_shutdown_seconds <= 0:
+            raise ValueError("idle_shutdown_seconds must be greater than zero")
+        self._idle_shutdown_seconds = (
+            None
+            if idle_shutdown_seconds is None
+            else float(idle_shutdown_seconds)
+        )
+        self._admission_controller = admission_controller
+        self._admission_scope = self._queue_scope(queue)
         if lease_renewal_seconds is not None:
             if lease_renewal_seconds <= 0:
                 raise ValueError("lease_renewal_seconds must be greater than zero")
@@ -146,20 +164,40 @@ class BatchJobRunner:
                 0.5,
                 min(60.0, lease_seconds / 3.0),
             )
-        self._executor = ThreadPoolExecutor(
-            max_workers=self.concurrency,
-            thread_name_prefix="article-server-job",
-        )
+        self._executor: ThreadPoolExecutor | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._shutdown_requested = threading.Event()
         self._wake = threading.Event()
         self._guard = threading.Lock()
         self._futures: set[Future[Any]] = set()
 
+    @staticmethod
+    def _queue_scope(queue: JobQueueBackend) -> tuple[str, str] | None:
+        organization_id = str(getattr(queue, "organization_id", "") or "").strip()
+        project_id = str(getattr(queue, "project_id", "") or "").strip()
+        if not organization_id or not project_id:
+            return None
+        return organization_id, project_id
+
+    @property
+    def running(self) -> bool:
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive())
+
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if self.running or self._shutdown_requested.is_set():
             return
-        self.queue.recover_interrupted(self.operations)
+        with self._guard:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self.concurrency,
+                thread_name_prefix="article-server-job",
+            )
+        try:
+            self.queue.recover_interrupted(self.operations)
+        except Exception:
+            self._shutdown_executor(wait=False)
+            raise
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._dispatch_loop,
@@ -169,12 +207,24 @@ class BatchJobRunner:
         self._thread.start()
 
     def wake(self) -> None:
+        if not self._shutdown_requested.is_set() and not self.running:
+            try:
+                self.start()
+            except Exception as exc:
+                # Enqueue has already committed the durable Job. A temporary
+                # restart/recovery failure must not turn that successful
+                # enqueue into a request failure; the next wake retries it.
+                LOGGER.warning(
+                    "job runner restart failed; durable work remains queued (%s)",
+                    type(exc).__name__,
+                )
         self._wake.set()
 
     def stop(self, *, timeout_seconds: float = 10.0) -> BatchJobRunnerStopReport:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
         deadline = time.monotonic() + timeout_seconds
+        self._shutdown_requested.set()
         self._stop.set()
         self._wake.set()
         if self._thread:
@@ -187,7 +237,7 @@ class BatchJobRunner:
             futures,
             timeout=max(0.0, deadline - time.monotonic()),
         )
-        self._executor.shutdown(wait=not pending, cancel_futures=False)
+        self._shutdown_executor(wait=not pending)
         with self._guard:
             self._futures = {future for future in self._futures if not future.done()}
             remaining_jobs = len(self._futures)
@@ -197,9 +247,27 @@ class BatchJobRunner:
             remaining_jobs=remaining_jobs,
         )
 
+    def _shutdown_executor(self, *, wait: bool) -> None:
+        with self._guard:
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=False)
+
+    def _release_admission(self) -> None:
+        if self._admission_controller is None or self._admission_scope is None:
+            return
+        self._admission_controller.release(
+            self._admission_scope[0],
+            self._admission_scope[1],
+        )
+
     def _dispatch_loop(self) -> None:
         retry_delay = 0.5
+        idle_since: float | None = None
         while not self._stop.is_set():
+            claimed_jobs: list[dict[str, Any]] = []
+            reservation = 0
             try:
                 with self._guard:
                     self._futures = {
@@ -207,12 +275,90 @@ class BatchJobRunner:
                         for future in self._futures
                         if not future.done()
                     }
-                    available = self.concurrency - len(self._futures)
-                for job in self.queue.claim_jobs(available, self.operations):
-                    future = self._executor.submit(self._run_job, job)
+                    local_available = self.concurrency - len(self._futures)
+                available = max(0, local_available)
+                available = max(0, available)
+                if (
+                    available > 0
+                    and self._admission_controller is not None
+                    and self._admission_scope is not None
+                ):
+                    reservation = self._admission_controller.reserve(
+                        self._admission_scope[0],
+                        self._admission_scope[1],
+                        available,
+                    )
+                    available = reservation
+                if available > 0:
+                    claimed_jobs = self.queue.claim_jobs(
+                        available,
+                        self.operations,
+                    )
+                if reservation > len(claimed_jobs):
+                    self._admission_controller.release(
+                        self._admission_scope[0],
+                        self._admission_scope[1],
+                        reservation - len(claimed_jobs),
+                    )
+                    reservation = len(claimed_jobs)
+                executor = self._executor
+                if executor is None:
+                    break
+                for job in claimed_jobs:
+                    future = executor.submit(
+                        self._run_job,
+                        job,
+                        bool(reservation),
+                    )
+                    if reservation:
+                        reservation -= 1
                     with self._guard:
                         self._futures.add(future)
+                if reservation:
+                    self._admission_controller.release(
+                        self._admission_scope[0],
+                        self._admission_scope[1],
+                        reservation,
+                    )
+                    reservation = 0
+                if (
+                    self._idle_shutdown_seconds is not None
+                    and not claimed_jobs
+                ):
+                    with self._guard:
+                        has_active_futures = bool(self._futures)
+                    if has_active_futures:
+                        idle_since = None
+                    else:
+                        has_pending = getattr(
+                            self.queue,
+                            "has_pending_jobs",
+                            None,
+                        )
+                        pending = (
+                            bool(has_pending(self.operations))
+                            if callable(has_pending)
+                            else False
+                        )
+                        if pending:
+                            idle_since = None
+                        elif idle_since is None:
+                            idle_since = time.monotonic()
+                        elif (
+                            time.monotonic() - idle_since
+                            >= self._idle_shutdown_seconds
+                        ):
+                            self._stop.set()
+                            break
+                else:
+                    idle_since = None
             except Exception as exc:
+                if reservation:
+                    self._admission_controller.release(
+                        self._admission_scope[0],
+                        self._admission_scope[1],
+                        reservation,
+                    )
                 # A transient PostgreSQL/connection-pool failure must not
                 # terminate the only dispatcher thread. Jobs already claimed
                 # by the database remain durable and will be recovered by the
@@ -233,10 +379,23 @@ class BatchJobRunner:
                 retry_delay = min(retry_delay * 2, 10.0)
                 continue
             retry_delay = 0.5
-            self._wake.wait(self.poll_seconds)
-            self._wake.clear()
+            if (
+                local_available > 0
+                and available == 0
+                and self._admission_controller is not None
+            ):
+                self._admission_controller.wait_for_capacity(
+                    min(max(self.poll_seconds * 4, 1.0), 2.0)
+                )
+            else:
+                wait_seconds = self.poll_seconds
+                if available == 0:
+                    wait_seconds = min(max(self.poll_seconds * 2, 1.0), 2.0)
+                self._wake.wait(wait_seconds)
+                self._wake.clear()
+        self._shutdown_executor(wait=True)
 
-    def _run_job(self, job: dict[str, Any]) -> None:
+    def _run_job(self, job: dict[str, Any], admitted: bool = False) -> None:
         job_id = str(job["id"])
         user_cancelled = lambda: self.queue.is_cancel_requested(job_id)
         should_stop = lambda: self._stop.is_set() or user_cancelled()
@@ -302,6 +461,8 @@ class BatchJobRunner:
                 heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1.0)
+            if admitted:
+                self._release_admission()
             self.wake()
 
 

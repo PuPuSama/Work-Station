@@ -2125,22 +2125,19 @@ def read_project_task_metrics(
     )
     if not requested_ids:
         return []
-    requested = set(requested_ids)
-    tasks = _task_store(request, authorized).load()
+    metrics = _task_store(request, authorized).load_metrics(requested_ids)
     return [
         ProjectTaskMetricsResponse(
-            task_id=task.id,
-            revision=task.revision,
-            final_ai_rate=task.final_ai_check.score,
-            knowledge_coverage_rate=(
-                task.knowledge_coverage.sentence_coverage
-                if task.knowledge_coverage.status == "available"
-                else None
+            task_id=str(item["task_id"]),
+            revision=int(item["revision"]),
+            final_ai_rate=item.get("final_ai_rate"),
+            knowledge_coverage_rate=item.get("knowledge_coverage_rate"),
+            knowledge_coverage_status=item.get(
+                "knowledge_coverage_status",
+                "not_checked",
             ),
-            knowledge_coverage_status=task.knowledge_coverage.status,
         )
-        for task in tasks
-        if task.id in requested
+        for item in metrics
     ]
 
 

@@ -137,7 +137,7 @@ class YamlOverlayTests(unittest.TestCase):
             root = Path(temporary)
             (root / "config.yaml").write_text(
                 BASE_CONFIG
-                + "\nserver_jobs:\n  project_concurrency: 5\n",
+                + "\nserver_jobs:\n  global_concurrency: 9\n  project_concurrency: 5\n",
                 encoding="utf-8",
             )
 
@@ -151,6 +151,7 @@ class YamlOverlayTests(unittest.TestCase):
             ):
                 config = load_config()
                 self.assertEqual(config.workflow_assistant_max_concurrency, 5)
+                self.assertEqual(config.global_job_concurrency, 9)
                 self.assertEqual(config.project_job_concurrency, 5)
 
             with patch.dict(
@@ -159,10 +160,13 @@ class YamlOverlayTests(unittest.TestCase):
                     "ARTICLE_AGENT_ROOT": str(root),
                     "ARTICLE_AGENT_CONFIG": "config.yaml",
                     "ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY": "7",
+                    "ARTICLE_AGENT_GLOBAL_JOB_CONCURRENCY": "11",
                 },
                 clear=True,
             ):
-                self.assertEqual(load_config().project_job_concurrency, 7)
+                config = load_config()
+                self.assertEqual(config.project_job_concurrency, 7)
+                self.assertEqual(config.global_job_concurrency, 11)
 
     def test_overlay_deep_merges_the_shared_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

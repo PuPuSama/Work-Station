@@ -81,6 +81,7 @@ from services.server_auth import (
     load_server_actor_session_codec,
     server_mode_enabled,
 )
+from services.job_admission import configure_process_job_admission
 from services.server_request_security import (
     ServerRequestSecurity,
     ServerRequestUnauthenticated,
@@ -451,6 +452,7 @@ async def app_lifespan(application: FastAPI):
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.article_agent_config = cfg
+    application.state.server_job_admission = None
     application.state.workflow_assistant_repository = None
     application.state.workflow_assistant_context = None
     application.state.workflow_assistant_planner = None
@@ -496,6 +498,10 @@ async def app_lifespan(application: FastAPI):
     application.state.server_llm_settings = None
     application.state.server_llm_client_factory = None
     if server_mode:
+        application.state.server_job_admission = configure_process_job_admission(
+            global_limit=cfg.global_job_concurrency,
+            project_limit=cfg.project_job_concurrency,
+        )
         codec = load_server_actor_session_codec()
         server_settings = load_knowledge_agent_settings(
             enabled=False,

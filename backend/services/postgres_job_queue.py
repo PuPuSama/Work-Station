@@ -402,6 +402,34 @@ class PostgresJobQueue:
                     claimed.append(self._job_dict(current_row))
         return claimed
 
+    def has_pending_jobs(
+        self,
+        operations: Iterable[str] | None = None,
+    ) -> bool:
+        """Return whether queued work remains, including future retries."""
+
+        selected_operations = tuple(dict.fromkeys(operations or ()))
+        conditions: list[sa.ColumnElement[bool]] = [
+            *self._job_scope(),
+            background_jobs.c.status.in_(("queued", "retry_wait")),
+            background_jobs.c.cancel_requested.is_(False),
+        ]
+        if selected_operations:
+            conditions.append(
+                background_jobs.c.operation.in_(selected_operations)
+            )
+        with self._engine.connect() as connection:
+            return bool(
+                connection.execute(
+                    sa.select(
+                        sa.literal(True)
+                    )
+                    .select_from(background_jobs)
+                    .where(*conditions)
+                    .limit(1)
+                ).scalar_one_or_none()
+            )
+
     def list_claim_candidates(
         self,
         limit: int,

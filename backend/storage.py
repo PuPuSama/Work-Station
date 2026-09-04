@@ -292,6 +292,42 @@ class TaskStore:
                 return []
             return self.repository.load_recent(limit)
 
+    def load_metrics(self, task_ids: Iterable[str]) -> list[dict[str, Any]]:
+        with _TASK_STORE_LOCK:
+            if not self.repository.is_initialized():
+                return []
+            loader = getattr(self.repository, "load_metrics", None)
+            if callable(loader):
+                return loader(task_ids)
+            requested = {
+                str(task_id).strip()
+                for task_id in task_ids
+                if str(task_id).strip()
+            }
+            result: list[dict[str, Any]] = []
+            for payload in self.repository.load_all():
+                task_id = str(payload.get("id") or "")
+                if task_id not in requested:
+                    continue
+                final_ai = payload.get("final_ai_check") or {}
+                coverage = payload.get("knowledge_coverage") or {}
+                result.append(
+                    {
+                        "task_id": task_id,
+                        "revision": int(payload.get("revision") or 0),
+                        "final_ai_rate": final_ai.get("score"),
+                        "knowledge_coverage_rate": (
+                            coverage.get("sentence_coverage")
+                            if coverage.get("status") == "available"
+                            else None
+                        ),
+                        "knowledge_coverage_status": (
+                            coverage.get("status") or "not_checked"
+                        ),
+                    }
+                )
+            return result
+
     def save(self, tasks: Iterable[TaskRecord]) -> None:
         with _TASK_STORE_LOCK:
             self._write_records(tasks)

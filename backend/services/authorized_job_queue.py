@@ -10,6 +10,10 @@ from services.access_control import (
     ProjectPermission,
 )
 from services.job_queue import BatchJobRunner, JobConflict
+from services.job_admission import (
+    JobAdmissionController,
+    process_job_admission,
+)
 from services.postgres_job_queue import PostgresJobQueue
 
 
@@ -135,6 +139,12 @@ class AuthorizedPostgresJobQueue:
                 continue
         return claimed
 
+    def has_pending_jobs(
+        self,
+        operations: Iterable[str] | None = None,
+    ) -> bool:
+        return self._queue.has_pending_jobs(operations)
+
     def is_cancel_requested(self, job_id: str) -> bool:
         return self._queue.is_cancel_requested(job_id)
 
@@ -213,6 +223,7 @@ def authorized_batch_runner(
     access: ProjectAccessService,
     operations: Iterable[str],
     concurrency: int = DEFAULT_PROJECT_JOB_CONCURRENCY,
+    admission_controller: JobAdmissionController | None = None,
 ) -> BatchJobRunner:
     """Build the only allowed Server runner with both authorization checks."""
 
@@ -224,11 +235,18 @@ def authorized_batch_runner(
     normalized_concurrency = int(concurrency)
     if not 1 <= normalized_concurrency <= 32:
         raise ValueError("concurrency must be between 1 and 32")
+    controller = (
+        admission_controller
+        if admission_controller is not None
+        else process_job_admission()
+    )
     return BatchJobRunner(
         AuthorizedPostgresJobQueue(queue, access=access),
         ReauthorizingJobHandler(handler, access=access),
         concurrency=normalized_concurrency,
         operations=normalized,
+        admission_controller=controller,
+        idle_shutdown_seconds=(30.0 if controller is not None else None),
     )
 
 

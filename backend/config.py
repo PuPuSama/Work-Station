@@ -210,6 +210,7 @@ class AppConfig:
     workflow_assistant_gap_fill_enabled: bool
     workflow_assistant_max_concurrency: int
     workflow_assistant_soft_budget_tokens: int
+    global_job_concurrency: int
     project_job_concurrency: int
     database_pool_size: int = 20
     database_max_overflow: int = 20
@@ -283,6 +284,12 @@ def load_config() -> AppConfig:
             *available_reasoning_efforts,
         )
 
+    project_job_concurrency = _environment_int(
+        "ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY",
+        int(server_jobs.get("project_concurrency", 5)),
+        minimum=1,
+        maximum=32,
+    )
     return AppConfig(
         topic_library=_configured_path(paths["topic_library"], root=root),
         knowledge_base=_configured_path(paths["knowledge_base"], root=root),
@@ -346,12 +353,13 @@ def load_config() -> AppConfig:
             minimum=1000,
             maximum=1_000_000,
         ),
-        project_job_concurrency=_environment_int(
-            "ARTICLE_AGENT_PROJECT_JOB_CONCURRENCY",
-            int(server_jobs.get("project_concurrency", 5)),
+        global_job_concurrency=_environment_int(
+            "ARTICLE_AGENT_GLOBAL_JOB_CONCURRENCY",
+            int(server_jobs.get("global_concurrency", 8)),
             minimum=1,
-            maximum=32,
+            maximum=128,
         ),
+        project_job_concurrency=project_job_concurrency,
         database_pool_size=_environment_int(
             "ARTICLE_AGENT_DB_POOL_SIZE",
             20,

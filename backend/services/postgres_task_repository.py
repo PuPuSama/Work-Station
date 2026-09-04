@@ -167,6 +167,78 @@ class PostgresTaskRepository:
                 for row in rows
             ]
 
+    def load_metrics(self, task_ids: Iterable[str]) -> list[dict[str, Any]]:
+        """Read only the fields used by batch progress cards.
+
+        The full Task payload contains article bodies, image metadata, prompt
+        snapshots, and export state. Loading it for a five-second progress
+        refresh made a small metrics request scale with the size of every
+        task in the project.
+        """
+
+        normalized_ids = tuple(
+            dict.fromkeys(
+                _required_text(str(task_id), "task_id")
+                for task_id in task_ids
+            )
+        )
+        if not normalized_ids:
+            return []
+        final_ai_rate = (
+            article_tasks.c.payload["final_ai_check"]["score"]
+            .astext.cast(sa.Float)
+            .label("final_ai_rate")
+        )
+        coverage_rate = (
+            article_tasks.c.payload["knowledge_coverage"]["sentence_coverage"]
+            .astext.cast(sa.Float)
+            .label("knowledge_coverage_rate")
+        )
+        coverage_status = (
+            article_tasks.c.payload["knowledge_coverage"]["status"]
+            .astext
+            .label("knowledge_coverage_status")
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(
+                sa.select(
+                    article_tasks.c.task_id,
+                    article_tasks.c.revision,
+                    final_ai_rate,
+                    coverage_rate,
+                    coverage_status,
+                )
+                .where(
+                    *self._scope(),
+                    article_tasks.c.task_id.in_(normalized_ids),
+                )
+                .order_by(article_tasks.c.position, article_tasks.c.task_id)
+            ).mappings()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                status = str(
+                    row["knowledge_coverage_status"] or "not_checked"
+                )
+                result.append(
+                    {
+                        "task_id": str(row["task_id"]),
+                        "revision": int(row["revision"] or 0),
+                        "final_ai_rate": (
+                            None
+                            if row["final_ai_rate"] is None
+                            else float(row["final_ai_rate"])
+                        ),
+                        "knowledge_coverage_rate": (
+                            None
+                            if status != "available"
+                            or row["knowledge_coverage_rate"] is None
+                            else float(row["knowledge_coverage_rate"])
+                        ),
+                        "knowledge_coverage_status": status,
+                    }
+                )
+            return result
+
     def get(self, task_id: str) -> dict[str, Any] | None:
         normalized_task_id = _required_text(task_id, "task_id")
         with self._engine.connect() as connection:

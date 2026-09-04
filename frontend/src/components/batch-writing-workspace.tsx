@@ -246,6 +246,9 @@ export function BatchWritingWorkspace() {
   const [historyPlanPending, setHistoryPlanPending] = useState("");
   const [historyActionPending, setHistoryActionPending] = useState("");
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const planPollInFlightRef = useRef(false);
+  const planPollDelayRef = useRef(2500);
+  const planPollPlanIdRef = useRef("");
 
   const projectById = useMemo(
     () => new Map(projects.map((project) => [project.project_id, project])),
@@ -352,6 +355,10 @@ export function BatchWritingWorkspace() {
     let disposed = false;
     let timer: number | null = null;
     async function refresh() {
+      if (document.visibilityState === "hidden") {
+        timer = window.setTimeout(() => void refresh(), 15_000);
+        return;
+      }
       setTaskMetricsLoading(true);
       const nextMetrics = await readPlanTaskMetrics(planForMetrics);
       if (disposed) return;
@@ -369,26 +376,63 @@ export function BatchWritingWorkspace() {
   }, [previewPlan?.plan_id, previewPlan?.status, previewTaskSignature]);
 
   useEffect(() => {
-    if (!plan || !["queued", "running", "waiting_review"].includes(plan.status)) {
+    const planId = plan?.plan_id || "";
+    const planStatus = plan?.status || "";
+    if (!planId || !["queued", "running", "waiting_review"].includes(planStatus)) {
       return;
     }
+    if (planPollPlanIdRef.current !== planId) {
+      planPollPlanIdRef.current = planId;
+      planPollDelayRef.current = 2500;
+    }
     let disposed = false;
-    const timer = window.setTimeout(() => {
-      void apiGet<WorkflowAssistantPlan>(
-        `/api/workflow-assistant/plans/${encodeURIComponent(plan.plan_id)}`,
-      )
-        .then((nextPlan) => {
-          if (!disposed) setPlan(nextPlan);
-        })
-        .catch(() => {
-          // Keep the current durable plan visible during a temporary poll failure.
-        });
-    }, 2500);
+    let timer: number | null = null;
+    const schedule = (delay: number) => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => void refresh(), delay);
+    };
+    async function refresh() {
+      if (disposed) return;
+      if (document.visibilityState === "hidden") {
+        schedule(10_000);
+        return;
+      }
+      if (planPollInFlightRef.current) {
+        schedule(1_000);
+        return;
+      }
+      planPollInFlightRef.current = true;
+      try {
+        const nextPlan = await apiGet<WorkflowAssistantPlan>(
+          `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
+        );
+        if (!disposed) {
+          planPollDelayRef.current = 2500;
+          setPlan(nextPlan);
+        }
+      } catch {
+        planPollDelayRef.current = Math.min(
+          planPollDelayRef.current * 2,
+          15_000,
+        );
+      } finally {
+        planPollInFlightRef.current = false;
+        if (!disposed) schedule(planPollDelayRef.current);
+      }
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        schedule(0);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedule(planPollDelayRef.current);
     return () => {
       disposed = true;
-      window.clearTimeout(timer);
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [plan]);
+  }, [plan?.plan_id, plan?.status]);
 
   function toggleProject(projectId: string, checked: boolean) {
     setRows((current) => {
