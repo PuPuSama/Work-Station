@@ -288,7 +288,7 @@ export function BatchWritingWorkspace() {
           apiGet<AccessibleProject[]>("/api/projects"),
           planId
             ? apiGet<WorkflowAssistantPlan>(
-              `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
+              `/api/workflow-assistant/plans/${encodeURIComponent(planId)}?view=overview`,
             )
             : Promise.resolve(null),
         ]);
@@ -404,7 +404,7 @@ export function BatchWritingWorkspace() {
       planPollInFlightRef.current = true;
       try {
         const nextPlan = await apiGet<WorkflowAssistantPlan>(
-          `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
+          `/api/workflow-assistant/plans/${encodeURIComponent(planId)}?view=overview`,
         );
         if (!disposed) {
           planPollDelayRef.current = 2500;
@@ -591,7 +591,7 @@ export function BatchWritingWorkspace() {
     setHistoryError("");
     try {
       const nextPlan = await apiGet<WorkflowAssistantPlan>(
-        `/api/workflow-assistant/plans/${encodeURIComponent(planId)}`,
+        `/api/workflow-assistant/plans/${encodeURIComponent(planId)}?view=overview`,
       );
       setCurrentPreviewOpen(false);
       setCurrentPreviewMinimized(false);

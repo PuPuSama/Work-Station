@@ -1141,6 +1141,16 @@ class PostgresWorkflowAssistantRepository:
                 raise WorkflowAssistantNotFound("plan not found")
             return result
 
+    def get_plan_overview(self, *, actor: ActorIdentity, plan_id: str) -> WorkflowPlan:
+        """Load the public batch-page projection without private snapshots."""
+
+        plan_id = _required(plan_id, "plan_id")
+        with self._engine.connect() as connection:
+            result = self._get_plan_overview_in_connection(connection, actor, plan_id)
+            if result is None:
+                raise WorkflowAssistantNotFound("plan not found")
+            return result
+
     def get_latest_plan_for_conversation(
         self,
         *,
@@ -3598,6 +3608,101 @@ class PostgresWorkflowAssistantRepository:
             updated_at=row["updated_at"],
         )
 
+    def _get_plan_overview_in_connection(
+        self,
+        connection: Connection,
+        actor: ActorIdentity,
+        plan_id: str,
+    ) -> WorkflowPlan | None:
+        """Load only fields required by the batch progress-card view."""
+
+        row = connection.execute(
+            sa.select(
+                workflow_plans.c.organization_id,
+                workflow_plans.c.plan_id,
+                workflow_plans.c.creator_user_id,
+                workflow_plans.c.conversation_id,
+                workflow_plans.c.natural_language_request,
+                workflow_plans.c.normalized_plan["title"].astext.label("title"),
+                workflow_plans.c.plan_hash,
+                workflow_plans.c.revision,
+                workflow_plans.c.status,
+                workflow_plans.c.concurrency_limit,
+                workflow_plans.c.budget_warning,
+                workflow_plans.c.attention_state,
+                workflow_plans.c.approved_by,
+                workflow_plans.c.approved_at,
+            ).where(
+                workflow_plans.c.organization_id == actor.organization_id,
+                workflow_plans.c.creator_user_id == actor.user_id,
+                workflow_plans.c.plan_id == plan_id,
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            return None
+        project_rows = connection.execute(
+            sa.select(
+                workflow_plan_projects.c.project_id,
+                workflow_plan_projects.c.paused,
+            )
+            .where(
+                workflow_plan_projects.c.organization_id == actor.organization_id,
+                workflow_plan_projects.c.plan_id == plan_id,
+            )
+            .order_by(workflow_plan_projects.c.project_id)
+        ).mappings().all()
+        step_rows = connection.execute(
+            sa.select(
+                workflow_plan_steps.c.step_id,
+                workflow_plan_steps.c.sequence,
+                workflow_plan_steps.c.action_kind,
+                workflow_plan_steps.c.project_id,
+                workflow_plan_steps.c.article_task_id,
+                workflow_plan_steps.c.status,
+                workflow_plan_steps.c.background_job_id,
+                workflow_plan_steps.c.retry_count,
+                workflow_plan_steps.c.hard_gate,
+                workflow_plan_steps.c.human_gate_confirmed,
+                workflow_plan_steps.c.input_summary,
+                workflow_plan_steps.c.output_summary,
+                workflow_plan_steps.c.standardized_error_code,
+                workflow_plan_steps.c.updated_at,
+            )
+            .where(
+                workflow_plan_steps.c.organization_id == actor.organization_id,
+                workflow_plan_steps.c.plan_id == plan_id,
+            )
+            .order_by(workflow_plan_steps.c.sequence)
+        ).mappings().all()
+        title = str(row["title"] or "Workflow plan")
+        return WorkflowPlan(
+            organization_id=str(row["organization_id"]),
+            plan_id=str(row["plan_id"]),
+            creator_user_id=str(row["creator_user_id"]),
+            conversation_id=str(row["conversation_id"]),
+            title=title,
+            natural_language_request=str(row["natural_language_request"]),
+            normalized_plan={"title": title},
+            plan_hash=str(row["plan_hash"]),
+            revision=int(row["revision"]),
+            status=str(row["status"]),
+            project_ids=tuple(str(value["project_id"]) for value in project_rows),
+            paused_project_ids=tuple(
+                str(value["project_id"])
+                for value in project_rows
+                if bool(value["paused"])
+            ),
+            steps=tuple(
+                self._step_from_row(item, include_private=False)
+                for item in step_rows
+            ),
+            concurrency_limit=int(row["concurrency_limit"]),
+            budget_warning=bool(row["budget_warning"]),
+            attention_state=str(row["attention_state"]),
+            approved_by=(str(row["approved_by"]) if row["approved_by"] else None),
+            approved_at=row["approved_at"],
+        )
+
     @staticmethod
     def _conversation_from_row(
         row: RowMapping,
@@ -3661,16 +3766,32 @@ class PostgresWorkflowAssistantRepository:
         )
 
     @staticmethod
-    def _step_from_row(row: RowMapping) -> WorkflowPlanStep:
+    def _step_from_row(
+        row: RowMapping,
+        *,
+        include_private: bool = True,
+    ) -> WorkflowPlanStep:
         return WorkflowPlanStep(
             step_id=str(row["step_id"]),
             sequence=int(row["sequence"]),
             action_kind=str(row["action_kind"]),
             project_id=str(row["project_id"]),
             article_task_id=(str(row["article_task_id"]) if row["article_task_id"] else None),
-            expected_task_revision=(int(row["expected_task_revision"]) if row["expected_task_revision"] is not None else None),
-            pinned_prompt_version=_json_dict(row["pinned_prompt_version"]),
-            pinned_knowledge_snapshot=_json_dict(row["pinned_knowledge_snapshot"]),
+            expected_task_revision=(
+                int(row["expected_task_revision"])
+                if include_private and row["expected_task_revision"] is not None
+                else None
+            ),
+            pinned_prompt_version=(
+                _json_dict(row["pinned_prompt_version"])
+                if include_private
+                else {}
+            ),
+            pinned_knowledge_snapshot=(
+                _json_dict(row["pinned_knowledge_snapshot"])
+                if include_private
+                else {}
+            ),
             status=str(row["status"]),
             background_job_id=(str(row["background_job_id"]) if row["background_job_id"] else None),
             retry_count=int(row["retry_count"]),

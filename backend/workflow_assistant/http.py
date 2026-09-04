@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -2042,17 +2042,30 @@ def append_message(
 def get_plan(
     plan_id: str,
     request: Request,
+    view: Literal["full", "overview"] = Query(default="full"),
     actor: ActorIdentity = Depends(require_server_actor),
 ) -> WorkflowPlanResponse:
     _feature_enabled(request)
     try:
-        plan = _repository(request).get_plan(actor=actor, plan_id=plan_id)
+        repository = _repository(request)
+        plan = (
+            repository.get_plan_overview(actor=actor, plan_id=plan_id)
+            if view == "overview"
+            else repository.get_plan(actor=actor, plan_id=plan_id)
+        )
         _reauthorize_plan_read(request, actor=actor, plan=plan)
         if plan.attention_state == "unread":
-            plan = _repository(request).mark_plan_seen(
+            plan = repository.mark_plan_seen(
                 actor=actor,
                 plan_id=plan.plan_id,
             )
+            if view == "overview":
+                plan = repository.get_plan_overview(
+                    actor=actor,
+                    plan_id=plan.plan_id,
+                )
+            else:
+                plan = repository.get_plan(actor=actor, plan_id=plan.plan_id)
         return _plan_response(plan)
     except Exception as exc:
         raise _error(exc) from exc
