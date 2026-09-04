@@ -404,6 +404,12 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "/api/projects/project-a/metadata",
             )
         )
+        self.assertTrue(
+            server_http_route_available(
+                "POST",
+                "/api/projects/project-a/metadata/business-profile-draft",
+            )
+        )
         self.assertFalse(
             server_http_route_available(
                 "POST",
