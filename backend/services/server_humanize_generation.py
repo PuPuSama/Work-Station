@@ -10,10 +10,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import AppConfig
+from services.server_generation_checks import (
+    checkpoint_generated_copy, finish_generation_checks, resume_generated_copy,
+)
 from models import (
     STATUS_HUMANIZED_READY,
     STATUS_FINAL_AI_CHECKED,
-    AICheck,
     ArticleVersion,
     PromptSnapshot,
     TaskRecord,
@@ -154,6 +156,12 @@ class HumanizeGenerationUnavailable(RuntimeError):
     """The scoped Humanize runner cannot safely complete work."""
 
 
+class HumanizeGenerationInvalid(HumanizeGenerationUnavailable):
+    """Content rejection must not restart the entire generation job."""
+
+    retryable = False
+
+
 class HumanizeLlmClient(Protocol):
     @property
     def ready(self) -> bool: ...
@@ -255,11 +263,13 @@ class LlmServerHumanizeProvider:
         user_id: str,
         source_article: str,
         prompt_snapshot: PromptSnapshot,
+        single_pass: bool = False,
     ) -> str:
         return self.generate(
             task,
             source_article=source_article,
             prompt_snapshot=prompt_snapshot,
+            single_pass=single_pass,
             organization_id=organization_id,
             user_id=user_id,
         )
@@ -270,6 +280,7 @@ class LlmServerHumanizeProvider:
         *,
         source_article: str,
         prompt_snapshot: PromptSnapshot,
+        single_pass: bool = False,
         organization_id: str = "",
         user_id: str = "",
     ) -> str:
@@ -308,7 +319,7 @@ class LlmServerHumanizeProvider:
                 },
             ]
             candidate = ""
-            for initial_attempt in range(3):
+            for initial_attempt in range(1 if single_pass else 3):
                 attempt_messages = messages
                 if initial_attempt:
                     attempt_messages = [
@@ -365,6 +376,8 @@ class LlmServerHumanizeProvider:
                 source_words >= ARTICLE_TARGET_MIN
                 and not HUMANIZE_ACCEPT_MIN <= candidate_words <= HUMANIZE_ACCEPT_MAX
             ):
+                if single_pass:
+                    raise ArticleStructureError("single-pass result is outside the accepted word range")
                 best_candidate = candidate
                 best_words = candidate_words
                 for correction_attempt in range(6):
@@ -474,7 +487,7 @@ class LlmServerHumanizeProvider:
         except HumanizeGenerationUnavailable:
             raise
         except ArticleStructureError:
-            raise HumanizeGenerationUnavailable(
+            raise HumanizeGenerationInvalid(
                 "humanize provider returned an invalid result"
             ) from None
         except PromptTemplateError:
@@ -583,6 +596,9 @@ class ServerHumanizeGenerationHandler:
         source_revision = int(job.get("source_revision") or 0)
         request = dict(job.get("request") or {})
         reference = ProjectPromptReference.from_mapping(request)
+        single_pass = request.get("single_pass", False)
+        if not isinstance(single_pass, bool):
+            raise JobConflict("humanize single-pass option is invalid")
         source_hash = str(
             request.get("source_article_hash") or ""
         ).strip()
@@ -599,6 +615,12 @@ class ServerHumanizeGenerationHandler:
         if payload is None:
             raise JobConflict("source task is unavailable")
         task = TaskRecord.model_validate(payload)
+        if resume_generated_copy(task, job):
+            return finish_generation_checks(
+                task, job, engine=self._engine, audit=self._audit,
+                ai_rate=self._ai_rate, knowledge_coverage=self._knowledge_coverage,
+                cancelled=cancelled,
+            )
         if task.revision != source_revision:
             raise JobConflict("source task revision changed")
         source_article, _rehumanizing = _source_article(task)
@@ -618,6 +640,9 @@ class ServerHumanizeGenerationHandler:
         _validate_prompt(prompt)
         if cancelled():
             raise JobCancelled("humanize cancelled before provider call")
+        if single_pass and int(job.get("attempts") or 1) > 1:
+            raise HumanizeGenerationInvalid("single-pass humanize execution was interrupted; review before retrying")
+        provider_options = {"single_pass": True} if single_pass else {}
         generate_for_organization = getattr(
             self._provider,
             "generate_for_organization",
@@ -630,12 +655,14 @@ class ServerHumanizeGenerationHandler:
                 user_id=requester,
                 source_article=source_article,
                 prompt_snapshot=prompt,
+                **provider_options,
             )
         else:
             candidate = self._provider.generate(
                 task,
                 source_article=source_article,
                 prompt_snapshot=prompt,
+                **provider_options,
             )
         if cancelled():
             raise JobCancelled("humanize cancelled before result commit")
@@ -646,54 +673,8 @@ class ServerHumanizeGenerationHandler:
             candidate=candidate,
         )
         if cancelled():
-            raise JobCancelled(
-                "humanize cancelled before AI-rate detection"
-            )
-        checked_at = now_iso()
-        article_hash = task.humanized_article_hash
-        if self._ai_rate is None or not self._ai_rate.ready:
-            task.final_ai_check = AICheck(
-                confirmed=False,
-                report=(
-                    "ZeroGPT 自动复检未运行：服务端尚未配置 API Key。"
-                ),
-                provider="zerogpt",
-                checked_at=checked_at,
-                article_hash=article_hash,
-            )
-        else:
-            try:
-                detection = self._ai_rate.detect(task.humanized_article)
-            except Exception:
-                task.final_ai_check = AICheck(
-                    confirmed=False,
-                    report=(
-                        "ZeroGPT 自动复检暂时不可用，请稍后重试或保留截图人工确认。"
-                    ),
-                    provider="zerogpt",
-                    checked_at=checked_at,
-                    article_hash=article_hash,
-                )
-            else:
-                task.final_ai_check = AICheck(
-                    confirmed=False,
-                    score=detection.ai_percentage,
-                    report=detection.report,
-                    provider="zerogpt",
-                    checked_at=checked_at,
-                    article_hash=article_hash,
-                )
-        if self._knowledge_coverage is not None:
-            self._knowledge_coverage.evaluate_task(
-                task,
-                organization_id=organization_id,
-                user_id=requester,
-                project_id=project_id,
-            )
-        if cancelled():
-            raise JobCancelled(
-                "humanize cancelled before result commit"
-            )
+            raise JobCancelled("generation cancelled before result commit")
+        checkpoint_generated_copy(task, job)
         try:
             saved = PostgresAuditedTaskWriter(
                 self._engine,
@@ -724,7 +705,11 @@ class ServerHumanizeGenerationHandler:
             raise JobConflict("source task revision changed") from exc
         except ServerTaskCommandUnavailable:
             raise
-        return saved.revision
+        return finish_generation_checks(
+            saved, job, engine=self._engine, audit=self._audit,
+            ai_rate=self._ai_rate, knowledge_coverage=self._knowledge_coverage,
+            cancelled=cancelled,
+        )
 
 
 class ServerHumanizeGenerationRegistry:
@@ -766,6 +751,7 @@ class ServerHumanizeGenerationRegistry:
         project_id: str,
         task_id: str,
         source_revision: int,
+        single_pass: bool = False,
     ) -> dict[str, object]:
         self._access.require(actor, project_id, "article.edit")
         repository = PostgresTaskRepository(
@@ -843,10 +829,12 @@ class ServerHumanizeGenerationRegistry:
                         {
                             "task_id": task_id,
                             "source_revision": source_revision,
+                            "max_attempts": 1 if single_pass else 4,
                             "customer": project_id,
                             "topic_index": int(row.topic_index),
                             "request": {
                                 **reference.private_values(),
+                                "single_pass": single_pass,
                                 "source_article_hash": content_hash(
                                     source_article
                                 ),

@@ -5311,7 +5311,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     time.sleep(0.02)
                 assert terminal is not None
                 self.assertEqual(terminal["status"], "succeeded")
-                self.assertEqual(terminal["result_revision"], 1)
+                self.assertEqual(terminal["result_revision"], 2)
                 self.assertEqual(len(provider.calls), 1)
                 self.assertEqual(
                     provider.calls[0]["chunk_ids"],
@@ -5328,7 +5328,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 stored_payload = repository.get(self.task_a)
                 assert stored_payload is not None
                 stored = TaskRecord.model_validate(stored_payload)
-                self.assertEqual(stored.revision, 1)
+                self.assertEqual(stored.revision, 2)
                 self.assertEqual(stored.status, "draft_ready")
                 self.assertEqual(
                     stored.raw_draft_article,
@@ -5384,7 +5384,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     rewritten = client.post(
                         rewrite_path,
                         json={
-                            "revision": 1,
+                            "revision": 2,
                             "use_evidence_pack": False,
                         },
                     )
@@ -5424,7 +5424,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     rewrite_terminal["status"],
                     "succeeded",
                 )
-                self.assertEqual(rewrite_terminal["result_revision"], 2)
+                self.assertEqual(rewrite_terminal["result_revision"], 4)
                 with self.engine.connect() as connection:
                     rewrite_request = connection.execute(
                         sa.select(background_jobs.c.request).where(
@@ -5440,7 +5440,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 rewritten_task = TaskRecord.model_validate(
                     rewritten_payload
                 )
-                self.assertEqual(rewritten_task.revision, 2)
+                self.assertEqual(rewritten_task.revision, 4)
                 self.assertEqual(len(provider.calls), 2)
                 self.assertEqual(len(ai_rate.calls), 2)
                 self.assertEqual(rewritten_task.initial_ai_check.score, 18.5)
@@ -6128,7 +6128,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                 )
                 stored = repository.get(self.task_a)
                 assert stored is not None
-                self.assertEqual(stored["revision"], 1)
+                self.assertEqual(stored["revision"], 2)
                 self.assertEqual(stored["status"], "humanized_ready")
                 self.assertEqual(stored["humanized_article"], article)
                 self.assertEqual(detector.calls, [article])
@@ -6149,6 +6149,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
                     [
                         "article.humanize.queued",
                         "article.humanized.generated",
+                        "article.generation.checked",
                         "background_job.terminal",
                     ],
                 )
@@ -6298,6 +6299,53 @@ class ServerProjectTaskApiTests(unittest.TestCase):
 
         self.assertNotIn(secret, str(raised.exception))
 
+    def test_humanize_checkpoint_recovers_without_second_generation(self) -> None:
+        repository, article = self._prepare_humanize_task()
+        with self.engine.begin() as connection:
+            connection.execute(project_memberships.update().where(
+                project_memberships.c.organization_id == self.org_a,
+                project_memberships.c.project_id == self.project_a,
+                project_memberships.c.user_id == self.user_a,
+            ).values(role="editor"))
+        prompt = PromptSnapshot(prompt_id="checkpoint-prompt", name="Test", kind="humanize",
+            content="Rewrite safely.\n\n{{ARTICLE}}", version=1, source="project_default", captured_at="2026-09-07T00:00:00+00:00")
+        reference = ProjectPromptReference.from_snapshot(prompt)
+        class SinglePassProvider(RecordingHumanizeProvider):
+            def generate(self, *args, single_pass=False, **kwargs):
+                if not single_pass:
+                    raise AssertionError("batch execution must request single pass")
+                return super().generate(*args, **kwargs)
+        provider = SinglePassProvider()
+        handler = ServerHumanizeGenerationHandler(self.engine, provider=provider, audit=RecordingAuditWriter())
+        job = {"id": "checkpoint-job", "operation": "humanize", "organization_id": self.org_a,
+            "project_id": self.project_a, "task_id": self.task_a, "requested_by_user_id": self.user_a,
+            "source_revision": 0, "request": {**reference.private_values(),
+                "source_article_hash": content_hash(article), "single_pass": True}}
+        # Simulate a worker interruption after the durable copy commit.
+        with patch("services.server_humanize_generation.load_pinned_project_prompt", return_value=prompt), \
+             patch("services.server_humanize_generation.finish_generation_checks", side_effect=JobCancelled("test interruption")):
+            with self.assertRaises(HumanizeGenerationUnavailable):
+                handler({**job, "attempts": 2}, lambda: False)
+            self.assertEqual(len(provider.calls), 0)
+            with self.assertRaises(JobCancelled):
+                handler(job, lambda: False)
+        saved = repository.get(self.task_a)
+        self.assertEqual(saved["humanized_article"], article)
+        self.assertEqual(saved["revision"], 1)
+        self.assertFalse(saved["generation_checkpoint"]["completed"])
+        # Recovery has a newer task revision, but must resume only this job's copy.
+        self.assertEqual(handler({**job, "attempts": 2}, lambda: False), 2)
+        self.assertEqual(handler({**job, "attempts": 3}, lambda: False), 2)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(repository.get(self.task_a)["article_versions"]), 1)
+        saved = repository.get(self.task_a)
+        saved["revision"] += 1
+        saved["humanized_article"] = article + "\nUser edit."
+        repository.upsert(saved)
+        with self.assertRaises(JobConflict):
+            handler(job, lambda: False)
+        self.assertEqual(len(provider.calls), 1)
+
     def test_humanize_audit_failure_rolls_back_task(self) -> None:
         repository, article = self._prepare_humanize_task()
         with self.engine.begin() as connection:
@@ -6326,6 +6374,7 @@ class ServerProjectTaskApiTests(unittest.TestCase):
             audit=FailingAuditWriter(),
         )
         job = {
+            "id": "audit-failure-job",
             "operation": "humanize",
             "organization_id": self.org_a,
             "project_id": self.project_a,

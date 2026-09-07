@@ -23,8 +23,10 @@ from knowledge_agent.schema import (
     retrieval_plans,
     retrieval_scopes,
 )
+from services.server_generation_checks import (
+    checkpoint_generated_copy, finish_generation_checks, resume_generated_copy,
+)
 from models import (
-    AICheck,
     ArticleVersion,
     OfficialLink,
     PromptSnapshot,
@@ -1084,6 +1086,12 @@ class ServerArticleGenerationHandler:
         if payload is None:
             raise JobConflict("source task is unavailable")
         task = TaskRecord.model_validate(payload)
+        if resume_generated_copy(task, job):
+            return finish_generation_checks(
+                task, job, engine=self._engine, audit=self._audit,
+                ai_rate=self._ai_rate, knowledge_coverage=self._knowledge_coverage,
+                cancelled=cancelled,
+            )
         if task.revision != source_revision:
             raise JobConflict("source task revision changed")
         _validate_article_operation(task, operation)
@@ -1183,44 +1191,8 @@ class ServerArticleGenerationHandler:
             prompt_snapshot=prompt_snapshot,
         )
         if cancelled():
-            raise JobCancelled(
-                "Article generation cancelled before AI-rate detection."
-            )
-        # A rewrite invalidates the previous detector result even when the
-        # optional external service is not configured for this run.
-        task.zero_gpt_report = ""
-        if self._ai_rate is not None and self._ai_rate.ready:
-            try:
-                detection = self._ai_rate.detect(initial)
-            except Exception:
-                # The draft is already valid and must remain usable when the
-                # optional external detector is unavailable.  Keep a clear,
-                # non-secret note for the retained screenshot/manual path.
-                task.initial_ai_check = AICheck(
-                    confirmed=False,
-                    report="ZeroGPT 自动检测暂时不可用，请保留截图人工确认。",
-                    provider="zerogpt",
-                    checked_at=now_iso(),
-                    article_hash=content_hash(initial),
-                )
-                task.zero_gpt_report = task.initial_ai_check.report
-            else:
-                task.initial_ai_check = AICheck(
-                    confirmed=False,
-                    score=detection.ai_percentage,
-                    report=detection.report,
-                    provider="zerogpt",
-                    checked_at=now_iso(),
-                    article_hash=content_hash(initial),
-                )
-                task.zero_gpt_report = task.initial_ai_check.report
-        if self._knowledge_coverage is not None:
-            self._knowledge_coverage.evaluate_task(
-                task,
-                organization_id=organization_id,
-                user_id=requester,
-                project_id=project_id,
-            )
+            raise JobCancelled("generation cancelled before result commit")
+        checkpoint_generated_copy(task, job)
         try:
             saved = PostgresAuditedTaskWriter(
                 self._engine,
@@ -1257,7 +1229,11 @@ class ServerArticleGenerationHandler:
             raise JobConflict("source task revision changed") from exc
         except ServerTaskCommandUnavailable:
             raise
-        return saved.revision
+        return finish_generation_checks(
+            saved, job, engine=self._engine, audit=self._audit,
+            ai_rate=self._ai_rate, knowledge_coverage=self._knowledge_coverage,
+            cancelled=cancelled,
+        )
 
 
 @dataclass(frozen=True, slots=True)

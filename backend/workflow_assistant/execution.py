@@ -170,7 +170,8 @@ class WorkflowExecutionCoordinator:
     ) -> None:
         if not 1 <= max_concurrency <= 32:
             raise ValueError("max_concurrency must be between 1 and 32")
-        self._repository = repository
+        execution_reader = getattr(repository, "for_execution", None)
+        self._repository = execution_reader() if callable(execution_reader) else repository
         self._access = access
         self._tools = tools
         self._job_status_resolver = job_status_resolver
@@ -840,6 +841,14 @@ class WorkflowExecutionCoordinator:
         plan: WorkflowPlan,
         step: WorkflowPlanStep,
     ) -> StepExecutionResult:
+        hydrate = getattr(self._repository, "get_step_for_execution", None)
+        if callable(hydrate):
+            current = hydrate(actor=actor, plan_id=plan.plan_id, step_id=step.step_id)
+            if (current.project_id, current.article_task_id, current.action_kind) != (
+                step.project_id, step.article_task_id, step.action_kind,
+            ):
+                raise WorkflowExecutionConflict("claimed step identity changed")
+            step = current
         action_kind = step.action_kind
         if action_kind not in ALLOWED_ACTION_KINDS:
             raise WorkflowExecutionConflict("unknown plan action")

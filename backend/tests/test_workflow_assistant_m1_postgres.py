@@ -300,6 +300,60 @@ class WorkflowAssistantPostgresTests(unittest.TestCase):
             },
         )
 
+    def test_execution_projection_hydrates_only_claimed_step(self) -> None:
+        repository, plan, _queue, _job_id = self._interrupted_job_fixture(
+            step_id="projection-step", task_id="projection-task",
+        )
+        private = {"fixture": "private pinned context " * 5000}
+        with self.engine.begin() as connection:
+            connection.execute(workflow_plan_steps.update().where(
+                workflow_plan_steps.c.organization_id == self.organization_id,
+                workflow_plan_steps.c.plan_id == plan.plan_id,
+            ).values(pinned_knowledge_snapshot=private))
+        execution = repository.for_execution()
+        statements = []
+        def capture(_conn, _cursor, statement, _params, _ctx, _many):
+            statements.append(statement)
+        sa.event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            light = execution.get_plan(actor=self.actor, plan_id=plan.plan_id)
+        finally:
+            sa.event.remove(self.engine, "before_cursor_execute", capture)
+        self.assertEqual(light.plan_hash, plan.plan_hash)
+        self.assertEqual(light.revision, plan.revision)
+        self.assertEqual(light.normalized_plan, {"title": plan.title})
+        self.assertEqual(light.steps[0].pinned_knowledge_snapshot, {})
+        self.assertFalse(any("pinned_knowledge_snapshot" in stmt for stmt in statements))
+        hydrated = execution.get_step_for_execution(
+            actor=self.actor, plan_id=plan.plan_id, step_id="projection-step",
+        )
+        self.assertEqual(hydrated.pinned_knowledge_snapshot, private)
+        with self.assertRaises(WorkflowAssistantNotFound):
+            execution.get_plan(actor=self.other_actor, plan_id=plan.plan_id)
+        repository.finish_step(actor=self.actor, plan_id=plan.plan_id,
+                               step_id="projection-step", status="cancelled")
+        with self.assertRaises(WorkflowAssistantConflict):
+            execution.get_step_for_execution(
+                actor=self.actor, plan_id=plan.plan_id, step_id="projection-step",
+            )
+
+    def test_single_pass_queue_does_not_retry_transient_failure(self) -> None:
+        _repository, _plan, queue, first_job = self._interrupted_job_fixture(
+            step_id="single-pass-step", task_id="single-pass-task",
+        )
+        queue.mark_cancelled(first_job)
+        batch = queue.create_batch("humanize", [{
+            "task_id": "single-pass-task", "customer": self.project_a,
+            "topic_index": 1, "source_revision": 0, "max_attempts": 1,
+            "request": {"single_pass": True},
+        }], customer=self.project_a, requested_by_user_id=self.owner_user_id)
+        job_id = batch["jobs"][0]["id"]
+        claimed = queue.claim_jobs(1)
+        self.assertEqual([job["id"] for job in claimed], [job_id])
+        self.assertEqual(claimed[0]["max_attempts"], 1)
+        self.assertEqual(queue.mark_failed(job_id, "timeout", retryable=True), "failed")
+        self.assertEqual(queue.claim_jobs(1), [])
+
     def test_private_conversation_and_message_idempotency(self) -> None:
         repository = PostgresWorkflowAssistantRepository(self.engine)
         conversation = repository.create_conversation(

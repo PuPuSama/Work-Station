@@ -117,4 +117,46 @@ def apply_ai_rate_humanization_skip(
     return True
 
 
-__all__ = ["apply_ai_rate_humanization_skip"]
+def apply_batch_high_ai_rate_skip(task: TaskRecord) -> bool:
+    """Keep the measured initial draft, while explicitly deferring quality review."""
+    if not _initial_article_is_current(task):
+        return False
+    score = task.initial_ai_check.score
+    if score is None or not math.isfinite(score) or not 40 < score <= 100:
+        return False
+    if task.humanization_skipped and task.status == STATUS_FINAL_AI_CHECKED:
+        initial_hash = content_hash(task.initial_article.strip())
+        return (
+            content_hash(task.humanized_article.strip()) == initial_hash
+            and task.humanized_article_hash == initial_hash
+            and task.final_ai_check.article_hash == initial_hash
+            and task.final_ai_check.deferred
+            and not task.final_ai_check.confirmed
+        )
+    if task.status not in {STATUS_DRAFT_READY, STATUS_INITIAL_AI_CHECKED}:
+        return False
+    task.initial_ai_check = task.initial_ai_check.model_copy(update={
+        "confirmed": False, "deferred": True, "confirmed_at": "",
+    })
+    if task.status == STATUS_DRAFT_READY:
+        transition_task(task, STATUS_INITIAL_AI_CHECKED)
+    initial = task.initial_article.strip()
+    initial_hash = content_hash(initial)
+    report = f"首次正文 AI 率 {score:g}% 高于 40%，按批量规则跳过润色；AI 率过高，需人工审阅。"
+    task.humanized_article = initial
+    task.humanized_article_word_count = visible_word_count(initial)
+    task.humanized_article_hash = initial_hash
+    task.humanization_skipped = True
+    task.article = initial
+    task.zero_gpt_report = report
+    task.final_ai_check = AICheck(
+        confirmed=False, deferred=True, score=score, report=report,
+        provider=task.initial_ai_check.provider,
+        checked_at=task.initial_ai_check.checked_at, article_hash=initial_hash,
+    )
+    transition_task(task, STATUS_HUMANIZED_READY)
+    transition_task(task, STATUS_FINAL_AI_CHECKED)
+    return True
+
+
+__all__ = ["apply_ai_rate_humanization_skip", "apply_batch_high_ai_rate_skip"]

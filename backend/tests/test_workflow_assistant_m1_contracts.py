@@ -610,7 +610,7 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         self.assertEqual([step.action_kind for step in plan.steps], ["list_tasks"])
         self.assertEqual([step.sequence for step in plan.steps], [1])
 
-    def test_assistant_skips_humanize_when_initial_ai_rate_is_below_threshold(self) -> None:
+    def test_assistant_skips_humanize_when_initial_ai_rate_is_above_threshold(self) -> None:
         article = "# Article\n\nA short initial article."
         task = TaskRecord(
             id="task-a",
@@ -623,7 +623,7 @@ class WorkflowAssistantContractTests(unittest.TestCase):
             initial_article=article,
             initial_article_hash=content_hash(article),
             initial_ai_check=AICheck(
-                score=12.5,
+                score=40.1,
                 provider="zerogpt",
                 checked_at="2026-08-25T00:00:00",
                 article_hash=content_hash(article),
@@ -652,7 +652,7 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         factory = SimpleNamespace(create=lambda _authorized: runtime)
         humanize_service = SimpleNamespace(
             enqueue=lambda **_kwargs: (_ for _ in ()).throw(
-                AssertionError("low AI-rate articles must not enqueue humanize")
+                AssertionError("high AI-rate articles must not enqueue humanize")
             )
         )
         adapter = WorkflowAssistantServiceAdapters(
@@ -683,7 +683,29 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         self.assertTrue(result["humanization_skipped"])
         self.assertEqual(len(writer.calls), 1)
         self.assertEqual(task.status, "final_ai_checked")
-        self.assertTrue(task.final_ai_check.confirmed)
+        self.assertFalse(task.final_ai_check.confirmed)
+        self.assertTrue(task.final_ai_check.deferred)
+        self.assertEqual(result["skip_reason"], "initial_ai_rate_above_threshold")
+
+        for score in (0, 20, 40, None):
+            with self.subTest(score=score):
+                task.status = "draft_ready"
+                task.humanization_skipped = False
+                task.humanized_article = ""
+                task.initial_ai_check = AICheck(score=score, article_hash=content_hash(article))
+                calls = []
+                def enqueue(**kwargs):
+                    calls.append(kwargs)
+                    return {"job_id": "job-one", "status": "queued"}
+                humanize_service.enqueue = enqueue
+                adapter._queue_generation(WorkflowToolInvocation(
+                    actor=ActorIdentity("org-a", "user-a"), plan_id="plan-a", step_id="humanize-1",
+                    action_kind="humanize", project_id="project-a", article_task_id=task.id,
+                    expected_task_revision=task.revision, input_summary={}, pinned_prompt_version={},
+                    pinned_knowledge_snapshot={}, confirmed=True,
+                ))
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(calls[0]["single_pass"])
 
     def test_natural_language_project_notes_change_is_previewed_and_executed(self) -> None:
         class NotesLlm:

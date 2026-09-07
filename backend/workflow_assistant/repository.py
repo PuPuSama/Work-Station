@@ -373,8 +373,36 @@ def _current_plan_steps(
 class PostgresWorkflowAssistantRepository:
     """PostgreSQL source of truth for private conversations and plans."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, execution_view: bool = False) -> None:
         self._engine = engine
+        self._execution_view = execution_view
+
+    def for_execution(self) -> PostgresWorkflowAssistantRepository:
+        """Share the engine, but never load every step's private inputs to poll."""
+        return PostgresWorkflowAssistantRepository(self._engine, execution_view=True)
+
+    def get_step_for_execution(
+        self, *, actor: ActorIdentity, plan_id: str, step_id: str,
+    ) -> WorkflowPlanStep:
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                sa.select(workflow_plan_steps).join(
+                    workflow_plans,
+                    sa.and_(
+                        workflow_plans.c.organization_id == workflow_plan_steps.c.organization_id,
+                        workflow_plans.c.plan_id == workflow_plan_steps.c.plan_id,
+                    ),
+                ).where(
+                    workflow_plans.c.organization_id == actor.organization_id,
+                    workflow_plans.c.creator_user_id == actor.user_id,
+                    workflow_plans.c.plan_id == _required(plan_id, "plan_id"),
+                    workflow_plan_steps.c.step_id == _required(step_id, "step_id"),
+                    workflow_plan_steps.c.status == "running",
+                )
+            ).mappings().one_or_none()
+        if row is None:
+            raise WorkflowAssistantConflict("claimed step is no longer executable")
+        return self._step_from_row(row)
 
     def create_conversation(
         self,
@@ -3216,7 +3244,7 @@ class PostgresWorkflowAssistantRepository:
         plan_id: str,
     ) -> RowMapping | None:
         return connection.execute(
-            sa.select(workflow_plans)
+            sa.select(*(c for c in workflow_plans.c if c.name != "normalized_plan"))
             .where(
                 workflow_plans.c.organization_id == actor.organization_id,
                 workflow_plans.c.creator_user_id == actor.user_id,
@@ -3548,8 +3576,16 @@ class PostgresWorkflowAssistantRepository:
         actor: ActorIdentity,
         plan_id: str,
     ) -> WorkflowPlan | None:
+        plan_columns = list(workflow_plans.c)
+        step_columns = list(workflow_plan_steps.c)
+        if self._execution_view:
+            plan_columns = [c for c in plan_columns if c.name != "normalized_plan"]
+            plan_columns.append(workflow_plans.c.normalized_plan["title"].astext.label("title"))
+            step_columns = [c for c in step_columns if c.name not in {
+                "pinned_prompt_version", "pinned_knowledge_snapshot",
+            }]
         row = connection.execute(
-            sa.select(workflow_plans).where(
+            sa.select(*plan_columns).where(
                 workflow_plans.c.organization_id == actor.organization_id,
                 workflow_plans.c.creator_user_id == actor.user_id,
                 workflow_plans.c.plan_id == plan_id,
@@ -3569,13 +3605,17 @@ class PostgresWorkflowAssistantRepository:
             .order_by(workflow_plan_projects.c.project_id)
         ).mappings().all()
         step_rows = connection.execute(
-            sa.select(workflow_plan_steps)
+            sa.select(*step_columns)
             .where(
                 workflow_plan_steps.c.organization_id == actor.organization_id,
                 workflow_plan_steps.c.plan_id == plan_id,
             )
             .order_by(workflow_plan_steps.c.sequence)
         ).mappings().all()
+        normalized = (
+            {"title": row["title"]} if self._execution_view
+            else _json_dict(row["normalized_plan"])
+        )
         return WorkflowPlan(
             organization_id=str(row["organization_id"]),
             plan_id=str(row["plan_id"]),
@@ -3586,9 +3626,9 @@ class PostgresWorkflowAssistantRepository:
                 if row["source_idempotency_key"]
                 else None
             ),
-            title=str(_json_dict(row["normalized_plan"]).get("title") or "Workflow plan"),
+            title=str(normalized.get("title") or "Workflow plan"),
             natural_language_request=str(row["natural_language_request"]),
-            normalized_plan=_json_dict(row["normalized_plan"]),
+            normalized_plan=normalized,
             plan_hash=str(row["plan_hash"]),
             revision=int(row["revision"]),
             status=str(row["status"]),
@@ -3598,7 +3638,9 @@ class PostgresWorkflowAssistantRepository:
                 for value in project_rows
                 if bool(value["paused"])
             ),
-            steps=tuple(self._step_from_row(item) for item in step_rows),
+            steps=tuple(self._step_from_row({
+                **item, "pinned_prompt_version": {}, "pinned_knowledge_snapshot": {},
+            } if self._execution_view else item) for item in step_rows),
             concurrency_limit=int(row["concurrency_limit"]),
             budget_warning=bool(row["budget_warning"]),
             attention_state=str(row["attention_state"]),

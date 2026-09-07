@@ -285,6 +285,27 @@ class ServerDeliveryPackageTests(unittest.TestCase):
                 task=task,
             )
 
+    def test_high_initial_ai_skip_preserves_warning_and_packages_without_approval(self) -> None:
+        from services.ai_rate_policy import apply_batch_high_ai_rate_skip
+        task, objects = prepared()
+        task.status = "draft_ready"
+        task.initial_article = "# High AI test article\n\nOriginal draft."
+        task.initial_article_hash = content_hash(task.initial_article)
+        task.initial_ai_check = AICheck(score=72, article_hash=task.initial_article_hash)
+        self.assertTrue(apply_batch_high_ai_rate_skip(task))
+        task.final_article = task.humanized_article
+        task.status = "docx_exported"
+        objects.objects.pop("screenshot")
+        ServerDeliveryPackage(objects=objects).package(
+            actor=ActorIdentity("org-a", "editor-a"), project_id="www.example.com", task=task,
+        )
+        self.assertFalse(task.final_ai_check.confirmed)
+        self.assertTrue(task.final_ai_check.deferred)
+        with ZipFile(BytesIO(objects.archive)) as archive:
+            self.assertNotIn("final-ai-rate.png", archive.namelist())
+            metadata = json.loads(archive.read("metadata.json"))
+            self.assertEqual(metadata["ai_rate_percent"], 72)
+
     def test_skipped_humanization_does_not_require_a_second_screenshot(self) -> None:
         task, objects = prepared()
         task.humanization_skipped = True

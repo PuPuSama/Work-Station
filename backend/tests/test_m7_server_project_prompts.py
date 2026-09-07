@@ -1531,6 +1531,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                 "task_id": task_id,
                 "requested_by_user_id": self.editor_id,
                 "operation": "article",
+                "id": "article-prompt-test-job",
                 "source_revision": 0,
                 "request": {
                     **reference.private_values(),
@@ -1540,7 +1541,7 @@ class ServerProjectPromptTests(unittest.TestCase):
             },
             lambda: False,
         )
-        self.assertEqual(result_revision, 1)
+        self.assertEqual(result_revision, 2)
         self.assertEqual(provider.versions, [1])
         stored_payload = repository.get(task_id)
         assert stored_payload is not None
@@ -1607,6 +1608,7 @@ class ServerProjectPromptTests(unittest.TestCase):
                     "task_id": task_id,
                     "requested_by_user_id": self.editor_id,
                     "operation": "article",
+                "id": "article-prompt-test-job",
                     "source_revision": 0,
                     "request": {
                         **reference.private_values(),

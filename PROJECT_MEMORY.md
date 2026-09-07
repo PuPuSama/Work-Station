@@ -154,7 +154,7 @@
 ## 2026-08-28：文章工作助手跳过检查与批量交付
 
 - 决策：用户明确写“跳过/不用复检”时，服务端解析器移除 SEO `review` 步骤；否定表达不触发跳过。
-- 决策：若初检 AI 率对应当前初始正文且严格低于 `ai_pass_threshold`（默认 30），Workflow Assistant 自动复用初始正文，跳过降 AI 与第二次检测；ZeroGPT 结果仍必须来自人工操作/确认边界。
+- 历史决策（Workflow Assistant 批量部分已被 2026-09-07 规则替代）：若初检 AI 率对应当前初始正文且严格低于 `ai_pass_threshold`（默认 30），Workflow Assistant 自动复用初始正文，跳过降 AI 与第二次检测；ZeroGPT 结果仍必须来自人工操作/确认边界。
 - 决策：同一项目计划中多个 `package_delivery` 步骤全部成功后，工作助手显示“一键下载”并生成按文章分目录的聚合 ZIP；跨项目计划暂按项目分别下载，未完成或资产哈希变化时拒绝聚合。
 - 影响：涉及 `backend/services/server_delivery_package.py`、`backend/workflow_assistant/http.py`、`frontend/src/components/workflow-assistant-workspace.tsx` 和 `frontend/src/types.ts`；聚合包仍走私有对象存储、`article.deliver` 重授权和短期签名 URL。
 - 验证：后端全量 1068 项测试通过（跳过 301 项）；前端 `npm.cmd run lint` 无错误、`npm.cmd run build` 通过；本地 backend 容器健康。前端镜像重建因 Docker Hub 拉取 `node:22-alpine` EOF 未完成，已用本机验证过的 standalone 产物更新现有前端容器供本地测试，镜像本身尚未固化。
@@ -183,3 +183,16 @@
     - 决策：最终采用什么约定。
     - 影响：哪些入口、文件或验证受到影响。
     - 验证：运行了什么，结果是什么。
+
+
+## 2026-09-07：大计划内存与批量一次润色（本地已验证，未部署）
+
+- 基线：本轮从 `6c6a5293` 开始，保留用户已有的 `docs/cliproxyapi-deployment-and-usage.md`。本轮无 commit、push 或部署。
+- 执行协调器使用轻量计划视图，执行被领取的步骤时才单独加载私有提示词和知识快照；SSE 用 overview；计划加锁读取不加载 normalized_plan。权限、计划哈希、revision/CAS 和文章活动 Job 排他规则保留。
+- 批量（Workflow Assistant）：首次正文的有效 AI 率 >40% 才跳过润色；卡片保留“AI 率过高”、首次得分和跳过说明。40%、更低分数或尚无得分最多润色一次；无得分不冒充低分。此规则替代上述 2026-08-28 的批量低分跳过规则，手动工作台不变。
+- 批量 single_pass 禁止提供方内部重写/字数校正，队列 max_attempts=1；租约恢复但没有已保存正文时不重复调用。用户显式重试仍是一项独立人工操作。内容验证失败不得通过放松事实/链接/结构约束来通过。
+- 有效正文先写入 PostgreSQL Task JSON 中的 generation_checkpoint（无新表或迁移），再并行执行两项检查；结果复用绑定 Job、源版本、结果版本和正文哈希。检查落库仍重授权/CAS，版本已变化时拒绝覆盖；完成后重放同一 Job 不重复检测/写作。
+- 高分跳过保留 confirmed=false/deferred=true，后续交付可继续；这不是人工质量确认。可选检测不可用时保留正文并显示失败说明，检查可通过既有人工入口单独重试。
+- 验证：隔离 PostgreSQL 后端全量 1158 项，1156 通过、2 跳过（历史 Local 测试、未启用的 S3 opt-in 测试）；S3 opt-in 随后在独立本地 MinIO 单独通过。前端 2 项规则测试、lint、build 通过；浏览器卡片展开/刷新通过；Word/TDK/ZIP 实际签名下载、哈希及内部内容检查通过。
+- 限制：仅本地隔离样本与合成基准，未调用真实付费模型、未线上压测或部署。检查仍在原 Job 并发槽内完成；本轮不增加并发上限。
+- 详细结果见 `docs/concurrency-and-batch-ai-optimization-20260907.md`。

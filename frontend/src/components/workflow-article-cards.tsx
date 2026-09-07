@@ -4,6 +4,8 @@ import { ChevronDown, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 
+import { batchHighAiRate } from "@/lib/batch-ai-policy";
+
 import { Badge } from "@/components/ui/badge";
 import { formatProjectDate, parseProjectDate } from "@/lib/project-date";
 import {
@@ -62,6 +64,7 @@ export type WorkflowArticleCard = {
   finalAiRate: number | null;
   knowledgeCoverageRate: number | null;
   knowledgeCoverageStatus: KnowledgeCoverageCheckRecord["status"];
+  highInitialAiRate: number | null;
   steps: WorkflowAssistantStep[];
 };
 
@@ -286,6 +289,7 @@ export function buildWorkflowArticleCards(
       focusStepLabel: focusStep ? WORKFLOW_STEP_LABELS[focusStep.action_kind] || focusStep.action_kind : null,
       focusStepStatus: focusStep?.status ?? null,
       workbenchStep: workbenchStepForAction(focusStep?.action_kind || "create_task"),
+      highInitialAiRate: batchHighAiRate(steps),
       finalAiRate: metrics?.finalAiRate ?? null,
       knowledgeCoverageRate: metrics?.knowledgeCoverageRate ?? null,
       knowledgeCoverageStatus: metrics?.knowledgeCoverageStatus ?? "not_checked",
@@ -401,6 +405,7 @@ export function WorkflowArticleCards({
               <Badge variant={workflowArticleCardStatusVariants[card.status]}>
                 {workflowArticleCardStatusLabels[card.status]}
               </Badge>
+              {card.highInitialAiRate !== null && <Badge variant="destructive">AI 率过高</Badge>}
               <span className="text-xs text-muted-foreground">{card.progress}/{card.total} 步已结束</span>
             </div>
             <div
@@ -420,6 +425,11 @@ export function WorkflowArticleCards({
               <p className={`mt-3 truncate text-xs ${card.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
                 {card.status === "failed" ? "失败于" : card.focusStepStatus === "waiting_review" ? "待人工处理" : "当前步骤"}
                 ：第 {card.focusStepSequence} 步 · {card.focusStepLabel}
+              </p>
+            )}
+            {card.highInitialAiRate !== null && (
+              <p className="mt-2 text-xs text-destructive">
+                首次正文 AI 率 {formatAiRate(card.highInitialAiRate, card.taskId)}，已跳过润色，请人工审阅。
               </p>
             )}
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs">

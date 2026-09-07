@@ -816,6 +816,9 @@ export function BatchWritingWorkspace() {
               <CardDescription>结构化配置会原样进入服务端固定工作流，不经过自然语言规划。</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-5 px-5 py-5">
+              <p className="text-sm leading-6 text-muted-foreground">
+                正文最多润色一次。首次正文 AI 率高于 40% 时跳过润色，并在文章卡片标记“AI 率过高”；后续交付流程继续。
+              </p>
               <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
                 <input
                   type="checkbox"

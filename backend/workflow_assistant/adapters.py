@@ -31,7 +31,7 @@ from models import (
 )
 from server_schema import background_jobs
 from services.access_control import ActorIdentity
-from services.ai_rate_policy import apply_ai_rate_humanization_skip
+from services.ai_rate_policy import apply_batch_high_ai_rate_skip
 from services.server_article_generation import (
     ARTICLE_GENERATION_OPERATION,
     ARTICLE_REWRITE_OPERATION,
@@ -899,12 +899,10 @@ class WorkflowAssistantServiceAdapters:
             raise WorkflowToolError("task revision is required")
         if action == "humanize":
             runtime, task = self._task(invocation)
-            already_skipped = task.humanization_skipped
-            if apply_ai_rate_humanization_skip(
-                task,
-                threshold=float(getattr(self._config, "ai_pass_threshold", 30)),
-                automatic=True,
-            ):
+            already_skipped = (
+                task.humanization_skipped and task.status == STATUS_FINAL_AI_CHECKED
+            )
+            if apply_batch_high_ai_rate_skip(task):
                 if not already_skipped:
                     try:
                         task = runtime.audited_writer.put(
@@ -913,8 +911,8 @@ class WorkflowAssistantServiceAdapters:
                             actor=invocation.actor,
                             action="article.initial_ai_check.updated",
                             details={
-                                "confirmed": True,
-                                "deferred": False,
+                                "confirmed": False,
+                                "deferred": True,
                                 "score_recorded": (
                                     task.initial_ai_check.score is not None
                                 ),
@@ -930,7 +928,7 @@ class WorkflowAssistantServiceAdapters:
                     "result_revision": task.revision,
                     "humanization_skipped": True,
                     "initial_ai_rate": task.initial_ai_check.score,
-                    "skip_reason": "initial_ai_rate_below_threshold",
+                    "skip_reason": "initial_ai_rate_above_threshold",
                     "_workflow_status": "skipped",
                 }
             if task.status == STATUS_DRAFT_READY:
@@ -999,6 +997,8 @@ class WorkflowAssistantServiceAdapters:
             "task_id": task_id,
             "source_revision": source_revision,
         }
+        if action == "humanize":
+            kwargs["single_pass"] = True
         if action == "generate_article":
             requested_operation = str(
                 invocation.input_summary.get("operation") or operation

@@ -333,6 +333,7 @@ class PostgresJobQueue:
                         "status": "queued",
                         "request": dict(item.get("request", {})),
                         "source_revision": int(item["source_revision"]),
+                        "max_attempts": max(1, min(4, int(item.get("max_attempts", 4)))),
                         "available_at": current,
                         "created_at": current,
                         "updated_at": current,

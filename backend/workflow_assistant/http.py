@@ -2688,7 +2688,7 @@ async def stream_plan_events(
     repository = _repository(request)
 
     def load_plan() -> WorkflowPlan:
-        plan = repository.get_plan(actor=actor, plan_id=plan_id)
+        plan = repository.get_plan_overview(actor=actor, plan_id=plan_id)
         _reauthorize_plan_read(request, actor=actor, plan=plan)
         return plan
 

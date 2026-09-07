@@ -77,6 +77,8 @@ class JobQueueBackend(Protocol):
 
 
 def is_retryable_error(error: BaseException) -> bool:
+    if getattr(error, "retryable", None) is False:
+        return False
     retry_signals = (
         "429",
         "502",

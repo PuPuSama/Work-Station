@@ -390,11 +390,21 @@ class SeoReviewRun(WorkflowModel):
     created_at: str
 
 
+class GenerationCheckpoint(WorkflowModel):
+    job_id: str
+    operation: str
+    source_revision: int
+    result_revision: int
+    article_hash: str
+    completed: bool = False
+
+
 class TaskRecord(WorkflowModel):
     # Storage/workflow metadata.
     schema_version: int = SCHEMA_VERSION
     revision: int = 0
     workflow_error: WorkflowError | None = None
+    generation_checkpoint: GenerationCheckpoint | None = None
 
     # Source task fields retained from schema v1.
     id: str
