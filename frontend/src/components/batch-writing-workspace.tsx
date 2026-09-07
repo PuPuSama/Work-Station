@@ -817,7 +817,7 @@ export function BatchWritingWorkspace() {
             </CardHeader>
             <CardContent className="grid gap-5 px-5 py-5">
               <p className="text-sm leading-6 text-muted-foreground">
-                正文最多润色一次。首次正文 AI 率高于 40% 时跳过润色，并在文章卡片标记“AI 率过高”；后续交付流程继续。
+                批量写作直接跳过降 AI，复用正文及已有初检结果，继续后续交付流程。
               </p>
               <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
                 <input

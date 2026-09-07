@@ -23,15 +23,13 @@ from knowledge_agent.research_runs import (
     ResearchGraphRun,
 )
 from models import (
-    STATUS_DRAFT_READY,
     STATUS_HUMANIZED_READY,
-    STATUS_INITIAL_AI_CHECKED,
     STATUS_FINAL_AI_CHECKED,
     TaskRecord,
 )
 from server_schema import background_jobs
 from services.access_control import ActorIdentity
-from services.ai_rate_policy import apply_batch_high_ai_rate_skip
+from services.ai_rate_policy import apply_batch_humanization_skip
 from services.server_article_generation import (
     ARTICLE_GENERATION_OPERATION,
     ARTICLE_REWRITE_OPERATION,
@@ -891,7 +889,7 @@ class WorkflowAssistantServiceAdapters:
             raise WorkflowToolError("unsupported queued action")
         service_name, operation = binding
         service = self._services.get(service_name)
-        if service is None:
+        if service is None and action != "humanize":
             raise WorkflowToolUnavailable(f"{service_name} is unavailable")
         task_id = self._task_id(invocation)
         source_revision = invocation.expected_task_revision
@@ -902,7 +900,7 @@ class WorkflowAssistantServiceAdapters:
             already_skipped = (
                 task.humanization_skipped and task.status == STATUS_FINAL_AI_CHECKED
             )
-            if apply_batch_high_ai_rate_skip(task):
+            if apply_batch_humanization_skip(task):
                 if not already_skipped:
                     try:
                         task = runtime.audited_writer.put(
@@ -928,38 +926,10 @@ class WorkflowAssistantServiceAdapters:
                     "result_revision": task.revision,
                     "humanization_skipped": True,
                     "initial_ai_rate": task.initial_ai_check.score,
-                    "skip_reason": "initial_ai_rate_above_threshold",
+                    "skip_reason": "batch_humanization_disabled",
                     "_workflow_status": "skipped",
                 }
-            if task.status == STATUS_DRAFT_READY:
-                task.initial_ai_check = task.initial_ai_check.model_copy(
-                    update={
-                        "confirmed": False,
-                        "deferred": True,
-                        "confirmed_at": "",
-                        "article_hash": content_hash(task.initial_article),
-                    }
-                )
-                transition_task(task, STATUS_INITIAL_AI_CHECKED)
-                try:
-                    task = runtime.audited_writer.put(
-                        task,
-                        expected_revision=source_revision,
-                        actor=invocation.actor,
-                        action="article.initial_ai_check.updated",
-                        details={
-                            "confirmed": False,
-                            "deferred": True,
-                            "score_recorded": (
-                                task.initial_ai_check.score is not None
-                            ),
-                        },
-                    )
-                except Exception as exc:
-                    raise WorkflowToolError(
-                        "initial AI check could not be deferred"
-                    ) from exc
-                source_revision = task.revision
+            raise WorkflowToolError("batch draft is not ready to skip humanization")
         elif action == "restore_links":
             runtime, task = self._task(invocation)
             if task.status == STATUS_HUMANIZED_READY:
@@ -997,8 +967,6 @@ class WorkflowAssistantServiceAdapters:
             "task_id": task_id,
             "source_revision": source_revision,
         }
-        if action == "humanize":
-            kwargs["single_pass"] = True
         if action == "generate_article":
             requested_operation = str(
                 invocation.input_summary.get("operation") or operation

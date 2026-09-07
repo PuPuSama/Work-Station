@@ -610,7 +610,7 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         self.assertEqual([step.action_kind for step in plan.steps], ["list_tasks"])
         self.assertEqual([step.sequence for step in plan.steps], [1])
 
-    def test_assistant_skips_humanize_when_initial_ai_rate_is_above_threshold(self) -> None:
+    def test_assistant_skips_humanize_at_every_initial_ai_rate(self) -> None:
         article = "# Article\n\nA short initial article."
         task = TaskRecord(
             id="task-a",
@@ -685,8 +685,9 @@ class WorkflowAssistantContractTests(unittest.TestCase):
         self.assertEqual(task.status, "final_ai_checked")
         self.assertFalse(task.final_ai_check.confirmed)
         self.assertTrue(task.final_ai_check.deferred)
-        self.assertEqual(result["skip_reason"], "initial_ai_rate_above_threshold")
+        self.assertEqual(result["skip_reason"], "batch_humanization_disabled")
 
+        adapter._services["humanize_generation"] = None
         for score in (0, 20, 40, None):
             with self.subTest(score=score):
                 task.status = "draft_ready"
@@ -704,8 +705,9 @@ class WorkflowAssistantContractTests(unittest.TestCase):
                     expected_task_revision=task.revision, input_summary={}, pinned_prompt_version={},
                     pinned_knowledge_snapshot={}, confirmed=True,
                 ))
-                self.assertEqual(len(calls), 1)
-                self.assertTrue(calls[0]["single_pass"])
+                self.assertEqual(calls, [])
+                self.assertTrue(task.humanization_skipped)
+                self.assertEqual(task.final_ai_check.score, score)
 
     def test_natural_language_project_notes_change_is_previewed_and_executed(self) -> None:
         class NotesLlm:

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from models import AICheck
-from services.ai_rate_policy import apply_batch_high_ai_rate_skip
+from services.ai_rate_policy import apply_batch_humanization_skip
 from services.job_queue import JobCancelled, JobConflict, is_retryable_error
 from services.server_generation_checks import (
     checkpoint_generated_copy, finish_generation_checks, resume_generated_copy,
@@ -24,22 +24,23 @@ from test_m7_server_humanize_generation import (
 
 
 class BatchGenerationOptimizationTests(unittest.TestCase):
-    def test_threshold_is_strict_and_requires_current_measurement(self):
-        for score, expected in [(0, False), (20, False), (40, False),
-                                (40.1, True), (100, True), (101, False),
-                                (None, False), (float("nan"), False)]:
+    def test_batch_skips_all_scores_and_drops_stale_measurements(self):
+        for score, expected in [(0, True), (20, True), (40, True),
+                                (40.1, True), (100, True), (101, True),
+                                (None, True), (float("nan"), True)]:
             with self.subTest(score=score):
                 value = task()
                 value.initial_ai_check = AICheck(score=score, article_hash=value.initial_article_hash)
-                self.assertEqual(apply_batch_high_ai_rate_skip(value), expected)
+                self.assertEqual(apply_batch_humanization_skip(value), expected)
                 if expected:
                     self.assertEqual(value.humanized_article, value.initial_article)
                     self.assertFalse(value.final_ai_check.confirmed)
                     self.assertTrue(value.final_ai_check.deferred)
-                    self.assertTrue(apply_batch_high_ai_rate_skip(value))
+                    self.assertTrue(apply_batch_humanization_skip(value))
         value = task()
         value.initial_ai_check = AICheck(score=90, article_hash=content_hash("older copy"))
-        self.assertFalse(apply_batch_high_ai_rate_skip(value))
+        self.assertTrue(apply_batch_humanization_skip(value))
+        self.assertIsNone(value.final_ai_check.score)
 
     def test_single_pass_never_corrects_rejected_content(self):
         source = article_with_word_count(1100)

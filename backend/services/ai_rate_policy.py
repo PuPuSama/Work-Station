@@ -117,13 +117,21 @@ def apply_ai_rate_humanization_skip(
     return True
 
 
-def apply_batch_high_ai_rate_skip(task: TaskRecord) -> bool:
-    """Keep the measured initial draft, while explicitly deferring quality review."""
-    if not _initial_article_is_current(task):
+def apply_batch_humanization_skip(task: TaskRecord) -> bool:
+    """Reuse the batch draft without a rewrite or a second AI check."""
+    initial = task.initial_article.strip()
+    if not initial:
         return False
-    score = task.initial_ai_check.score
-    if score is None or not math.isfinite(score) or not 40 < score <= 100:
+    initial_hash = content_hash(initial)
+    if task.initial_article_hash and task.initial_article_hash != initial_hash:
         return False
+    check = task.initial_ai_check
+    if check.article_hash != initial_hash:
+        check = AICheck(article_hash=initial_hash)
+    score = check.score
+    if score is not None and (not math.isfinite(score) or not 0 <= score <= 100):
+        check = AICheck(article_hash=initial_hash)
+        score = None
     if task.humanization_skipped and task.status == STATUS_FINAL_AI_CHECKED:
         initial_hash = content_hash(task.initial_article.strip())
         return (
@@ -135,14 +143,14 @@ def apply_batch_high_ai_rate_skip(task: TaskRecord) -> bool:
         )
     if task.status not in {STATUS_DRAFT_READY, STATUS_INITIAL_AI_CHECKED}:
         return False
-    task.initial_ai_check = task.initial_ai_check.model_copy(update={
+    task.initial_ai_check = check.model_copy(update={
         "confirmed": False, "deferred": True, "confirmed_at": "",
     })
     if task.status == STATUS_DRAFT_READY:
         transition_task(task, STATUS_INITIAL_AI_CHECKED)
     initial = task.initial_article.strip()
     initial_hash = content_hash(initial)
-    report = f"首次正文 AI 率 {score:g}% 高于 40%，按批量规则跳过润色；AI 率过高，需人工审阅。"
+    report = "按批量规则跳过降 AI，复用正文及有效初检结果；未进行第二次检测，待人工审阅。"
     task.humanized_article = initial
     task.humanized_article_word_count = visible_word_count(initial)
     task.humanized_article_hash = initial_hash
@@ -159,4 +167,4 @@ def apply_batch_high_ai_rate_skip(task: TaskRecord) -> bool:
     return True
 
 
-__all__ = ["apply_ai_rate_humanization_skip", "apply_batch_high_ai_rate_skip"]
+__all__ = ["apply_ai_rate_humanization_skip", "apply_batch_humanization_skip"]
