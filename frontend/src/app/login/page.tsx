@@ -1,7 +1,7 @@
 "use client";
 
-import { Loader2, LockKeyhole, PenLine, ShieldCheck } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Loader2, LockKeyhole, LogIn, PenLine } from "lucide-react";
+import { FormEvent, useEffect, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { apiFileUrl, apiGet } from "@/lib/api";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { apiGet, apiPost } from "@/lib/api";
 import type { AuthStatus } from "@/types";
 
 function safeDestination() {
@@ -23,6 +25,8 @@ function safeDestination() {
 }
 
 export default function LoginPage() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState<AuthStatus["data"] | null>();
@@ -42,6 +46,20 @@ export default function LoginPage() {
       });
   }, []);
 
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    setPending(true);
+    setError("");
+    try {
+      await apiPost("/api/auth/login", { username, password });
+      window.location.replace(safeDestination());
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : "登录失败，请检查账号和密码。");
+      setPending(false);
+    }
+  }
+
   return (
     <main className="grid min-h-dvh place-items-center bg-muted/35 px-4 py-10">
       <div className="w-full max-w-md">
@@ -60,7 +78,7 @@ export default function LoginPage() {
               <LockKeyhole className="size-4 text-primary" />
               登录工作台
             </CardTitle>
-            <CardDescription>使用组织身份提供方安全登录。</CardDescription>
+            <CardDescription>使用管理员提供的账号和密码登录。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
             {status === undefined && (
@@ -68,26 +86,54 @@ export default function LoginPage() {
                 <Loader2 className="animate-spin" />正在检查登录状态
               </Button>
             )}
-            {status?.login_available && (
-              <Button
-                type="button"
-                size="lg"
-                disabled={pending}
-                onClick={() => {
-                  setPending(true);
-                  const next = encodeURIComponent(safeDestination());
-                  window.location.assign(apiFileUrl(`/api/auth/oidc/start?next=${next}`));
-                }}
-              >
-                {pending ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
-                {pending ? "正在前往身份提供方" : "使用组织账号登录"}
-              </Button>
+            {status?.password_login_available && (
+              <form className="grid gap-4" onSubmit={submit}>
+                <div className="grid gap-2">
+                  <Label htmlFor="login-username">账号</Label>
+                  <Input
+                    id="login-username"
+                    name="username"
+                    autoComplete="username"
+                    autoFocus
+                    className="min-h-11"
+                    value={username}
+                    onChange={(event) => {
+                      setUsername(event.target.value);
+                      setError("");
+                    }}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="login-password">密码</Label>
+                  <Input
+                    id="login-password"
+                    name="password"
+                    type="password"
+                    autoComplete="current-password"
+                    className="min-h-11"
+                    value={password}
+                    onChange={(event) => {
+                      setPassword(event.target.value);
+                      setError("");
+                    }}
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  size="lg"
+                  className="min-h-11"
+                  disabled={pending || !username.trim() || !password}
+                >
+                  {pending ? <Loader2 className="animate-spin" /> : <LogIn />}
+                  {pending ? "正在登录" : "登录"}
+                </Button>
+              </form>
             )}
-            {status && !status.login_available && (
+            {status && !status.password_login_available && (
               <Alert>
-                <ShieldCheck />
-                <AlertTitle>身份登录尚未配置</AlertTitle>
-                <AlertDescription>请联系管理员完成 OIDC 配置。</AlertDescription>
+                <LockKeyhole />
+                <AlertTitle>账号登录尚未配置</AlertTitle>
+                <AlertDescription>请联系管理员配置登录账号和密码。</AlertDescription>
               </Alert>
             )}
             {error && (

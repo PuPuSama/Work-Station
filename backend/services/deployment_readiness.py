@@ -18,11 +18,7 @@ from services.object_store import (
     ObjectStoreError,
     S3ObjectStoreSettings,
 )
-from services.oidc_identity import (
-    OidcConfigurationError,
-    OidcProviderSettings,
-    OidcProviderUnavailable,
-)
+from services.local_password_login import LocalPasswordLoginSettings
 from services.recovery_evidence import VerifiedRecoveryEvidence
 from services.server_auth import (
     ServerActorSessionError,
@@ -31,10 +27,10 @@ from services.server_auth import (
 )
 
 # Keep the signed deployment evidence bound to the schema that the Server
-# runtime actually requires. The project business profile was added in 0035;
-# accepting an older head would let a partially migrated deployment pass the
-# preflight gate while the settings and generation paths disagree.
-EXPECTED_ALEMBIC_HEAD = "20260904_0035"
+# runtime actually requires. Local workspace-user passwords were added in
+# 0036; accepting an older head would let password login run without its
+# database column.
+EXPECTED_ALEMBIC_HEAD = "20260908_0036"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +152,6 @@ def _configuration_checks(
     list[PreflightCheck],
     KnowledgeAgentSettings | None,
     S3ObjectStoreSettings | None,
-    OidcProviderSettings | None,
 ]:
     checks: list[PreflightCheck] = []
     try:
@@ -173,24 +168,21 @@ def _configuration_checks(
             PreflightCheck("server_mode", False, "invalid configuration")
         )
 
-    oidc_settings: OidcProviderSettings | None = None
     try:
-        oidc_settings = OidcProviderSettings.from_environment(
+        password_login_settings = LocalPasswordLoginSettings.from_environment(
             environment
         )
         checks.append(
             PreflightCheck(
-                "oidc_config",
-                oidc_settings is not None,
+                "password_login",
+                password_login_settings is not None,
                 "configured"
-                if oidc_settings is not None
+                if password_login_settings is not None
                 else "not ready",
             )
         )
-    except OidcConfigurationError:
-        checks.append(
-            PreflightCheck("oidc_config", False, "not ready")
-        )
+    except ValueError:
+        checks.append(PreflightCheck("password_login", False, "not ready"))
 
     try:
         load_server_actor_session_codec(environment)
@@ -263,7 +255,7 @@ def _configuration_checks(
         checks.append(
             PreflightCheck("object_store_transport", False, "not ready")
         )
-    return checks, knowledge_settings, object_settings, oidc_settings
+    return checks, knowledge_settings, object_settings
 
 
 def run_deployment_preflight(
@@ -271,9 +263,7 @@ def run_deployment_preflight(
     environment: Mapping[str, str],
     database_probe: DatabaseProbe,
     object_store_factory: Callable[[S3ObjectStoreSettings], ObjectStore],
-    identity_provider_probe: (
-        Callable[[OidcProviderSettings], None] | None
-    ) = None,
+    identity_provider_probe: Callable[[object], None] | None = None,
     capabilities: ServerCutoverCapabilities = CURRENT_SERVER_CUTOVER_CAPABILITIES,
     recovery_evidence: VerifiedRecoveryEvidence | None = None,
 ) -> DeploymentPreflightReport:
@@ -289,8 +279,8 @@ def run_deployment_preflight(
         checks,
         knowledge_settings,
         object_settings,
-        oidc_settings,
     ) = _configuration_checks(environment)
+    del identity_provider_probe
 
     if knowledge_settings is not None:
         try:
@@ -312,33 +302,6 @@ def run_deployment_preflight(
     else:
         checks.append(
             PreflightCheck("database", False, "configuration unavailable")
-        )
-
-    if oidc_settings is not None and identity_provider_probe is not None:
-        try:
-            identity_provider_probe(oidc_settings)
-            checks.append(
-                PreflightCheck(
-                    "identity_provider",
-                    True,
-                    "metadata and signing keys reachable",
-                )
-            )
-        except OidcProviderUnavailable:
-            checks.append(
-                PreflightCheck(
-                    "identity_provider",
-                    False,
-                    "readiness probe failed",
-                )
-            )
-    else:
-        checks.append(
-            PreflightCheck(
-                "identity_provider",
-                False,
-                "configuration unavailable",
-            )
         )
 
     if object_settings is not None:

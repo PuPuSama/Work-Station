@@ -37,11 +37,13 @@ from services.recovery_evidence import (  # noqa: E402
 
 NOW = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
 RELEASE_COMMIT = "1" * 40
-ALEMBIC_HEAD = "20260904_0035"
+ALEMBIC_HEAD = "20260908_0036"
 
 COMPLETE_ENVIRONMENT = {
     "ARTICLE_AGENT_SERVER_MODE": "true",
     "ARTICLE_AGENT_SERVER_SESSION_SECRET": "s" * 32,
+    "ARTICLE_AGENT_LOGIN_USERNAME": "admin",
+    "ARTICLE_AGENT_LOGIN_PASSWORD": "private-login-password",
     "ARTICLE_AGENT_OIDC_ISSUER": "https://identity.test/tenant",
     "ARTICLE_AGENT_OIDC_CLIENT_ID": "article-agent",
     "ARTICLE_AGENT_OIDC_CLIENT_SECRET": "private-oidc-secret",

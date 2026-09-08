@@ -1,5 +1,7 @@
 # Knowledge Agent M7：服务器切换、备份恢复与回滚 Runbook
 
+> 当前运行时说明（2026-09）：Server 登录已改为部署级账号密码；OIDC/Auth0、Google 登录、外部登录回调和邀请兑换入口已移除。本文件中关于 OIDC、Issuer 和 External Identity 的章节属于历史 M7 设计记录，不是当前登录配置要求。
+
 ## 1. 目的和硬门禁
 
 本文是 M7 正式服务器切换的操作准源。它不表示当前系统已经可以上线。

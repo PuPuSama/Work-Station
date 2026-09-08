@@ -39,19 +39,11 @@ from services.oidc_identity import (  # noqa: E402
     OidcVerificationError,
 )
 from services.oidc_login import (  # noqa: E402
-    OIDC_STATE_COOKIE_NAME,
-    WORKSPACE_INVITATION_COOKIE_NAME,
     OidcLoginService,
     OidcLoginStateCodec,
     OidcLoginStateError,
 )
-from services.server_auth import (  # noqa: E402
-    SERVER_AUTH_COOKIE_NAME,
-    ServerActorSessionCodec,
-)
-from services.server_request_security import (  # noqa: E402
-    ServerRequestSecurity,
-)
+from services.server_auth import ServerActorSessionCodec  # noqa: E402
 from services.workspace_invitations import (  # noqa: E402
     WorkspaceInvitationDenied,
 )
@@ -634,154 +626,27 @@ class OidcLoginHttpTests(unittest.TestCase):
         self,
     ) -> None:
         import app as app_module
-
-        fake = FakeOidcProvider()
-        private_key, public_jwk = make_key("invitation-key")
-        fake.keys = [public_jwk]
-        http_client = httpx.Client(transport=fake.transport())
-        codec = ServerActorSessionCodec(b"j" * 32)
-        redeemer = FakeInvitationRedeemer(
-            ResolvedExternalActor(
-                ActorIdentity("org-invited", "user-invited"),
-                session_version=1,
-            )
-        )
-        service = OidcLoginService.create(
-            settings=settings(),
-            identities=FakeIdentityRepository(None),
-            codec=codec,
-            invitations=redeemer,
-            client=http_client,
-        )
-        previous = (
-            getattr(app_module.app.state, "server_mode_enabled", None),
-            getattr(app_module.app.state, "server_oidc_login", None),
-            getattr(
-                app_module.app.state,
-                "server_request_security",
-                None,
-            ),
-        )
-        app_module.app.state.server_mode_enabled = True
-        app_module.app.state.server_oidc_login = service
-        app_module.app.state.server_request_security = ServerRequestSecurity(
-            codec=codec,
-            access=object(),  # type: ignore[arg-type]
-            sessions=type(
-                "AlwaysCurrentSessions",
-                (),
-                {"is_current": lambda self, session: True},
-            )(),
-        )
         client = TestClient(app_module.app, follow_redirects=False)
-        invitation_token = "invite-" + "x" * 40
         try:
             prepared = client.post(
                 "/api/auth/invitations/prepare",
-                json={"invitation_token": invitation_token},
+                json={"invitation_token": "invite-token"},
             )
-            self.assertEqual(prepared.status_code, 200, prepared.text)
-            self.assertNotIn(invitation_token, prepared.text)
-            self.assertIn(
-                WORKSPACE_INVITATION_COOKIE_NAME,
-                client.cookies,
-            )
+            self.assertEqual(prepared.status_code, 404, prepared.text)
             started = client.get("/api/auth/oidc/start")
-            self.assertEqual(started.status_code, 307, started.text)
-            self.assertNotIn(
-                invitation_token,
-                started.headers["location"],
-            )
-            query = parse_qs(
-                urlsplit(started.headers["location"]).query
-            )
-            fake.id_token = encode_id_token(
-                private_key,
-                key_id="invitation-key",
-                nonce=query["nonce"][0],
-                overrides={"sub": "invited-subject"},
-            )
+            self.assertEqual(started.status_code, 404, started.text)
             completed = client.get(
                 "/api/auth/oidc/callback",
-                params={
-                    "code": "invitation-code",
-                    "state": query["state"][0],
-                },
+                params={"code": "invitation-code", "state": "state"},
             )
-            self.assertEqual(completed.status_code, 303, completed.text)
-            self.assertEqual(len(redeemer.calls), 1)
-            self.assertEqual(redeemer.calls[0][0], invitation_token)
-            self.assertNotIn(
-                WORKSPACE_INVITATION_COOKIE_NAME,
-                client.cookies,
-            )
-            actor_token = client.cookies.get(
-                SERVER_AUTH_COOKIE_NAME
-            )
-            self.assertEqual(
-                codec.parse(str(actor_token)),
-                ActorIdentity("org-invited", "user-invited"),
-            )
+            self.assertEqual(completed.status_code, 404, completed.text)
         finally:
             client.close()
-            service.close()
-            http_client.close()
-            (
-                app_module.app.state.server_mode_enabled,
-                app_module.app.state.server_oidc_login,
-                app_module.app.state.server_request_security,
-            ) = previous
 
     def test_authorization_code_pkce_flow_sets_minimal_actor_cookie(
         self,
     ) -> None:
         import app as app_module
-
-        fake = FakeOidcProvider()
-        private_key, public_jwk = make_key("login-key")
-        fake.keys = [public_jwk]
-        http_client = httpx.Client(transport=fake.transport())
-        codec = ServerActorSessionCodec(b"c" * 32)
-        identities = FakeIdentityRepository(
-            ResolvedExternalActor(
-                ActorIdentity("org-a", "user-a"),
-                session_version=1,
-            )
-        )
-        service = OidcLoginService.create(
-            settings=settings(),
-            identities=identities,
-            codec=codec,
-            client=http_client,
-        )
-        previous_mode = getattr(
-            app_module.app.state,
-            "server_mode_enabled",
-            None,
-        )
-        previous_login = getattr(
-            app_module.app.state,
-            "server_oidc_login",
-            None,
-        )
-        previous_security = getattr(
-            app_module.app.state,
-            "server_request_security",
-            None,
-        )
-        app_module.app.state.server_mode_enabled = True
-        app_module.app.state.server_oidc_login = service
-        app_module.app.state.server_request_security = (
-            ServerRequestSecurity(
-                codec=codec,
-                access=object(),  # type: ignore[arg-type]
-                sessions=type(
-                    "AlwaysCurrentSessions",
-                    (),
-                    {"is_current": lambda self, session: True},
-                )(),
-            )
-        )
         client = TestClient(
             app_module.app,
             follow_redirects=False,
@@ -791,131 +656,17 @@ class OidcLoginHttpTests(unittest.TestCase):
                 "/api/auth/oidc/start",
                 params={"next": "/projects/example?tab=knowledge"},
             )
-            self.assertEqual(started.status_code, 307, started.text)
-            authorization = urlsplit(started.headers["location"])
-            query = parse_qs(authorization.query)
-            self.assertEqual(
-                f"{authorization.scheme}://{authorization.netloc}"
-                f"{authorization.path}",
-                AUTHORIZATION_ENDPOINT,
-            )
-            self.assertEqual(query["response_type"], ["code"])
-            self.assertEqual(query["scope"], ["openid"])
-            self.assertEqual(
-                query["code_challenge_method"],
-                ["S256"],
-            )
-            self.assertIn(OIDC_STATE_COOKIE_NAME, client.cookies)
-            fake.id_token = encode_id_token(
-                private_key,
-                key_id="login-key",
-                nonce=query["nonce"][0],
-            )
-
+            self.assertEqual(started.status_code, 404, started.text)
+            status = client.get("/api/auth/status")
+            self.assertFalse(status.json()["data"]["login_available"])
+            self.assertNotIn("issuer", status.json()["data"])
             completed = client.get(
                 "/api/auth/oidc/callback",
-                params={
-                    "code": "one-time-code",
-                    "state": query["state"][0],
-                },
+                params={"code": "one-time-code", "state": "state"},
             )
-
-            self.assertEqual(completed.status_code, 303)
-            self.assertEqual(
-                completed.headers["location"],
-                "/projects/example?tab=knowledge",
-            )
-            actor_token = client.cookies.get(
-                SERVER_AUTH_COOKIE_NAME
-            )
-            self.assertIsNotNone(actor_token)
-            self.assertEqual(
-                codec.parse(str(actor_token)),
-                ActorIdentity("org-a", "user-a"),
-            )
-            self.assertEqual(len(identities.identities), 1)
-            self.assertEqual(len(fake.token_calls), 1)
-            form = fake.token_calls[0]["form"]
-            self.assertEqual(form["code"], "one-time-code")
-            self.assertEqual(
-                form["redirect_uri"],
-                REDIRECT_URI,
-            )
-            verifier = str(form["code_verifier"])
-            expected_challenge = base64.urlsafe_b64encode(
-                hashlib.sha256(verifier.encode("ascii")).digest()
-            ).decode("ascii").rstrip("=")
-            self.assertEqual(
-                expected_challenge,
-                query["code_challenge"][0],
-            )
-            basic = str(fake.token_calls[0]["authorization"])
-            self.assertTrue(basic.startswith("Basic "))
-            decoded_basic = base64.b64decode(
-                basic.removeprefix("Basic ")
-            ).decode("utf-8")
-            self.assertEqual(
-                decoded_basic,
-                f"{CLIENT_ID}:{CLIENT_SECRET}",
-            )
-            self.assertNotIn(CLIENT_SECRET, completed.text)
-            status = client.get("/api/auth/status")
-            self.assertTrue(status.json()["data"]["authenticated"])
-            self.assertTrue(
-                status.json()["data"]["login_available"]
-            )
-            self.assertEqual(status.json()["data"]["issuer"], ISSUER)
-            invalid_destination = client.get(
-                "/api/auth/oidc/start",
-                params={"next": "https://evil.example.test/"},
-            )
-            self.assertEqual(
-                invalid_destination.status_code,
-                400,
-            )
-            replayed = client.get(
-                "/api/auth/oidc/callback",
-                params={
-                    "code": "replayed-code",
-                    "state": query["state"][0],
-                },
-            )
-            self.assertEqual(replayed.status_code, 401)
-            self.assertEqual(
-                replayed.json()["detail"],
-                "OIDC login failed.",
-            )
-            self.assertNotIn(CLIENT_SECRET, replayed.text)
-
-            denied = client.get(
-                "/api/auth/oidc/callback",
-                params={
-                    "error": "access_denied",
-                    "error_description": (
-                        f"provider echoed {CLIENT_SECRET}"
-                    ),
-                    "state": "provider-state",
-                },
-            )
-            self.assertEqual(denied.status_code, 401)
-            self.assertEqual(
-                denied.json()["detail"],
-                "OIDC login failed.",
-            )
-            self.assertNotIn(CLIENT_SECRET, denied.text)
-            self.assertNotIn(
-                OIDC_STATE_COOKIE_NAME,
-                client.cookies,
-            )
+            self.assertEqual(completed.status_code, 404, completed.text)
         finally:
             client.close()
-            service.close()
-            http_client.close()
-            app_module.app.state.server_mode_enabled = previous_mode
-            app_module.app.state.server_oidc_login = previous_login
-            app_module.app.state.server_request_security = (
-                previous_security
-            )
 
     def test_local_mode_and_invalid_state_fail_closed(self) -> None:
         import app as app_module
@@ -942,7 +693,7 @@ class OidcLoginHttpTests(unittest.TestCase):
         os.environ.get("ARTICLE_AGENT_DATABASE_URL"),
         "ARTICLE_AGENT_DATABASE_URL is required for server OIDC wiring",
     )
-    def test_server_lifespan_wires_configured_oidc_lazily(
+    def test_server_lifespan_does_not_wire_external_login(
         self,
     ) -> None:
         import app as app_module
@@ -964,6 +715,9 @@ class OidcLoginHttpTests(unittest.TestCase):
                     {
                         "ARTICLE_AGENT_SERVER_MODE": "true",
                         "ARTICLE_AGENT_SERVER_SESSION_SECRET": "s" * 32,
+                        # Legacy OIDC settings must not re-enable an external
+                        # login path after the local-password migration.
+                        "ARTICLE_AGENT_ENABLE_OIDC": "true",
                         "ARTICLE_AGENT_OIDC_ISSUER": ISSUER,
                         "ARTICLE_AGENT_OIDC_CLIENT_ID": CLIENT_ID,
                         "ARTICLE_AGENT_OIDC_CLIENT_SECRET": (
@@ -980,18 +734,13 @@ class OidcLoginHttpTests(unittest.TestCase):
                 ),
                 TestClient(app_module.app) as client,
             ):
-                self.assertIsInstance(
-                    app_module.app.state.server_oidc_login,
-                    OidcLoginService,
+                self.assertIsNone(
+                    getattr(app_module.app.state, "server_oidc_login", None)
                 )
                 status = client.get("/api/auth/status")
                 self.assertEqual(status.status_code, 200)
-                self.assertTrue(
-                    status.json()["data"]["login_available"]
-                )
-                self.assertEqual(status.json()["data"]["issuer"], ISSUER)
-                # Discovery/JWKS are deliberately lazy; startup and status
-                # must not depend on a live external provider.
+                self.assertFalse(status.json()["data"]["login_available"])
+                self.assertNotIn("issuer", status.json()["data"])
 
 
 if __name__ == "__main__":

@@ -11,12 +11,8 @@ from fastapi import (
     Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    JSONResponse,
-    RedirectResponse,
-)
+from fastapi.responses import JSONResponse
 import sqlalchemy as sa
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import config as app_config
 from config import (
@@ -37,26 +33,11 @@ from services.actor_sessions import (
     PostgresActorSessionRepository,
     PostgresActorSessionRevocationService,
 )
-from services.external_identity import (
-    ExternalIdentityNotAuthorized,
-    PostgresExternalIdentityRepository,
-)
 from services.external_identity_provisioning import (
     PostgresExternalIdentityProvisioningService,
 )
 from services.workspace_invitations import (
     PostgresWorkspaceInvitationService,
-)
-from services.oidc_identity import (
-    OidcProviderSettings,
-    OidcProviderUnavailable,
-    OidcVerificationError,
-)
-from services.oidc_login import (
-    OIDC_STATE_COOKIE_NAME,
-    WORKSPACE_INVITATION_COOKIE_NAME,
-    OidcLoginService,
-    OidcLoginStateError,
 )
 from services.project_directory import PostgresProjectDirectory
 from services.project_memberships import PostgresProjectMembershipService
@@ -80,6 +61,12 @@ from services.server_auth import (
     SERVER_AUTH_COOKIE_NAME,
     load_server_actor_session_codec,
     server_mode_enabled,
+)
+from services.local_password_login import (
+    LocalPasswordLoginFailed,
+    LocalPasswordLoginService,
+    LocalPasswordLoginSettings,
+    LocalPasswordLoginUnavailable,
 )
 from services.job_admission import configure_process_job_admission
 from services.server_request_security import (
@@ -391,9 +378,9 @@ async def app_lifespan(application: FastAPI):
         "server_job_control",
         None,
     )
-    previous_server_oidc_login = getattr(
+    previous_server_password_login = getattr(
         application.state,
-        "server_oidc_login",
+        "server_password_login",
         None,
     )
     previous_server_actor_session_revocation = getattr(
@@ -448,7 +435,7 @@ async def app_lifespan(application: FastAPI):
     workflow_assistant_runner = None
     workflow_assistant_attachment_retention = None
     workflow_assistant_attachment_review = None
-    server_oidc_login = None
+    server_password_login = None
     server_mode = server_mode_enabled()
     application.state.server_mode_enabled = server_mode
     application.state.article_agent_config = cfg
@@ -489,7 +476,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_seo_review_generation = None
     application.state.server_humanize_generation = None
     application.state.server_job_control = None
-    application.state.server_oidc_login = None
+    application.state.server_password_login = None
     application.state.server_actor_session_revocation = None
     application.state.server_workspace_users = None
     application.state.server_team_administration = None
@@ -569,17 +556,16 @@ async def app_lifespan(application: FastAPI):
                     llm_factory=server_llm_client_factory,
                 )
             )
-        oidc_settings = OidcProviderSettings.from_environment()
-        if oidc_settings is not None:
-            server_oidc_login = OidcLoginService.create(
-                settings=oidc_settings,
-                identities=PostgresExternalIdentityRepository(
-                    server_engine
-                ),
-                codec=codec,
-                invitations=application.state.server_workspace_invitations,
-            )
-            application.state.server_oidc_login = server_oidc_login
+        password_login_settings = LocalPasswordLoginSettings.from_environment()
+        server_password_login = LocalPasswordLoginService(
+            server_engine,
+            codec=codec,
+            settings=(
+                password_login_settings
+                or LocalPasswordLoginSettings.database_only()
+            ),
+        )
+        application.state.server_password_login = server_password_login
         application.state.server_project_task_store_factory = (
             ServerProjectTaskStoreFactory(server_engine, cfg)
         )
@@ -1123,8 +1109,6 @@ async def app_lifespan(application: FastAPI):
                     shutdown_error = RuntimeError(
                         "server humanize generation did not drain"
                     )
-            if server_oidc_login is not None:
-                server_oidc_login.close()
             server_private_ingestion = getattr(
                 application.state,
                 "server_private_document_ingestion",
@@ -1248,8 +1232,8 @@ async def app_lifespan(application: FastAPI):
                 previous_server_humanize_generation
             )
             application.state.server_job_control = previous_server_job_control
-            application.state.server_oidc_login = (
-                previous_server_oidc_login
+            application.state.server_password_login = (
+                previous_server_password_login
             )
             application.state.server_actor_session_revocation = (
                 previous_server_actor_session_revocation
@@ -1308,9 +1292,6 @@ _AUTH_PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/status",
-    "/api/auth/oidc/start",
-    "/api/auth/oidc/callback",
-    "/api/auth/invitations/prepare",
     "/api/health",
 }
 
@@ -1353,8 +1334,15 @@ def auth_cookie_secure(request: Request) -> bool:
 @app.get("/api/auth/status", response_model=ApiMessage)
 def auth_status(request: Request) -> ApiMessage:
     security = getattr(request.app.state, "server_request_security", None)
-    oidc_login = getattr(request.app.state, "server_oidc_login", None)
-    oidc_enabled = isinstance(oidc_login, OidcLoginService)
+    password_login = getattr(
+        request.app.state,
+        "server_password_login",
+        None,
+    )
+    password_login_enabled = isinstance(
+        password_login,
+        LocalPasswordLoginService,
+    ) and password_login.has_available_accounts()
     authenticated = False
     actor = None
     if isinstance(security, ServerRequestSecurity):
@@ -1380,8 +1368,9 @@ def auth_status(request: Request) -> ApiMessage:
             "enabled": True,
             "authenticated": authenticated,
             "mode": "server",
-            "login_available": oidc_enabled,
-            "issuer": oidc_login.settings.issuer if oidc_enabled else None,
+            "login_available": password_login_enabled,
+            "password_login_available": password_login_enabled,
+            "login_method": "password" if password_login_enabled else None,
             "organization_id": actor.organization_id if actor is not None else None,
             "user_id": actor.user_id if actor is not None else None,
             "workflow_assistant_enabled": workflow_assistant_enabled,
@@ -1414,166 +1403,35 @@ def auth_status(request: Request) -> ApiMessage:
 
 @app.post("/api/auth/login", response_model=ApiMessage)
 def auth_login(request: Request, payload: AuthLoginRequest):
-    del request, payload
-    raise HTTPException(
-        status_code=503,
-        detail="Password login is unavailable; use the configured identity provider.",
-    )
-
-def _server_oidc_login(request: Request) -> OidcLoginService:
-    if not request_server_mode(request):
-        raise HTTPException(
-            status_code=404,
-            detail="Server OIDC login is not available.",
-        )
-    service = getattr(request.app.state, "server_oidc_login", None)
-    if not isinstance(service, OidcLoginService):
+    service = getattr(request.app.state, "server_password_login", None)
+    if not isinstance(service, LocalPasswordLoginService):
         raise HTTPException(
             status_code=503,
-            detail="Server identity provider is not configured.",
+            detail="Password login is not configured.",
         )
-    return service
-
-
-def _oidc_failure(status_code: int) -> JSONResponse:
-    response = JSONResponse(
-        status_code=status_code,
-        content={"detail": "OIDC login failed."},
-    )
-    response.delete_cookie(
-        OIDC_STATE_COOKIE_NAME,
-        path="/api/auth/oidc",
-    )
-    response.delete_cookie(
-        WORKSPACE_INVITATION_COOKIE_NAME,
-        path="/api/auth/oidc",
-    )
-    return response
-
-
-class WorkspaceInvitationPrepareRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    invitation_token: str = Field(min_length=1, max_length=512)
-
-    @field_validator("invitation_token")
-    @classmethod
-    def validate_invitation_token(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("invitation_token must not be blank")
-        return normalized
-
-
-@app.post("/api/auth/invitations/prepare")
-def prepare_workspace_invitation(
-    payload: WorkspaceInvitationPrepareRequest,
-    request: Request,
-) -> JSONResponse:
-    service = _server_oidc_login(request)
+    try:
+        result = service.login(payload.username, payload.password)
+    except LocalPasswordLoginFailed as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="用户名或密码错误。",
+        ) from exc
+    except LocalPasswordLoginUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="登录账号当前不可用。",
+        ) from exc
     response = JSONResponse(
         content={
-            "start_path": "/api/auth/oidc/start",
-            "expires_seconds": service.settings.state_seconds,
+            "message": "登录成功。",
+            "data": {
+                "enabled": True,
+                "authenticated": True,
+                "mode": "server",
+                "organization_id": result.actor.organization_id,
+                "user_id": result.actor.user_id,
+            },
         }
-    )
-    response.set_cookie(
-        key=WORKSPACE_INVITATION_COOKIE_NAME,
-        value=payload.invitation_token,
-        max_age=service.settings.state_seconds,
-        httponly=True,
-        secure=auth_cookie_secure(request),
-        samesite="lax",
-        path="/api/auth/oidc",
-    )
-    return response
-
-
-@app.get("/api/auth/oidc/start")
-def oidc_login_start(request: Request) -> RedirectResponse:
-    service = _server_oidc_login(request)
-    try:
-        attempt = service.begin(
-            redirect_path=request.query_params.get("next"),
-            invitation_token=request.cookies.get(
-                WORKSPACE_INVITATION_COOKIE_NAME
-            ),
-        )
-    except OidcLoginStateError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid login destination.",
-        ) from exc
-    except OidcProviderUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Identity provider is temporarily unavailable.",
-        ) from exc
-    response = RedirectResponse(
-        url=attempt.authorization_url,
-        status_code=307,
-    )
-    response.set_cookie(
-        key=OIDC_STATE_COOKIE_NAME,
-        value=attempt.state_cookie,
-        max_age=attempt.max_age,
-        httponly=True,
-        secure=auth_cookie_secure(request),
-        samesite="lax",
-        path="/api/auth/oidc",
-    )
-    return response
-
-
-@app.get("/api/auth/oidc/callback", response_model=None)
-def oidc_login_callback(
-    request: Request,
-    code: str | None = None,
-    state: str | None = None,
-    error: str | None = None,
-) -> RedirectResponse | JSONResponse:
-    service = _server_oidc_login(request)
-    if (
-        error is not None
-        or code is None
-        or not code.strip()
-        or len(code) > 4096
-        or state is None
-        or not state.strip()
-        or len(state) > 512
-    ):
-        return _oidc_failure(401)
-    try:
-        result = service.complete(
-            code=code,
-            state=state,
-            state_cookie=request.cookies.get(
-                OIDC_STATE_COOKIE_NAME,
-                "",
-            ),
-            invitation_token=request.cookies.get(
-                WORKSPACE_INVITATION_COOKIE_NAME
-            ),
-        )
-    except OidcProviderUnavailable:
-        return _oidc_failure(503)
-    except (
-        ExternalIdentityNotAuthorized,
-        OidcLoginStateError,
-        OidcVerificationError,
-    ):
-        return _oidc_failure(401)
-    response = RedirectResponse(
-        url=service.settings.post_login_url(result.redirect_path),
-        status_code=303,
-    )
-    response.delete_cookie(
-        OIDC_STATE_COOKIE_NAME,
-        path="/api/auth/oidc",
-    )
-    response.delete_cookie(
-        WORKSPACE_INVITATION_COOKIE_NAME,
-        path="/api/auth/oidc",
     )
     response.set_cookie(
         key=SERVER_AUTH_COOKIE_NAME,
@@ -1586,7 +1444,6 @@ def oidc_login_callback(
     )
     return response
 
-
 @app.post("/api/auth/logout", response_model=ApiMessage)
 def auth_logout() -> JSONResponse:
     response = JSONResponse(
@@ -1596,8 +1453,6 @@ def auth_logout() -> JSONResponse:
         }
     )
     response.delete_cookie(SERVER_AUTH_COOKIE_NAME, path="/")
-    response.delete_cookie(OIDC_STATE_COOKIE_NAME, path="/api/auth/oidc")
-    response.delete_cookie(WORKSPACE_INVITATION_COOKIE_NAME, path="/api/auth/oidc")
     return response
 
 def config():
