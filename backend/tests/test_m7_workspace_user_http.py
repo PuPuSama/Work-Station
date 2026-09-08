@@ -35,6 +35,7 @@ from services.server_request_security import (  # noqa: E402
     ServerRequestSecurity,
     server_http_route_available,
 )
+from services.local_password_login import verify_local_password  # noqa: E402
 from services.workspace_users import (  # noqa: E402
     PostgresWorkspaceUserService,
 )
@@ -317,10 +318,12 @@ class WorkspaceUserHttpTests(unittest.TestCase):
                     "user_id": created_id,
                     "display_name": "Created User",
                     "organization_role": "member",
+                    "initial_password": "initial-pass-123",
                 },
             )
             self.assertEqual(created.status_code, 201, created.text)
             self.assertNotIn("session_version", created.json())
+            self.assertTrue(created.json()["login_linked"])
             self.assertEqual(
                 client.post(
                     path,
@@ -353,6 +356,91 @@ class WorkspaceUserHttpTests(unittest.TestCase):
                 "Updated User",
                 str(audit.events[-1].details),
             )
+        finally:
+            self._restore_client(client, previous)
+
+    def test_team_lead_creates_member_in_own_team_with_password(self) -> None:
+        lead_id = f"{self.org_a}-lead"
+        lead_team_id = f"{self.org_a}-lead-team"
+        created_id = f"{self.org_a}-lead-created"
+        with self.engine.begin() as connection:
+            connection.execute(
+                workspace_users.insert().values(
+                    **self._user(
+                        self.org_a,
+                        lead_id,
+                        "Team Lead A",
+                        "member",
+                    )
+                )
+            )
+            connection.execute(
+                teams.insert().values(
+                    organization_id=self.org_a,
+                    team_id=lead_team_id,
+                    name="Lead Team A",
+                    manager_user_id=lead_id,
+                )
+            )
+            connection.execute(
+                team_memberships.insert().values(
+                    organization_id=self.org_a,
+                    team_id=lead_team_id,
+                    user_id=lead_id,
+                    role="team_lead",
+                    granted_by_user_id=self.admin_a,
+                )
+            )
+        client, previous = self._client(
+            PostgresWorkspaceUserService(self.engine)
+        )
+        path = f"/api/organizations/{self.org_a}/users"
+        try:
+            client.cookies.set(
+                SERVER_AUTH_COOKIE_NAME,
+                self._token(self.org_a, lead_id),
+            )
+            created = client.post(
+                path,
+                json={
+                    "user_id": created_id,
+                    "display_name": "Lead Created",
+                    "organization_role": "member",
+                    "initial_password": "lead-pass-123",
+                },
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            self.assertTrue(created.json()["login_linked"])
+            self.assertEqual(created.json()["team_id"], lead_team_id)
+            self.assertEqual(created.json()["team_role"], "member")
+
+            with self.engine.connect() as connection:
+                membership = connection.execute(
+                    sa.select(team_memberships.c.team_id).where(
+                        team_memberships.c.organization_id == self.org_a,
+                        team_memberships.c.user_id == created_id,
+                    )
+                ).scalar_one()
+                password_hash = connection.execute(
+                    sa.select(workspace_users.c.password_hash).where(
+                        workspace_users.c.organization_id == self.org_a,
+                        workspace_users.c.user_id == created_id,
+                    )
+                ).scalar_one()
+            self.assertEqual(membership, lead_team_id)
+            self.assertTrue(verify_local_password("lead-pass-123", password_hash))
+
+            cross_team = client.post(
+                path,
+                json={
+                    "user_id": f"{self.org_a}-cross-team",
+                    "display_name": "Cross Team",
+                    "organization_role": "member",
+                    "team_id": self.team_a,
+                    "initial_password": "lead-pass-123",
+                },
+            )
+            self.assertEqual(cross_team.status_code, 403, cross_team.text)
         finally:
             self._restore_client(client, previous)
 
