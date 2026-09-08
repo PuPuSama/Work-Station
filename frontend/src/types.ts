@@ -551,8 +551,7 @@ export type AuthStatus = {
     mode?: "server";
     login_available?: boolean;
     password_login_available?: boolean;
-    login_method?: "password" | "oidc" | null;
-    issuer?: string | null;
+    login_method?: "password" | null;
     organization_id?: string | null;
     user_id?: string | null;
     workflow_assistant_enabled?: boolean;
@@ -695,50 +694,6 @@ export type WorkspaceTeamMember = {
 export type WorkspaceTeamMemberPage = {
   items: WorkspaceTeamMember[];
   next_after_user_id: string | null;
-};
-
-export type ExternalIdentityMappingStatus = "active" | "revoked";
-
-export type ExternalIdentityMapping = {
-  mapping_id: string;
-  issuer: string;
-  user_id: string;
-  user_display_name: string;
-  user_status: WorkspaceUserStatus;
-  status: ExternalIdentityMappingStatus;
-};
-
-export type ExternalIdentityMappingPage = {
-  items: ExternalIdentityMapping[];
-  next_after_mapping_id: string | null;
-};
-
-export type WorkspaceInvitationStatus =
-  | "pending"
-  | "expired"
-  | "accepted"
-  | "revoked";
-
-export type WorkspaceInvitation = {
-  organization_id: string;
-  invitation_id: string;
-  user_id: string | null;
-  user_display_name: string | null;
-  team_id: string | null;
-  issuer: string;
-  status: WorkspaceInvitationStatus;
-  expires_at: string;
-  created_by_user_id: string;
-  created_at: string;
-};
-
-export type IssuedWorkspaceInvitation = WorkspaceInvitation & {
-  invitation_token: string;
-};
-
-export type WorkspaceInvitationPage = {
-  items: WorkspaceInvitation[];
-  next_after_invitation_id: string | null;
 };
 
 export type ProjectMembershipMutation = {

@@ -7,8 +7,6 @@ import {
   ArrowLeft,
   Building2,
   CheckCircle2,
-  Fingerprint,
-  MailPlus,
   Loader2,
   LogOut,
   Plus,
@@ -23,8 +21,6 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { LogoutButton } from "@/components/logout-button";
-import { OrganizationExternalIdentities } from "@/components/organization-external-identities";
-import { OrganizationInvitations } from "@/components/organization-invitations";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -209,7 +205,7 @@ export function OrganizationAdminConsole({
               <h1 className="text-xl font-semibold">组织管理</h1>
             </div>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              管理本组织的本地账号、登录会话、团队、Team Lead、邀请与外部登录身份。
+              管理本组织的本地账号、登录会话、团队和 Team Lead。登录使用服务器配置的账号密码。
             </p>
             <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={organizationId}>
               {organizationId}
@@ -258,12 +254,6 @@ export function OrganizationAdminConsole({
               <TabsTrigger value="teams" className="min-h-10">
                 <Building2 />团队与成员
               </TabsTrigger>
-              <TabsTrigger value="identities" className="min-h-10">
-                <Fingerprint />外部身份
-              </TabsTrigger>
-              <TabsTrigger value="invitations" className="min-h-10">
-                <MailPlus />邀请
-              </TabsTrigger>
             </TabsList>
             <TabsContent value="users">
               <WorkspaceUsersPanel
@@ -300,18 +290,6 @@ export function OrganizationAdminConsole({
                   加载更多团队
                 </Button>
               )}
-            </TabsContent>
-            <TabsContent value="identities">
-              <OrganizationExternalIdentities
-                organizationId={organizationId}
-                users={users}
-              />
-            </TabsContent>
-            <TabsContent value="invitations">
-              <OrganizationInvitations
-                organizationId={organizationId}
-                teams={teams}
-              />
             </TabsContent>
           </Tabs>
         ) : null}
@@ -448,7 +426,7 @@ function WorkspaceUsersPanel({
       <Card>
         <CardHeader className="border-b">
           <CardTitle>创建本地账号</CardTitle>
-          <CardDescription>这里只建立 Workspace User，不发送邀请，也不自动关联 OIDC。</CardDescription>
+          <CardDescription>这里维护 Workspace User 的项目权限；登录使用服务器配置的账号密码。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_180px_180px_150px_auto] md:items-end">
           <div className="grid gap-1.5"><Label htmlFor="new-user-id">User ID</Label><Input id="new-user-id" className="h-11" value={newUser.user_id} onChange={(event) => setNewUser((current) => ({ ...current, user_id: event.target.value }))} /></div>

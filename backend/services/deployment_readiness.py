@@ -18,11 +18,6 @@ from services.object_store import (
     ObjectStoreError,
     S3ObjectStoreSettings,
 )
-from services.oidc_identity import (
-    OidcConfigurationError,
-    OidcProviderSettings,
-    OidcProviderUnavailable,
-)
 from services.local_password_login import LocalPasswordLoginSettings
 from services.recovery_evidence import VerifiedRecoveryEvidence
 from services.server_auth import (
@@ -157,7 +152,6 @@ def _configuration_checks(
     list[PreflightCheck],
     KnowledgeAgentSettings | None,
     S3ObjectStoreSettings | None,
-    OidcProviderSettings | None,
 ]:
     checks: list[PreflightCheck] = []
     try:
@@ -172,33 +166,6 @@ def _configuration_checks(
     except ServerActorSessionError:
         checks.append(
             PreflightCheck("server_mode", False, "invalid configuration")
-        )
-
-    oidc_settings: OidcProviderSettings | None = None
-    oidc_enabled = str(
-        environment.get("ARTICLE_AGENT_ENABLE_OIDC", "") or ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    if oidc_enabled:
-        try:
-            oidc_settings = OidcProviderSettings.from_environment(
-                environment
-            )
-            checks.append(
-                PreflightCheck(
-                    "oidc_config",
-                    oidc_settings is not None,
-                    "configured"
-                    if oidc_settings is not None
-                    else "not ready",
-                )
-            )
-        except OidcConfigurationError:
-            checks.append(
-                PreflightCheck("oidc_config", False, "not ready")
-            )
-    else:
-        checks.append(
-            PreflightCheck("oidc_config", True, "disabled")
         )
 
     try:
@@ -288,7 +255,7 @@ def _configuration_checks(
         checks.append(
             PreflightCheck("object_store_transport", False, "not ready")
         )
-    return checks, knowledge_settings, object_settings, oidc_settings
+    return checks, knowledge_settings, object_settings
 
 
 def run_deployment_preflight(
@@ -296,9 +263,7 @@ def run_deployment_preflight(
     environment: Mapping[str, str],
     database_probe: DatabaseProbe,
     object_store_factory: Callable[[S3ObjectStoreSettings], ObjectStore],
-    identity_provider_probe: (
-        Callable[[OidcProviderSettings], None] | None
-    ) = None,
+    identity_provider_probe: Callable[[object], None] | None = None,
     capabilities: ServerCutoverCapabilities = CURRENT_SERVER_CUTOVER_CAPABILITIES,
     recovery_evidence: VerifiedRecoveryEvidence | None = None,
 ) -> DeploymentPreflightReport:
@@ -314,8 +279,8 @@ def run_deployment_preflight(
         checks,
         knowledge_settings,
         object_settings,
-        oidc_settings,
     ) = _configuration_checks(environment)
+    del identity_provider_probe
 
     if knowledge_settings is not None:
         try:
@@ -337,40 +302,6 @@ def run_deployment_preflight(
     else:
         checks.append(
             PreflightCheck("database", False, "configuration unavailable")
-        )
-
-    oidc_enabled = str(
-        environment.get("ARTICLE_AGENT_ENABLE_OIDC", "") or ""
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    if not oidc_enabled:
-        checks.append(
-            PreflightCheck("identity_provider", True, "disabled")
-        )
-    elif oidc_settings is not None and identity_provider_probe is not None:
-        try:
-            identity_provider_probe(oidc_settings)
-            checks.append(
-                PreflightCheck(
-                    "identity_provider",
-                    True,
-                    "metadata and signing keys reachable",
-                )
-            )
-        except OidcProviderUnavailable:
-            checks.append(
-                PreflightCheck(
-                    "identity_provider",
-                    False,
-                    "readiness probe failed",
-                )
-            )
-    else:
-        checks.append(
-            PreflightCheck(
-                "identity_provider",
-                False,
-                "configuration unavailable",
-            )
         )
 
     if object_settings is not None:

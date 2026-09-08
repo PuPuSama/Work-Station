@@ -14,4 +14,4 @@ ARTICLE_AGENT_LOGIN_SESSION_SECONDS=43200
 
 By default, the username is also used as the existing `workspace_users.user_id`. Set `ARTICLE_AGENT_LOGIN_ORGANIZATION_ID` and `ARTICLE_AGENT_LOGIN_USER_ID` when the display login name differs from that user ID or when the user ID exists in more than one organization.
 
-`APP_USERNAME` and `APP_PASSWORD` are accepted as compatibility aliases for the first two values. OIDC is disabled unless `ARTICLE_AGENT_ENABLE_OIDC=true` is explicitly set, and the normal login page never displays an external-provider button.
+`APP_USERNAME` and `APP_PASSWORD` are accepted as compatibility aliases for the first two values. OIDC/Auth0 configuration is no longer read by the Server, and the normal login page has no external-provider button.

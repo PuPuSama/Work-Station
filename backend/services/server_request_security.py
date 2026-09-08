@@ -99,14 +99,11 @@ def server_http_route_available(method: str, path: str) -> bool:
     if normalized_method == "GET" and normalized_path in {
         "/api/health",
         "/api/auth/status",
-        "/api/auth/oidc/start",
-        "/api/auth/oidc/callback",
     }:
         return True
     if normalized_method == "POST" and normalized_path in {
         "/api/auth/login",
         "/api/auth/logout",
-        "/api/auth/invitations/prepare",
     }:
         return True
     if (

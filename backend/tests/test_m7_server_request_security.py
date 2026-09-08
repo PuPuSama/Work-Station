@@ -355,13 +355,13 @@ class ServerRequestSecurityTests(unittest.TestCase):
                 "review-a/changes/change-a",
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             server_http_route_available(
                 "GET",
                 "/api/auth/oidc/start",
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             server_http_route_available(
                 "GET",
                 "/api/auth/oidc/callback",
