@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -48,6 +49,44 @@ class _Engine:
 
 
 class LocalPasswordLoginTests(unittest.TestCase):
+    def test_login_route_sets_the_server_actor_cookie(self) -> None:
+        import app as app_module
+
+        service = LocalPasswordLoginService(
+            _Engine(),
+            codec=ServerActorSessionCodec(b"s" * 32),
+            settings=LocalPasswordLoginSettings(
+                username="admin",
+                password="secret",
+                organization_id="org-a",
+                user_id="user-a",
+            ),
+        )
+        previous = getattr(
+            app_module.app.state,
+            "server_password_login",
+            None,
+        )
+        app_module.app.state.server_password_login = service
+        client = TestClient(app_module.app)
+        try:
+            response = client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": "secret"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn("article_agent_actor_session", client.cookies)
+            self.assertTrue(response.json()["data"]["authenticated"])
+
+            wrong = client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": "wrong"},
+            )
+            self.assertEqual(wrong.status_code, 401, wrong.text)
+        finally:
+            client.close()
+            app_module.app.state.server_password_login = previous
+
     def test_settings_require_credentials_and_allow_actor_defaults(self) -> None:
         self.assertIsNone(
             LocalPasswordLoginSettings.from_environment(
