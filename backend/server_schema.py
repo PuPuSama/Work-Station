@@ -115,6 +115,7 @@ workspace_users = sa.Table(
         nullable=False,
         server_default=sa.text("1"),
     ),
+    sa.Column("password_hash", sa.Text(), nullable=True),
     sa.Column(
         "created_at",
         sa.DateTime(timezone=True),

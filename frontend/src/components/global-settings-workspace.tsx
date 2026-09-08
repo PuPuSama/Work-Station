@@ -92,7 +92,7 @@ export function GlobalSettingsWorkspace() {
                 <UserRound className="size-5 text-primary" />账户资料
               </CardTitle>
               <CardDescription>
-                更新显示名；登录身份本身不会被修改。
+                更新显示名和当前账号密码。
               </CardDescription>
             </CardHeader>
             <CardContent className="flex items-center justify-between gap-4 px-5 py-5">
@@ -110,7 +110,7 @@ export function GlobalSettingsWorkspace() {
               <Building2 className="size-5 text-primary" />组织管理
             </CardTitle>
             <CardDescription>
-              管理组织账号、团队、Team Lead、邀请和外部登录身份。只有具备相应组织权限的账号可以操作。
+              管理组织账号、团队和 Team Lead。只有具备相应组织权限的账号可以操作。
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 px-5 py-5">

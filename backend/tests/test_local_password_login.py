@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 
+import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -11,11 +12,17 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from services.access_control import ActorIdentity  # noqa: E402
+from server_schema import (  # noqa: E402
+    organizations,
+    workspace_users,
+)
 from services.local_password_login import (  # noqa: E402
     LocalPasswordLoginFailed,
     LocalPasswordLoginService,
     LocalPasswordLoginSettings,
     LocalPasswordLoginUnavailable,
+    hash_local_password,
+    verify_local_password,
 )
 from services.server_auth import ServerActorSessionCodec  # noqa: E402
 
@@ -49,6 +56,97 @@ class _Engine:
 
 
 class LocalPasswordLoginTests(unittest.TestCase):
+    def test_password_hash_round_trip(self) -> None:
+        encoded = hash_local_password("old-password")
+        self.assertTrue(verify_local_password("old-password", encoded))
+        self.assertFalse(verify_local_password("wrong-password", encoded))
+
+    def test_database_password_login_and_change_rotate_sessions(self) -> None:
+        engine = sa.create_engine("sqlite://")
+        test_metadata = sa.MetaData()
+        sa.Table(
+            "organizations",
+            test_metadata,
+            sa.Column("organization_id", sa.Text(), primary_key=True),
+            sa.Column("name", sa.Text(), nullable=False),
+            sa.Column("status", sa.Text(), nullable=False),
+        )
+        sa.Table(
+            "workspace_users",
+            test_metadata,
+            sa.Column("organization_id", sa.Text(), nullable=False),
+            sa.Column("user_id", sa.Text(), nullable=False),
+            sa.Column("display_name", sa.Text(), nullable=False),
+            sa.Column("organization_role", sa.Text(), nullable=False),
+            sa.Column("status", sa.Text(), nullable=False),
+            sa.Column("session_version", sa.BigInteger(), nullable=False),
+            sa.Column("password_hash", sa.Text(), nullable=True),
+            sa.Column("updated_at", sa.DateTime(), nullable=True),
+            sa.PrimaryKeyConstraint("organization_id", "user_id"),
+        )
+        test_metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                organizations.insert().values(
+                    organization_id="org-a",
+                    name="Organization A",
+                    status="active",
+                )
+            )
+            connection.execute(
+                workspace_users.insert().values(
+                    organization_id="org-a",
+                    user_id="admin",
+                    display_name="Administrator",
+                    organization_role="org_admin",
+                    status="active",
+                    session_version=1,
+                    password_hash=hash_local_password("old-password"),
+                )
+            )
+
+        class RecordingAudit:
+            def __init__(self) -> None:
+                self.events = []
+
+            def append(self, _connection, event) -> None:
+                self.events.append(event)
+
+        audit = RecordingAudit()
+        service = LocalPasswordLoginService(
+            engine,
+            codec=ServerActorSessionCodec(b"s" * 32),
+            settings=LocalPasswordLoginSettings.database_only(),
+            audit=audit,
+        )
+        actor = ActorIdentity("org-a", "admin")
+        logged_in = service.login("admin", "old-password")
+        self.assertEqual(logged_in.actor, actor)
+        changed = service.change_password(
+            actor=actor,
+            current_password="old-password",
+            new_password="new-password",
+            event_id="password-change-1",
+        )
+        self.assertEqual(changed.actor, actor)
+        self.assertEqual([event.action for event in audit.events], [
+            "workspace_user.password_changed",
+        ])
+        with engine.connect() as connection:
+            row = connection.execute(
+                sa.select(
+                    workspace_users.c.password_hash,
+                    workspace_users.c.session_version,
+                ).where(
+                    workspace_users.c.organization_id == "org-a",
+                    workspace_users.c.user_id == "admin",
+                )
+            ).one()
+        self.assertEqual(row.session_version, 2)
+        self.assertTrue(verify_local_password("new-password", row.password_hash))
+        with self.assertRaises(LocalPasswordLoginFailed):
+            service.login("admin", "old-password")
+
     def test_login_route_sets_the_server_actor_cookie(self) -> None:
         import app as app_module
 

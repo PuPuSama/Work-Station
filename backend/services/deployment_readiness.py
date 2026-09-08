@@ -27,10 +27,10 @@ from services.server_auth import (
 )
 
 # Keep the signed deployment evidence bound to the schema that the Server
-# runtime actually requires. The project business profile was added in 0035;
-# accepting an older head would let a partially migrated deployment pass the
-# preflight gate while the settings and generation paths disagree.
-EXPECTED_ALEMBIC_HEAD = "20260904_0035"
+# runtime actually requires. Local workspace-user passwords were added in
+# 0036; accepting an older head would let password login run without its
+# database column.
+EXPECTED_ALEMBIC_HEAD = "20260908_0036"
 
 
 @dataclass(frozen=True, slots=True)

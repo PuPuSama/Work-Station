@@ -557,13 +557,15 @@ async def app_lifespan(application: FastAPI):
                 )
             )
         password_login_settings = LocalPasswordLoginSettings.from_environment()
-        if password_login_settings is not None:
-            server_password_login = LocalPasswordLoginService(
-                server_engine,
-                codec=codec,
-                settings=password_login_settings,
-            )
-            application.state.server_password_login = server_password_login
+        server_password_login = LocalPasswordLoginService(
+            server_engine,
+            codec=codec,
+            settings=(
+                password_login_settings
+                or LocalPasswordLoginSettings.database_only()
+            ),
+        )
+        application.state.server_password_login = server_password_login
         application.state.server_project_task_store_factory = (
             ServerProjectTaskStoreFactory(server_engine, cfg)
         )
@@ -1340,7 +1342,7 @@ def auth_status(request: Request) -> ApiMessage:
     password_login_enabled = isinstance(
         password_login,
         LocalPasswordLoginService,
-    )
+    ) and password_login.has_available_accounts()
     authenticated = False
     actor = None
     if isinstance(security, ServerRequestSecurity):
