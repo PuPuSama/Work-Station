@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 SCHEMA_VERSION = 6
@@ -583,7 +583,15 @@ class ProjectDomainUpdateRequest(WorkflowModel):
 
 
 class AuthLoginRequest(WorkflowModel):
+    # Preserve the route's generic "not configured" response for legacy
+    # clients that only sent a password before local login was enabled.
+    username: str = Field(default="", max_length=200)
     password: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        return value.strip()
 
 
 class ProjectContextUpdateRequest(WorkflowModel):

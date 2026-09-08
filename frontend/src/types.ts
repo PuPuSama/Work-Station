@@ -550,6 +550,8 @@ export type AuthStatus = {
     authenticated?: boolean;
     mode?: "server";
     login_available?: boolean;
+    password_login_available?: boolean;
+    login_method?: "password" | "oidc" | null;
     issuer?: string | null;
     organization_id?: string | null;
     user_id?: string | null;

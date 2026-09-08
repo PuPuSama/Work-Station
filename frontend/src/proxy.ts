@@ -1,10 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import {
-  AUTH_COOKIE_NAME,
-  authenticationEnabled,
-  validSessionToken,
-} from "@/lib/server-auth";
+const SERVER_SESSION_COOKIE = "article_agent_actor_session";
 
 function safeDestination(request: NextRequest) {
   const candidate = request.nextUrl.searchParams.get("next") || "/";
@@ -14,19 +10,17 @@ function safeDestination(request: NextRequest) {
 }
 
 export function proxy(request: NextRequest) {
-  const loginPage = request.nextUrl.pathname === "/login";
-  if (!authenticationEnabled()) {
-    return NextResponse.next();
-  }
-
-  const authenticated = validSessionToken(
-    request.cookies.get(AUTH_COOKIE_NAME)?.value,
+  const pathname = request.nextUrl.pathname;
+  const authenticated = Boolean(
+    request.cookies.get(SERVER_SESSION_COOKIE)?.value,
   );
-  if (loginPage) {
+
+  if (pathname === "/login") {
     return authenticated
       ? NextResponse.redirect(new URL(safeDestination(request), request.url))
       : NextResponse.next();
   }
+  if (pathname === "/accept-invite") return NextResponse.next();
   if (authenticated) return NextResponse.next();
 
   const loginUrl = new URL("/login", request.url);
@@ -34,6 +28,8 @@ export function proxy(request: NextRequest) {
     "next",
     `${request.nextUrl.pathname}${request.nextUrl.search}`,
   );
+  // The backend verifies the signed cookie; this edge check only prevents
+  // loading protected pages before the API can return its 401 response.
   return NextResponse.redirect(loginUrl);
 }
 

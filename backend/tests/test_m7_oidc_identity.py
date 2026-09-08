@@ -964,6 +964,7 @@ class OidcLoginHttpTests(unittest.TestCase):
                     {
                         "ARTICLE_AGENT_SERVER_MODE": "true",
                         "ARTICLE_AGENT_SERVER_SESSION_SECRET": "s" * 32,
+                        "ARTICLE_AGENT_ENABLE_OIDC": "true",
                         "ARTICLE_AGENT_OIDC_ISSUER": ISSUER,
                         "ARTICLE_AGENT_OIDC_CLIENT_ID": CLIENT_ID,
                         "ARTICLE_AGENT_OIDC_CLIENT_SECRET": (

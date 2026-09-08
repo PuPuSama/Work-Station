@@ -23,6 +23,7 @@ from services.oidc_identity import (
     OidcProviderSettings,
     OidcProviderUnavailable,
 )
+from services.local_password_login import LocalPasswordLoginSettings
 from services.recovery_evidence import VerifiedRecoveryEvidence
 from services.server_auth import (
     ServerActorSessionError,
@@ -174,23 +175,47 @@ def _configuration_checks(
         )
 
     oidc_settings: OidcProviderSettings | None = None
+    oidc_enabled = str(
+        environment.get("ARTICLE_AGENT_ENABLE_OIDC", "") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if oidc_enabled:
+        try:
+            oidc_settings = OidcProviderSettings.from_environment(
+                environment
+            )
+            checks.append(
+                PreflightCheck(
+                    "oidc_config",
+                    oidc_settings is not None,
+                    "configured"
+                    if oidc_settings is not None
+                    else "not ready",
+                )
+            )
+        except OidcConfigurationError:
+            checks.append(
+                PreflightCheck("oidc_config", False, "not ready")
+            )
+    else:
+        checks.append(
+            PreflightCheck("oidc_config", True, "disabled")
+        )
+
     try:
-        oidc_settings = OidcProviderSettings.from_environment(
+        password_login_settings = LocalPasswordLoginSettings.from_environment(
             environment
         )
         checks.append(
             PreflightCheck(
-                "oidc_config",
-                oidc_settings is not None,
+                "password_login",
+                password_login_settings is not None,
                 "configured"
-                if oidc_settings is not None
+                if password_login_settings is not None
                 else "not ready",
             )
         )
-    except OidcConfigurationError:
-        checks.append(
-            PreflightCheck("oidc_config", False, "not ready")
-        )
+    except ValueError:
+        checks.append(PreflightCheck("password_login", False, "not ready"))
 
     try:
         load_server_actor_session_codec(environment)
@@ -314,7 +339,14 @@ def run_deployment_preflight(
             PreflightCheck("database", False, "configuration unavailable")
         )
 
-    if oidc_settings is not None and identity_provider_probe is not None:
+    oidc_enabled = str(
+        environment.get("ARTICLE_AGENT_ENABLE_OIDC", "") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not oidc_enabled:
+        checks.append(
+            PreflightCheck("identity_provider", True, "disabled")
+        )
+    elif oidc_settings is not None and identity_provider_probe is not None:
         try:
             identity_provider_probe(oidc_settings)
             checks.append(
