@@ -8,7 +8,6 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from server_schema import (
-    external_identities,
     organizations,
     project_memberships,
     project_ownership,
@@ -1037,22 +1036,6 @@ class PostgresWorkspaceUserService:
             )
             .subquery()
         )
-        linked_identities = (
-            sa.select(
-                external_identities.c.organization_id,
-                external_identities.c.user_id,
-                sa.func.count().label("active_identity_count"),
-            )
-            .where(
-                external_identities.c.organization_id == organization_id,
-                external_identities.c.status == "active",
-            )
-            .group_by(
-                external_identities.c.organization_id,
-                external_identities.c.user_id,
-            )
-            .subquery()
-        )
         statement = (
             sa.select(
                 workspace_users.c.user_id,
@@ -1067,13 +1050,9 @@ class PostgresWorkspaceUserService:
                     project_counts.c.project_membership_count,
                     0,
                 ).label("project_membership_count"),
-                (
-                    sa.func.coalesce(
-                        linked_identities.c.active_identity_count,
-                        0,
-                    )
-                    > 0
-                ).label("login_linked"),
+                workspace_users.c.password_hash.is_not(None).label(
+                    "login_linked"
+                ),
                 team_id_subquery.label("team_id"),
                 team_role_subquery.label("team_role"),
             )
@@ -1092,15 +1071,6 @@ class PostgresWorkspaceUserService:
                         project_counts.c.organization_id
                         == workspace_users.c.organization_id,
                         project_counts.c.user_id
-                        == workspace_users.c.user_id,
-                    ),
-                )
-                .outerjoin(
-                    linked_identities,
-                    sa.and_(
-                        linked_identities.c.organization_id
-                        == workspace_users.c.organization_id,
-                        linked_identities.c.user_id
                         == workspace_users.c.user_id,
                     ),
                 )

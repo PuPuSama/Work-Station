@@ -205,7 +205,7 @@ export function OrganizationAdminConsole({
               <h1 className="text-xl font-semibold">组织管理</h1>
             </div>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              管理本组织的本地账号、登录会话、团队和 Team Lead。登录使用服务器配置的账号密码。
+              管理本组织的本地账号、登录会话、团队和 Team Lead。每个账号使用自己的本地密码。
             </p>
             <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={organizationId}>
               {organizationId}
@@ -348,7 +348,7 @@ function WorkspaceUsersPanel({
       });
       setNewUser({ user_id: "", display_name: "", organization_role: "member", team_id: "", team_role: "member" });
       await refresh();
-      setFeedback({ kind: "success", message: "本地账号已创建。登录关联仍需单独配置。" });
+      setFeedback({ kind: "success", message: "本地账号已创建；设置密码后即可登录。" });
     } catch (error) {
       setFeedback({ kind: "error", message: message(error, "账号创建失败。") });
     } finally {
@@ -426,7 +426,7 @@ function WorkspaceUsersPanel({
       <Card>
         <CardHeader className="border-b">
           <CardTitle>创建本地账号</CardTitle>
-          <CardDescription>这里维护 Workspace User 的项目权限；登录使用服务器配置的账号密码。</CardDescription>
+          <CardDescription>这里维护 Workspace User 的项目权限和本地登录状态。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_180px_180px_150px_auto] md:items-end">
           <div className="grid gap-1.5"><Label htmlFor="new-user-id">User ID</Label><Input id="new-user-id" className="h-11" value={newUser.user_id} onChange={(event) => setNewUser((current) => ({ ...current, user_id: event.target.value }))} /></div>
@@ -438,7 +438,7 @@ function WorkspaceUsersPanel({
         </CardContent>
       </Card>
       <Card>
-        <CardHeader className="border-b"><CardTitle>账号目录</CardTitle><CardDescription>登录是否关联只公开为布尔状态；内部 Session Version 不会返回。</CardDescription></CardHeader>
+        <CardHeader className="border-b"><CardTitle>账号目录</CardTitle><CardDescription>这里只显示是否已设置本地密码；内部 Session Version 不会返回。</CardDescription></CardHeader>
         <CardContent className="grid gap-3 pt-4">
           {users.map((user) => {
             const draft = drafts[user.user_id] ?? { display_name: user.display_name, organization_role: user.organization_role, team_id: user.team_id ?? "", team_role: user.team_role ?? "member" };
@@ -448,7 +448,7 @@ function WorkspaceUsersPanel({
                   <div className="grid gap-1.5"><Label htmlFor={`team-${user.user_id}`}>团队</Label><select id={`team-${user.user_id}`} className={selectClass} value={draft.team_id} disabled={Boolean(pending) || draft.organization_role === "org_admin"} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, team_id: event.target.value } }))}><option value="">待分配</option>{teams.filter((team) => team.status === "active").map((team) => <option key={team.team_id} value={team.team_id}>{team.name}</option>)}</select></div>
                   <div className="grid gap-1.5"><Label htmlFor={`team-role-${user.user_id}`}>团队角色</Label><select id={`team-role-${user.user_id}`} className={selectClass} value={draft.team_role} disabled={Boolean(pending) || draft.organization_role === "org_admin" || !draft.team_id} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, team_role: event.target.value as TeamMembershipRole } }))}><option value="member">成员</option><option value="team_lead">Team Lead</option></select></div>
                 </div>
-                <div className="min-w-0"><div className="flex flex-wrap gap-2"><span className="font-medium">{user.display_name}</span><Badge variant={user.status === "active" ? "outline" : "secondary"}>{user.status === "active" ? "Active" : "Disabled"}</Badge><Badge variant="outline">{user.login_linked ? "已关联登录" : "未关联登录"}</Badge></div><p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={user.user_id}>{user.user_id}</p><p className="mt-1 text-xs text-muted-foreground">Team {user.team_membership_count} · Project {user.project_membership_count}</p></div>
+                <div className="min-w-0"><div className="flex flex-wrap gap-2"><span className="font-medium">{user.display_name}</span><Badge variant={user.status === "active" ? "outline" : "secondary"}>{user.status === "active" ? "Active" : "Disabled"}</Badge><Badge variant="outline">{user.login_linked ? "已设置密码" : "未设置密码"}</Badge></div><p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={user.user_id}>{user.user_id}</p><p className="mt-1 text-xs text-muted-foreground">Team {user.team_membership_count} · Project {user.project_membership_count}</p></div>
                 <div className="grid gap-1.5"><Label htmlFor={`name-${user.user_id}`}>显示名</Label><Input id={`name-${user.user_id}`} className="h-11" value={draft.display_name} disabled={Boolean(pending)} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, display_name: event.target.value } }))} /></div>
                 <div className="grid gap-1.5"><Label htmlFor={`role-${user.user_id}`}>组织角色</Label><select id={`role-${user.user_id}`} className={selectClass} value={draft.organization_role} disabled={Boolean(pending)} onChange={(event) => setDrafts((current) => ({ ...current, [user.user_id]: { ...draft, organization_role: event.target.value as WorkspaceOrganizationRole } }))}><option value="member">普通成员</option><option value="org_admin">组织管理员</option></select></div>
                 <div className="flex flex-wrap gap-2">

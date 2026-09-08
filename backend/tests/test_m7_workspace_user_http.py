@@ -129,6 +129,14 @@ class WorkspaceUserHttpTests(unittest.TestCase):
                 )
             )
             connection.execute(
+                workspace_users.update()
+                .where(
+                    workspace_users.c.organization_id == self.org_a,
+                    workspace_users.c.user_id == self.target_a,
+                )
+                .values(password_hash="test-password-hash")
+            )
+            connection.execute(
                 projects.insert().values(
                     project_id=self.project_a,
                     customer_name="Project A",
