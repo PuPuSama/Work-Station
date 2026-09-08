@@ -22,6 +22,7 @@ from services.audit_log import (
     AuditEventWriter,
     PostgresAuditEventWriter,
 )
+from services.local_password_login import hash_local_password
 
 
 WorkspaceUserStatus = Literal["active", "disabled"]
@@ -34,7 +35,7 @@ class WorkspaceUserError(RuntimeError):
 
 
 class WorkspaceUserDenied(WorkspaceUserError):
-    """The Actor is not an active administrator of this Organization."""
+    """The Actor cannot perform this Organization-scoped user operation."""
 
 
 class WorkspaceUserNotFound(WorkspaceUserError):
@@ -304,6 +305,7 @@ class PostgresWorkspaceUserService:
         event_id: str,
         team_id: str | None = None,
         team_role: str | None = None,
+        initial_password: str | None = None,
     ) -> WorkspaceUserRecord:
         try:
             with self._engine.begin() as connection:
@@ -316,6 +318,7 @@ class PostgresWorkspaceUserService:
                     organization_role=organization_role,
                     team_id=team_id,
                     team_role=team_role,
+                    initial_password=initial_password,
                     event_id=event_id,
                 )
         except WorkspaceUserDenied:
@@ -343,6 +346,7 @@ class PostgresWorkspaceUserService:
         event_id: str,
         team_id: str | None = None,
         team_role: str | None = None,
+        initial_password: str | None = None,
     ) -> WorkspaceUserRecord:
         if not connection.in_transaction():
             raise ValueError(
@@ -358,6 +362,11 @@ class PostgresWorkspaceUserService:
             "display_name",
         )
         normalized_role = _organization_role(organization_role)
+        normalized_initial_password = (
+            str(initial_password)
+            if initial_password is not None
+            else None
+        )
         normalized_team_id = (
             _required_text(team_id, "team_id") if team_id is not None else None
         )
@@ -370,11 +379,34 @@ class PostgresWorkspaceUserService:
             raise ValueError("organization administrators cannot belong to a team")
         normalized_event_id = _required_text(event_id, "event_id")
 
-        self._lock_active_admin(
+        creator_role, creator_team_id = self._lock_user_creator(
             connection,
             actor=actor,
             organization_id=normalized_organization_id,
             write=True,
+        )
+        if creator_role == "team_lead":
+            if normalized_role != "member":
+                raise WorkspaceUserDenied(
+                    "team leads can only create member accounts"
+                )
+            if normalized_initial_password is None:
+                raise ValueError(
+                    "initial_password is required when a team lead creates an account"
+                )
+            if (
+                normalized_team_id is not None
+                and normalized_team_id != creator_team_id
+            ):
+                raise WorkspaceUserDenied(
+                    "team leads can only create accounts in their own team"
+                )
+            normalized_team_id = creator_team_id
+            normalized_team_role = "member"
+        initial_password_hash = (
+            hash_local_password(normalized_initial_password)
+            if normalized_initial_password is not None
+            else None
         )
         connection.execute(
             workspace_users.insert().values(
@@ -383,6 +415,7 @@ class PostgresWorkspaceUserService:
                 display_name=normalized_display_name,
                 status="active",
                 organization_role=normalized_role,
+                password_hash=initial_password_hash,
             )
         )
         if normalized_team_id is not None:
@@ -449,6 +482,7 @@ class PostgresWorkspaceUserService:
                     "team_role": normalized_team_role
                     if normalized_team_id is not None
                     else None,
+                    "password_initialized": initial_password_hash is not None,
                 },
             ),
         )
@@ -459,7 +493,7 @@ class PostgresWorkspaceUserService:
             organization_role=normalized_role,
             team_membership_count=1 if normalized_team_id is not None else 0,
             project_membership_count=0,
-            login_linked=False,
+            login_linked=initial_password_hash is not None,
             team_id=normalized_team_id,
             team_role=(
                 cast(TeamMembershipRole, normalized_team_role)
@@ -925,6 +959,70 @@ class PostgresWorkspaceUserService:
             organization_id=normalized_organization_id,
             user_id=normalized_user_id,
         )
+
+    def _lock_user_creator(
+        self,
+        connection: Connection,
+        *,
+        actor: ActorIdentity,
+        organization_id: str,
+        write: bool,
+    ) -> tuple[Literal["org_admin", "team_lead"], str | None]:
+        """Authorize account creation and derive a team lead's scope."""
+
+        if actor.organization_id != organization_id:
+            raise WorkspaceUserDenied("workspace user administration denied")
+        organization_exists = connection.execute(
+            sa.select(organizations.c.organization_id)
+            .where(
+                organizations.c.organization_id == organization_id,
+                organizations.c.status == "active",
+            )
+            .with_for_update(read=not write)
+        ).scalar_one_or_none()
+        if organization_exists is None:
+            raise WorkspaceUserDenied("workspace user administration denied")
+        actor_row = connection.execute(
+            sa.select(
+                workspace_users.c.user_id,
+                workspace_users.c.organization_role,
+            )
+            .where(
+                workspace_users.c.organization_id == organization_id,
+                workspace_users.c.user_id == actor.user_id,
+                workspace_users.c.status == "active",
+            )
+            .with_for_update(read=True)
+        ).mappings().one_or_none()
+        if actor_row is None:
+            raise WorkspaceUserDenied("workspace user administration denied")
+        if actor_row["organization_role"] == "org_admin":
+            return "org_admin", None
+
+        lead_team_ids = connection.execute(
+            sa.select(team_memberships.c.team_id)
+            .select_from(
+                team_memberships.join(
+                    teams,
+                    sa.and_(
+                        teams.c.organization_id
+                        == team_memberships.c.organization_id,
+                        teams.c.team_id == team_memberships.c.team_id,
+                    ),
+                )
+            )
+            .where(
+                team_memberships.c.organization_id == organization_id,
+                team_memberships.c.user_id == actor.user_id,
+                team_memberships.c.role == "team_lead",
+                teams.c.status == "active",
+            )
+            .order_by(team_memberships.c.team_id)
+            .with_for_update(read=True)
+        ).scalars().all()
+        if len(lead_team_ids) != 1:
+            raise WorkspaceUserDenied("workspace user administration denied")
+        return "team_lead", str(lead_team_ids[0])
 
     def _lock_active_admin(
         self,

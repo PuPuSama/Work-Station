@@ -42,7 +42,7 @@ class RevokeActorSessionsResponse(BaseModel):
 
 
 class WorkspaceUserCreateRequest(BaseModel):
-    """Create an active local user record; login linkage is separate."""
+    """Create an active local user record with an optional initial password."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -51,6 +51,11 @@ class WorkspaceUserCreateRequest(BaseModel):
     organization_role: Literal["org_admin", "member"]
     team_id: str | None = Field(default=None, min_length=1, max_length=200)
     team_role: Literal["team_lead", "member"] | None = None
+    initial_password: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=256,
+    )
 
     @field_validator("user_id", "display_name", "team_id")
     @classmethod
@@ -255,6 +260,7 @@ def create_workspace_user(
             organization_role=payload.organization_role,
             team_id=payload.team_id,
             team_role=payload.team_role,
+            initial_password=payload.initial_password,
             event_id=f"workspace_user_create_{uuid.uuid4().hex}",
         )
     except (

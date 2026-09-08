@@ -14,6 +14,7 @@ import type { AuthStatus } from "@/types";
 
 export function OrganizationAdminEntry({ embedded = false }: { embedded?: boolean }) {
   const [organizationId, setOrganizationId] = useState<string | null>(null);
+  const [actorUserId, setActorUserId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -25,10 +26,15 @@ export function OrganizationAdminEntry({ embedded = false }: { embedded?: boolea
       if (status.data?.mode !== "server") {
         throw new Error("组织管理仅在 Server 模式开放。");
       }
-      if (!status.data.authenticated || !status.data.organization_id) {
+      if (
+        !status.data.authenticated ||
+        !status.data.organization_id ||
+        !status.data.user_id
+      ) {
         throw new Error("当前组织身份不可用，请重新登录。");
       }
       setOrganizationId(status.data.organization_id);
+      setActorUserId(status.data.user_id);
     } catch (nextError) {
       setError(
         nextError instanceof Error
@@ -44,8 +50,14 @@ export function OrganizationAdminEntry({ embedded = false }: { embedded?: boolea
     void resolve();
   }, [resolve]);
 
-  if (organizationId) {
-    return <OrganizationAdminConsole organizationId={organizationId} embedded={embedded} />;
+  if (organizationId && actorUserId) {
+    return (
+      <OrganizationAdminConsole
+        organizationId={organizationId}
+        actorUserId={actorUserId}
+        embedded={embedded}
+      />
+    );
   }
   return (
     <main className={`flex items-center justify-center bg-background px-5 ${embedded ? "min-h-56" : "min-h-dvh"}`}>
