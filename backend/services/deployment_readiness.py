@@ -30,7 +30,7 @@ from services.server_auth import (
 # runtime actually requires. Local workspace-user passwords were added in
 # 0036; accepting an older head would let password login run without its
 # database column.
-EXPECTED_ALEMBIC_HEAD = "20260908_0036"
+EXPECTED_ALEMBIC_HEAD = "20260909_0038"
 
 
 @dataclass(frozen=True, slots=True)
