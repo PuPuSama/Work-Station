@@ -30,6 +30,7 @@ from services.audit_log import (
     PostgresAuditEventWriter,
 )
 from services.task_identity import normalized_customer
+from services.wordpress_publisher import validate_wordpress_base_url
 
 
 class ServerProjectMetadataConflict(RuntimeError):
@@ -56,6 +57,7 @@ class ServerProjectMetadata:
     revision: int
     owning_team_id: str | None = None
     owner_user_id: str | None = None
+    wordpress_url: str = ""
 
 
 def _normalized_customer_name(value: str) -> str:
@@ -78,6 +80,7 @@ def _validated_metadata(
     official_domain: str,
     project_notes: str,
     project_business_profile: str = "",
+    wordpress_url: str = "",
     revision: int,
 ) -> ServerProjectMetadata:
     if isinstance(revision, bool) or not isinstance(revision, int):
@@ -98,12 +101,14 @@ def _validated_metadata(
     ).replace("\r\n", "\n").replace("\r", "\n").strip()
     if len(normalized_business_profile) > 30000:
         raise ValueError("project_business_profile is too long")
+    normalized_wordpress_url = validate_wordpress_base_url(wordpress_url)
     return ServerProjectMetadata(
         project_id=validated.project_id,
         customer_name=validated.customer_name,
         official_domain=validated.official_domain,
         project_notes=normalized_notes,
         project_business_profile=normalized_business_profile,
+        wordpress_url=normalized_wordpress_url,
         revision=revision,
     )
 
@@ -137,6 +142,7 @@ class PostgresServerProjectMetadata:
             project_business_profile=str(
                 row.get("project_business_profile") or ""
             ),
+            wordpress_url=str(row.get("wordpress_url") or ""),
             revision=int(row["revision"]),
             owning_team_id=(
                 str(row["owning_team_id"])
@@ -166,6 +172,7 @@ class PostgresServerProjectMetadata:
                         projects.c.official_domain,
                         projects.c.project_notes,
                         projects.c.project_business_profile,
+                        projects.c.wordpress_url,
                         projects.c.revision,
                         project_ownership.c.owning_team_id,
                         project_ownership.c.owner_user_id,
@@ -215,6 +222,7 @@ class PostgresServerProjectMetadata:
             official_domain=identity.official_domain,
             project_notes="",
             project_business_profile="",
+            wordpress_url="",
             revision=0,
             owning_team_id=None,
             owner_user_id=None,
@@ -354,6 +362,7 @@ class PostgresServerProjectMetadata:
                     official_domain=requested.official_domain,
                     project_notes=requested.project_notes,
                     project_business_profile=requested.project_business_profile,
+                    wordpress_url=requested.wordpress_url,
                     revision=requested.revision,
                     owning_team_id=normalized_team_id,
                     owner_user_id=normalized_owner_user_id,
@@ -424,6 +433,7 @@ class PostgresServerProjectMetadata:
         official_domain: str,
         project_notes: str,
         project_business_profile: str | None = None,
+        wordpress_url: str | None = None,
     ) -> ServerProjectMetadata:
         normalized_business_profile = (
             None
@@ -433,12 +443,18 @@ class PostgresServerProjectMetadata:
             .replace("\r", "\n")
             .strip()
         )
+        normalized_wordpress_url = (
+            None
+            if wordpress_url is None
+            else validate_wordpress_base_url(wordpress_url)
+        )
         requested = _validated_metadata(
             project_id=project_id,
             customer_name=customer_name,
             official_domain=official_domain,
             project_notes=project_notes,
             project_business_profile=normalized_business_profile or "",
+            wordpress_url=normalized_wordpress_url or "",
             revision=expected_revision,
         )
         try:
@@ -462,6 +478,7 @@ class PostgresServerProjectMetadata:
                         projects.c.official_domain,
                         projects.c.project_notes,
                         projects.c.project_business_profile,
+                        projects.c.wordpress_url,
                         projects.c.revision,
                         project_ownership.c.owning_team_id,
                         project_ownership.c.owner_user_id,
@@ -491,6 +508,11 @@ class PostgresServerProjectMetadata:
                         requested,
                         project_business_profile=current.project_business_profile,
                     )
+                if normalized_wordpress_url is None:
+                    requested = replace(
+                        requested,
+                        wordpress_url=current.wordpress_url,
+                    )
                 customer_name_changed = (
                     current.customer_name != requested.customer_name
                 )
@@ -504,12 +526,14 @@ class PostgresServerProjectMetadata:
                     current.project_business_profile
                     != requested.project_business_profile
                 )
+                wordpress_url_changed = current.wordpress_url != requested.wordpress_url
                 if not any(
                     (
                         customer_name_changed,
                         official_domain_changed,
                         project_notes_changed,
                         project_business_profile_changed,
+                        wordpress_url_changed,
                     )
                 ):
                     return current
@@ -526,6 +550,7 @@ class PostgresServerProjectMetadata:
                         official_domain=requested.official_domain,
                         project_notes=requested.project_notes,
                         project_business_profile=requested.project_business_profile,
+                        wordpress_url=requested.wordpress_url,
                         revision=next_revision,
                         updated_at=sa.func.now(),
                     )
@@ -543,6 +568,8 @@ class PostgresServerProjectMetadata:
                 }
                 if project_business_profile_changed:
                     details["project_business_profile_changed"] = True
+                if wordpress_url_changed:
+                    details["wordpress_url_changed"] = True
                 self._audit.append(
                     connection,
                     AuditEvent(
@@ -574,6 +601,7 @@ class PostgresServerProjectMetadata:
                     official_domain=requested.official_domain,
                     project_notes=requested.project_notes,
                     project_business_profile=requested.project_business_profile,
+                    wordpress_url=requested.wordpress_url,
                     revision=next_revision,
                     owning_team_id=current.owning_team_id,
                     owner_user_id=current.owner_user_id,

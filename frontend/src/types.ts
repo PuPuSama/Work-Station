@@ -534,6 +534,7 @@ export type TaskRecord = {
   tdk_asset_id?: string;
   tdk_content_hash?: string;
   tdk_filename?: string;
+  wordpress_upload?: WordPressUploadState;
   delivery_package_path?: string;
   delivery_package_asset_id?: string;
   delivery_package_content_hash?: string;
@@ -541,6 +542,19 @@ export type TaskRecord = {
   zero_gpt_report: string;
   created_at: string;
   updated_at: string;
+};
+
+export type WordPressUploadState = {
+  status?: "not_started" | "uploading" | "draft_created" | "failed";
+  source_revision?: number;
+  source_article_hash?: string;
+  source_title?: string;
+  wordpress_url?: string;
+  post_id?: number | null;
+  post_url?: string;
+  media_ids?: Record<string, number>;
+  error?: string;
+  updated_at?: string;
 };
 
 export type AuthStatus = {
@@ -597,9 +611,17 @@ export type ServerProjectMetadata = {
   official_domain: string;
   project_notes: string;
   project_business_profile: string;
+  wordpress_url?: string;
   revision: number;
   owning_team_id?: string | null;
   owner_user_id?: string | null;
+};
+
+export type WordPressCredentials = {
+  configured: boolean;
+  username: string;
+  revision: number;
+  updated_at: string;
 };
 
 export type ServerTaskIntakeItem = {

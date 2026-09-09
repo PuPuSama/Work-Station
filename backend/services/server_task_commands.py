@@ -55,6 +55,10 @@ ServerTaskAuditAction = Literal[
     "article.final_ai_screenshot.uploaded",
     "article.final_ai_check.updated",
     "article.delivery.packaged",
+    "article.wordpress_upload.started",
+    "article.wordpress_media.uploaded",
+    "article.wordpress_draft.created",
+    "article.wordpress_upload.failed",
 ]
 
 SERVER_TASK_ACTION_PERMISSIONS: dict[
@@ -91,6 +95,10 @@ SERVER_TASK_ACTION_PERMISSIONS: dict[
     "article.final_ai_screenshot.uploaded": "article.review",
     "article.final_ai_check.updated": "article.review",
     "article.delivery.packaged": "article.deliver",
+    "article.wordpress_upload.started": "article.deliver",
+    "article.wordpress_media.uploaded": "article.deliver",
+    "article.wordpress_draft.created": "article.deliver",
+    "article.wordpress_upload.failed": "article.deliver",
 }
 
 SERVER_TASK_ACTION_DETAIL_KEYS: dict[
@@ -276,6 +284,10 @@ SERVER_TASK_ACTION_DETAIL_KEYS: dict[
             "image_count",
         }
     ),
+    "article.wordpress_upload.started": frozenset({"source_revision", "media_count"}),
+    "article.wordpress_media.uploaded": frozenset({"media_index", "media_count"}),
+    "article.wordpress_draft.created": frozenset({"post_id", "media_count", "already_exists"}),
+    "article.wordpress_upload.failed": frozenset({"retryable"}),
 }
 
 _BASE_DETAIL_KEYS = frozenset(

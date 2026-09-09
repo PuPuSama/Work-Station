@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from threading import RLock
 from typing import Literal
 
 from fastapi import (
@@ -62,6 +63,7 @@ from services.project_deletion import (
 )
 from services.server_auth import SERVER_AUTH_COOKIE_NAME
 from services.server_article_images import (
+    MAX_SERVER_SOURCE_IMAGE_BYTES,
     ServerArticleImageAnchorRequired,
     ServerArticleImageError,
     ServerArticleImagePreparation,
@@ -75,6 +77,7 @@ from services.server_ai_screenshots import (
 from services.server_docx_export import (
     ServerArticleDocxError,
     ServerArticleDocxExport,
+    verified_server_article_webp,
 )
 from services.server_outline_update import (
     ServerOutlineUpdateError,
@@ -197,6 +200,19 @@ from services.server_tdk_export import (
     ServerTdkError,
     ServerTdkUnavailable,
 )
+from services.wordpress_publisher import (
+    WordPressPublisher,
+    WordPressPublisherError,
+    WordPressSettings,
+    configured_wordpress_base_url,
+    markdown_to_wordpress_html,
+    wordpress_slug,
+)
+from services.server_wordpress_credentials import (
+    PostgresServerWordPressCredentials,
+    WordPressCredentialsConflict,
+    WordPressCredentialsUnavailable,
+)
 from services.server_task_workbook import (
     MAX_WORKBOOK_BYTES,
     ServerTaskWorkbookError,
@@ -204,6 +220,7 @@ from services.server_task_workbook import (
 )
 from services.zerogpt import ZeroGPTClient
 from storage import RevisionConflictError, content_hash, now_iso
+from services.tdk import article_title, current_article
 from workflow.state_machine import (
     ACTION_CONFIRM_FINAL_AI,
     ACTION_CONFIRM_INITIAL_AI,
@@ -225,6 +242,9 @@ from workflow.state_machine import (
     reset_for_full_rewrite,
     transition_task,
 )
+
+
+_WORDPRESS_UPLOAD_LOCK = RLock()
 
 
 class ProjectAssetDownload(BaseModel):
@@ -473,9 +493,46 @@ class ProjectMetadataResponse(BaseModel):
     official_domain: str
     project_notes: str
     project_business_profile: str
+    wordpress_url: str = ""
     revision: int
     owning_team_id: str | None = None
     owner_user_id: str | None = None
+
+
+class WordPressConnectionTestResponse(BaseModel):
+    configured: bool
+    url: str
+    user_id: str = ""
+    username: str = ""
+    message: str
+
+
+class WordPressConnectionTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    wordpress_url: str | None = Field(default=None, max_length=2048)
+
+
+class WordPressCredentialsResponse(BaseModel):
+    configured: bool
+    username: str = ""
+    revision: int = 0
+    updated_at: str = ""
+
+
+class WordPressCredentialsUpdateRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    revision: int = Field(ge=0)
+    username: str = Field(min_length=1, max_length=200)
+    # Empty/omitted on update keeps the existing password; it is required for
+    # the first save. The secret is never returned by the API.
+    # Length is checked inside the credential service so a validation error
+    # cannot echo a submitted secret in FastAPI's request-error payload.
+    app_password: str | None = Field(default=None)
 
 
 class ProjectMetadataUpdateRequest(BaseModel):
@@ -494,6 +551,7 @@ class ProjectMetadataUpdateRequest(BaseModel):
         default=None,
         max_length=30000,
     )
+    wordpress_url: str | None = Field(default=None, max_length=2048)
 
 
 class ProjectBusinessProfileDraftResponse(BaseModel):
@@ -510,6 +568,7 @@ def _project_metadata_response(
         official_domain=metadata.official_domain,
         project_notes=metadata.project_notes,
         project_business_profile=metadata.project_business_profile,
+        wordpress_url=metadata.wordpress_url,
         revision=metadata.revision,
         owning_team_id=metadata.owning_team_id,
         owner_user_id=metadata.owner_user_id,
@@ -931,6 +990,15 @@ class HumanizeGenerationJobResponse(ProductRediscoveryJobResponse):
     """Public Humanize Job state; Prompt and Article identities stay hidden."""
 
 
+class WordPressUploadResponse(BaseModel):
+    status: Literal["draft_created", "already_exists"]
+    post_id: int
+    post_url: str
+    source_revision: int
+    source_article_hash: str
+    media_count: int
+
+
 def require_server_project_access(
     request: Request,
 ) -> AuthorizedProjectRequest:
@@ -1014,6 +1082,22 @@ def _project_metadata_service(
         raise HTTPException(
             status_code=503,
             detail="Server project metadata is not available.",
+        )
+    return service
+
+
+def _wordpress_credentials_service(
+    request: Request,
+) -> PostgresServerWordPressCredentials:
+    service = getattr(
+        request.app.state,
+        "server_wordpress_credentials",
+        None,
+    )
+    if not isinstance(service, PostgresServerWordPressCredentials):
+        raise HTTPException(
+            status_code=503,
+            detail="WordPress credentials service is not available.",
         )
     return service
 
@@ -1618,6 +1702,136 @@ def get_project_metadata(
 
 
 @router.post(
+    "/{project}/wordpress/test-connection",
+    response_model=WordPressConnectionTestResponse,
+)
+def test_project_wordpress_connection(
+    project: str,
+    request: Request,
+    payload: WordPressConnectionTestRequest | None = None,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> WordPressConnectionTestResponse:
+    del project
+    authorized = _require_project_permission(request, authorized, "article.deliver")
+    try:
+        metadata = _project_metadata_service(request).get(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+        )
+        candidate_url = (
+            metadata.wordpress_url
+            if payload is None or payload.wordpress_url is None
+            else payload.wordpress_url
+        )
+        saved_credentials = _wordpress_credentials_service(request).get(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+        )
+        settings = WordPressSettings.from_environment_for_url(
+            candidate_url,
+            project_id=authorized.project_id,
+            credentials=(
+                None
+                if saved_credentials is None
+                else (
+                    saved_credentials.username,
+                    saved_credentials.app_password,
+                )
+            ),
+        )
+        publisher = WordPressPublisher(settings)
+        try:
+            account = publisher.test_connection()
+        finally:
+            publisher.close()
+    except WordPressPublisherError as exc:
+        if exc.status_code in {401, 403}:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=503 if exc.retryable else 422, detail=str(exc)) from exc
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    except WordPressCredentialsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return WordPressConnectionTestResponse(
+        configured=True,
+        url=settings.base_url,
+        user_id=account["user_id"],
+        username=account["name"],
+        message="WordPress 连接成功，可以使用当前账号创建草稿。",
+    )
+
+
+@router.get(
+    "/{project}/wordpress/credentials",
+    response_model=WordPressCredentialsResponse,
+)
+def get_project_wordpress_credentials(
+    project: str,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> WordPressCredentialsResponse:
+    del project
+    authorized = _require_project_permission(request, authorized, "article.edit")
+    try:
+        credentials = _wordpress_credentials_service(request).get(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    except WordPressCredentialsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return WordPressCredentialsResponse(
+        configured=credentials is not None,
+        username=credentials.username if credentials else "",
+        revision=credentials.revision if credentials else 0,
+        updated_at=credentials.updated_at if credentials else "",
+    )
+
+
+@router.put(
+    "/{project}/wordpress/credentials",
+    response_model=WordPressCredentialsResponse,
+)
+def save_project_wordpress_credentials(
+    project: str,
+    payload: WordPressCredentialsUpdateRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> WordPressCredentialsResponse:
+    del project
+    authorized = _require_project_permission(request, authorized, "article.edit")
+    try:
+        credentials = _wordpress_credentials_service(request).save(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+            username=payload.username,
+            app_password=payload.app_password,
+            expected_revision=payload.revision,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    except WordPressCredentialsConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except WordPressCredentialsUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return WordPressCredentialsResponse(
+        configured=True,
+        username=credentials.username,
+        revision=credentials.revision,
+        updated_at=credentials.updated_at,
+    )
+
+
+@router.post(
     "/{project}/metadata/business-profile-draft",
     response_model=ProjectBusinessProfileDraftResponse,
 )
@@ -1691,6 +1905,7 @@ def update_project_metadata(
             official_domain=payload.official_domain,
             project_notes=payload.project_notes,
             project_business_profile=payload.project_business_profile,
+            wordpress_url=payload.wordpress_url,
         )
     except ProjectAccessDenied as exc:
         raise HTTPException(
@@ -4582,6 +4797,304 @@ def prepare_project_task_images(
         action="article.images.prepared",
         details={"image_count": len(task.images)},
     )
+
+
+@router.post(
+    "/{project}/tasks/{task_id}/wordpress-upload",
+    response_model=WordPressUploadResponse,
+)
+def upload_project_task_wordpress(
+    project: str,
+    task_id: str,
+    payload: ProjectRevisionRequest,
+    request: Request,
+    authorized: AuthorizedProjectRequest = Depends(
+        require_server_project_access
+    ),
+) -> WordPressUploadResponse:
+    """Create or reuse one WordPress draft for the current article revision."""
+    del project
+    authorized = _require_project_permission(request, authorized, "article.deliver")
+    store = _task_store(request, authorized)
+    try:
+        task = store.get(task_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task was not found in the requested project.") from None
+    if task.revision != payload.revision:
+        raise HTTPException(
+            status_code=409,
+            detail=str(RevisionConflictError(task.id, payload.revision, task.revision)),
+        )
+    article = current_article(task).strip()
+    title = article_title(task, article).strip()
+    if not article or not title:
+        raise HTTPException(status_code=409, detail="请先完成文章正文和标题，再上传 WordPress 草稿。")
+    source_revision = task.revision
+    source_hash = content_hash(article)
+    try:
+        project_metadata = _project_metadata_service(request).get(
+            actor=authorized.actor,
+            project_id=authorized.project_id,
+        )
+    except ProjectAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="project access denied") from exc
+    except ServerProjectMetadataUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project metadata is temporarily unavailable.",
+        ) from exc
+    target_wordpress_url = configured_wordpress_base_url(
+        project_metadata.wordpress_url
+    )
+    state = task.wordpress_upload
+    if (
+        state.status == "draft_created"
+        and state.source_article_hash == source_hash
+        and state.source_title == title
+        and state.wordpress_url == target_wordpress_url
+        and state.post_id
+    ):
+        return WordPressUploadResponse(
+            status="already_exists",
+            post_id=state.post_id,
+            post_url=state.post_url,
+            source_revision=state.source_revision,
+            source_article_hash=source_hash,
+            media_count=len(state.media_ids),
+        )
+
+    with _WORDPRESS_UPLOAD_LOCK:
+        # Refresh after waiting for another request in this process. A second
+        # worker still cannot overwrite a different source hash because the
+        # deterministic WordPress slug is checked by the publisher.
+        try:
+            task = store.get(task_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Task was not found in the requested project.") from None
+        if task.revision != payload.revision:
+            raise HTTPException(
+                status_code=409,
+                detail=str(RevisionConflictError(task.id, payload.revision, task.revision)),
+            )
+        article = current_article(task).strip()
+        title = article_title(task, article).strip()
+        source_revision = task.revision
+        source_hash = content_hash(article)
+        try:
+            project_metadata = _project_metadata_service(request).get(
+                actor=authorized.actor,
+                project_id=authorized.project_id,
+            )
+        except ProjectAccessDenied as exc:
+            raise HTTPException(status_code=403, detail="project access denied") from exc
+        except ServerProjectMetadataUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Project metadata is temporarily unavailable.",
+            ) from exc
+        target_wordpress_url = configured_wordpress_base_url(
+            project_metadata.wordpress_url
+        )
+        state = task.wordpress_upload
+        if (
+            state.status == "draft_created"
+            and state.source_article_hash == source_hash
+            and state.source_title == title
+            and state.wordpress_url == target_wordpress_url
+            and state.post_id
+        ):
+            return WordPressUploadResponse(
+                status="already_exists",
+                post_id=state.post_id,
+                post_url=state.post_url,
+                source_revision=state.source_revision,
+                source_article_hash=source_hash,
+                media_count=len(state.media_ids),
+            )
+        if state.source_article_hash != source_hash or state.wordpress_url != target_wordpress_url:
+            state.media_ids = {}
+        if state.wordpress_url != target_wordpress_url:
+            state.post_id = None
+            state.post_url = ""
+        state.status = "uploading"
+        state.source_revision = source_revision
+        state.source_article_hash = source_hash
+        state.source_title = title
+        state.wordpress_url = target_wordpress_url
+        state.error = ""
+        state.updated_at = now_iso()
+        task = _save_audited_task(
+            request,
+            authorized,
+            task,
+            expected_revision=payload.revision,
+            action="article.wordpress_upload.started",
+            details={"source_revision": source_revision, "media_count": len(task.images)},
+        )
+        working_revision = task.revision
+        publisher = None
+        try:
+            saved_credentials = _wordpress_credentials_service(request).get(
+                actor=authorized.actor,
+                project_id=authorized.project_id,
+            )
+            publisher = WordPressPublisher(
+                WordPressSettings.from_environment_for_url(
+                    project_metadata.wordpress_url,
+                    project_id=authorized.project_id,
+                    credentials=(
+                        None
+                        if saved_credentials is None
+                        else (
+                            saved_credentials.username,
+                            saved_credentials.app_password,
+                        )
+                    ),
+                )
+            )
+            image_urls: dict[str, str] = {}
+            media_count = len(task.images)
+            for index, image in enumerate(task.images):
+                asset_id = image.prepared_asset_id.strip()
+                if not asset_id:
+                    continue
+                stored = _knowledge_object_service(request).read_for_article_delivery(
+                    actor=authorized.actor,
+                    project_id=authorized.project_id,
+                    asset_id=asset_id,
+                    max_bytes=MAX_SERVER_SOURCE_IMAGE_BYTES,
+                )
+                try:
+                    verified = verified_server_article_webp(image, stored)
+                except ValueError as exc:
+                    raise WordPressPublisherError("准备好的文章图片校验失败。") from exc
+                key = image.prepared_content_hash.strip() or stored.asset.content_hash
+                media_id = state.media_ids.get(key)
+                media_url = ""
+                if media_id:
+                    try:
+                        media_url = publisher.media_source(media_id)
+                    except WordPressPublisherError as exc:
+                        if exc.status_code != 404:
+                            raise
+                if not media_url:
+                    media_id, media_url = publisher.upload_media(
+                        verified.data,
+                        image.filename,
+                        alt_text=image.product_name or title,
+                    )
+                    state.media_ids[key] = media_id
+                    state.updated_at = now_iso()
+                    task = _save_audited_task(
+                        request,
+                        authorized,
+                        task,
+                        expected_revision=working_revision,
+                        action="article.wordpress_media.uploaded",
+                        details={"media_index": index, "media_count": media_count},
+                    )
+                    working_revision = task.revision
+                for marker in (image.marker, image.filename, asset_id):
+                    if marker.strip():
+                        image_urls[marker.strip()] = media_url
+            html_content = markdown_to_wordpress_html(article, image_urls)
+            hero = next((item for item in task.images if item.role == "hero"), None)
+            hero_media = None
+            if hero:
+                hero_media = state.media_ids.get(hero.prepared_content_hash.strip())
+            meta = {
+                "article_agent_seo_title": task.tdk.title.strip(),
+                "article_agent_seo_description": task.tdk.description.strip(),
+                "article_agent_seo_keywords": ", ".join(task.tdk.keywords),
+            }
+            status, post_id, post_url = publisher.create_or_get_draft(
+                title=title,
+                content=html_content,
+                slug=wordpress_slug(task.id),
+                source_hash=source_hash,
+                task_id=task.id,
+                excerpt=task.tdk.description.strip(),
+                featured_media=hero_media,
+                meta=meta,
+            )
+            state.status = "draft_created"
+            state.post_id = post_id
+            state.post_url = post_url
+            state.updated_at = now_iso()
+            state.error = ""
+            task = _save_audited_task(
+                request,
+                authorized,
+                task,
+                expected_revision=working_revision,
+                action="article.wordpress_draft.created",
+                details={
+                    "post_id": post_id,
+                    "media_count": len(state.media_ids),
+                    "already_exists": status == "already_exists",
+                },
+            )
+            return WordPressUploadResponse(
+                status=status,
+                post_id=post_id,
+                post_url=post_url,
+                source_revision=source_revision,
+                source_article_hash=source_hash,
+                media_count=len(state.media_ids),
+            )
+        except WordPressCredentialsUnavailable as exc:
+            state.status = "failed"
+            state.error = str(exc)
+            state.updated_at = now_iso()
+            try:
+                _save_audited_task(
+                    request,
+                    authorized,
+                    task,
+                    expected_revision=working_revision,
+                    action="article.wordpress_upload.failed",
+                    details={"retryable": False},
+                )
+            except HTTPException:
+                pass
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except WordPressPublisherError as exc:
+            state.status = "failed"
+            state.error = str(exc)
+            state.updated_at = now_iso()
+            try:
+                _save_audited_task(
+                    request,
+                    authorized,
+                    task,
+                    expected_revision=working_revision,
+                    action="article.wordpress_upload.failed",
+                    details={"retryable": exc.retryable},
+                )
+            except HTTPException:
+                pass
+            if exc.status_code == 409:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(status_code=503 if exc.retryable else 422, detail=str(exc)) from exc
+        except (KnowledgeObjectNotFound, ObjectTooLarge) as exc:
+            state.status = "failed"
+            state.error = "文章图片不可用。"
+            state.updated_at = now_iso()
+            try:
+                _save_audited_task(
+                    request,
+                    authorized,
+                    task,
+                    expected_revision=working_revision,
+                    action="article.wordpress_upload.failed",
+                    details={"retryable": False},
+                )
+            except HTTPException:
+                pass
+            raise HTTPException(status_code=409, detail="文章图片不可用，请重新准备图片后再试。") from exc
+        finally:
+            if publisher is not None:
+                publisher.close()
 
 
 @router.post(

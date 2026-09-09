@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew the isolated Article Agent WordPress IP certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/article-agent-wordpress-test/certbot-venv/bin/certbot renew --quiet --config-dir /etc/letsencrypt-article-agent-wp --work-dir /var/lib/letsencrypt-article-agent-wp --logs-dir /var/log/letsencrypt-article-agent-wp --deploy-hook "/usr/bin/nginx -t && /usr/bin/nginx -s reload"

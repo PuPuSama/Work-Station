@@ -11,6 +11,7 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Wifi,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -31,7 +32,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, apiDelete, apiGet, apiPost, apiPut } from "@/lib/api";
-import type { ServerProjectMetadata } from "@/types";
+import type { ServerProjectMetadata, WordPressCredentials } from "@/types";
 
 type ServerProjectSettingsProps = {
   projectId: string;
@@ -40,6 +41,7 @@ type ServerProjectSettingsProps = {
 type MetadataForm = {
   customerName: string;
   officialDomain: string;
+  wordpressUrl: string;
   projectBusinessProfile: string;
   projectNotes: string;
 };
@@ -61,6 +63,14 @@ function normalizeOfficialDomain(value: string) {
   return value.trim().replace(/\.$/, "").toLowerCase();
 }
 
+function normalizeWordPressUrl(value: string) {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function normalizeWordPressUsername(value: string) {
+  return value.trim().replace(/\s+/g, " ");
+}
+
 function normalizeProjectNotes(value: string) {
   return value.replace(/\r\n/g, "\n").trim();
 }
@@ -76,6 +86,7 @@ function validateForm(form: MetadataForm): {
   const normalized = {
     customerName: normalizeCustomerName(form.customerName),
     officialDomain: normalizeOfficialDomain(form.officialDomain),
+    wordpressUrl: normalizeWordPressUrl(form.wordpressUrl),
     projectBusinessProfile: normalizeProjectBusinessProfile(
       form.projectBusinessProfile,
     ),
@@ -98,6 +109,32 @@ function validateForm(form: MetadataForm): {
   ) {
     errors.officialDomain =
       "只填写主机名，例如 www.example.com；不要包含协议、路径或账号信息。";
+  }
+  if (normalized.wordpressUrl.length > 2048) {
+    errors.wordpressUrl = "WordPress 地址不能超过 2048 个字符。";
+  } else if (
+    normalized.wordpressUrl &&
+    !/^https?:\/\/[^\s]+$/i.test(normalized.wordpressUrl)
+  ) {
+    errors.wordpressUrl =
+      "请输入完整的 http(s)://WordPress 地址，不要包含账号或查询参数。";
+  } else if (normalized.wordpressUrl) {
+    try {
+      const parsed = new URL(normalized.wordpressUrl);
+      if (
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        errors.wordpressUrl =
+          "请输入不含账号、查询参数或片段的 WordPress 地址。";
+      }
+    } catch {
+      errors.wordpressUrl =
+        "请输入完整的 http(s)://WordPress 地址，不要包含账号或查询参数。";
+    }
   }
   if (normalized.projectNotes.length > 30000) {
     errors.projectNotes = "项目注意事项不能超过 30000 个字符。";
@@ -122,6 +159,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
   const [form, setForm] = useState<MetadataForm>({
     customerName: "",
     officialDomain: "",
+    wordpressUrl: "",
     projectBusinessProfile: "",
     projectNotes: "",
   });
@@ -130,12 +168,22 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [profileGenerating, setProfileGenerating] = useState(false);
+  const [wordpressTesting, setWordpressTesting] = useState(false);
+  const [wordpressCredentials, setWordpressCredentials] =
+    useState<WordPressCredentials | null>(null);
+  const [wordpressUsername, setWordpressUsername] = useState("");
+  const [wordpressAppPassword, setWordpressAppPassword] = useState("");
+  const [wordpressCredentialsLoading, setWordpressCredentialsLoading] =
+    useState(true);
+  const [wordpressCredentialsSaving, setWordpressCredentialsSaving] =
+    useState(false);
 
   const applyMetadata = useCallback((next: ServerProjectMetadata) => {
     setMetadata(next);
     setForm({
       customerName: next.customer_name,
       officialDomain: next.official_domain,
+      wordpressUrl: next.wordpress_url || "",
       projectBusinessProfile: next.project_business_profile || "",
       projectNotes: next.project_notes,
     });
@@ -164,18 +212,60 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
     [applyMetadata, encodedProject],
   );
 
+  const applyWordPressCredentials = useCallback(
+    (next: WordPressCredentials) => {
+      setWordpressCredentials(next);
+      setWordpressUsername(next.username);
+      setWordpressAppPassword("");
+    },
+    [],
+  );
+
+  const loadWordPressCredentials = useCallback(
+    async (showLoader: boolean) => {
+      if (showLoader) setWordpressCredentialsLoading(true);
+      try {
+        const next = await apiGet<WordPressCredentials>(
+          `/api/projects/${encodedProject}/wordpress/credentials`,
+        );
+        applyWordPressCredentials(next);
+      } catch (error) {
+        setWordpressCredentials(null);
+        setWordpressUsername("");
+        setWordpressAppPassword("");
+        setFeedback({
+          kind: "error",
+          message: errorMessage(error, "WordPress 账号配置加载失败，请重试。"),
+          canReload: true,
+        });
+      } finally {
+        if (showLoader) setWordpressCredentialsLoading(false);
+      }
+    },
+    [applyWordPressCredentials, encodedProject],
+  );
+
   useEffect(() => {
     void loadMetadata(true);
-  }, [loadMetadata]);
+    void loadWordPressCredentials(true);
+  }, [loadMetadata, loadWordPressCredentials]);
 
   const dirty =
     metadata !== null &&
     (normalizeCustomerName(form.customerName) !== metadata.customer_name ||
       normalizeOfficialDomain(form.officialDomain) !==
         metadata.official_domain ||
+      normalizeWordPressUrl(form.wordpressUrl) !==
+        (metadata.wordpress_url || "") ||
       normalizeProjectBusinessProfile(form.projectBusinessProfile) !==
         metadata.project_business_profile ||
       normalizeProjectNotes(form.projectNotes) !== metadata.project_notes);
+
+  const wordpressCredentialsDirty =
+    wordpressCredentials !== null &&
+    (normalizeWordPressUsername(wordpressUsername) !==
+      wordpressCredentials.username ||
+      Boolean(wordpressAppPassword.trim()));
 
   function validateField(field: keyof MetadataForm) {
     const result = validateForm(form);
@@ -205,6 +295,7 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
           revision: metadata.revision,
           customer_name: result.normalized.customerName,
           official_domain: result.normalized.officialDomain,
+          wordpress_url: result.normalized.wordpressUrl,
           project_business_profile: result.normalized.projectBusinessProfile,
           project_notes: result.normalized.projectNotes,
         },
@@ -225,6 +316,96 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
       });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function testWordPressConnection() {
+    if (wordpressTesting || saving || loading) return;
+    if (wordpressCredentialsDirty) {
+      setFeedback({
+        kind: "error",
+        title: "请先保存 WordPress 账号",
+        message: "账号或 Application Password 有未保存修改。保存后再测试连接，避免测试到旧账号。",
+      });
+      return;
+    }
+    const result = validateForm(form);
+    setFieldErrors(result.errors);
+    if (result.errors.wordpressUrl) return;
+    setWordpressTesting(true);
+    setFeedback(null);
+    try {
+      const response = await apiPost<{
+        configured: boolean;
+        url: string;
+        username: string;
+        message: string;
+      }>(`/api/projects/${encodedProject}/wordpress/test-connection`, {
+        wordpress_url: result.normalized.wordpressUrl,
+      });
+      setFeedback({
+        kind: "success",
+        title: "WordPress 连接成功",
+        message: `${response.message} 当前站点：${response.url}，账号：${response.username}。如修改了站点地址，请点击“保存项目资料”保存。`,
+      });
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        message: errorMessage(error, "WordPress 连接失败，请检查地址和服务端凭据。"),
+      });
+    } finally {
+      setWordpressTesting(false);
+    }
+  }
+
+  async function saveWordPressCredentials() {
+    if (!wordpressCredentials || wordpressCredentialsSaving) return;
+    const username = normalizeWordPressUsername(wordpressUsername);
+    if (!username) {
+      setFeedback({
+        kind: "error",
+        title: "WordPress 账号未保存",
+        message: "请输入 WordPress 用户名。",
+      });
+      return;
+    }
+    if (!wordpressCredentials.configured && !wordpressAppPassword.trim()) {
+      setFeedback({
+        kind: "error",
+        title: "WordPress 账号未保存",
+        message: "首次配置必须填写 Application Password。",
+      });
+      return;
+    }
+    setWordpressCredentialsSaving(true);
+    setFeedback(null);
+    try {
+      const updated = await apiPut<WordPressCredentials>(
+        `/api/projects/${encodedProject}/wordpress/credentials`,
+        {
+          revision: wordpressCredentials.revision,
+          username,
+          app_password: wordpressAppPassword.trim() || null,
+        },
+      );
+      applyWordPressCredentials(updated);
+      setFeedback({
+        kind: "success",
+        title: "WordPress 账号已保存",
+        message: "账号已按当前项目保存。Application Password 只在保存时发送，服务器不会再次显示它。",
+      });
+    } catch (error) {
+      const conflict = error instanceof ApiError && error.status === 409;
+      setFeedback({
+        kind: "error",
+        title: "WordPress 账号未保存",
+        message: conflict
+          ? "WordPress 账号已被其他成员更新。请重新载入最新配置后再保存。"
+          : errorMessage(error, "WordPress 账号保存失败，请重试。"),
+        canReload: true,
+      });
+    } finally {
+      setWordpressCredentialsSaving(false);
     }
   }
 
@@ -322,8 +503,11 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
                   type="button"
                   variant="outline"
                   className="min-h-11"
-                  onClick={() => void loadMetadata(true)}
-                  disabled={saving}
+                  onClick={() => {
+                    void loadMetadata(true);
+                    void loadWordPressCredentials(true);
+                  }}
+                  disabled={saving || wordpressCredentialsSaving}
                 >
                   <RefreshCw />
                   重新载入
@@ -410,6 +594,165 @@ function ProjectMetadataCard({ projectId }: ServerProjectSettingsProps) {
               {fieldErrors.officialDomain ||
                 "只填主机名，不包含 https://、路径或登录信息。"}
             </p>
+          </div>
+        </div>
+
+        <div className="grid min-w-0 gap-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Label htmlFor="server-project-wordpress-url">
+              WordPress 站点地址
+            </Label>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-9"
+              onClick={() => void testWordPressConnection()}
+              disabled={!metadata || saving || loading || wordpressTesting}
+            >
+              {wordpressTesting ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Wifi />
+              )}
+              测试连接
+            </Button>
+          </div>
+          <Input
+            id="server-project-wordpress-url"
+            className="h-11 font-mono"
+            value={form.wordpressUrl}
+            maxLength={2048}
+            inputMode="url"
+            autoCapitalize="none"
+            spellCheck={false}
+            placeholder="https://www.example.com（留空使用服务端默认站点）"
+            aria-invalid={Boolean(fieldErrors.wordpressUrl)}
+            aria-describedby="server-project-wordpress-url-help"
+            disabled={!metadata || saving || loading || wordpressTesting}
+            onChange={(event) => {
+              setForm((current) => ({
+                ...current,
+                wordpressUrl: event.target.value,
+              }));
+              setFieldErrors((current) => ({
+                ...current,
+                wordpressUrl: undefined,
+              }));
+            }}
+            onBlur={() => validateField("wordpressUrl")}
+          />
+          <p
+            id="server-project-wordpress-url-help"
+            className={
+              fieldErrors.wordpressUrl
+                ? "text-xs text-destructive"
+                : "text-xs text-muted-foreground"
+            }
+          >
+            {fieldErrors.wordpressUrl ||
+              "每个项目可以使用不同的 WordPress 地址。站点地址按项目保存；生产连接必须使用 HTTPS。"}
+          </p>
+        </div>
+
+        <div className="grid min-w-0 gap-3 rounded-lg border bg-muted/20 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <Label htmlFor="server-project-wordpress-username">
+                WordPress 账号
+              </Label>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                每个项目单独保存账号。Application Password 只用于连接 WordPress REST API，不是后台网页登录密码。
+              </p>
+            </div>
+            <Badge variant={wordpressCredentials?.configured ? "default" : "outline"}>
+              {wordpressCredentialsLoading
+                ? "读取中"
+                : wordpressCredentials?.configured
+                  ? "已配置"
+                  : "未配置"}
+            </Badge>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid min-w-0 gap-1.5">
+              <Label htmlFor="server-project-wordpress-username">用户名</Label>
+              <Input
+                id="server-project-wordpress-username"
+                className="h-11"
+                value={wordpressUsername}
+                maxLength={200}
+                autoCapitalize="none"
+                autoComplete="username"
+                spellCheck={false}
+                placeholder="例如 article_agent_publisher"
+                disabled={
+                  !metadata ||
+                  !wordpressCredentials ||
+                  wordpressCredentialsLoading ||
+                  wordpressCredentialsSaving ||
+                  saving ||
+                  wordpressTesting
+                }
+                onChange={(event) => setWordpressUsername(event.target.value)}
+              />
+            </div>
+            <div className="grid min-w-0 gap-1.5">
+              <Label htmlFor="server-project-wordpress-app-password">
+                Application Password
+              </Label>
+              <Input
+                id="server-project-wordpress-app-password"
+                className="h-11 font-mono"
+                type="password"
+                value={wordpressAppPassword}
+                maxLength={1024}
+                autoComplete="new-password"
+                spellCheck={false}
+                placeholder={
+                  wordpressCredentials?.configured
+                    ? "留空保持现有密码"
+                    : "首次配置必填"
+                }
+                disabled={
+                  !metadata ||
+                  !wordpressCredentials ||
+                  wordpressCredentialsLoading ||
+                  wordpressCredentialsSaving ||
+                  saving ||
+                  wordpressTesting
+                }
+                onChange={(event) =>
+                  setWordpressAppPassword(event.target.value)
+                }
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs leading-5 text-muted-foreground">
+              {wordpressCredentials?.configured
+                ? "密码不会回显；用户名不变时留空表示继续使用当前密码。修改用户名时请同时填写新密码。"
+                : "首次保存后，服务器会加密保存密码；页面和任务接口都不会返回密码。"}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11 w-full sm:w-auto"
+              onClick={() => void saveWordPressCredentials()}
+              disabled={
+                !metadata ||
+                wordpressCredentialsLoading ||
+                !wordpressCredentialsDirty ||
+                wordpressCredentialsSaving ||
+                saving ||
+                wordpressTesting
+              }
+            >
+              {wordpressCredentialsSaving ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Save />
+              )}
+              保存 WordPress 账号
+            </Button>
           </div>
         </div>
 

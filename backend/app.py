@@ -43,6 +43,9 @@ from services.project_directory import PostgresProjectDirectory
 from services.project_memberships import PostgresProjectMembershipService
 from services.project_deletion import PostgresProjectDeletionService
 from services.server_project_metadata import PostgresServerProjectMetadata
+from services.server_wordpress_credentials import (
+    PostgresServerWordPressCredentials,
+)
 from services.server_project_business_profile import (
     PostgresProjectBusinessProfileService,
 )
@@ -283,6 +286,11 @@ async def app_lifespan(application: FastAPI):
         "server_project_metadata",
         None,
     )
+    previous_server_wordpress_credentials = getattr(
+        application.state,
+        "server_wordpress_credentials",
+        None,
+    )
     previous_server_project_business_profile = getattr(
         application.state,
         "server_project_business_profile",
@@ -456,6 +464,7 @@ async def app_lifespan(application: FastAPI):
     application.state.server_task_writing_settings_service_factory = None
     application.state.server_project_directory = None
     application.state.server_project_metadata = None
+    application.state.server_wordpress_credentials = None
     application.state.server_project_business_profile = None
     application.state.server_project_memberships = None
     application.state.server_project_deletion = None
@@ -580,6 +589,12 @@ async def app_lifespan(application: FastAPI):
         )
         application.state.server_project_metadata = (
             PostgresServerProjectMetadata(server_engine)
+        )
+        application.state.server_wordpress_credentials = (
+            PostgresServerWordPressCredentials(
+                server_engine,
+                access=server_access,
+            )
         )
         application.state.server_project_business_profile = (
             PostgresProjectBusinessProfileService(
@@ -1176,6 +1191,9 @@ async def app_lifespan(application: FastAPI):
             )
             application.state.server_project_metadata = (
                 previous_server_project_metadata
+            )
+            application.state.server_wordpress_credentials = (
+                previous_server_wordpress_credentials
             )
             application.state.server_project_business_profile = (
                 previous_server_project_business_profile

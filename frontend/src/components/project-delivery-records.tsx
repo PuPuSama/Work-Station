@@ -14,8 +14,11 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Upload,
+  ExternalLink,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +47,20 @@ const DELIVERY_LABELS: Record<string, string> = {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "未知错误";
+}
+
+function wordpressEditorUrl(task: TaskRecord) {
+  const upload = task.wordpress_upload;
+  if (!upload?.wordpress_url || !upload.post_id) return null;
+  try {
+    const url = new URL(`${upload.wordpress_url.replace(/\/$/, "")}/wp-admin/post.php`);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return null;
+    url.searchParams.set("post", String(upload.post_id));
+    url.searchParams.set("action", "edit");
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 function deliveryParts(task: TaskRecord) {
@@ -123,6 +140,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   const [filter, setFilter] = useState<DeliveryFilter>("all");
   const [updatedAtSort, setUpdatedAtSort] = useState<UpdatedAtSortDirection>("desc");
   const [pending, setPending] = useState<Record<string, string>>({});
+  const activeActions = useRef(new Set<string>());
 
   const projectApi = `/api/projects/${encodeURIComponent(customer)}`;
 
@@ -174,6 +192,8 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
   }, [filter, query, tasks, updatedAtSort]);
 
   async function runTaskAction(task: TaskRecord, label: string, action: () => Promise<unknown>) {
+    if (activeActions.current.has(task.id)) return;
+    activeActions.current.add(task.id);
     setPending((current) => ({ ...current, [task.id]: label }));
     setError("");
     setMessage("");
@@ -182,8 +202,11 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
       setMessage(`${task.id}：${label}成功`);
       await loadTasks();
     } catch (actionError) {
+      // Upload failures can persist media progress and a newer task revision.
+      await loadTasks();
       setError(errorMessage(actionError));
     } finally {
+      activeActions.current.delete(task.id);
       setPending((current) => {
         const next = { ...current };
         delete next[task.id];
@@ -236,8 +259,11 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
               <Badge variant="outline"><ShieldCheck />Server 私有交付</Badge>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              集中检查 Word、D 文档、最终 AI 截图、图片和交付包；下载时由服务器重新授权并签发短期地址。
+              下载文章交付物，或上传到 WordPress 存为草稿，检查后再发布。
             </p>
+            <Link href={`/projects/${encodeURIComponent(customer)}/settings`} className="mt-2 inline-block text-sm underline underline-offset-4">
+              配置 WordPress 站点和账号
+            </Link>
           </div>
         </div>
       </div>
@@ -278,7 +304,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
             </div>
             <div className="overflow-x-auto rounded-lg border">
               <Table>
-                <TableHeader><TableRow><TableHead className="w-28">编号</TableHead><TableHead>文章</TableHead><TableHead>交付项</TableHead><TableHead className="w-36">
+                <TableHeader><TableRow><TableHead className="w-24">编号</TableHead><TableHead className="min-w-48">文章</TableHead><TableHead>交付项</TableHead><TableHead className="w-28">
                   <Button
                     type="button"
                     variant="ghost"
@@ -291,7 +317,7 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
                     更新时间
                     {updatedAtSort === "desc" ? <ArrowDown aria-hidden="true" /> : <ArrowUp aria-hidden="true" />}
                   </Button>
-                </TableHead><TableHead className="min-w-72 text-right">操作</TableHead></TableRow></TableHeader>
+                </TableHead><TableHead className="min-w-32">WordPress</TableHead><TableHead className="min-w-48 text-right">操作</TableHead></TableRow></TableHeader>
                 <TableBody>
                   {filteredTasks.map((task) => {
                     const parts = deliveryParts(task);
@@ -299,14 +325,27 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
                     const taskPending = pending[task.id];
                     const taskApi = `${projectApi}/tasks/${encodeURIComponent(task.id)}`;
                     const topicNumber = String(task.topic_index).padStart(3, "0");
+                    const wordpressUrl = wordpressEditorUrl(task);
+                    const wordpress = task.wordpress_upload;
+                    const hasArticle = Boolean((task.final_article || task.linked_article || task.humanized_article || task.initial_article || task.article || "").trim());
                     return (
                       <TableRow key={task.id}>
                         <TableCell className="font-mono text-xs">topic_{topicNumber}</TableCell>
-                        <TableCell className="max-w-0 whitespace-normal"><div className="truncate font-medium">{task.selected_title || task.topic}</div><div className="mt-1 truncate text-xs text-muted-foreground">{task.topic}</div></TableCell>
+                        <TableCell className="max-w-72 whitespace-normal"><div className="truncate font-medium">{task.selected_title || task.topic}</div><div className="mt-1 truncate text-xs text-muted-foreground">{task.topic}</div></TableCell>
                         <TableCell><div className="flex flex-wrap gap-1">{parts.package ? <Badge>已打包</Badge> : missing.length ? missing.map((item) => <Badge key={item} variant="outline">缺 {item}</Badge>) : <Badge>可打包</Badge>}</div></TableCell>
                         <TableCell className="text-xs text-muted-foreground">{formatUpdatedAt(task.updated_at)}</TableCell>
                         <TableCell>
+                          <div className="grid gap-2 whitespace-normal">
+                            <Badge variant={wordpress?.status === "failed" ? "destructive" : "outline"}>
+                              {taskPending === "上传 WordPress 草稿" || wordpress?.status === "uploading" ? "上传中" : wordpress?.status === "draft_created" ? "草稿已上传" : wordpress?.status === "failed" ? "上传失败" : "未上传"}
+                            </Badge>
+                            {wordpressUrl && <a href={wordpressUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs underline underline-offset-4"><ExternalLink className="size-3" />在 WordPress 后台查看</a>}
+                            {wordpress?.status === "failed" && wordpress.error && <p className="max-w-56 text-xs text-destructive">{wordpress.error}</p>}
+                          </div>
+                        </TableCell>
+                        <TableCell>
                           <div className="flex flex-wrap justify-end gap-1">
+                            {deliveryAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending) || !hasArticle} title={hasArticle ? "上传为草稿，检查后再发布" : "请先完成文章正文"} aria-label={`上传 topic_${topicNumber} 到 WordPress 草稿`} onClick={() => void runTaskAction(task, "上传 WordPress 草稿", () => apiPost(`${taskApi}/wordpress-upload`, { revision: task.revision ?? 0 }))}>{taskPending === "上传 WordPress 草稿" ? <Loader2 className="animate-spin" /> : <Upload />}{wordpress?.status === "failed" ? "重试上传草稿" : "上传 WordPress 草稿"}</Button>}
                             {parts.word && deliveryAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending)} aria-label={`下载 topic_${topicNumber} 的 Word`} onClick={() => void downloadArtifact(task, "下载 Word", `${taskApi}/docx/download`)}>{taskPending === "下载 Word" ? <Loader2 className="animate-spin" /> : <FileText />}Word</Button>}
                             {parts.tdk && deliveryAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending)} aria-label={`下载 topic_${topicNumber} 的 D 文档`} onClick={() => void downloadArtifact(task, "下载 D 文档", `${taskApi}/tdk/download`)}>{taskPending === "下载 D 文档" ? <Loader2 className="animate-spin" /> : <FileText />}D.docx</Button>}
                             {parts.screenshot && reviewAllowed && <Button size="sm" variant="outline" disabled={Boolean(taskPending)} aria-label={`查看 topic_${topicNumber} 的终审截图`} onClick={() => void downloadArtifact(task, "打开终审截图", `${taskApi}/checks/final-ai/screenshot/download`)}>{taskPending === "打开终审截图" ? <Loader2 className="animate-spin" /> : <ImageIcon />}终审</Button>}
@@ -317,8 +356,8 @@ export function ProjectDeliveryRecords({ customer }: { customer: string }) {
                       </TableRow>
                     );
                   })}
-                  {loading && !filteredTasks.length && <TableRow><TableCell colSpan={5} className="h-36 text-center text-muted-foreground"><span className="inline-flex items-center gap-2" role="status" aria-live="polite"><Loader2 className="size-4 animate-spin" />正在读取交付记录…</span></TableCell></TableRow>}
-                  {!loading && !filteredTasks.length && <TableRow><TableCell colSpan={5} className="h-36 text-center text-muted-foreground">没有符合当前条件的交付记录</TableCell></TableRow>}
+                  {loading && !filteredTasks.length && <TableRow><TableCell colSpan={6} className="h-36 text-center text-muted-foreground"><span className="inline-flex items-center gap-2" role="status" aria-live="polite"><Loader2 className="size-4 animate-spin" />正在读取交付记录…</span></TableCell></TableRow>}
+                  {!loading && !filteredTasks.length && <TableRow><TableCell colSpan={6} className="h-36 text-center text-muted-foreground">没有符合当前条件的交付记录</TableCell></TableRow>}
                 </TableBody>
               </Table>
             </div>

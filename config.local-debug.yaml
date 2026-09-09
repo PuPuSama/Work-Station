@@ -1,0 +1,12 @@
+extends: config.ci.yaml
+
+paths:
+  knowledge_base: outputs/local-debug/knowledge
+  data_file: outputs/local-debug/unused-tasks.json
+
+features:
+  knowledge_agent_enabled: false
+  workflow_assistant_enabled: true
+  workflow_assistant_attachments_enabled: true
+  workflow_assistant_project_changes_enabled: true
+  workflow_assistant_gap_fill_enabled: true

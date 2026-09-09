@@ -1,79 +1,48 @@
-# Article Agent 项目地图
+# Article Agent 开发指引
 
-本仓库位于 `D:\Project\article\article-agent-formal`，只维护 Server 版本。不要恢复 Local/SQLite 分支、密码登录、旧无项目作用域 API 或双写兼容层。
+## 用途与优先级
 
-## 快速定位
+- 本文件只保留长期有效的工作方式、架构边界和代码入口，不作为每轮任务的功能清单。
+- 用户当前明确要求优先于本文件中的项目约定。历史文档用于提供线索；当前代码和测试用于确认现状，不自动证明业务设计合理。
+- 字数、FAQ、图片数量、AI 阈值和批量策略等业务细节，在相关任务中核对当前实现、配置和测试；不要凭历史记录恢复旧行为。修改时同步检查调用链与相关校验。
+- `PROJECT_MEMORY.md` 按相关主题检索，无需每轮全文阅读。只记录值得后续复用且经过验证的决策，不追加普通操作流水。
 
-- FastAPI 入口：`backend/app.py`
-- 项目级文章 API：`backend/server_project_http.py`
-- 请求安全与路由边界：`backend/services/server_request_security.py`
-- PostgreSQL Task Repository：`backend/services/postgres_task_repository.py`
-- PostgreSQL Job Queue：`backend/services/postgres_job_queue.py`
-- 工作流状态机：`backend/workflow/state_machine.py`
-- 知识库：`backend/knowledge_agent/`
-- Alembic：`backend/migrations/`
-- 前端 API：`frontend/src/lib/api.ts`
-- Server 文章工作台：`frontend/src/components/server-article-workbench.tsx`
-- Server 项目、批次、知识与设置组件：`frontend/src/components/server-*`
+## 部署环境
 
-## 不要扫描或修改的内容
+- 项目部署在远端服务器，可从本机通过 `ssh myserver` 连接；远端项目目录为 `/home/ubuntu/Work-Station`。
+- 排查线上运行、内存、并发或部署问题时，检查远端实际代码版本、服务状态和相关日志；明确区分本地开发环境与远端运行环境。
+- 本地修改或构建成功不代表线上已更新。部署获授权后，分别核验 Git 推送、CI/构建结果和远端服务状态。
+- 本地免登录隔离调试：`backend\.venv\Scripts\python.exe scripts\local_debug.py`；入口 `http://127.0.0.1:3108`，只使用测试账号和独立数据，详见 `docs/wordpress-upload-plan.md` 第 6 节。
+- 本地 WordPress 模板站：`backend\.venv\Scripts\python.exe scripts\setup_wordpress_test.py`，入口 `http://127.0.0.1:8088`，凭据位于被忽略的 `outputs/wordpress-test/credentials.json`。远端独立测试站见 `deploy/wordpress-test/README.md`；测试站部署与 Article Agent 生产部署分别验证，测试凭据不得用于正式业务站点。
+- 生产 WordPress 地址和账号按项目保存；账号可由项目设置页录入，Application Password 只以密文存入专用凭据表，明文密码不得进入项目表、Task、响应或日志。部署级 `ARTICLE_AGENT_WORDPRESS_PROJECT_CREDENTIALS` 环境映射仍可作为运维回退；未配置项目凭据或映射时才使用兼容性的全局账号。
+- 远端 WordPress 测试站为 `https://43.154.92.36`，目录 `/home/ubuntu/article-agent-wordpress-test`，可用于生产 Article Agent 的草稿上传验收。上传入口在项目交付记录页，默认只存草稿。
 
-除非任务明确要求，否则不要递归读取或清理：
+## 工作方式
 
-- `frontend/node_modules/`、`frontend/.next/`、`backend/.venv/`
-- `dist/`、`packaging/build/`、`tmp/`
-- 用户真实文章、图片、导出文件、数据库和对象存储内容
+- 开始仓库修改前运行 `git status --short`，保留无关改动。诊断请求先分析，明确要求实现时再修改。
+- 使用 `rg` 限定相关源码目录；不递归扫描依赖、构建目录、`tmp/` 或用户真实数据。
+- 不删除真实文章、数据库记录、对象、交付物或密钥；不输出或提交凭据及私有配置。
+- 按用户授权范围推进可逆工作，不重复请求普通步骤确认；未明确授权时不 commit、push、合并或部署。
 
-源码检索优先使用 `rg`，并限定到相关目录。
+## 必须保留的保障
 
-## Server 硬边界
+- 只维护 Server 版本。PostgreSQL 是业务元数据准源；文件使用私有对象存储和短期签名 URL。不要恢复 Local/SQLite、活动 JSON 存储或双写兼容层。当前生产使用组织账号密码登录及已验证会话，保留密码哈希、角色与项目权限校验。
+- 项目业务数据必须隔离；身份、组织与角色从已验证会话派生，不能信任客户端声明或恢复无项目作用域的旧业务 API。
+- Worker 在执行和提交时重新授权，使用 revision/CAS；同一文章的活动 Job 保持互斥。409 冲突展示差异，不能静默覆盖用户修改。
+- 数据库结构只由 Alembic 管理，应用启动不自动建表或改表。
+- 自动检测结果不能冒充人工确认；检索资料不能作为执行指令或绕过权限。知识证据只使用已发布、当前快照、项目隔离且允许作证的内容；官方博客不进入硬事实证据链。
 
-- Task、Prompt、Job、Audit 与知识元数据以 PostgreSQL 为准。
-- 文件、截图、图片和交付包使用私有对象存储及短期签名 URL。
-- 所有业务路由必须带 Project scope，并从已验证会话派生 Organization、User 与角色。
-- Worker 必须在执行和提交时重新授权，并使用 revision/CAS 防止覆盖新版本。
-- 数据库结构只由 Alembic 迁移；应用启动不得建表或改表。
-- 不新增 SQLite、JSON 活动存储、本地任务目录准源、自动双写或 Local fallback。
-- 不恢复 `/api/tasks*`、`/api/batches*`、密码登录或 Local Dashboard/Config API。
-- 官方博客仅可作为正文引用资料，不能进入 Evidence Pack、Hard Fact 或证据引用链。
-- Agent 只检索已发布、当前快照、项目隔离且允许作证的内容。
+## 代码入口
 
-## 核心业务约束
+- API 与安全：`backend/app.py`、`backend/server_project_http.py`、`backend/services/server_request_security.py`。
+- 存储与队列：`backend/services/postgres_task_repository.py`、`backend/services/postgres_job_queue.py`。
+- 工作流与知识：`backend/workflow/`、`backend/knowledge_agent/`；数据库迁移：`backend/migrations/`。
+- 前端：`frontend/src/lib/api.ts`、`frontend/src/components/server-*`；修改前端时同时遵循 `frontend/AGENTS.md`。
 
-- ZeroGPT API 检测与人工确认分开记录；自动得分不得伪造成已人工确认。检测失败或未配置要明确显示。
-- 批量计划：首次正文的有效 AI 率严格高于 40% 时跳过润色并标记“AI 率过高”，人工复核记为 deferred；其余情况最多调用一次润色。手动工作台原有规则不随批量策略改变。
-- 正文和润色结果先经授权与 CAS 保存，再并行检测；恢复仅复用同一 Job、源版本、结果版本和正文哈希对应的已保存结果。
-- 英文正文目标 1000–1200 词，不机械截断。
-- 非 FAQ 的 H2 至少包含两个 H3；FAQ 是最后一个 H2，固定三组 `**Q: ...**` 问答。
-- 每篇最多三张不同图片，包括首图。
-- 官网品牌链接、产品链接、Markdown 表格和图片位置必须正确导出到 Word。
-- `D.docx` 的 T 与 H1 一致，D 最多 150 字符，K 固定六个逗号分隔关键词。
-- 产品发现只接受官网域名；产品页和图片资产必须有证据对应。
-- 标题、产品、大纲和正文长操作进入 PostgreSQL Queue；同一文章不能并发两个活动任务。
-- 409 revision 冲突必须展示差异，不能静默覆盖。
+## 按改动验证
 
-## 修改原则
-
-- 开始前运行 `git status --short`，保留无关的用户改动。
-- 诊断请求只分析；实现请求才改代码。
-- 不删除真实数据、对象、产物或密钥文件。
-- 配置和密钥不得输出或提交。
-- 修改提示词时同时检查系统硬约束、项目提示词和相关测试。
-- 涉及产物时，除单元测试外还要验证真实下载/导出边界。
-- 跨 Claude/Codex 的共享记忆维护在仓库根目录 `PROJECT_MEMORY.md`；开始任务前阅读，稳定决策经验证后再追加，禁止写入密钥和真实数据。
-
-## 验证
-
-```powershell
-backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -q
-
-cd frontend
-npm.cmd run lint
-npm.cmd run build
-
-cd ..
-git diff --check
-git status --short
-```
-
-Windows 下使用 `npm.cmd`。以当前工作树和最新测试结果为准。
+- 选择与改动相关的测试；跨模块行为变化再运行必要整体回归。纯文档修改检查内容与 `git diff --check` 即可。
+- 后端整体回归参考：`backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -q`。涉及数据库、对象存储的测试先确认使用隔离测试环境，避免加载生产配置。
+- 前端代码修改按影响运行 `npm.cmd run lint`、`npm.cmd run build`（在 `frontend/` 下执行）；Windows 使用 `npm.cmd`。
+- 涉及导出或下载时检查实际文件内容，不能只以接口成功为准。环境缺失的检查明确标为未验证。
+- 完成后检查 `git diff --check` 和 `git status --short`，说明实际修改、验证结果与限制。

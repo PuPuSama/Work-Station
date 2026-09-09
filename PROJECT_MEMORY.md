@@ -7,7 +7,7 @@
 ## 1. 项目身份与硬边界
 
 - 仓库：D:\Project\article\article-agent-formal。
-- 只维护 Server 版本。不要恢复 Local/SQLite、密码登录、旧无项目作用域 API、自动双写或 Local fallback。
+- 只维护 Server 版本。不要恢复 Local/SQLite、旧无项目作用域 API、自动双写或 Local fallback。当前生产已采用组织账号密码登录；保留密码哈希、已验证会话与项目权限校验。
 - PostgreSQL 是 Task、Prompt、Job、Audit 和知识元数据的准源；文件、图片、截图和交付包使用私有对象存储及短期签名 URL。
 - 业务路由必须带 Project scope，并从已验证会话派生 Organization、User 与角色。
 - Worker 在执行和提交时都要重新授权，并用 revision/CAS 防止覆盖新版本。
