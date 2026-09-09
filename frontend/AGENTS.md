@@ -1,5 +1,5 @@
-<!-- BEGIN:nextjs-agent-rules -->
-# This is NOT the Next.js you know
+# 前端开发补充
 
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
-<!-- END:nextjs-agent-rules -->
+- 涉及 Next.js 路由、服务端/客户端边界或框架 API 时，先核对 `package.json` 中的版本及相关文档；本地 `node_modules/next/dist/docs/` 可用时按主题查阅，否则使用对应官方文档。
+- 普通文案、样式或业务逻辑修改无需预先通读框架文档；沿用项目现有组件与交互方式。
+- 验证范围遵循根目录 `AGENTS.md`，不因纯文档修改运行前端构建。

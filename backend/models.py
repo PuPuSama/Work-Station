@@ -202,6 +202,26 @@ class TdkMetadata(WorkflowModel):
     prompt_version: str = "tdk-v1"
 
 
+WordPressUploadStatus = Literal[
+    "not_started", "uploading", "draft_created", "failed"
+]
+
+
+class WordPressUploadState(WorkflowModel):
+    """Audited, resumable state for the draft-only WordPress delivery step."""
+
+    status: WordPressUploadStatus = "not_started"
+    source_revision: int = 0
+    source_article_hash: str = ""
+    source_title: str = ""
+    wordpress_url: str = ""
+    post_id: int | None = None
+    post_url: str = ""
+    media_ids: dict[str, int] = Field(default_factory=dict)
+    error: str = ""
+    updated_at: str = ""
+
+
 class ArticleBriefFact(WorkflowModel):
     """One model-summarized fact with server-validated source chunk IDs."""
 
@@ -505,6 +525,7 @@ class TaskRecord(WorkflowModel):
     tdk_asset_id: str = ""
     tdk_content_hash: str = ""
     tdk_filename: str = ""
+    wordpress_upload: WordPressUploadState = Field(default_factory=WordPressUploadState)
     delivery_package_path: str = ""
     delivery_package_asset_id: str = ""
     delivery_package_content_hash: str = ""

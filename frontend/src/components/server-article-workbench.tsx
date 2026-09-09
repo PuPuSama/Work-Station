@@ -15,6 +15,7 @@ import {
   ImageIcon,
   Loader2,
   Package,
+  Upload,
   ClipboardPaste,
   RefreshCw,
   Save,
@@ -631,6 +632,18 @@ export function ServerArticleWorkbench({
         );
       },
       "TDK 已生成，交付 ZIP 已生成并开始下载，请查看浏览器下载列表。",
+    );
+  }
+
+  async function uploadWordPressDraft() {
+    if (!task) return;
+    await runAction(
+      "上传 WordPress 草稿",
+      () =>
+        apiPost(`${taskApi}/wordpress-upload`, {
+          revision: task.revision ?? 0,
+        }),
+      "WordPress 草稿已创建或已存在；可打开站点继续检查。",
     );
   }
 
@@ -2033,6 +2046,10 @@ export function ServerArticleWorkbench({
                     label="交付 ZIP"
                     ready={Boolean(task.delivery_package_asset_id)}
                   />
+                  <ArtifactState
+                    label="WordPress 草稿"
+                    ready={task.wordpress_upload?.status === "draft_created"}
+                  />
                 </div>
                 <Separator />
                 <div className="grid gap-2 sm:grid-cols-2">
@@ -2073,7 +2090,42 @@ export function ServerArticleWorkbench({
                     )}
                     导出交付 ZIP
                   </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="min-h-11"
+                    disabled={Boolean(pending) || !editAllowed || !articleFor(task).trim()}
+                    onClick={() => void uploadWordPressDraft()}
+                  >
+                    {pending === "上传 WordPress 草稿" ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Upload />
+                    )}
+                    上传 WordPress 草稿
+                  </Button>
                 </div>
+                {task.wordpress_upload?.post_url ? (
+                  <p className="text-xs text-muted-foreground">
+                    草稿地址：{" "}
+                    <a
+                      className="underline underline-offset-2"
+                      href={task.wordpress_upload.post_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      打开 WordPress
+                    </a>
+                  </p>
+                ) : null}
+                {task.wordpress_upload?.status === "failed" && task.wordpress_upload.error ? (
+                  <Alert variant="destructive">
+                    <AlertCircle />
+                    <AlertDescription>
+                      上次 WordPress 上传失败：{task.wordpress_upload.error}。可以修复后重试，已完成的媒体会复用。
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
               </CardContent>
             </Card>
           </div>

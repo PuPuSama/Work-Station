@@ -15,6 +15,12 @@ projects = sa.Table(
     sa.Column("customer_name", sa.Text(), nullable=False),
     sa.Column("official_domain", sa.Text(), nullable=False),
     sa.Column(
+        "wordpress_url",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("''"),
+    ),
+    sa.Column(
         "project_notes",
         sa.Text(),
         nullable=False,
@@ -61,6 +67,35 @@ projects = sa.Table(
     sa.CheckConstraint(
         "revision >= 0",
         name="ck_projects_revision_nonnegative",
+    ),
+)
+
+
+wordpress_project_credentials = sa.Table(
+    "wordpress_project_credentials",
+    metadata,
+    sa.Column("project_id", sa.Text(), nullable=False),
+    sa.Column("organization_id", sa.Text(), nullable=False),
+    sa.Column("username", sa.Text(), nullable=False),
+    sa.Column("app_password_ciphertext", sa.Text(), nullable=False),
+    sa.Column("key_version", sa.Text(), nullable=False, server_default=sa.text("'v1'")),
+    sa.Column("revision", sa.Integer(), nullable=False, server_default=sa.text("0")),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    sa.PrimaryKeyConstraint("project_id", name="pk_wordpress_project_credentials"),
+    sa.ForeignKeyConstraint(
+        ["project_id"],
+        ["projects.project_id"],
+        name="fk_wordpress_project_credentials_project",
+        ondelete="CASCADE",
+    ),
+    sa.CheckConstraint(
+        "btrim(username) <> '' AND btrim(app_password_ciphertext) <> ''",
+        name="ck_wordpress_project_credentials_values_nonempty",
+    ),
+    sa.CheckConstraint(
+        "revision >= 0",
+        name="ck_wordpress_project_credentials_revision_nonnegative",
     ),
 )
 

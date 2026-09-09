@@ -1,0 +1,23 @@
+/*
+Theme Name: Article Agent Template
+Theme URI: https://example.invalid/article-agent-template
+Description: A small deterministic template for Article Agent WordPress tests.
+Version: 0.1.0
+Author: Article Agent
+*/
+
+:root { color-scheme: light; font-family: system-ui, -apple-system, sans-serif; }
+body { margin: 0; color: #172033; background: #f5f7fb; line-height: 1.7; }
+a { color: #075985; }
+.site-header { background: #0f172a; color: #fff; padding: 1.5rem max(1rem, calc((100% - 960px) / 2)); }
+.site-header a { color: #fff; text-decoration: none; }
+.site-title { margin: 0; font-size: 1.35rem; }
+.site-description { margin: .25rem 0 0; color: #cbd5e1; }
+.site-main { max-width: 960px; margin: 2rem auto; padding: 0 1rem 4rem; }
+.article-card { background: #fff; border: 1px solid #dbe3ef; border-radius: 12px; padding: clamp(1.25rem, 4vw, 3rem); box-shadow: 0 8px 24px rgb(15 23 42 / 6%); }
+.entry-title { margin-top: 0; color: #0f172a; line-height: 1.2; }
+.entry-content img { max-width: 100%; height: auto; border-radius: 8px; }
+.entry-content table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+.entry-content th, .entry-content td { border: 1px solid #cbd5e1; padding: .6rem; text-align: left; }
+.entry-content th { background: #e2e8f0; }
+.site-footer { max-width: 960px; margin: 0 auto; padding: 0 1rem 2rem; color: #64748b; font-size: .9rem; }
