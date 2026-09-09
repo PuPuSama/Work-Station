@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "task_id": "tsk_demo_001",
+  "project_id": "example.com",
+  "topic_index": 1,
+  "title": "How to Choose a Workshop Pump",
+  "completion_date": "2026-09-09",
+  "primary_keyword": "workshop pump",
+  "keywords": ["workshop pump", "pump maintenance"],
+  "keyword_density": [
+    {
+      "keyword": "workshop pump",
+      "occurrences": 4,
+      "exact_occurrences": 4,
+      "approximate_occurrences": 0,
+      "match_mode": "exact",
+      "density_percent": 0.4
+    }
+  ],
+  "ai_rate_percent": 20,
+  "ai_rate_confirmed": true,
+  "knowledge_base_citation_rate_percent": 16,
+  "knowledge_base_citation_status": "available",
+  "anchor_text": ["pump selection guide", "maintenance checklist"],
+  "anchors": [
+    {"anchor_text": "pump selection guide", "url": "https://example.com/pumps"},
+    {"anchor_text": "maintenance checklist", "url": "https://example.com/maintenance"}
+  ]
+}

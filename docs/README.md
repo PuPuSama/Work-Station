@@ -8,6 +8,7 @@
 | --- | --- |
 | [配置指南](configuration.md) | LLM、Embedding、MinerU、存储、登录、开关、网络与验收 |
 | [WordPress 草稿上传](wordpress.md) | 项目站点、账号、上传入口与当前限制 |
+| [钉钉自动填表 Skill](dingtalk-sheet-fill.md) | 安装、项目与 Sheet 映射、读取交付 metadata、预览确认与回读 |
 | [远端 WordPress 测试站](../deploy/wordpress-test/README.md) | 独立测试站服务、证书与测试记录；不是 Article Agent 生产部署脚本 |
 | [前端开发入口](../frontend/README.md) | 启动方式、代理和验证 |
 | [项目协作记忆](../PROJECT_MEMORY.md) | 少量可复用决策与代码入口；不记录日常操作流水 |

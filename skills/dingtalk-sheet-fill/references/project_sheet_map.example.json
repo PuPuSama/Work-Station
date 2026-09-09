@@ -1,0 +1,8 @@
+{
+  "example.com": {
+    "sheet_name": "示例项目"
+  },
+  "another-example.com": {
+    "sheet_name": "另一个示例项目"
+  }
+}

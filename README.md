@@ -12,6 +12,7 @@
 | 在本机预览界面、调试操作 | 下方“本地隔离调试” |
 | 维护现有生产服务 | 下方“服务器部署与维护” |
 | 上传 WordPress 草稿 | [WordPress 使用说明](docs/wordpress.md) |
+| 将成品信息登记到钉钉表格 | [自动填表 Skill 使用说明](docs/dingtalk-sheet-fill.md) |
 | 查架构、历史决策或验收记录 | [文档索引](docs/README.md) |
 | 修改代码 | [AGENTS.md](AGENTS.md) · [前端补充](frontend/AGENTS.md) |
 
@@ -128,6 +129,7 @@ sudo docker compose up -d --wait
 | `backend/migrations/` | 唯一的数据库结构迁移入口 |
 | `frontend/src/` | 项目工作台、知识库、批量任务及交付界面 |
 | `scripts/local_debug.py` | 独立本地调试入口 |
+| `skills/dingtalk-sheet-fill/` | Codex 钉钉填表 Skill、转换脚本与脱敏配置示例 |
 | `deploy/` | 生产发布和独立 WordPress 测试站 |
 
 按改动运行相关专项测试。整体回归参考：

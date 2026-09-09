@@ -1,0 +1,3 @@
+interface:
+  display_name: "DingTalk Sheet Fill"
+  short_description: "Fill selected DingTalk sheet columns from metadata JSON"
