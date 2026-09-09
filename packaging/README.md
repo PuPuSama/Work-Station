@@ -1,19 +1,5 @@
-# Windows portable package
+# 历史 Windows 便携打包目录
 
-Build the operator-facing portable ZIP from the repository root:
+此目录保留旧便携包构建脚本以供追溯，**不属于当前维护的 Server 部署入口**。当前启动、配置与发布以根 [README](../README.md) 为准。
 
-```powershell
-backend\.venv\Scripts\python.exe -m pip install -r backend\requirements-build.txt
-.\packaging\build-portable.ps1
-```
-
-The build creates:
-
-- `dist\ArticleAgent-Portable\`
-- `dist\ArticleAgent-Portable.zip`
-
-The package contains a PyInstaller backend, a production Next.js server with a
-bundled Node runtime, a clean per-operator data workspace, the configured
-humanization prompt, and one selected environment file. The build prefers the
-root `.env` and falls back to the legacy `backend/.env` only when the root file
-does not exist. Treat the ZIP as confidential because it contains API keys.
+旧脚本可能将选定环境文件复制进产物，因此不能将历史 ZIP 当作不含秘密的安装包分发。本轮只移除过时操作说明，未删除打包代码、历史产物或用户文件；不据此恢复 Local/SQLite 运行模式。

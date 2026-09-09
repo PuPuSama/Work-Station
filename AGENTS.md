@@ -5,14 +5,14 @@
 - 本文件只保留长期有效的工作方式、架构边界和代码入口，不作为每轮任务的功能清单。
 - 用户当前明确要求优先于本文件中的项目约定。历史文档用于提供线索；当前代码和测试用于确认现状，不自动证明业务设计合理。
 - 字数、FAQ、图片数量、AI 阈值和批量策略等业务细节，在相关任务中核对当前实现、配置和测试；不要凭历史记录恢复旧行为。修改时同步检查调用链与相关校验。
-- `PROJECT_MEMORY.md` 按相关主题检索，无需每轮全文阅读。只记录值得后续复用且经过验证的决策，不追加普通操作流水。
+- 先按任务从 `README.md`、`docs/configuration.md`、`docs/README.md` 找相关入口；历史方案不是默认执行清单。`PROJECT_MEMORY.md` 按相关主题检索，无需每轮全文阅读，只记录值得复用且经过验证的决策。
 
 ## 部署环境
 
 - 项目部署在远端服务器，可从本机通过 `ssh myserver` 连接；远端项目目录为 `/home/ubuntu/Work-Station`。
 - 排查线上运行、内存、并发或部署问题时，检查远端实际代码版本、服务状态和相关日志；明确区分本地开发环境与远端运行环境。
 - 本地修改或构建成功不代表线上已更新。部署获授权后，分别核验 Git 推送、CI/构建结果和远端服务状态。
-- 本地免登录隔离调试：`backend\.venv\Scripts\python.exe scripts\local_debug.py`；入口 `http://127.0.0.1:3108`，只使用测试账号和独立数据，详见 `docs/wordpress-upload-plan.md` 第 6 节。
+- 本地免登录隔离调试：`backend\.venv\Scripts\python.exe scripts\local_debug.py`；入口 `http://127.0.0.1:3108`，只使用测试账号和独立数据，主模型密钥禁用，详见根 `README.md`。
 - 本地 WordPress 模板站：`backend\.venv\Scripts\python.exe scripts\setup_wordpress_test.py`，入口 `http://127.0.0.1:8088`，凭据位于被忽略的 `outputs/wordpress-test/credentials.json`。远端独立测试站见 `deploy/wordpress-test/README.md`；测试站部署与 Article Agent 生产部署分别验证，测试凭据不得用于正式业务站点。
 - 生产 WordPress 地址和账号按项目保存；账号可由项目设置页录入，Application Password 只以密文存入专用凭据表，明文密码不得进入项目表、Task、响应或日志。部署级 `ARTICLE_AGENT_WORDPRESS_PROJECT_CREDENTIALS` 环境映射仍可作为运维回退；未配置项目凭据或映射时才使用兼容性的全局账号。
 - 远端 WordPress 测试站为 `https://43.154.92.36`，目录 `/home/ubuntu/article-agent-wordpress-test`，可用于生产 Article Agent 的草稿上传验收。上传入口在项目交付记录页，默认只存草稿。

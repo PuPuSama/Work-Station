@@ -1,5 +1,7 @@
 # 知识库与 LangGraph Agent 实施路线图
 
+> 历史里程碑记录，不作为当前安装或任务清单。现行入口见 [README](../README.md) 与[配置指南](configuration.md)；固定分支、版本、测试数量和旧业务规则只反映记录时点。
+
 ## 目标
 
 先交付一个单项目、可运行、可评测、可演示的垂直切片，再扩展成公司多人共享工作台。每个里程碑都要产生前端可见结果或可自动验证的后端能力。
@@ -11,7 +13,7 @@
 | 里程碑 | 状态 | 结构记录 |
 |---|---|---|
 | M0 | 完成 | 基线接口与 feature flag 测试 |
-| M1 | 完成 | `docs/knowledge-agent-m1-runbook.md` |
+| M1 | 完成 | [当前配置与依赖](configuration.md)；早期运行手册已移除 |
 | M2 | 完成正式边界；真实 MinerU 私有样本对比待外部条件 | `docs/architecture/knowledge-agent-m2.md`、`docs/validation/knowledge-agent-m2-qewitfastener.md` |
 | M3 | 完成 | `docs/architecture/knowledge-agent-m3.md`、`knowledge-agent-m3-evidence.md` |
 | M4 | 完成 | `docs/architecture/knowledge-agent-m4.md` |

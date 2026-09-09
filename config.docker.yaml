@@ -4,7 +4,6 @@ paths:
   topic_library: /app/workspace/topic-library
   knowledge_base: /app/workspace/knowledge
   output_root: /app/workspace/projects
-  data_file: /app/workspace/data/tasks.json
 
 prompts:
   humanize: /app/workspace/humanize.txt
