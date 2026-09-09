@@ -221,6 +221,7 @@ from services.server_task_workbook import (
 from services.zerogpt import ZeroGPTClient
 from storage import RevisionConflictError, content_hash, now_iso
 from services.tdk import article_title, current_article
+from services.article_images import ArticleImageError, resolve_asset_image_placements
 from workflow.state_machine import (
     ACTION_CONFIRM_FINAL_AI,
     ACTION_CONFIRM_INITIAL_AI,
@@ -4911,6 +4912,10 @@ def upload_project_task_wordpress(
                 source_article_hash=source_hash,
                 media_count=len(state.media_ids),
             )
+        try:
+            placements = resolve_asset_image_placements(article, task.images) if task.images else []
+        except ArticleImageError as exc:
+            raise HTTPException(status_code=409, detail="文章图片位置或素材尚未准备好，请在图片与交付页检查后重试。") from exc
         if state.source_article_hash != source_hash or state.wordpress_url != target_wordpress_url:
             state.media_ids = {}
         if state.wordpress_url != target_wordpress_url:
@@ -4997,7 +5002,7 @@ def upload_project_task_wordpress(
                 for marker in (image.marker, image.filename, asset_id):
                     if marker.strip():
                         image_urls[marker.strip()] = media_url
-            html_content = markdown_to_wordpress_html(article, image_urls)
+            html_content = markdown_to_wordpress_html(article, image_urls, placements=placements)
             hero = next((item for item in task.images if item.role == "hero"), None)
             hero_media = None
             if hero:

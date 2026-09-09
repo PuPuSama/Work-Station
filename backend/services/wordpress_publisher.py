@@ -8,10 +8,12 @@ import os
 import re
 import socket
 from dataclasses import dataclass, field
-from typing import Any, Mapping
-from urllib.parse import urlsplit
+from typing import Any, Mapping, Sequence
+from urllib.parse import unquote, urlsplit
 
 import httpx
+
+from services.article_images import ImagePlacement
 
 
 class WordPressPublisherError(ValueError):
@@ -229,9 +231,43 @@ def _inline_markdown(value: str, image_urls: Mapping[str, str]) -> str:
     return escaped
 
 
-def markdown_to_wordpress_html(markdown: str, image_urls: Mapping[str, str] | None = None) -> str:
+def _with_placed_images(markdown: str, placements: Sequence[ImagePlacement]) -> str:
+    """Apply the same Server image positions used by Word, without editing the Task."""
+    before: dict[int, list[dict[str, Any]]] = {}
+    after: dict[int, list[dict[str, Any]]] = {}
+    existing: set[str] = set()
+    for placement in placements:
+        target = before if placement.position == 'before' else after
+        target.setdefault(placement.line_index, []).append(placement.image)
+        existing.update(str(placement.image[key]) for key in ('marker', 'filename', 'prepared_asset_id'))
+    output: list[str] = []
+
+    def append_image(image: Mapping[str, Any]) -> None:
+        alt = str(image.get('product_name') or image['filename']).replace('[', '(').replace(']', ')')
+        output.extend(['', f"![{alt}]({image['prepared_asset_id']})", ''])
+
+    for index, line in enumerate(markdown.splitlines()):
+        for image in before.get(index, []):
+            append_image(image)
+        preview = re.fullmatch(r'!\[[^\]]*\]\(([^)]+)\)', line.strip())
+        generated_preview = bool(preview and unquote(preview.group(1)).rsplit('/', 1)[-1] in existing)
+        if line.strip() not in existing and not generated_preview:
+            output.append(line)
+        for image in after.get(index, []):
+            append_image(image)
+    return '\n'.join(output)
+
+
+def markdown_to_wordpress_html(
+    markdown: str,
+    image_urls: Mapping[str, str] | None = None,
+    *,
+    placements: Sequence[ImagePlacement] = (),
+) -> str:
     """Convert the supported article Markdown subset into safe WordPress HTML."""
     images = dict(image_urls or {})
+    if placements:
+        markdown = _with_placed_images(markdown, placements)
     lines = str(markdown or "").replace("\r\n", "\n").split("\n")
     blocks: list[str] = []
     paragraph: list[str] = []
@@ -298,7 +334,7 @@ def markdown_to_wordpress_html(markdown: str, image_urls: Mapping[str, str] | No
             blocks.append(f"<{tag}>{''.join(items)}</{tag}>")
             continue
         marker = line.rsplit("/", 1)[-1]
-        if marker in images and re.match(r"^(?:img\.)?[^\s]+\.(?:webp|png|jpg|jpeg)$", marker, re.IGNORECASE):
+        if marker in images and re.search(r"\.(?:webp|png|jpg|jpeg)$", marker, re.IGNORECASE):
             flush_paragraph()
             blocks.append(
                 f'<figure><img src="{html.escape(images[marker], quote=True)}" alt="Article image" loading="lazy" /></figure>'

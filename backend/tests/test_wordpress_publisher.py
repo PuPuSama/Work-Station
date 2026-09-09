@@ -22,6 +22,32 @@ from services.wordpress_publisher import (  # noqa: E402
 
 
 class WordPressPublisherTests(unittest.TestCase):
+    def test_server_images_follow_word_positions_without_mutating_article(self) -> None:
+        from models import ArticleImage
+        from services.article_images import resolve_asset_image_placements
+
+        article = '# Buyer Guide\n\nStart with the actual requirement.\n\n## Cooling\n\nCooling Core limits cycle time.\n\n## Next Step\n\nCompare measured output.'
+        original = article
+        images = [
+            ArticleImage(id='hero', role='hero', filename='Buyer Guide.webp', prepared_asset_id='asset-hero', prepared_content_hash='a' * 64, width=320, height=240),
+            ArticleImage(id='product', role='product', filename='Cooling Core.webp', product_name='Cooling Core', prepared_asset_id='asset-product', prepared_content_hash='b' * 64, width=320, height=240),
+        ]
+        rendered = markdown_to_wordpress_html(article, {
+            'asset-hero': 'https://wp.example/hero.webp',
+            'asset-product': 'https://wp.example/core.webp',
+        }, placements=resolve_asset_image_placements(article, images))
+        self.assertEqual(article, original)
+        self.assertEqual(rendered.count('<img '), 2)
+        self.assertLess(rendered.index('/hero.webp'), rendered.index('<h2>Cooling'))
+        self.assertGreater(rendered.index('/core.webp'), rendered.index('limits cycle time.'))
+        self.assertLess(rendered.index('/core.webp'), rendered.index('<h2>Next Step'))
+        self.assertNotIn('asset-hero', rendered)
+
+    def test_image_marker_with_spaces_is_rendered(self) -> None:
+        rendered = markdown_to_wordpress_html('img.Cooling Core.webp', {'img.Cooling Core.webp': 'https://wp.example/core.webp'})
+        self.assertIn('<img ', rendered)
+        self.assertNotIn('img.Cooling Core.webp', rendered)
+
     def test_project_url_overrides_deployment_fallback(self) -> None:
         old = {key: os.environ.get(key) for key in (
             "ARTICLE_AGENT_WORDPRESS_URL",

@@ -45,7 +45,7 @@ class ServerWordPressUploadTests(unittest.TestCase):
 
     def test_changing_site_uploads_fresh_media_and_persists_draft(self):
         task, objects = prepared()
-        task.final_article = '# Example\n\n![Hero](hero.webp)'
+        task.final_article = '# Example\n\nA useful introduction.\n\n## Selection\n\nA practical answer.'
         task.wordpress_upload.status = 'draft_created'
         task.wordpress_upload.source_article_hash = content_hash(task.final_article)
         task.wordpress_upload.wordpress_url = 'https://old.example'
@@ -59,6 +59,7 @@ class ServerWordPressUploadTests(unittest.TestCase):
         publisher.upload_media.assert_called_once()
         self.assertEqual(publisher.create_or_get_draft.call_args.kwargs['featured_media'], 5)
         self.assertIn('https://new.example/hero.webp', publisher.create_or_get_draft.call_args.kwargs['content'])
+        self.assertEqual(publisher.create_or_get_draft.call_args.kwargs['content'].count('<img '), 1)
         self.assertEqual(snapshots[0]['wordpress_upload']['post_id'], None)
         self.assertEqual(snapshots[-1]['wordpress_upload']['status'], 'draft_created')
         self.assertEqual(snapshots[-1]['wordpress_upload']['post_id'], 6)
@@ -67,7 +68,7 @@ class ServerWordPressUploadTests(unittest.TestCase):
 
     def test_retry_reuses_confirmed_media_on_same_site(self):
         task, objects = prepared()
-        task.final_article = '# Example\n\n![Hero](hero.webp)'
+        task.final_article = '# Example\n\nA useful introduction.\n\n## Selection\n\nA practical answer.'
         task.wordpress_upload.status = 'failed'
         task.wordpress_upload.source_article_hash = content_hash(task.final_article)
         task.wordpress_upload.wordpress_url = 'https://same.example'
@@ -80,6 +81,17 @@ class ServerWordPressUploadTests(unittest.TestCase):
         publisher.media_source.assert_called_once_with(5)
         self.assertEqual(result.media_count, 1)
         self.assertEqual(snapshots[-1]['wordpress_upload']['status'], 'draft_created')
+
+    def test_invalid_image_placement_fails_before_upload_or_state_change(self):
+        task, objects = prepared()
+        task.final_article = '# Example\n\nNo image position has been confirmed.'
+        publisher = Mock()
+        with self.assertRaises(routes.HTTPException) as raised:
+            self.run_upload(task, objects, publisher, 'https://same.example')
+        self.assertEqual(raised.exception.status_code, 409)
+        publisher.upload_media.assert_not_called()
+        publisher.create_or_get_draft.assert_not_called()
+        self.assertNotEqual(task.wordpress_upload.status, 'uploading')
 
 
 if __name__ == '__main__':
