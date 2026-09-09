@@ -2,7 +2,6 @@ extends: config.yaml
 
 paths:
   knowledge_base: workspace/knowledge
-  data_file: workspace/data/tasks.json
 
 prompts:
   humanize: backend/prompts/humanize_ci.txt

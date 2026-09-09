@@ -2,7 +2,6 @@ extends: config.ci.yaml
 
 paths:
   knowledge_base: outputs/local-debug/knowledge
-  data_file: outputs/local-debug/unused-tasks.json
 
 features:
   knowledge_agent_enabled: false

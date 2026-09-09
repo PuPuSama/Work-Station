@@ -1,5 +1,7 @@
 #!/bin/bash
 # 快速优化部署脚本
+# 历史一次性工具，不是当前生产发布入口。数据库结构变更统一走 Alembic；
+# 当前配置与发布方式见根 README.md 和 docs/configuration.md。
 
 echo "======================================"
 echo "Article Agent 性能优化 - 快速部署"
@@ -126,7 +128,7 @@ echo "🚀 下一步："
 echo "  1. 重启后端服务"
 echo "  2. 部署前端构建产物"
 echo "  3. 监控内存使用情况"
-echo "  4. 查看 docs/quick-wins-implementation.md 了解更多优化"
+echo "  4. 查看 docs/configuration.md 了解当前配置"
 echo ""
-echo "需要帮助？查看 docs/optimization-summary.md"
+echo "需要帮助？查看 docs/README.md 文档索引"
 echo ""

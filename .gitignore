@@ -12,6 +12,8 @@ data/*.txt
 *.pyc
 __pycache__/
 .env
+.env.*
+!.env.example
 workspace/data/*
 workspace/topic-library/*
 workspace/knowledge/*
